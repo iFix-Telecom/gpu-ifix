@@ -1,0 +1,28 @@
+.git
+.gitignore
+.github
+.planning
+.dockerignore
+docs/
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+
+# Go artifacts
+bin/
+coverage.*
+*.test
+
+# Large assets — never go into any Docker image per D-01
+pod/weights/*
+pod/smoke/fixtures/*.wav
+pod/smoke/fixtures/*.mp3
+
+# Compose files (baked by onstart, not by Docker build)
+docker-compose*.yml
+
+# External doc that's in repo root but not shipped
+ConverseAI_GPU_Stack_Guide.docx
+ConverseAI_GPU_Stack_Guide.docx:Zone.Identifier
