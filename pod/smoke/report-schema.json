@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifixtelecom.com.br/schemas/ifix-ai-pod/smoke-report/1.0.0",
+  "title": "Ifix AI Pod Smoke Report",
+  "version": "1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "started_at",
+    "finished_at",
+    "target",
+    "workload_spec",
+    "vram_peak_gb",
+    "vram_p95_gb",
+    "llm_p95_ttft_ms",
+    "llm_p95_tpot_ms",
+    "whisper_latency_s",
+    "embed_p95_ms",
+    "tool_call_valid",
+    "errors",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "required": ["llm_url", "stt_url", "embed_url", "dcgm_url"],
+      "properties": {
+        "llm_url":   { "type": "string", "format": "uri" },
+        "stt_url":   { "type": "string", "format": "uri" },
+        "embed_url": { "type": "string", "format": "uri" },
+        "dcgm_url":  { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "workload_spec": {
+      "type": "object",
+      "required": ["chats_concurrent", "chat_prompt_tokens", "chat_max_completion_tokens", "whisper_duration_s", "embed_batch_size"],
+      "properties": {
+        "chats_concurrent":           { "type": "integer", "minimum": 1 },
+        "chat_prompt_tokens":         { "type": "integer", "minimum": 1 },
+        "chat_max_completion_tokens": { "type": "integer", "minimum": 1 },
+        "whisper_duration_s":         { "type": "integer", "minimum": 1 },
+        "embed_batch_size":           { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "vram_peak_gb":      { "type": "number", "minimum": 0 },
+    "vram_p95_gb":       { "type": "number", "minimum": 0 },
+    "llm_p95_ttft_ms":   { "type": "integer", "minimum": 0 },
+    "llm_p95_tpot_ms":   { "type": "integer", "minimum": 0 },
+    "whisper_latency_s": { "type": "number", "minimum": 0 },
+    "embed_p95_ms":      { "type": "integer", "minimum": 0 },
+    "tool_call_valid":   { "type": "boolean" },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "type": "object",
+      "required": ["vram_peak_gb_le_21", "tool_call_valid_true", "no_cuda_oom_errors", "llm_p95_ttft_ms_le_3000", "all_passed"],
+      "properties": {
+        "vram_peak_gb_le_21":        { "type": "boolean" },
+        "tool_call_valid_true":      { "type": "boolean" },
+        "no_cuda_oom_errors":        { "type": "boolean" },
+        "llm_p95_ttft_ms_le_3000":   { "type": "boolean" },
+        "all_passed":                { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

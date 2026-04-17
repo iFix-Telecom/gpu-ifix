@@ -1,0 +1,7 @@
+# pod/smoke/requirements.txt
+# Smoke-test runtime deps (Python 3.12+ assumed — matches converseai-v4/agents)
+httpx>=0.27.0
+prometheus-client>=0.20.0
+numpy>=1.26.0
+structlog>=24.1.0
+jsonschema>=4.21.0
