@@ -1,0 +1,254 @@
+name: build-pod
+
+on:
+  # IMPORTANT: do NOT add `paths:` under `push:` — GitHub applies it to ALL push
+  # events (branches + tags). D-23 stable promotion is `git tag v1.0.0` on an
+  # already-smoked SHA; that tag push rarely modifies pod/** in the tag commit
+  # itself, so a paths filter here would silently block stable releases.
+  # Keep paths filter on pull_request only.
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'pod/**'
+      - 'pkg/openai/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build-pod.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional explicit tag (else branch-sha)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_POD: ghcr.io/ifixtelecom/ifix-ai-pod
+  IMAGE_HEALTH_BRIDGE: ghcr.io/ifixtelecom/ifix-ai-pod-health-bridge
+  GO_VERSION: '1.23'
+
+jobs:
+  test:
+    name: Go unit tests + template integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify template SHA-256 (plan 02)
+        run: |
+          set -euo pipefail
+          EXPECTED="$(tr -d '[:space:]' < pod/templates/qwen3.5-27b-tool-calling.jinja.sha256)"
+          ACTUAL="$(sha256sum pod/templates/qwen3.5-27b-tool-calling.jinja | awk '{print $1}')"
+          if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
+            echo "::error::Qwen template SHA-256 drift — expected ${EXPECTED} got ${ACTUAL}"
+            exit 1
+          fi
+          echo "template integrity OK (${ACTUAL:0:12}...)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1 -race -timeout=3m
+
+      - name: gofmt check
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [[ -n "${UNFORMATTED}" ]]; then
+            echo "::error::gofmt unclean files:"
+            echo "${UNFORMATTED}"
+            exit 1
+          fi
+
+  compute-tags:
+    name: Compute image tags
+    runs-on: ubuntu-latest
+    needs: [test]
+    outputs:
+      pod_tags:           ${{ steps.set.outputs.pod_tags }}
+      health_bridge_tags: ${{ steps.set.outputs.health_bridge_tags }}
+      is_stable_release:  ${{ steps.set.outputs.is_stable_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tags (D-21 + D-23)
+        id: set
+        env:
+          REF:  ${{ github.ref }}
+          SHA:  ${{ github.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo "${SHA}" | cut -c1-7)"
+          POD_TAGS=""
+          HB_TAGS=""
+          IS_STABLE="false"
+
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            # Stable release promotion (D-23) — git tag push
+            VER="${REF##refs/tags/}"
+            POD_TAGS="${IMAGE_POD}:${VER}
+          ${IMAGE_POD}:latest
+          ${IMAGE_POD}:${VER}-${SHORT_SHA}"
+            HB_TAGS="${IMAGE_HEALTH_BRIDGE}:${VER}
+          ${IMAGE_HEALTH_BRIDGE}:latest
+          ${IMAGE_HEALTH_BRIDGE}:${VER}-${SHORT_SHA}"
+            IS_STABLE="true"
+          elif [[ "${REF}" == refs/heads/main ]]; then
+            POD_TAGS="${IMAGE_POD}:main
+          ${IMAGE_POD}:main-${SHORT_SHA}"
+            HB_TAGS="${IMAGE_HEALTH_BRIDGE}:main
+          ${IMAGE_HEALTH_BRIDGE}:main-${SHORT_SHA}"
+          elif [[ "${REF}" == refs/heads/develop ]]; then
+            POD_TAGS="${IMAGE_POD}:develop
+          ${IMAGE_POD}:develop-${SHORT_SHA}
+          ${IMAGE_POD}:latest-dev"
+            HB_TAGS="${IMAGE_HEALTH_BRIDGE}:develop
+          ${IMAGE_HEALTH_BRIDGE}:develop-${SHORT_SHA}
+          ${IMAGE_HEALTH_BRIDGE}:latest-dev"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            POD_TAGS="${IMAGE_POD}:${INPUT_TAG}"
+            HB_TAGS="${IMAGE_HEALTH_BRIDGE}:${INPUT_TAG}"
+          else
+            # PR or other — ephemeral sha tag
+            POD_TAGS="${IMAGE_POD}:pr-${SHORT_SHA}"
+            HB_TAGS="${IMAGE_HEALTH_BRIDGE}:pr-${SHORT_SHA}"
+          fi
+
+          # Use heredoc WITHOUT leading whitespace on tag lines (they are the
+          # literal tag values going to GITHUB_OUTPUT). Using `printf` for scalars
+          # and a tightly-packed heredoc for multi-line outputs avoids the risk
+          # of a stray leading space on a tag value that would break pushes.
+          {
+            echo "pod_tags<<EOF"
+            printf '%s\n' "${POD_TAGS}"
+            echo "EOF"
+            echo "health_bridge_tags<<EOF"
+            printf '%s\n' "${HB_TAGS}"
+            echo "EOF"
+            printf 'is_stable_release=%s\n' "${IS_STABLE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "resolved tags:"
+          echo "pod:"; echo "${POD_TAGS}"
+          echo "health-bridge:"; echo "${HB_TAGS}"
+
+  build-pod:
+    name: Build & push pod image
+    runs-on: ubuntu-latest
+    needs: [test, compute-tags]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push pod
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: pod/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ needs.compute-tags.outputs.pod_tags }}
+          cache-from: type=gha,scope=ifix-ai-pod
+          cache-to:   type=gha,scope=ifix-ai-pod,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+  build-health-bridge:
+    name: Build & push health-bridge image
+    runs-on: ubuntu-latest
+    needs: [test, compute-tags]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push health-bridge
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: pod/health-bridge/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ needs.compute-tags.outputs.health_bridge_tags }}
+          cache-from: type=gha,scope=ifix-ai-pod-health-bridge
+          cache-to:   type=gha,scope=ifix-ai-pod-health-bridge,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [build-pod, build-health-bridge, compute-tags]
+    if: always()
+    steps:
+      - name: Print summary
+        env:
+          POD_TAGS: ${{ needs.compute-tags.outputs.pod_tags }}
+          HB_TAGS: ${{ needs.compute-tags.outputs.health_bridge_tags }}
+          STABLE: ${{ needs.compute-tags.outputs.is_stable_release }}
+        run: |
+          {
+            echo "## Build Summary"
+            echo ""
+            echo "**Stable release:** ${STABLE}"
+            echo ""
+            echo "### Pod image tags"
+            echo '```'
+            echo "${POD_TAGS}"
+            echo '```'
+            echo ""
+            echo "### Health-bridge image tags"
+            echo '```'
+            echo "${HB_TAGS}"
+            echo '```'
+            echo ""
+            echo "### Next steps"
+            echo "- Run smoke-test: \`gh workflow run smoke.yml -f image_tag=<sha-tag>\`"
+            echo "- Stable promotion: gates D-19 green in smoke-report then \`git tag vX.Y.Z\` + push"
+          } >> "$GITHUB_STEP_SUMMARY"
