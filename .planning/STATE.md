@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-04-17T23:16:00.000Z"
+last_updated: "2026-04-17T23:29:00.000Z"
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 9
-  completed_plans: 3
+  completed_plans: 6
   percent: 0
 ---
 
@@ -28,10 +28,10 @@ progress:
 ## Current Position
 
 Phase: 1 (GPU Pod Image & Smoke-Test) — EXECUTING
-Plan: 4 of 9
+Plan: 7 of 9
 
-- **Phase:** Phase 1 (Waves 1-2 complete: 01-01, 01-02, 01-03)
-- **Plan:** Wave 3 next (01-04 health-bridge, 01-05 onstart, 01-06 smoke-test)
+- **Phase:** Phase 1 (Waves 1-3 complete: 01-01..01-06)
+- **Plan:** Wave 4 next (01-07: GHA build-pod.yml)
 - **Status:** Executing Phase 1
 - **Progress:** `[──────────]` 0/10 phases complete (0%)
 

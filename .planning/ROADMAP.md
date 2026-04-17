@@ -37,9 +37,9 @@ Plans:
 - [x] 01-01-PLAN.md — Repo scaffolding + Go monorepo + Ifix conventions (POD-01)
 - [x] 01-02-PLAN.md — Qwen 3.5 27B tool-calling Jinja template (community patched, pinned by SHA-256) (POD-05)
 - [x] 01-03-PLAN.md — Pod Dockerfile + docker-compose (5 services, GPU share, healthchecks) (POD-01, POD-02, POD-04, POD-06)
-- [ ] 01-04-PLAN.md — Health-bridge Go service (port 9100, 10s probe loop, per-upstream state) (POD-03)
-- [ ] 01-05-PLAN.md — Vast.ai onstart.sh — MinIO weight download + SHA-256 + docker compose up (POD-02)
-- [ ] 01-06-PLAN.md — Smoke-test (asyncio benchmark + report schema + D-19 gate enforcement) (POD-06, POD-07)
+- [x] 01-04-PLAN.md — Health-bridge Go service (port 9100, 10s probe loop, per-upstream state) (POD-03)
+- [x] 01-05-PLAN.md — Vast.ai onstart.sh — MinIO weight download + SHA-256 + docker compose up (POD-02)
+- [x] 01-06-PLAN.md — Smoke-test (asyncio benchmark + report schema + D-19 gate enforcement) (POD-06, POD-07)
 - [ ] 01-07-PLAN.md — GitHub Actions build-pod.yml — build + push ghcr.io/ifixtelecom/ifix-ai-pod (POD-01)
 - [ ] 01-08-PLAN.md — GitHub Actions smoke.yml — Vast.ai pod lifecycle + D-19 gate enforcement (POD-07)
 - [ ] 01-09-PLAN.md — Operator runbook — MinIO weight upload + pod operation + baseline archival (POD-02)
@@ -177,7 +177,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. GPU Pod Image & Smoke-Test | 3/9 | In progress | - |
+| 1. GPU Pod Image & Smoke-Test | 6/9 | In progress | - |
 | 2. Gateway Core + Multi-tenant Auth | 0/? | Not started | - |
 | 3. Resilience & Fallback Chain | 0/? | Not started | - |
 | 4. Multi-tenant Quotas, Billing & Schedule Routing | 0/? | Not started | - |
