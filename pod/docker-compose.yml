@@ -1,0 +1,183 @@
+# pod/docker-compose.yml
+# 5-service GPU inference pod for Vast.ai RTX 4090.
+# Launched by pod/onstart.sh (plan 05) after weights downloaded from MinIO (D-02).
+# Image tagged/pushed by .github/workflows/build-pod.yml (plan 07).
+#
+# Refs:
+#   - .planning/phases/01-gpu-pod-image-smoke-test/01-03-PLAN.md
+#   - .planning/phases/01-gpu-pod-image-smoke-test/01-CONTEXT.md D-07/D-08/D-10/D-11/D-24/D-25/D-26/D-27
+#   - .planning/phases/01-gpu-pod-image-smoke-test/01-PATTERNS.md §pod/docker-compose.yml
+
+name: ifix-ai-pod
+
+x-common-env: &common-env
+  TZ: America/Sao_Paulo
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+x-gpu-all: &gpu-all
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # -----------------------------------------------------------------------
+  # llama: Qwen 3.5 27B Q4_K_M via llama-server CUDA binary (D-07, D-24)
+  # Flags locked: -np 2, --ctx-size 16384, --jinja, --chat-template-file (D-08, POD-06)
+  # -----------------------------------------------------------------------
+  llama:
+    image: ${IFIX_AI_POD_IMAGE:-ghcr.io/ifixtelecom/ifix-ai-pod:latest}
+    container_name: ifix-ai-pod-llama
+    environment:
+      <<: *common-env
+    command: >
+      llama-server
+      --host 0.0.0.0
+      --port 8000
+      -m /weights/qwen/model.gguf
+      -np 2
+      --ctx-size 16384
+      --jinja
+      --chat-template-file /app/templates/qwen3.5-27b-tool-calling.jinja
+      --log-format json
+    volumes:
+      - ${WEIGHTS_DIR:-/weights}:/weights:ro
+    ports:
+      - "8000:8000"
+    networks:
+      - ifix-ai-pod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8000/health > /dev/null || python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    <<: *gpu-all
+    stop_grace_period: 30s
+
+  # -----------------------------------------------------------------------
+  # speaches: Whisper large-v3 OpenAI-compat STT (D-25)
+  # -----------------------------------------------------------------------
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: ifix-ai-pod-speaches
+    environment:
+      <<: *common-env
+      WHISPER_MODEL: Systran/faster-whisper-large-v3
+      WHISPER_MODEL_PATH: /weights/whisper
+    volumes:
+      - ${WEIGHTS_DIR:-/weights}/whisper:/weights/whisper:rw
+    ports:
+      - "8001:8000"
+    networks:
+      - ifix-ai-pod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8000/health > /dev/null || python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    <<: *gpu-all
+    stop_grace_period: 30s
+
+  # -----------------------------------------------------------------------
+  # infinity: BGE-M3 embedding OpenAI-compat (D-26)
+  # Dense-only mode (sparse unsupported for BGE-M3 per research STACK.md)
+  # -----------------------------------------------------------------------
+  infinity:
+    image: michaelf34/infinity:latest
+    container_name: ifix-ai-pod-infinity
+    environment:
+      <<: *common-env
+    command: >
+      v2
+      --model-id BAAI/bge-m3
+      --port 8002
+      --host 0.0.0.0
+      --engine torch
+      --dtype float16
+    volumes:
+      - ${WEIGHTS_DIR:-/weights}/bge-m3:/app/.cache/huggingface:rw
+    ports:
+      - "8002:8002"
+    networks:
+      - ifix-ai-pod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8002/health > /dev/null || python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8002/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    <<: *gpu-all
+    stop_grace_period: 30s
+
+  # -----------------------------------------------------------------------
+  # health-bridge: aggregated health probes on port 9100 (D-10..D-13)
+  # Built from pod/health-bridge/Dockerfile (plan 04)
+  # -----------------------------------------------------------------------
+  health-bridge:
+    image: ${IFIX_AI_POD_HEALTH_BRIDGE_IMAGE:-ghcr.io/ifixtelecom/ifix-ai-pod-health-bridge:latest}
+    container_name: ifix-ai-pod-health-bridge
+    environment:
+      <<: *common-env
+      HEALTH_BRIDGE_PORT: "9100"
+      LLAMA_URL: "http://llama:8000"
+      SPEACHES_URL: "http://speaches:8000"
+      INFINITY_URL: "http://infinity:8002"
+      SPEACHES_MODEL: "${SPEACHES_MODEL:-Systran/faster-whisper-large-v3}"
+      PROBE_INTERVAL_SECONDS: "10"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      ENV: "${ENV:-production}"
+    ports:
+      - "9100:9100"
+    networks:
+      - ifix-ai-pod
+    depends_on:
+      - llama
+      - speaches
+      - infinity
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/health-bridge", "--self-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 10s
+
+  # -----------------------------------------------------------------------
+  # dcgm-exporter: GPU metrics on port 9400 (POD-04, D-27)
+  # -----------------------------------------------------------------------
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:latest-ubuntu22.04
+    container_name: ifix-ai-pod-dcgm-exporter
+    environment:
+      <<: *common-env
+      DCGM_EXPORTER_LISTEN: ":9400"
+      DCGM_EXPORTER_KUBERNETES: "false"
+    ports:
+      - "9400:9400"
+    networks:
+      - ifix-ai-pod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9400/metrics > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    <<: *gpu-all
+    cap_add:
+      - SYS_ADMIN
+
+networks:
+  ifix-ai-pod:
+    driver: bridge
+    name: ifix-ai-pod
