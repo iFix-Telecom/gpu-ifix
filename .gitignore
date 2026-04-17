@@ -8,6 +8,12 @@ bin/
 coverage.out
 coverage.html
 
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
 # Weights and large binary fixtures — never committed
 pod/weights/*.gguf
 pod/weights/*.bin
