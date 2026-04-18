@@ -12,6 +12,7 @@ require (
 	github.com/pressly/goose/v3 v3.23.0
 	github.com/prometheus/client_golang v1.20.5
 	github.com/redis/go-redis/v9 v9.18.0
+	go.uber.org/goleak v1.3.0
 )
 
 require (
