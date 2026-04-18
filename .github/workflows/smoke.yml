@@ -1,0 +1,291 @@
+name: smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'ghcr.io/ifixtelecom/ifix-ai-pod tag to test'
+        required: true
+        default: 'develop'
+        type: string
+      health_bridge_tag:
+        description: 'ghcr.io/ifixtelecom/ifix-ai-pod-health-bridge tag (defaults to image_tag)'
+        required: false
+        default: ''
+        type: string
+      weights_qwen_key:
+        description: 'MinIO object key for Qwen GGUF'
+        required: false
+        default: 'qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf'
+        type: string
+      weights_whisper_key:
+        description: 'MinIO object key for Whisper tarball'
+        required: false
+        default: 'whisper-large-v3/v1.0.0/model.tar.gz'
+        type: string
+      weights_bge_m3_key:
+        description: 'MinIO object key for BGE-M3 tarball'
+        required: false
+        default: 'bge-m3/v1.0.0/model.tar.gz'
+        type: string
+      max_price_per_hour:
+        description: 'Max accepted $/h per D-22 guardrail'
+        required: false
+        default: '0.40'
+        type: string
+      smoke_timeout_minutes:
+        description: 'Hard workflow timeout (D-22 cost cap)'
+        required: false
+        default: '45'
+        type: string
+
+# D-22: smoke runs must NOT be cancelled mid-flight — cost risk of leaked pod.
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_POD_REPO: ghcr.io/ifixtelecom/ifix-ai-pod
+
+jobs:
+  smoke:
+    name: Smoke-test on Vast.ai 4090
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.smoke_timeout_minutes) }}
+    env:
+      VAST_AI_API_KEY:    ${{ secrets.VAST_AI_API_KEY }}
+      MINIO_ENDPOINT:     ${{ secrets.MINIO_ENDPOINT }}
+      MINIO_ACCESS_KEY:   ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY:   ${{ secrets.MINIO_SECRET_KEY }}
+      MINIO_BUCKET:       ${{ secrets.MINIO_BUCKET }}
+      WEIGHTS_QWEN_SHA256:    ${{ secrets.WEIGHTS_QWEN_SHA256 }}
+      WEIGHTS_WHISPER_SHA256: ${{ secrets.WEIGHTS_WHISPER_SHA256 }}
+      WEIGHTS_BGE_M3_SHA256:  ${{ secrets.WEIGHTS_BGE_M3_SHA256 }}
+      IMAGE_TAG:          ${{ inputs.image_tag }}
+      HB_TAG:             ${{ inputs.health_bridge_tag != '' && inputs.health_bridge_tag || inputs.image_tag }}
+      WEIGHTS_QWEN_KEY:   ${{ inputs.weights_qwen_key }}
+      WEIGHTS_WHISPER_KEY: ${{ inputs.weights_whisper_key }}
+      WEIGHTS_BGE_M3_KEY: ${{ inputs.weights_bge_m3_key }}
+      MAX_PRICE:          ${{ inputs.max_price_per_hour }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight — required secrets present
+        run: |
+          set -euo pipefail
+          echo "=== Preparing smoke run ==="
+          for s in VAST_AI_API_KEY MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET \
+                   WEIGHTS_QWEN_SHA256 WEIGHTS_WHISPER_SHA256 WEIGHTS_BGE_M3_SHA256; do
+            v="${!s:-}"
+            if [[ -z "${v}" ]]; then
+              echo "::error::missing required secret ${s}"
+              exit 1
+            fi
+          done
+          echo "secrets present"
+          echo "image: ${IMAGE_POD_REPO}:${IMAGE_TAG}"
+          echo "max price: \$${MAX_PRICE}/h"
+
+      - name: Verify image exists in GHCR
+        run: |
+          set -euo pipefail
+          # HEAD the manifest — 2xx = exists
+          HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(echo -n '' | base64)" \
+                 "https://ghcr.io/v2/ifixtelecom/ifix-ai-pod/manifests/${IMAGE_TAG}" || true)
+          # ghcr.io requires a pull token even for public anonymous reads in some cases;
+          # accept 401 as "exists but token required" (not fatal — Vast.ai will do the real pull)
+          if [[ "${HTTP}" != "200" && "${HTTP}" != "401" ]]; then
+            echo "::warning::GHCR HEAD returned ${HTTP} for ${IMAGE_POD_REPO}:${IMAGE_TAG} — continuing"
+          fi
+
+      - name: Setup Python + jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq openssh-client
+          python3 --version
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r pod/smoke/requirements.txt
+
+      - name: Search for Vast.ai offer
+        id: search
+        run: |
+          set -euo pipefail
+          echo "=== Creating Vast.ai pod ==="
+          OFFERS_JSON=$(pod/scripts/vast-ai.sh search --max-price "${MAX_PRICE}")
+          OFFER_ID=$(echo "$OFFERS_JSON" | jq -r '.offers[0].id // .bundles[0].id // empty')
+          PRICE=$(echo "$OFFERS_JSON" | jq -r '.offers[0].dph_total // .bundles[0].dph_total // empty')
+          if [[ -z "$OFFER_ID" ]]; then
+            echo "::error::no Vast.ai offer matched filters under \$${MAX_PRICE}/h"
+            echo "offers body:"; echo "$OFFERS_JSON"
+            exit 1
+          fi
+          echo "chose offer ${OFFER_ID} at \$${PRICE}/h"
+          echo "offer_id=${OFFER_ID}" >> "$GITHUB_OUTPUT"
+          echo "price=${PRICE}"     >> "$GITHUB_OUTPUT"
+
+      - name: Materialize env-file for create
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > /tmp/pod.env <<EOF
+          IFIX_AI_POD_IMAGE=${IMAGE_POD_REPO}:${IMAGE_TAG}
+          IFIX_AI_POD_HEALTH_BRIDGE_IMAGE=ghcr.io/ifixtelecom/ifix-ai-pod-health-bridge:${HB_TAG}
+          WEIGHTS_DIR=/weights
+          MINIO_ENDPOINT=${MINIO_ENDPOINT}
+          MINIO_BUCKET=${MINIO_BUCKET}
+          MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+          MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+          WEIGHTS_QWEN_KEY=${WEIGHTS_QWEN_KEY}
+          WEIGHTS_WHISPER_KEY=${WEIGHTS_WHISPER_KEY}
+          WEIGHTS_BGE_M3_KEY=${WEIGHTS_BGE_M3_KEY}
+          WEIGHTS_QWEN_SHA256=${WEIGHTS_QWEN_SHA256}
+          WEIGHTS_WHISPER_SHA256=${WEIGHTS_WHISPER_SHA256}
+          WEIGHTS_BGE_M3_SHA256=${WEIGHTS_BGE_M3_SHA256}
+          ENV=production
+          LOG_LEVEL=info
+          EOF
+
+      - name: Create Vast.ai instance
+        id: create
+        run: |
+          set -euo pipefail
+          RESP=$(pod/scripts/vast-ai.sh create \
+            --offer-id "${{ steps.search.outputs.offer_id }}" \
+            --image "${IMAGE_POD_REPO}:${IMAGE_TAG}" \
+            --env-file /tmp/pod.env \
+            --onstart pod/onstart.sh)
+          echo "create response:"; echo "$RESP"
+          INST_ID=$(echo "$RESP" | jq -r '.new_contract // .instance_id // .id // empty')
+          if [[ -z "$INST_ID" ]]; then
+            echo "::error::could not parse instance id from create response"
+            exit 1
+          fi
+          echo "instance_id=${INST_ID}" >> "$GITHUB_OUTPUT"
+          echo "started_at=$(date +%s)"  >> "$GITHUB_OUTPUT"
+
+      - name: Wait for instance running + SSH ready
+        id: ready
+        run: |
+          set -euo pipefail
+          STATE=$(pod/scripts/vast-ai.sh wait-running \
+            --instance-id "${{ steps.create.outputs.instance_id }}" \
+            --timeout-seconds 900)
+          echo "$STATE" > /tmp/instance.json
+          SSH_HOST=$(jq -r '.instances.ssh_host // .instances[0].ssh_host' /tmp/instance.json)
+          SSH_PORT=$(jq -r '.instances.ssh_port // .instances[0].ssh_port' /tmp/instance.json)
+          PUB_IP=$(jq -r   '.instances.public_ipaddr // .instances[0].public_ipaddr' /tmp/instance.json)
+          echo "ssh_host=${SSH_HOST}"   >> "$GITHUB_OUTPUT"
+          echo "ssh_port=${SSH_PORT}"   >> "$GITHUB_OUTPUT"
+          echo "public_ip=${PUB_IP}"    >> "$GITHUB_OUTPUT"
+
+      - name: Upload compose + scripts to pod
+        run: |
+          set -euo pipefail
+          echo "=== Provisioning pod ==="
+          HOST="${{ steps.ready.outputs.ssh_host }}"
+          PORT="${{ steps.ready.outputs.ssh_port }}"
+
+          # Stage files into /tmp/pod-bundle/ locally, then scp once.
+          rm -rf /tmp/pod-bundle && mkdir -p /tmp/pod-bundle/scripts
+          cp pod/docker-compose.yml /tmp/pod-bundle/
+          cp /tmp/pod.env           /tmp/pod-bundle/.env
+          cp pod/onstart.sh         /tmp/pod-bundle/
+          cp pod/scripts/download-weights.sh /tmp/pod-bundle/scripts/
+          chmod +x /tmp/pod-bundle/onstart.sh /tmp/pod-bundle/scripts/download-weights.sh
+
+          # Ensure target dir on pod exists
+          pod/scripts/vast-ai.sh ssh-exec --ssh-host "$HOST" --ssh-port "$PORT" \
+            --cmd "mkdir -p /opt/ifix-ai-pod/scripts"
+          pod/scripts/vast-ai.sh scp-upload --ssh-host "$HOST" --ssh-port "$PORT" \
+            --src "/tmp/pod-bundle/." \
+            --dest "/opt/ifix-ai-pod/"
+
+          # Note: onstart already ran once at pod creation via the create body's `onstart` param.
+          # If the pod was booted before our files landed (race), re-invoke onstart manually.
+          pod/scripts/vast-ai.sh ssh-exec --ssh-host "$HOST" --ssh-port "$PORT" \
+            --cmd "cd /opt/ifix-ai-pod && IFIX_AI_POD_ROOT=/opt/ifix-ai-pod COMPOSE_FILE=/opt/ifix-ai-pod/docker-compose.yml ENV_FILE=/opt/ifix-ai-pod/.env /opt/ifix-ai-pod/onstart.sh 2>&1 | tail -200"
+
+      - name: Run smoke-test (plan 06)
+        id: smoke
+        run: |
+          set +e
+          echo "=== Running smoke-test ==="
+          TARGET="http://${{ steps.ready.outputs.public_ip }}"
+          python3 pod/smoke/smoke.py --target "$TARGET" --out smoke-report.json
+          CODE=$?
+          set -e
+          echo "smoke.py exit code: ${CODE}"
+          echo "exit_code=${CODE}" >> "$GITHUB_OUTPUT"
+          if [[ -f smoke-report.json ]]; then
+            jq . smoke-report.json
+          fi
+          # Bubble the exit code at a later step so archive + destroy still run.
+
+      - name: Archive smoke-report.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report-${{ inputs.image_tag }}-${{ github.run_id }}
+          path: smoke-report.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Publish summary
+        if: always()
+        env:
+          EXIT: ${{ steps.smoke.outputs.exit_code }}
+          OFFER_ID: ${{ steps.search.outputs.offer_id }}
+          PRICE: ${{ steps.search.outputs.price }}
+          INST_ID: ${{ steps.create.outputs.instance_id }}
+        run: |
+          {
+            echo "## Smoke Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image tag | \`${IMAGE_POD_REPO}:${IMAGE_TAG}\` |"
+            echo "| Offer | #${OFFER_ID} @ \$${PRICE}/h |"
+            echo "| Instance | #${INST_ID} |"
+            echo "| smoke.py exit | ${EXIT:-unset} |"
+            echo ""
+            if [[ -f smoke-report.json ]]; then
+              echo "### Gates (D-19)"
+              echo '```json'
+              jq '.gates' smoke-report.json
+              echo '```'
+              echo "### Key metrics"
+              echo '```json'
+              jq '{vram_peak_gb, vram_p95_gb, llm_p95_ttft_ms, llm_p95_tpot_ms, whisper_latency_s, embed_p95_ms, tool_call_valid, errors}' smoke-report.json
+              echo '```'
+            else
+              echo "_smoke-report.json not produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy Vast.ai instance (ALWAYS — D-22 cost cap)
+        if: always() && steps.create.outputs.instance_id != ''
+        run: |
+          set -euo pipefail
+          echo "=== Destroying pod ==="
+          pod/scripts/vast-ai.sh destroy --instance-id "${{ steps.create.outputs.instance_id }}"
+
+      - name: Fail workflow on smoke exit code
+        if: always()
+        run: |
+          CODE="${{ steps.smoke.outputs.exit_code }}"
+          if [[ -z "$CODE" ]]; then
+            echo "::error::smoke step did not emit exit_code (earlier step failed?)"
+            exit 1
+          fi
+          if [[ "$CODE" != "0" ]]; then
+            echo "::error::smoke.py exit ${CODE} — D-19 gates failed. See Summary + smoke-report.json artifact."
+            exit "$CODE"
+          fi
+          echo "D-19 gates GREEN — image ${IMAGE_POD_REPO}:${IMAGE_TAG} is a stable-tag candidate (D-23)."
