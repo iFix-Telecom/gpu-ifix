@@ -19,12 +19,15 @@ type Config struct {
 	Port              int           // GATEWAY_PORT (default 8080)
 	ReadHeaderTimeout time.Duration // fixed 10s per CONTEXT.md Plumbing
 	ReadTimeout       time.Duration // fixed 60s (whisper multipart)
-	WriteTimeout      time.Duration // fixed 0 (streaming unbounded — SSE needs no write deadline)
+	// DEPRECATED in Phase 3 — use WriteTimeoutChat/Embed/Audio per route.
+	// Kept at 0 for backwards compatibility during the refactor; main.go
+	// wire-up reads the three new fields below instead.
+	WriteTimeout time.Duration
 	// Operational note (Codex review [LOW] 02-01):
 	//   WriteTimeout=0 is required for SSE chat streams but removes a slow-
-	//   client-DoS defense on non-streaming routes. Phase 3's routing layer
-	//   should revisit: per-route WriteTimeout (chat=0 for SSE, embeddings=30s,
-	//   audio=120s). Tracked as Phase 3 follow-up todo in STATE.md.
+	//   client-DoS defense on non-streaming routes. Phase 3 introduces the
+	//   per-route WriteTimeout* fields below; HTTP wire-up in 03-08 reads
+	//   them via http.TimeoutHandler per chi route.
 	IdleTimeout    time.Duration // fixed 120s
 	MaxHeaderBytes int           // fixed 1 MiB
 	MaxBodyBytes   int64         // fixed 25 MiB (OpenAI audio limit)
@@ -42,6 +45,30 @@ type Config struct {
 	UpstreamSTTURL          string // UPSTREAM_STT_URL (required)
 	UpstreamEmbedURL        string // UPSTREAM_EMBED_URL (required)
 	UpstreamHealthBridgeURL string // UPSTREAM_HEALTH_BRIDGE_URL (required)
+
+	// Phase 3 — External fallback upstreams (optional at boot; warn-log if a
+	// row in ai_gateway.upstreams is enabled but the env it points to is missing)
+	UpstreamOpenRouterChatURL        string   // UPSTREAM_LLM_OPENROUTER_URL
+	UpstreamOpenRouterChatAuthBearer string   // UPSTREAM_LLM_OPENROUTER_AUTH_BEARER
+	UpstreamOpenRouterProviderOrder  []string // UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER (CSV; default ["fireworks"])
+	UpstreamOpenRouterAllowFallbacks bool     // UPSTREAM_LLM_OPENROUTER_ALLOW_FALLBACKS (default false)
+	UpstreamOpenAIWhisperURL         string   // UPSTREAM_STT_OPENAI_URL
+	UpstreamOpenAIWhisperAuthBearer  string   // UPSTREAM_STT_OPENAI_AUTH_BEARER
+	UpstreamOpenAIEmbedURL           string   // UPSTREAM_EMBED_OPENAI_URL
+	UpstreamOpenAIEmbedAuthBearer    string   // UPSTREAM_EMBED_OPENAI_AUTH_BEARER
+
+	// Phase 3 — Probe + breaker tuning (CONTEXT.md D-A2 + D-A3)
+	ProbeIntervalSeconds       int // PROBE_INTERVAL_SECONDS (default 10)
+	ProbeBudgetSeconds         int // PROBE_BUDGET_SECONDS (default 5)
+	BreakerConsecutiveFailures int // BREAKER_CONSECUTIVE_FAILURES (default 3)
+	BreakerCooldownSeconds     int // BREAKER_COOLDOWN_SECONDS (default 30)
+
+	// Phase 3 — Per-route WriteTimeout (folded todo from Phase 2; D-A1 Plumbing).
+	// Replaces the single WriteTimeout=0 default; chat MUST stay 0 for SSE
+	// but non-streaming routes get slow-client-DoS defense.
+	WriteTimeoutChat  time.Duration // WRITE_TIMEOUT_CHAT_SECONDS  (default 0 — unlimited for SSE)
+	WriteTimeoutEmbed time.Duration // WRITE_TIMEOUT_EMBED_SECONDS (default 30s)
+	WriteTimeoutAudio time.Duration // WRITE_TIMEOUT_AUDIO_SECONDS (default 120s; Whisper long multipart)
 
 	// Observability
 	SentryDSN string // SENTRY_DSN (optional; empty = Sentry disabled)
@@ -78,6 +105,25 @@ func Load() (Config, error) {
 		UpstreamSTTURL:          os.Getenv("UPSTREAM_STT_URL"),
 		UpstreamEmbedURL:        os.Getenv("UPSTREAM_EMBED_URL"),
 		UpstreamHealthBridgeURL: os.Getenv("UPSTREAM_HEALTH_BRIDGE_URL"),
+
+		// Phase 3 external upstreams (optional at boot)
+		UpstreamOpenRouterChatURL:        os.Getenv("UPSTREAM_LLM_OPENROUTER_URL"),
+		UpstreamOpenRouterChatAuthBearer: os.Getenv("UPSTREAM_LLM_OPENROUTER_AUTH_BEARER"),
+		UpstreamOpenRouterProviderOrder:  csvOr(os.Getenv("UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER"), []string{"fireworks"}),
+		UpstreamOpenRouterAllowFallbacks: boolOr(os.Getenv("UPSTREAM_LLM_OPENROUTER_ALLOW_FALLBACKS"), false),
+		UpstreamOpenAIWhisperURL:         os.Getenv("UPSTREAM_STT_OPENAI_URL"),
+		UpstreamOpenAIWhisperAuthBearer:  os.Getenv("UPSTREAM_STT_OPENAI_AUTH_BEARER"),
+		UpstreamOpenAIEmbedURL:           os.Getenv("UPSTREAM_EMBED_OPENAI_URL"),
+		UpstreamOpenAIEmbedAuthBearer:    os.Getenv("UPSTREAM_EMBED_OPENAI_AUTH_BEARER"),
+
+		ProbeIntervalSeconds:       atoiOr(os.Getenv("PROBE_INTERVAL_SECONDS"), 10),
+		ProbeBudgetSeconds:         atoiOr(os.Getenv("PROBE_BUDGET_SECONDS"), 5),
+		BreakerConsecutiveFailures: atoiOr(os.Getenv("BREAKER_CONSECUTIVE_FAILURES"), 3),
+		BreakerCooldownSeconds:     atoiOr(os.Getenv("BREAKER_COOLDOWN_SECONDS"), 30),
+
+		WriteTimeoutChat:  time.Duration(atoiOr(os.Getenv("WRITE_TIMEOUT_CHAT_SECONDS"), 0)) * time.Second,
+		WriteTimeoutEmbed: time.Duration(atoiOr(os.Getenv("WRITE_TIMEOUT_EMBED_SECONDS"), 30)) * time.Second,
+		WriteTimeoutAudio: time.Duration(atoiOr(os.Getenv("WRITE_TIMEOUT_AUDIO_SECONDS"), 120)) * time.Second,
 
 		SentryDSN: os.Getenv("SENTRY_DSN"),
 		LogLevel:  envOr("LOG_LEVEL", "info"),
@@ -133,4 +179,40 @@ func atoiOr(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// csvOr parses a comma-separated string into []string, trimming whitespace
+// around each element. Empty input or all-blank elements -> default. Used
+// for UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER which the Director injects
+// into the request body via {"provider":{"order":[...]}}, see CONTEXT.md
+// D-C2.
+func csvOr(s string, def []string) []string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
+}
+
+// boolOr parses "true"/"false"/"1"/"0"/"yes"/"no" case-insensitive. Anything
+// else returns the default. Polarity-explicit per CLAUDE.md opt-out pattern —
+// callers pass the desired default rather than relying on the parser to flip
+// silently on bogus input.
+func boolOr(s string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "1", "yes", "y":
+		return true
+	case "false", "0", "no", "n":
+		return false
+	}
+	return def
 }
