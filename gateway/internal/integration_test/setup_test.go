@@ -156,13 +156,15 @@ func freshSchema(t *testing.T, ctx context.Context) (*pgxpool.Pool, *redis.Clien
 	pool.Reset()
 
 	// Truncate data tables (leave schema + partitions). CASCADE covers
-	// the child partitions automatically.
-	for _, tbl := range []string{"api_keys", "audit_log", "audit_log_content", "usage_counters"} {
+	// the child partitions automatically. Tenants are TRUNCATE'd too so
+	// cross-test contamination (prior tests seeding "leak-tenant",
+	// "concurrent-tenant", etc.) doesn't bleed into tenant-count assertions.
+	for _, tbl := range []string{"api_keys", "audit_log", "audit_log_content", "usage_counters", "tenants"} {
 		if _, err := pool.Exec(ctx, "TRUNCATE ai_gateway."+tbl+" CASCADE"); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
 	}
-	// Re-seed tenants + model_aliases idempotently.
+	// Re-seed the default converseai tenant that the 0001 migration created.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO ai_gateway.tenants (slug,name) VALUES ('converseai','ConverseAI') ON CONFLICT (slug) DO NOTHING`); err != nil {
 		t.Fatalf("seed tenant: %v", err)
