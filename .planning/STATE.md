@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-04-19T00:00:34.065Z"
+last_updated: "2026-04-19T00:21:32.764Z"
 progress:
   total_phases: 10
   completed_phases: 1
   total_plans: 18
-  completed_plans: 15
-  percent: 83
+  completed_plans: 16
+  percent: 89
 ---
 
 # STATE: ifix-ai-gateway
@@ -28,21 +28,22 @@ progress:
 ## Current Position
 
 Phase: 02 (gateway-core-multi-tenant-auth) — EXECUTING
-Plan: 6 of 9 complete (Wave 5 done)
+Plan: 7 of 9 complete (Wave 6 done)
 
-- **Phase:** Phase 2 execution in progress. Waves 1–5 complete (02-01..02-06). 02-06 shipped the Idempotency-Key middleware (Stripe semantics) on POST /v1/chat/completions non-streaming with Redis `SET NX EX` first-writer-wins, IN_FLIGHT sentinel at `gw:idem:<tenant>:<key>`, 30s wait budget for losers, 24h entry TTL, immediate 422 on hash mismatch (even vs in-flight), 409 + `Retry-After: 5` on wait-poll timeout, 502 → Abort (don't cache). Audit replay flag propagated via `audit.IdempotencyReplayedSetter` interface assertion on the response writer. 32 unit tests pass under `-race` (8 hash + 11 store + 13 middleware including 10-goroutine concurrent serialization asserting upstream hit count == 1).
-- **Reviews cycle (2026-04-18):** `/gsd-review --phase 2 --all` invoked Codex (Gemini/OpenCode/Qwen/Cursor/CodeRabbit missing; Claude skipped for independence). `02-REVIEWS.md` committed with 4 HIGH/MEDIUM + 2 LOW concerns. `/gsd-plan-phase 2 --reviews` revised 8/9 plans across 2 iterations. All 02-05 Codex concerns resolved at implementation time (see 02-05-SUMMARY.md). Codex [MEDIUM] 02-06 concern (incomplete serialization) resolved by this wave — see SUMMARY confirmations.
-- **Plan:** next wave is 02-07 (integration test: idempotency + audit end-to-end with real Postgres via testcontainers).
+- **Phase:** Phase 2 execution in progress. Waves 1–6 complete (02-01..02-07). 02-07 shipped the testcontainers-go integration test harness: 12 tests (counting 04b separately) exercising migrations, auth flow, audit writer, idempotency single + concurrent replay (D-C2 + B2 audit flag), model aliases, partition automation, upstream health caching, gateway subprocess E2E, and goroutine-leak regression — all behind `//go:build integration` so `go test ./...` stays unit-fast. Full suite wall time ~20s warm (60-90s first-run). Rule-1 fix during execution: `gateway/internal/db/pool.go` now registers `ai_gateway.{api_key_status,data_class}` ENUM OIDs via `conn.LoadType` in AfterConnect + `pool.Reset()` in `cmd/gateway/main.go` after boot-migration. Without this, sqlc-generated `interface{}` scan targets fail with "cannot scan unknown type (OID ...)" on fresh DBs — a latent bug that neither unit tests nor previous plans would have caught.
+- **Reviews cycle (2026-04-18):** `/gsd-review --phase 2 --all` invoked Codex (Gemini/OpenCode/Qwen/Cursor/CodeRabbit missing; Claude skipped for independence). `02-REVIEWS.md` committed with 4 HIGH/MEDIUM + 2 LOW concerns. `/gsd-plan-phase 2 --reviews` revised 8/9 plans across 2 iterations. All 02-05/02-06/02-07 Codex concerns now resolved in shipped code (see 02-07-SUMMARY.md — B2 contract + goroutine leak + partition auto + auth hot path under load all covered by integration tests).
+- **Plan:** next wave is 02-08 (Dockerfile + build-gateway.yml + Portainer stack, `autonomous: false` — human-verify first live deploy).
 - **Status:** Executing Phase 02
-- **Progress:** [████████░░] 83%
+- **Progress:** [█████████░] 89%
 
 ## Performance Metrics
 
 - **Phases completed:** 1 / 10
-- **Plans completed:** 16 / 18 (9 in Phase 1 + 6 executed in Phase 2 waves 1–5 + 1 optional staging plan)
+- **Plans completed:** 16 / 18 (9 in Phase 1 + 7 executed in Phase 2 waves 1–6 + 1 optional staging plan)
 - **v1 requirements covered by plans:** 21 / 70 (POD-01..POD-07 from Phase 1 + GW-01..GW-10, TEN-01, TEN-02, TEN-08, TEN-09 newly planned in Phase 2)
 - **Plan 02-05:** duration 820s, 2 tasks, 14 files created, 1 file modified, 28 tests added
 - **Plan 02-06:** duration 1100s, 2 tasks, 8 files created, 1 file modified, 32 tests added (19 hash+store + 13 middleware, all -race clean)
+- **Plan 02-07:** duration 1200s, 2 tasks, 13 files created, 2 files modified, 12 integration tests added (testcontainers Postgres 16 + Redis 7; full suite ~20s wall time warm)
 
 ## Accumulated Context
 
@@ -79,8 +80,8 @@ None at present. Roadmap is ready for planning.
 
 ## Session Continuity
 
-- **Last session:** 2026-04-19T00:00:30.736Z
-- **Next session should:** Continue `/gsd-execute-phase 2` with Wave 5 (02-06 idempotency middleware). 02-05 exported `audit.IdempotencyReplayedSetter` interface for the replay-path flag propagation; 02-06 type-asserts the ResponseWriter and calls `SetIdempotencyReplayed(true)` on replays. 02-07 will then integration-test the `SELECT idempotency_replayed FROM ai_gateway.audit_log` assertion end-to-end. Wave 7 `02-08-PLAN.md` (Dockerfile + build-gateway.yml + Portainer stack) is `autonomous: false` — human-verify first live deploy.
+- **Last session:** 2026-04-19T00:21:32.759Z
+- **Next session should:** Continue `/gsd-execute-phase 2` with Wave 7 (02-08 deploy) — `autonomous: false` — operator must human-verify first live deploy on dev VPS. 02-09 (audit export/retention, optional per Codex review scope-creep flag) can be deferred until Phase 7 dashboard work demands the cold-storage story. 02-07 integration tests provide the regression net for all Phase 2 cross-subsystem contracts (B2 audit replay flag, concurrent idempotency serialization, auth hot path under load, SSE mid-disconnect goroutine cleanup).
 
 ---
 

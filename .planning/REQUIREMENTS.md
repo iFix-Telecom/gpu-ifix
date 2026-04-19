@@ -19,21 +19,21 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 
 ### Gateway — Core HTTP (Go)
 
-- [ ] **GW-01**: Gateway Go roda como binário único com `chi v5` + `httputil.ReverseProxy` (streaming compatible) + `slog`
-- [ ] **GW-02**: Expõe `POST /v1/chat/completions` OpenAI-compatible (incluindo streaming SSE com `FlushInterval: -1`)
+- [x] **GW-01**: Gateway Go roda como binário único com `chi v5` + `httputil.ReverseProxy` (streaming compatible) + `slog`
+- [x] **GW-02**: Expõe `POST /v1/chat/completions` OpenAI-compatible (incluindo streaming SSE com `FlushInterval: -1`)
 - [ ] **GW-03**: Expõe `POST /v1/embeddings` OpenAI-compatible
 - [ ] **GW-04**: Expõe `POST /v1/audio/transcriptions` OpenAI-compatible (multipart upload)
 - [ ] **GW-05**: Expõe `GET /health` (gateway saudável) e `GET /v1/health/upstreams` (status por upstream: LLM local, STT local, embed local, OpenRouter, OpenAI-Whisper, OpenAI-embed)
 - [ ] **GW-06**: Pass-through de tool/function calling no formato OpenAI
-- [ ] **GW-07**: Model alias mapping (cliente pede `model: "qwen"`, gateway resolve para versão atual)
-- [ ] **GW-08**: Request ID único (UUID) emitido em todo request e echoed em `X-Request-ID` header + logs estruturados
+- [x] **GW-07**: Model alias mapping (cliente pede `model: "qwen"`, gateway resolve para versão atual)
+- [x] **GW-08**: Request ID único (UUID) emitido em todo request e echoed em `X-Request-ID` header + logs estruturados
 - [ ] **GW-09**: Deploy Docker Compose + Portainer + webhook GitHub no padrão Ifix (VPS dedicada 4 vCPU)
-- [ ] **GW-10**: Schema Postgres inicial (dedicated schema no DO compartilhado) com tabelas `api_keys`, `tenants`, `audit_log`, `billing_events`, `usage_counters`; migrations versionadas
+- [x] **GW-10**: Schema Postgres inicial (dedicated schema no DO compartilhado) com tabelas `api_keys`, `tenants`, `audit_log`, `billing_events`, `usage_counters`; migrations versionadas
 
 ### Multi-tenant — Auth, Quotas, Cost Attribution
 
-- [ ] **TEN-01**: API key auth em `Authorization: Bearer <key>` ou `X-API-Key`; lookup em Postgres com cache Redis
-- [ ] **TEN-02**: Cada API key pertence a um tenant (ConverseAI, Chat Ifix, Telefonia, Cobranças, Campanhas, voice-api) com campo `data_class` (`normal` | `sensitive`)
+- [x] **TEN-01**: API key auth em `Authorization: Bearer <key>` ou `X-API-Key`; lookup em Postgres com cache Redis
+- [x] **TEN-02**: Cada API key pertence a um tenant (ConverseAI, Chat Ifix, Telefonia, Cobranças, Campanhas, voice-api) com campo `data_class` (`normal` | `sensitive`)
 - [ ] **TEN-03**: Rate limiting por API key (RPS e requests/min) usando Redis Lua atomic
 - [ ] **TEN-04**: Quota diária e mensal por tenant (tokens de LLM, minutos de áudio, requests de embed); bloqueio ao atingir limite
 - [ ] **TEN-05**: Modo de operação configurável por tenant: `24/7` (sempre local primário) OU `peak` (08-22h local, fora de horário OpenRouter)
@@ -163,18 +163,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POD-05 | Phase 1: GPU Pod Image & Smoke-Test | Pending |
 | POD-06 | Phase 1: GPU Pod Image & Smoke-Test | Pending |
 | POD-07 | Phase 1: GPU Pod Image & Smoke-Test | Pending |
-| GW-01 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| GW-02 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
+| GW-01 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
+| GW-02 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
 | GW-03 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
 | GW-04 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
 | GW-05 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
 | GW-06 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| GW-07 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| GW-08 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
+| GW-07 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
+| GW-08 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
 | GW-09 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| GW-10 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| TEN-01 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
-| TEN-02 | Phase 2: Gateway Core + Multi-tenant Auth | Pending |
+| GW-10 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
+| TEN-01 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
+| TEN-02 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
 | TEN-03 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Pending |
 | TEN-04 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Pending |
 | TEN-05 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Pending |
