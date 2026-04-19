@@ -1,0 +1,282 @@
+name: build-gateway
+
+# IMPORTANT: paths filter lives ONLY on pull_request. Keeping it off `push:`
+# mirrors build-pod.yml — otherwise stable release tag pushes (which often
+# don't modify gateway/** in the tag commit itself) would be silently skipped.
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'gateway/**'
+      - 'pkg/openai/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build-gateway.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional explicit tag (else branch-sha)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_GATEWAY: ghcr.io/ifixtelecom/ifix-ai-gateway
+  GO_VERSION: '1.23'
+  SQLC_VERSION: 'v1.27.0'
+
+jobs:
+  test:
+    name: Go unit tests + sqlc codegen verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install sqlc
+        run: |
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@${{ env.SQLC_VERSION }}
+
+      - name: Generate sqlc code (gateway/)
+        working-directory: gateway
+        run: |
+          sqlc generate
+          # Fail build if sqlc output would change the tree — force every
+          # PR/push to commit regenerated files alongside query changes.
+          if ! git diff --exit-code internal/db/gen/; then
+            echo "::error::sqlc-generated code is out of sync with queries/. Run \`cd gateway && sqlc generate\` and commit the output."
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./gateway/... ./pkg/openai/... ./pod/...
+
+      - name: go test (unit only — no integration tag)
+        run: go test ./gateway/... ./pkg/openai/... ./pod/... -count=1 -race -timeout=5m
+
+      - name: gofmt check
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [[ -n "${UNFORMATTED}" ]]; then
+            echo "::error::gofmt unclean files:"
+            echo "${UNFORMATTED}"
+            exit 1
+          fi
+
+  integration-test:
+    name: Integration tests (testcontainers-go)
+    runs-on: ubuntu-latest
+    needs: [test]
+    timeout-minutes: 15
+    # GitHub-hosted Ubuntu runners have docker available by default.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@${{ env.SQLC_VERSION }}
+
+      - name: Generate sqlc code
+        working-directory: gateway
+        run: sqlc generate
+
+      - name: Integration tests
+        run: |
+          go test -tags=integration ./gateway/internal/integration_test/... -count=1 -v -timeout=10m
+
+  compute-tags:
+    name: Compute image tags
+    runs-on: ubuntu-latest
+    needs: [test]
+    outputs:
+      gateway_tags:      ${{ steps.set.outputs.gateway_tags }}
+      is_stable_release: ${{ steps.set.outputs.is_stable_release }}
+      gateway_version:   ${{ steps.set.outputs.gateway_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tags (mirrors build-pod.yml D-21 + D-23)
+        id: set
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo "${SHA}" | cut -c1-7)"
+          GW_TAGS=""
+          IS_STABLE="false"
+          GW_VERSION=""
+
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            VER="${REF##refs/tags/}"
+            GW_TAGS="${IMAGE_GATEWAY}:${VER}
+          ${IMAGE_GATEWAY}:latest
+          ${IMAGE_GATEWAY}:${VER}-${SHORT_SHA}"
+            IS_STABLE="true"
+            GW_VERSION="${VER}"
+          elif [[ "${REF}" == refs/heads/main ]]; then
+            GW_TAGS="${IMAGE_GATEWAY}:main
+          ${IMAGE_GATEWAY}:main-${SHORT_SHA}"
+            GW_VERSION="main-${SHORT_SHA}"
+          elif [[ "${REF}" == refs/heads/develop ]]; then
+            GW_TAGS="${IMAGE_GATEWAY}:develop
+          ${IMAGE_GATEWAY}:develop-${SHORT_SHA}
+          ${IMAGE_GATEWAY}:latest-dev"
+            GW_VERSION="develop-${SHORT_SHA}"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            GW_TAGS="${IMAGE_GATEWAY}:${INPUT_TAG}"
+            GW_VERSION="${INPUT_TAG}"
+          else
+            GW_TAGS="${IMAGE_GATEWAY}:pr-${SHORT_SHA}"
+            GW_VERSION="pr-${SHORT_SHA}"
+          fi
+
+          {
+            echo "gateway_tags<<EOF"
+            printf '%s\n' "${GW_TAGS}"
+            echo "EOF"
+            printf 'is_stable_release=%s\n' "${IS_STABLE}"
+            printf 'gateway_version=%s\n' "${GW_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "resolved tags:"; echo "${GW_TAGS}"
+          echo "version: ${GW_VERSION}"
+
+  build-gateway:
+    name: Build & push gateway image
+    runs-on: ubuntu-latest
+    needs: [test, integration-test, compute-tags]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go (for sqlc generate)
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@${{ env.SQLC_VERSION }}
+
+      - name: Generate sqlc code (so Dockerfile sees fresh gen/)
+        working-directory: gateway
+        run: sqlc generate
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (or build-only for PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: gateway/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64
+          tags: ${{ needs.compute-tags.outputs.gateway_tags }}
+          build-args: |
+            GATEWAY_VERSION=${{ needs.compute-tags.outputs.gateway_version }}
+          cache-from: type=gha,scope=ifix-ai-gateway
+          cache-to:   type=gha,scope=ifix-ai-gateway,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+  deploy-dev:
+    name: Trigger Portainer redeploy (dev)
+    runs-on: ubuntu-latest
+    needs: [build-gateway, compute-tags]
+    if: github.ref == 'refs/heads/develop' && needs.build-gateway.result == 'success'
+    steps:
+      - name: Trigger Portainer webhook (dev)
+        env:
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL_DEV_GATEWAY }}
+        run: |
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL_DEV_GATEWAY not set — skipping dev deploy"
+            exit 0
+          fi
+          curl -X POST "${WEBHOOK}" --fail --silent --show-error
+          echo "Portainer dev webhook triggered — ai-gateway-dev will recreate"
+
+  deploy-prod:
+    name: Trigger Portainer redeploy (prod)
+    runs-on: ubuntu-latest
+    needs: [build-gateway, compute-tags]
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.build-gateway.result == 'success'
+    steps:
+      - name: Trigger Portainer webhook (prod)
+        env:
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL_PROD_GATEWAY }}
+        run: |
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL_PROD_GATEWAY not set — skipping prod deploy"
+            exit 0
+          fi
+          curl -X POST "${WEBHOOK}" --fail --silent --show-error
+          echo "Portainer prod webhook triggered — ai-gateway-prod will recreate"
+
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [build-gateway, compute-tags]
+    if: always()
+    steps:
+      - name: Print summary
+        env:
+          GW_TAGS: ${{ needs.compute-tags.outputs.gateway_tags }}
+          STABLE:  ${{ needs.compute-tags.outputs.is_stable_release }}
+          VERSION: ${{ needs.compute-tags.outputs.gateway_version }}
+        run: |
+          {
+            echo "## Gateway Build Summary"
+            echo ""
+            echo "**Version:** ${VERSION}"
+            echo "**Stable release:** ${STABLE}"
+            echo ""
+            echo "### Image tags"
+            echo '```'
+            echo "${GW_TAGS}"
+            echo '```'
+            echo ""
+            echo "### Deploy"
+            echo "- Dev (develop): auto-deploys to Portainer stack \`ai-gateway-dev\`"
+            echo "- Prod (main / tag): auto-deploys to Portainer stack \`ai-gateway-prod\`"
+            echo "- First deploy: confirm \`AI_GATEWAY_MIGRATE_ON_BOOT=true\` in Portainer stack env"
+          } >> "$GITHUB_STEP_SUMMARY"
