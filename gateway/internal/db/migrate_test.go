@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-// TestEmbedFS_HasAllSixMigrations validates the embedded migrations FS
-// (via the gatewaydb package shim) contains exactly the 6 Phase-2
-// migration files expected by downstream plans.
-func TestEmbedFS_HasAllSixMigrations(t *testing.T) {
+// TestEmbedFS_HasAllNineMigrations validates the embedded migrations FS
+// (via the gatewaydb package shim) contains exactly the 9 migration files
+// expected by downstream plans (6 from Phase 2 + 3 from Phase 3 plan 03-02:
+// 0007 upstreams table, 0008 seed, 0009 NOTIFY trigger).
+func TestEmbedFS_HasAllNineMigrations(t *testing.T) {
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -22,8 +23,8 @@ func TestEmbedFS_HasAllSixMigrations(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	if len(names) != 6 {
-		t.Fatalf("expected 6 migrations embedded, got %d: %v", len(names), names)
+	if len(names) != 9 {
+		t.Fatalf("expected 9 migrations embedded, got %d: %v", len(names), names)
 	}
 	want := []string{
 		"0001_create_tenants.sql",
@@ -32,6 +33,9 @@ func TestEmbedFS_HasAllSixMigrations(t *testing.T) {
 		"0004_create_audit_log_content_partitioned.sql",
 		"0005_create_model_aliases.sql",
 		"0006_create_usage_counters_skeleton.sql",
+		"0007_create_upstreams.sql",
+		"0008_seed_upstreams.sql",
+		"0009_upstreams_notify_trigger.sql",
 	}
 	for i, w := range want {
 		if names[i] != w {
