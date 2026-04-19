@@ -29,6 +29,9 @@ smoke-report-*.json
 # Local env
 .env
 .env.local
+.env.portainer
+.env.portainer.*
+!.env.portainer.example
 
 # Editor
 .vscode/
