@@ -70,7 +70,16 @@ Plans:
   3. A request from a tenant flagged `data_class: sensitive` is never proxied to OpenAI/OpenRouter during failover — it either queues (short retry) or returns a controlled error; an audit row records the decision.
   4. A tool-calling request that arrives mid-failover never executes the same tool twice: the gateway returns 502 after a tool call was emitted and relies on the agent layer to retry with a separate idempotency key.
   5. Context window is normalized: a 20k-token prompt is rejected with the same behavior whether primary or OpenRouter is serving (both capped at 16k).
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** yes (OpenRouter upstream provider for Qwen 3.5 27B tool-calling behavior, exact streaming policy SSE event shape)
 **UI hint:** no
 
@@ -84,7 +93,16 @@ Plans:
   3. An admin can call a reporting endpoint and retrieve `{tenant, tokens, minutes, embeds, cost_local, cost_external, cost_total}` for any date range.
   4. A tenant configured `mode=peak` has requests routed to OpenRouter between 22:00 and 08:00 local time automatically; a tenant in `mode=24/7` stays on local primary at all hours.
   5. Load-test of 1000 concurrent rate-limit checks against Redis shows zero over-use (Lua-atomic).
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** no (Redis Lua rate-limit is standard; only open question is Postgres DO headroom for billing writes — covered by batching)
 **UI hint:** no
 
@@ -97,7 +115,16 @@ Plans:
   2. Under sustained P95 latency spike or VRAM > 21 GB, shedding activates within 30s; no flapping occurs during 60s of oscillating load (hysteresis verified).
   3. Thresholds (inflight_max, P95_ms, VRAM_bytes, hysteresis_seconds) can be changed by updating rows in Postgres and take effect within 2s without restarting the gateway.
   4. During shedding, one tenant's burst does not starve other tenants — per-tenant inflight quotas keep smaller apps responsive while overflow from the noisy tenant hits OpenRouter.
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** yes (real saturation thresholds must be tuned from Phase 1 baseline data; histeresis window needs empirical validation)
 **UI hint:** no
 
@@ -111,7 +138,16 @@ Plans:
   3. If the primary recovers while provisioning is in flight, the emergency pod creation is cancelled/destroyed before it starts serving traffic (cancel-in-flight).
   4. Once primary is healthy for 5 minutes, traffic cuts back to primary; after an additional 5-minute idle grace period, the emergency pod is destroyed automatically.
   5. A Vast.ai offer priced above the configured cap ($0.40/h) is never accepted; each lifecycle emits a full audit record (trigger, offer accepted, duration, total cost, shutdown reason).
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** yes (Vast.ai REST API quirks — SSH/onstart/port exposure/bid acceptance timing; 3h timeboxed spike before commit)
 **UI hint:** no
 
@@ -126,7 +162,16 @@ Plans:
   4. Every FSM transition, tenant activation/deactivation, pod spin-up/shutdown, and threshold change leaves an entry in the `audit_log` table accessible via dashboard or SQL.
   5. Prometheus scrape of `/metrics` stays under 10k active series and is consumable by standard Prometheus tooling.
   6. Sentry captures panics/circuit trips/provisioning failures with `authorization`, `x-api-key`, and payload bodies redacted.
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** yes (confirm Ifix WhatsApp provider — Evolution API vs Z-API vs Chatwoot; confirm Better Auth vs SSO for dashboard)
 **UI hint:** yes
 
@@ -139,7 +184,16 @@ Plans:
   2. Chat Ifix transcribes a sample of real Whatsapp audios via gateway Whisper; transcription quality and latency are equivalent to the prior direct integration within ±10%.
   3. A documented rollback plan (revert env vars, redeploy) is tested end-to-end and measured at <5 minutes from decision to fully-rolled-back.
   4. Dashboard shows both apps' traffic as separate tenants with independent latency and cost panels.
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** no (straightforward env-var migration)
 **UI hint:** no
 
@@ -152,7 +206,16 @@ Plans:
   2. Cobranças and Campanhas send LLM personalization + embedding lookups through the gateway with tenant-specific quotas, and metrics confirm cost-per-request is reported correctly.
   3. voice-api continues to run TTS locally on CPU but retrieves LLM-generated scripts through the gateway.
   4. Each app has an individual smoke-test on production and a <5 min rollback playbook; LGPD review is documented before sensitive tenants go live in prod.
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** yes (LGPD review with Ifix legal — external input required before GA of sensitive tenants)
 **UI hint:** no
 
@@ -167,7 +230,16 @@ Plans:
   4. A runbook document covers detection → diagnosis → rollback → postmortem for the five most-likely incident classes; on-call operator executes one scenario from the runbook successfully.
   5. The dashboard is reachable at a HTTPS URL behind admin authentication (Better Auth or SSO); `gateway.ifix.com.br` resolves via Cloudflare with valid TLS.
   6. LGPD review sign-off is attached to the repo and all sensitive tenants have confirmed privacy-policy disclosures listing OpenAI/OpenRouter/Vast.ai as sub-processadores.
-**Plans:** TBD
+**Plans:** 8 plans
+Plans:
+- [ ] 03-01-PLAN.md — Wave 0 scaffolding: 3 Go deps + sentinel errors + probe.wav fixture + operator gates (Fireworks slug + /tokenize)
+- [ ] 03-02-PLAN.md — DB foundation: 3 migrations (upstreams table + seed + NOTIFY trigger) + sqlc queries + config extension (RES-01,03,04,07)
+- [ ] 03-03-PLAN.md — breaker package: gobreaker v2 wrapper + Redis mirror + Pub/Sub subscriber + 9 obs metrics (RES-01,04)
+- [ ] 03-04-PLAN.md — upstreams loader + pgxlisten hot-reload (RES-03,04)
+- [ ] 03-05-PLAN.md — probe goroutine (zero-value errgroup) + refactored /v1/health/upstreams handler (RES-04,01)
+- [ ] 03-06-PLAN.md — proxy refactor: tokencount + directors + dispatcher + sensitive retry + tool-call interceptor + streaming + main.go wiring (RES-01..03,05..08)
+- [ ] 03-07-PLAN.md — gatewayctl upstreams CLI + 5 integration tests (state machine, fallback, sensitive block, hot reload, tool-call partial) (RES-01,03,04,06,08)
+- [ ] 03-08-PLAN.md — HUMAN-UAT: SC-1 live failover + Sentry breadcrumbs + RUNBOOK-FAILOVER.md (RES-01,03,04,06)
 **Research hint:** no (execution phase — no open research)
 **UI hint:** yes
 
