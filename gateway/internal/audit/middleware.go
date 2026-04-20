@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auditctx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 )
@@ -69,7 +70,14 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 
 			next.ServeHTTP(aw, r)
 
-			// Build Event from the captured state.
+			// Build Event from the captured state. Upstream defaults to
+			// the route-derived value (llm/embed/stt); handlers may
+			// override via audit.WithUpstreamOverride (e.g. dispatcher's
+			// sensitive-block path → "blocked_sensitive" per D-B3).
+			upstream := upstreamForRoute(r.URL.Path)
+			if override := auditctx.UpstreamOverrideFrom(r.Context()); override != "" {
+				upstream = override
+			}
 			event := Event{
 				TS:         start,
 				RequestID:  rid,
@@ -78,7 +86,7 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 				DataClass:  fallbackDataClass(ac.DataClass),
 				Route:      routeTemplate(r.URL.Path),
 				Method:     r.Method,
-				Upstream:   upstreamForRoute(r.URL.Path),
+				Upstream:   upstream,
 				StatusCode: aw.status,
 				LatencyMs:  time.Since(start).Milliseconds(),
 				Stream:     aw.sawSSE,
@@ -156,6 +164,19 @@ func upstreamForRoute(path string) string {
 		return ""
 	}
 }
+
+// UpstreamBlockedSensitive is written to audit_log.upstream when a
+// data_class=sensitive request is blocked from external fallback per
+// CONTEXT.md D-B3. Reserved value distinct from the route-derived
+// upstream defaults (llm/embed/stt) so dashboards can isolate sensitive-
+// blocked events without a join. Consistent with Phase 2 D-B2 — no
+// audit_log_content row is written for sensitive (no content ever
+// persists for sensitive tenants).
+//
+// Handlers (e.g. the Phase 3 dispatcher's sensitive-block path) stamp
+// this value via auditctx.WithUpstreamOverride; the middleware reads
+// it back during Event construction.
+const UpstreamBlockedSensitive = "blocked_sensitive"
 
 func isAudioRoute(path string) bool {
 	return strings.HasPrefix(path, "/v1/audio/transcriptions")

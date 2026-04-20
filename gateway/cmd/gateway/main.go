@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -178,12 +180,14 @@ func main() {
 	}
 	resolver.Start(ctx)
 
-	// Build the three reverse proxies (Plan 02-04). Interceptors are passed
+	// Build the LOCAL reverse proxies (Plan 02-04). Interceptors are passed
 	// at construction time per Codex review [HIGH/MEDIUM] 02-05 decoupling.
-	// Chat gets the audit interceptor (SSE streaming); embeddings + audio
-	// never stream so their non-SSE bodies are captured by audit.Middleware
-	// directly.
-	chatRP, err := proxy.NewChatProxy(cfg.UpstreamLLMURL, log, auditInterceptor)
+	// Chat gets the audit interceptor (SSE streaming) AND the tool-call
+	// interceptor (Phase 3 RES-06 / SC-4 — emit terminal SSE error event
+	// on disconnect after tool_calls); embeddings + audio never stream so
+	// their non-SSE bodies are captured by audit.Middleware directly.
+	toolCallInterceptor := proxy.NewToolCallInterceptor()
+	chatRP, err := proxy.NewChatProxy(cfg.UpstreamLLMURL, log, auditInterceptor, toolCallInterceptor)
 	if err != nil {
 		log.Error("build chat proxy", "err", err)
 		os.Exit(2)
@@ -251,11 +255,106 @@ func main() {
 		}
 	}()
 
+	// Phase 3 — Wave 4 (Plan 03-06): build the EXTERNAL fallback reverse
+	// proxies (OpenRouter chat, OpenAI embed, OpenAI Whisper) using the
+	// directors that inject Authorization Bearer + body rewrites. Each
+	// fallback is OPTIONAL — if the env URL is empty, the upstream is
+	// dropped from the dispatcher map and the dispatcher returns 503
+	// when tier-0 is OPEN. This matches the upstreams.Loader's "missing
+	// url_env → drop the row" semantics from Plan 03-04.
+	//
+	// Each external proxy uses the same audit interceptor as its local
+	// counterpart (chat gets BOTH audit + tool-call). The directors
+	// already strip client auth via base BuildDirector then inject the
+	// upstream-bound bearer.
+	llmRoleProxies := map[string]http.Handler{"local-llm": chatRP}
+	if u, ok := loader.Get("openrouter-chat"); ok && u.URL != "" {
+		orChatProxy, perr := buildOpenRouterChatProxy(u, cfg, log, auditInterceptor, toolCallInterceptor)
+		if perr != nil {
+			log.Warn("build openrouter-chat proxy", "err", perr)
+		} else {
+			llmRoleProxies["openrouter-chat"] = orChatProxy
+		}
+	}
+	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}
+	if u, ok := loader.Get("openai-embed"); ok && u.URL != "" {
+		oaEmbedProxy, perr := buildOpenAIEmbedProxy(u, log)
+		if perr != nil {
+			log.Warn("build openai-embed proxy", "err", perr)
+		} else {
+			embedRoleProxies["openai-embed"] = oaEmbedProxy
+		}
+	}
+	sttRoleProxies := map[string]http.Handler{"local-stt": audioRP}
+	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
+		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log)
+		if perr != nil {
+			log.Warn("build openai-whisper proxy", "err", perr)
+		} else {
+			sttRoleProxies["openai-whisper"] = oaWhisperProxy
+		}
+	}
+
+	// Token counter — uses the LOCAL llm URL (tier-0) for /tokenize. This
+	// is the authoritative tokenizer because llama-server's BPE matches
+	// the model that will actually serve the request. Fail-open if the
+	// /tokenize endpoint is unreachable (caller proceeds; breaker
+	// catches actual outage).
+	tokenCounter := proxy.NewTokenCounter(rdb, cfg.UpstreamLLMURL, log)
+
+	// Dispatchers — one per role. Each applies breaker-driven fallback
+	// per the dispatcher decision tree (CONTEXT.md D-A2 + D-B1..B4 + D-C4).
+	chatDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
+		Role:         "llm",
+		Loader:       loader,
+		Breaker:      breakerSet,
+		TokenCounter: tokenCounter,
+		ContextCap:   proxy.ChatContextCap,
+		Proxies:      llmRoleProxies,
+		Log:          log,
+	})
+	embedDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
+		Role:         "embed",
+		Loader:       loader,
+		Breaker:      breakerSet,
+		TokenCounter: tokenCounter,
+		ContextCap:   proxy.EmbedContextCap,
+		Proxies:      embedRoleProxies,
+		Log:          log,
+	})
+	audioDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
+		Role:    "stt",
+		Loader:  loader,
+		Breaker: breakerSet,
+		// STT skips token-cap enforcement (multipart, no JSON to parse).
+		TokenCounter: nil,
+		ContextCap:   0,
+		Proxies:      sttRoleProxies,
+		Log:          log,
+	})
+
+	// Per-route WriteTimeout binding (Folded Todo from Phase 2; D-A1
+	// Plumbing). Chat=0 (SSE — unlimited), embed=30s, audio=120s. Wraps
+	// each dispatcher in http.TimeoutHandler so slow-client-DoS defense
+	// applies to non-streaming routes without breaking SSE.
+	var chatHandler http.Handler = chatDispatcher
+	if cfg.WriteTimeoutChat > 0 {
+		chatHandler = http.TimeoutHandler(chatDispatcher, cfg.WriteTimeoutChat, "request timeout")
+	}
+	var embedHandler http.Handler = embedDispatcher
+	if cfg.WriteTimeoutEmbed > 0 {
+		embedHandler = http.TimeoutHandler(embedDispatcher, cfg.WriteTimeoutEmbed, "request timeout")
+	}
+	var audioHandler http.Handler = audioDispatcher
+	if cfg.WriteTimeoutAudio > 0 {
+		audioHandler = http.TimeoutHandler(audioDispatcher, cfg.WriteTimeoutAudio, "request timeout")
+	}
+
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
-		chat:            chatRP,
-		embed:           embedRP,
-		audio:           audioRP,
+		chat:            chatHandler,
+		embed:           embedHandler,
+		audio:           audioHandler,
 		auditWriter:     auditWriter,
 		resolver:        resolver,
 		upstreamsHealth: upstreams.NewHealthHandler(loader, breakerSet, log),
@@ -404,6 +503,88 @@ var (
 	_ = (*pgxpool.Pool)(nil)
 	_ = (*redis.Client)(nil)
 )
+
+// buildOpenRouterChatProxy constructs a *httputil.ReverseProxy for the
+// openrouter-chat fallback upstream. Uses BuildOpenRouterDirector to
+// inject Authorization Bearer + body rewrite with provider.order +
+// allow_fallbacks per CONTEXT.md D-C2 (Novita pin per D-C1 amendment).
+//
+// Wired with the same audit + tool-call interceptors as the local chat
+// proxy so SSE streams from OpenRouter get the same observability +
+// tool-call protection.
+func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log *slog.Logger,
+	auditInterceptor *audit.AuditInterceptor, toolCallInterceptor *proxy.ToolCallInterceptor) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(u.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse openrouter url %q: %w", u.URL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid openrouter url %q (missing scheme or host)", u.URL)
+	}
+	rp := &httputil.ReverseProxy{
+		Director: proxy.BuildOpenRouterDirector(parsed, u.AuthBearer,
+			cfg.UpstreamOpenRouterProviderOrder, cfg.UpstreamOpenRouterAllowFallbacks),
+		FlushInterval: -1, // SSE streaming
+		Transport: &http.Transport{
+			MaxIdleConns:          50,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+		ErrorHandler:   proxy.ErrorHandler("openrouter-chat", log),
+		ModifyResponse: proxy.ComposeInterceptors(auditInterceptor, toolCallInterceptor),
+	}
+	return rp, nil
+}
+
+// buildOpenAIEmbedProxy constructs the openai-embed fallback proxy. The
+// director rewrites model="text-embedding-3-small" + dimensions=1024 for
+// BGE-M3 parity. No streaming, no tool-call interceptor (embeddings are
+// always non-streaming JSON).
+func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(u.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse openai-embed url %q: %w", u.URL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid openai-embed url %q", u.URL)
+	}
+	rp := &httputil.ReverseProxy{
+		Director: proxy.BuildOpenAIEmbedDirector(parsed, u.AuthBearer),
+		Transport: &http.Transport{
+			MaxIdleConns:          50,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("openai-embed", log),
+	}
+	return rp, nil
+}
+
+// buildOpenAIWhisperProxy constructs the openai-whisper fallback proxy.
+// The director leaves the multipart body untouched (boundary preserved);
+// only Authorization is added.
+func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(u.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse openai-whisper url %q: %w", u.URL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid openai-whisper url %q", u.URL)
+	}
+	rp := &httputil.ReverseProxy{
+		Director: proxy.BuildOpenAIWhisperDirector(parsed, u.AuthBearer),
+		Transport: &http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("openai-whisper", log),
+	}
+	return rp, nil
+}
 
 // newLogger builds the slog.Logger wrapped in the Redactor so sensitive
 // attribute values are globally redacted (D-B7).
