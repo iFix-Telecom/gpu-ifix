@@ -10,20 +10,32 @@ END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS upstreams_change_notify ON ai_gateway.upstreams;
+DROP TRIGGER IF EXISTS upstreams_insert_delete_notify ON ai_gateway.upstreams;
+DROP TRIGGER IF EXISTS upstreams_update_notify ON ai_gateway.upstreams;
 
--- WHEN clause filters out pure probe writebacks (Pitfall 7). Fire ONLY
--- when a config column actually changed. INSERT/DELETE always fires
--- (no OLD/NEW comparison possible) -- handled by the OR-chain below.
-CREATE TRIGGER upstreams_change_notify
-AFTER INSERT OR UPDATE OR DELETE ON ai_gateway.upstreams
+-- Postgres restriction: an INSERT trigger's WHEN clause cannot reference
+-- OLD; a DELETE trigger's WHEN clause cannot reference NEW. Splitting
+-- into two triggers is the canonical workaround. Both call the same
+-- notify_upstreams_changed() function.
+--
+-- INSERT/DELETE: always fire (config-table writes are operator actions).
+CREATE TRIGGER upstreams_insert_delete_notify
+AFTER INSERT OR DELETE ON ai_gateway.upstreams
+FOR EACH ROW
+WHEN (pg_trigger_depth() = 0)
+EXECUTE FUNCTION ai_gateway.notify_upstreams_changed();
+
+-- UPDATE: filter out pure probe writebacks (Pitfall 7). The trigger
+-- fires only when a config column actually changed. probe writebacks
+-- (last_probe_at, last_probe_ms, last_probe_status, last_probe_error,
+-- updated_at) leave the listed config columns untouched and therefore
+-- skip the notify path entirely.
+CREATE TRIGGER upstreams_update_notify
+AFTER UPDATE ON ai_gateway.upstreams
 FOR EACH ROW
 WHEN (
-    -- INSERT: OLD is NULL -> comparisons are NULL -> fire (we want it)
-    -- DELETE: NEW is NULL -> comparisons are NULL -> fire (we want it)
-    -- UPDATE: fire only if any of the config columns differ
     pg_trigger_depth() = 0 AND (
-        TG_OP IN ('INSERT', 'DELETE')
-        OR NEW.name IS DISTINCT FROM OLD.name
+        NEW.name IS DISTINCT FROM OLD.name
         OR NEW.role IS DISTINCT FROM OLD.role
         OR NEW.tier IS DISTINCT FROM OLD.tier
         OR NEW.url_env IS DISTINCT FROM OLD.url_env
@@ -38,6 +50,8 @@ EXECUTE FUNCTION ai_gateway.notify_upstreams_changed();
 
 -- +goose Down
 -- +goose StatementBegin
+DROP TRIGGER IF EXISTS upstreams_update_notify ON ai_gateway.upstreams;
+DROP TRIGGER IF EXISTS upstreams_insert_delete_notify ON ai_gateway.upstreams;
 DROP TRIGGER IF EXISTS upstreams_change_notify ON ai_gateway.upstreams;
 DROP FUNCTION IF EXISTS ai_gateway.notify_upstreams_changed();
 -- +goose StatementEnd
