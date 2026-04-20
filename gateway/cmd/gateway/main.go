@@ -267,13 +267,23 @@ func main() {
 	// counterpart (chat gets BOTH audit + tool-call). The directors
 	// already strip client auth via base BuildDirector then inject the
 	// upstream-bound bearer.
-	llmRoleProxies := map[string]http.Handler{"local-llm": chatRP}
+	// Wrap each chat-capable proxy in ToolCallTerminalGuard so SC-4 holds
+	// end-to-end: when an upstream emits a tool_call delta then disconnects
+	// mid-stream, the gateway emits a terminal SSE error event with code
+	// "tool_call_partial_stream" + bumps gateway_tool_call_partial_total,
+	// and never failovers to tier-1 (the dispatcher already enforces the
+	// no-failover policy by calling proxy.ServeHTTP exactly once).
+	llmRoleProxies := map[string]http.Handler{
+		"local-llm": proxy.ToolCallTerminalGuard(chatRP, toolCallInterceptor, "local-llm", "/v1/chat/completions"),
+	}
 	if u, ok := loader.Get("openrouter-chat"); ok && u.URL != "" {
 		orChatProxy, perr := buildOpenRouterChatProxy(u, cfg, log, auditInterceptor, toolCallInterceptor)
 		if perr != nil {
 			log.Warn("build openrouter-chat proxy", "err", perr)
 		} else {
-			llmRoleProxies["openrouter-chat"] = orChatProxy
+			llmRoleProxies["openrouter-chat"] = proxy.ToolCallTerminalGuard(
+				orChatProxy, toolCallInterceptor, "openrouter-chat", "/v1/chat/completions",
+			)
 		}
 	}
 	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}

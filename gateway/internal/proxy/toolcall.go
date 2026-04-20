@@ -179,3 +179,84 @@ func WriteSSEToolCallError(w http.ResponseWriter, reqID, upstream, route string)
 
 // Compile-time assertion: ToolCallInterceptor satisfies ProxyResponseInterceptor.
 var _ ProxyResponseInterceptor = (*ToolCallInterceptor)(nil)
+
+// ToolCallTerminalGuard wraps the chat reverse-proxy handler so that
+// when the upstream stream terminates abnormally AFTER a tool_call delta
+// was emitted, the gateway emits a terminal `event: error` SSE frame
+// with code "tool_call_partial_stream" and bumps the
+// gateway_tool_call_partial_total counter (RES-06 / SC-4).
+//
+// Without this wrapper the production chat-proxy chain would simply log
+// the upstream error and close the connection — the client would see a
+// truncated stream with no signal that the partial tool_call is
+// non-replayable. The wrapper relies on the ToolCallInterceptor having
+// installed a per-request flag (via Intercept on the SSE response) that
+// the tee reader sets when it sees `"tool_calls"` in the head buffer.
+//
+// Detection: we wrap the ResponseWriter and observe headers/data flow.
+// After next.ServeHTTP returns we check the per-request flag; if set
+// AND the upstream stream did not terminate cleanly (no closing
+// `data: [DONE]\n\n`) we emit the terminal frame.
+func ToolCallTerminalGuard(next http.Handler, tci *ToolCallInterceptor, upstreamName, route string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := httpx.RequestIDFrom(r.Context())
+		tw := &tcGuardWriter{ResponseWriter: w}
+		// Defer the post-stream check so it runs even when ReverseProxy
+		// panics with http.ErrAbortHandler — which is exactly what happens
+		// when the upstream disconnects mid-stream after writing some
+		// bytes (Go stdlib semantics). We rethrow the panic after writing
+		// our terminal frame so the http.Server's recover still aborts
+		// the rest of the middleware chain cleanly.
+		defer func() {
+			rec := recover()
+			if reqID != "" {
+				flag := tci.Flag(reqID)
+				if flag != nil && flag.Load() && !tw.sawDone {
+					WriteSSEToolCallError(w, reqID, upstreamName, route)
+					tci.Clear(reqID)
+				}
+			}
+			if rec != nil {
+				// Only re-panic on http.ErrAbortHandler — that's the only
+				// panic value Go expects to surface from a handler. Any
+				// other panic is a real bug and should also propagate.
+				panic(rec)
+			}
+		}()
+		next.ServeHTTP(tw, r)
+	})
+}
+
+// tcGuardWriter wraps ResponseWriter to observe SSE chunks for the
+// `data: [DONE]` terminator that signals a clean stream end. Forwards
+// every Write/Flush/Header call so the proxy semantics are preserved.
+type tcGuardWriter struct {
+	http.ResponseWriter
+	sawDone bool
+	tail    []byte
+}
+
+func (g *tcGuardWriter) Write(p []byte) (int, error) {
+	// Track the tail of the stream so we can detect [DONE] which can
+	// span multiple Write calls. A 64-byte rolling buffer is enough.
+	combined := append(g.tail, p...)
+	if bytes.Contains(combined, []byte(`data: [DONE]`)) {
+		g.sawDone = true
+	}
+	if len(combined) > 64 {
+		g.tail = append(g.tail[:0], combined[len(combined)-64:]...)
+	} else {
+		g.tail = combined
+	}
+	return g.ResponseWriter.Write(p)
+}
+
+func (g *tcGuardWriter) Flush() {
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijacker pass-through so upstream tests + audio multipart still work.
+func (g *tcGuardWriter) Header() http.Header { return g.ResponseWriter.Header() }
+func (g *tcGuardWriter) WriteHeader(c int)   { g.ResponseWriter.WriteHeader(c) }

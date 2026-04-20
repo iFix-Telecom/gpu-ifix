@@ -27,6 +27,7 @@ Commands:
   migrate           Apply or revert Postgres migrations.
   tenant            Create and list tenants.
   key               Create and revoke API keys.
+  upstreams         List, update, enable, or disable rows in ai_gateway.upstreams.
   audit             Export audit-log partitions to MinIO cold storage (Plan 02-09).
 
 Use "gatewayctl <command> --help" for subcommand flags.
@@ -51,6 +52,8 @@ func main() {
 		os.Exit(runTenant(ctx, args, log))
 	case "key":
 		os.Exit(runKey(ctx, args, log))
+	case "upstreams":
+		os.Exit(runUpstreams(ctx, args, log))
 	case "audit":
 		fmt.Fprintln(os.Stderr, "gatewayctl audit: not yet implemented (Plan 02-09)")
 		os.Exit(1)
