@@ -14,6 +14,9 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	sentry "github.com/getsentry/sentry-go"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
@@ -217,9 +220,15 @@ func ToolCallTerminalGuard(next http.Handler, tci *ToolCallInterceptor, upstream
 				}
 			}
 			if rec != nil {
-				// Only re-panic on http.ErrAbortHandler — that's the only
-				// panic value Go expects to surface from a handler. Any
-				// other panic is a real bug and should also propagate.
+				// Capture the panic in Sentry before re-panicking so the
+				// original stack trace is preserved. Without this, the outer
+				// httpx.Recoverer would see a re-panic from this defer's
+				// location rather than the original panic site (HIGH-03 fix).
+				// http.ErrAbortHandler is the canonical client-disconnect
+				// signal; other values are real bugs — both are re-panicked
+				// so http.Server's recovery chain handles them correctly.
+				sentry.CurrentHub().RecoverWithContext(r.Context(), rec)
+				sentry.Flush(200 * time.Millisecond)
 				panic(rec)
 			}
 		}()
