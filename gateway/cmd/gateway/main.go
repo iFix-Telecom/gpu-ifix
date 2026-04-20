@@ -26,6 +26,7 @@ import (
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/audit"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
@@ -203,6 +204,53 @@ func main() {
 	// first-writer-wins semantics + 24h TTL post-completion.
 	idemStore := idempotency.NewStore(rdb)
 
+	// Phase 3 wiring (Plans 03-03 / 03-04 / 03-05) — replaces the Phase 2
+	// pod-:9100 health-bridge proxy with an in-process aggregator over
+	// the multi-upstream loader + per-upstream gobreaker set + synthetic
+	// E2E probe goroutine.
+	//
+	// Construction order matters:
+	//   1. Loader fail-fasts at boot if ai_gateway.upstreams is unreadable.
+	//   2. breaker.Set is built from loader.Names() so each enabled
+	//      upstream gets its own *gobreaker.CircuitBreaker.
+	//   3. Subscribe (Pub/Sub) goroutine runs so cross-replica OPEN
+	//      events from other gateways short-circuit local Execute.
+	//   4. Probe loop drives breaker state via synthetic E2E even with
+	//      zero client traffic (D-A2 / SC-1 ≤10s failover budget).
+	//   5. ListenAndReload watches LISTEN upstreams_changed and rebuilds
+	//      the breaker set on hot-reload (D-D4).
+	loader, err := upstreams.NewLoader(ctx, pool, log)
+	if err != nil {
+		log.Error("upstreams loader init failed", "err", err)
+		os.Exit(2)
+	}
+	breakerSet := breaker.NewSet(rdb, log,
+		breaker.Options{
+			ConsecutiveFailures: uint32(cfg.BreakerConsecutiveFailures),
+			Cooldown:            time.Duration(cfg.BreakerCooldownSeconds) * time.Second,
+		},
+		loader.Names(),
+	)
+	go breakerSet.Subscribe(ctx)
+	probe := upstreams.NewProbe(loader, breakerSet, gen.New(pool),
+		upstreams.ProbeConfig{
+			Interval: time.Duration(cfg.ProbeIntervalSeconds) * time.Second,
+			Budget:   time.Duration(cfg.ProbeBudgetSeconds) * time.Second,
+		},
+		log,
+	)
+	go probe.Run(ctx)
+	go func() {
+		// Hot-reload pipeline: NOTIFY → loader.Refresh → breaker.Rebuild
+		// so newly-added upstreams get fresh CLOSED breakers and
+		// removed upstreams have their breakers dropped.
+		if err := upstreams.ListenAndReload(ctx, cfg.PGDSN, loader, func() {
+			breakerSet.Rebuild(loader.Names())
+		}, log); err != nil {
+			log.Warn("upstreams listener exited", "err", err)
+		}
+	}()
+
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
 		chat:            chatRP,
@@ -210,7 +258,7 @@ func main() {
 		audio:           audioRP,
 		auditWriter:     auditWriter,
 		resolver:        resolver,
-		upstreamsHealth: upstreams.NewHealthHandler(cfg.UpstreamHealthBridgeURL, log),
+		upstreamsHealth: upstreams.NewHealthHandler(loader, breakerSet, log),
 		idemStore:       idemStore,
 	})
 

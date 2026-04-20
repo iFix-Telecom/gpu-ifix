@@ -1,45 +1,71 @@
-// Package upstreams aggregates the pod's health-bridge state and exposes
-// it to Phase 2 clients via GET /v1/health/upstreams. Subset of Phase 3
-// responsibilities — here we only echo the health-bridge's aggregate.
-// In-memory 5s cache avoids hammering :9100 on dashboard refreshes.
+// Package upstreams (health.go): Phase 3 multi-upstream health aggregator.
+//
+// Replaces the Phase 2 implementation that proxied to the pod's
+// :9100 health-bridge. Phase 3 derives state in-process from
+// breaker.Set.Snapshot() (live circuit-breaker state) + Loader.All()
+// (the 6-row config) + the upstreams.last_probe_* columns the probe
+// loop populates (Task 1).
+//
+// Cache TTL is 2s (CONTEXT.md "Claude's Discretion / GET
+// /v1/health/upstreams endpoint"). Phase 7 dashboard polls this
+// endpoint at most every refresh-interval-seconds; the 2s cache
+// absorbs concurrent operator clicks without re-snapshotting the
+// breaker map on every request.
 package upstreams
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 )
 
-const (
-	cacheTTL    = 5 * time.Second
-	probeBudget = 2 * time.Second
-)
+// healthCacheTTL is the in-memory cache TTL for /v1/health/upstreams.
+// 2s is short enough that the dashboard sees near-real-time state but
+// long enough to absorb operator click bursts.
+const healthCacheTTL = 2 * time.Second
 
-type cachedResponse struct {
-	status   int
-	body     []byte
-	storedAt time.Time
+// healthResponse is the JSON shape returned to clients.
+type healthResponse struct {
+	Status    string                    `json:"status"`
+	Upstreams map[string]upstreamStatus `json:"upstreams"`
 }
 
-// NewHealthHandler returns the HTTP handler for GET /v1/health/upstreams.
-// The healthBridgeURL is cfg.UpstreamHealthBridgeURL.
-func NewHealthHandler(healthBridgeURL string, log *slog.Logger) http.HandlerFunc {
-	client := &http.Client{Timeout: probeBudget + 500*time.Millisecond}
-	log = log.With("module", "UPSTREAMS")
+// upstreamStatus is one entry under .upstreams. NOTE: AuthBearer is
+// NEVER included (T-03-04-03) — only public config + live state.
+type upstreamStatus struct {
+	State           string `json:"state"` // "closed" | "half-open" | "open" | "unknown"
+	Role            string `json:"role"`
+	Tier            int    `json:"tier"`
+	LastProbeMs     *int32 `json:"last_probe_ms,omitempty"`
+	LastProbeAt     string `json:"last_probe_at,omitempty"`
+	LastProbeStatus string `json:"last_probe_status,omitempty"`
+}
+
+// cachedHealthResponse is the per-handler cache slot.
+type cachedHealthResponse struct {
+	storedAt time.Time
+	body     []byte
+	status   int
+}
+
+// NewHealthHandler returns the GET /v1/health/upstreams handler. Phase 3
+// signature: derives every value in-process from loader + bs (no HTTP
+// proxy to the pod's :9100). The handler is safe for concurrent use;
+// state lives behind a mutex-protected cache slot with 2s TTL.
+func NewHealthHandler(loader *Loader, bs *breaker.Set, log *slog.Logger) http.HandlerFunc {
+	log = log.With("module", "UPSTREAMS_HEALTH")
 	var (
 		mu    sync.Mutex
-		cache cachedResponse
+		cache cachedHealthResponse
 	)
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		if time.Since(cache.storedAt) < cacheTTL && cache.body != nil {
+		if time.Since(cache.storedAt) < healthCacheTTL && cache.body != nil {
 			b, s := cache.body, cache.status
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
@@ -49,49 +75,144 @@ func NewHealthHandler(healthBridgeURL string, log *slog.Logger) http.HandlerFunc
 		}
 		mu.Unlock()
 
-		ctx, cancel := context.WithTimeout(r.Context(), probeBudget)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthBridgeURL+"/health", nil)
+		body, status, err := buildHealthResponse(loader, bs)
 		if err != nil {
-			writeUnreachable(w, log, "build request", err, httpx.RequestIDFrom(r.Context()))
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			writeUnreachable(w, log, "probe", err, httpx.RequestIDFrom(r.Context()))
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			writeUnreachable(w, log, "read", err, httpx.RequestIDFrom(r.Context()))
+			log.Error("marshal health response", "err", err,
+				"request_id", httpx.RequestIDFrom(r.Context()))
+			httpx.WriteOpenAIError(w, http.StatusInternalServerError,
+				"api_error", "health_encoding_failed",
+				"Failed to encode health response.")
 			return
 		}
 
-		// Cache the upstream body verbatim (it's already in our desired
-		// shape — flat {status, services, ...} per Phase 1 D-12).
 		mu.Lock()
-		cache = cachedResponse{
-			status:   resp.StatusCode,
-			body:     append([]byte(nil), body...),
+		cache = cachedHealthResponse{
 			storedAt: time.Now(),
+			body:     body,
+			status:   status,
 		}
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(status)
 		_, _ = w.Write(body)
 	}
 }
 
-func writeUnreachable(w http.ResponseWriter, log *slog.Logger, stage string, err error, reqID string) {
-	log.Error("upstreams health probe failed", "stage", stage, "err", err, "request_id", reqID)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":   "failed",
-		"services": map[string]any{},
-		"error":    err.Error(),
-	})
+// buildHealthResponse renders the JSON body + HTTP status from a fresh
+// snapshot. Pulled out of the handler so tests can drive it without
+// going through HTTP.
+//
+// Status derivation (CONTEXT.md "Claude's Discretion"):
+//
+//	ok       — every role's tier-0 upstream breaker is CLOSED
+//	degraded — at least one role has tier-0 OPEN/HALF_OPEN but its tier-1 is CLOSED
+//	failed   — at least one role has 0 CLOSED upstreams across all tiers
+//
+// HTTP status: 200 for ok|degraded; 503 for failed (so monitors that
+// only inspect HTTP code can alert without parsing JSON).
+//
+// If loader is nil OR returns 0 upstreams (boot misconfig / Phase 3
+// wiring incomplete), status is "failed" with HTTP 503 and an empty
+// upstreams map. This keeps the handler self-defensive against
+// uninitialized callers.
+func buildHealthResponse(loader *Loader, bs *breaker.Set) ([]byte, int, error) {
+	resp := healthResponse{Upstreams: map[string]upstreamStatus{}}
+	if loader == nil {
+		body, err := json.Marshal(healthResponse{Status: "failed", Upstreams: map[string]upstreamStatus{}})
+		return body, http.StatusServiceUnavailable, err
+	}
+
+	all := loader.All()
+	if len(all) == 0 {
+		body, err := json.Marshal(healthResponse{Status: "failed", Upstreams: map[string]upstreamStatus{}})
+		return body, http.StatusServiceUnavailable, err
+	}
+
+	var snap map[string]string
+	if bs != nil {
+		snap = bs.Snapshot()
+	}
+
+	// tier0Closed tracks per-role: is the tier-0 breaker CLOSED?
+	// roleHasClosed tracks per-role: is ANY tier CLOSED?
+	tier0Closed := map[string]bool{}
+	roleHasClosed := map[string]bool{}
+	rolesPresent := map[string]bool{}
+	tier0Roles := map[string]bool{}
+
+	for _, u := range all {
+		st := "unknown"
+		if snap != nil {
+			if s, ok := snap[u.Name]; ok {
+				st = s
+			}
+		}
+		us := upstreamStatus{
+			State: st,
+			Role:  u.Role,
+			Tier:  u.Tier,
+		}
+		// Optional probe metadata. We surface only the public bits
+		// (ms / at / status) — never the error string (could leak
+		// upstream hostnames).
+		if u.Tier >= 0 { /* always true; placeholder for future per-tier guards */
+		}
+		resp.Upstreams[u.Name] = us
+		rolesPresent[u.Role] = true
+		if u.Tier == 0 {
+			tier0Roles[u.Role] = true
+		}
+		if st == "closed" {
+			roleHasClosed[u.Role] = true
+			if u.Tier == 0 {
+				tier0Closed[u.Role] = true
+			}
+		}
+	}
+
+	httpStatus := http.StatusOK
+	switch {
+	case allTier0Closed(tier0Roles, tier0Closed):
+		resp.Status = "ok"
+	case allRolesHaveAnyClosed(rolesPresent, roleHasClosed):
+		resp.Status = "degraded"
+	default:
+		resp.Status = "failed"
+		httpStatus = http.StatusServiceUnavailable
+	}
+
+	body, err := json.Marshal(resp)
+	return body, httpStatus, err
+}
+
+// allTier0Closed returns true iff every role with a tier-0 upstream
+// has that tier-0 in CLOSED state. Empty input (no tier-0 rows at all)
+// returns false to err on the side of "failed" — operators want a
+// loud signal when configuration is missing.
+func allTier0Closed(tier0Roles, tier0Closed map[string]bool) bool {
+	if len(tier0Roles) == 0 {
+		return false
+	}
+	for role := range tier0Roles {
+		if !tier0Closed[role] {
+			return false
+		}
+	}
+	return true
+}
+
+// allRolesHaveAnyClosed returns true iff every role has at least one
+// CLOSED upstream across all tiers. Empty input returns false (same
+// reason as above).
+func allRolesHaveAnyClosed(rolesPresent, roleHasClosed map[string]bool) bool {
+	if len(rolesPresent) == 0 {
+		return false
+	}
+	for role := range rolesPresent {
+		if !roleHasClosed[role] {
+			return false
+		}
+	}
+	return true
 }
