@@ -31,6 +31,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -270,7 +271,10 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 	if err != nil {
 		return nil, err
 	}
-	// Consume + close the body so the underlying conn returns to the pool.
+	// Drain then close the body so the underlying conn returns to the pool.
+	// Without draining, net/http cannot reuse the connection even on 2xx
+	// (MED-01: ~36 conn/min leak across 6 upstreams × 10s probe cadence).
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 500 {
 		return nil, &breaker.HTTPError{Status: resp.StatusCode, Msg: "probe upstream 5xx: " + strconv.Itoa(resp.StatusCode)}
