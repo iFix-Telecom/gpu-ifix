@@ -77,6 +77,34 @@ type Config struct {
 
 	// Admin / bootstrap
 	BootstrapTenantSlug string // BOOTSTRAP_TENANT_SLUG (default converseai)
+
+	// Phase 4 — admin endpoint bootstrap (D-D3).
+	// Optional: if empty at first boot, migration 0014 generates a random
+	// key and logs a WARN so the operator can capture it from the logs.
+	// Production deploys should set this in the Portainer stack BEFORE
+	// pushing the Phase 4 image.
+	AdminKeyBootstrap string // AI_GATEWAY_ADMIN_KEY_BOOTSTRAP (required=false, default="")
+
+	// Phase 4 — rate-limit + quota fail policy (D-A2). Rate-limit defaults
+	// to fail-open (preserve "failover invisible" core value during Redis
+	// incidents); quota defaults to fail-closed (stopping is better than
+	// burning OpenRouter/OpenAI cost without visibility).
+	RateLimitFailOpen bool // AI_GATEWAY_RATE_LIMIT_FAIL_OPEN (default true)
+	QuotaFailOpen     bool // AI_GATEWAY_QUOTA_FAIL_OPEN      (default false)
+
+	// Phase 4 — pricing fallback (D-B3). Used when fx_rates has no live
+	// row for USD/BRL. Operator updates weekly via `gatewayctl prices set-fx`.
+	USDBRLDefault float64 // AI_GATEWAY_USD_BRL_RATE_DEFAULT (default 5.10)
+
+	// Phase 4 — per-route WriteTimeout in integer seconds (folded TODO
+	// from Phase 3). Separate from the Phase 3 time.Duration fields so the
+	// TODO is truly resolved at the Phase 4 layer (the HTTP wiring in
+	// Plan 04-06 will prefer these fields). chat=0 keeps SSE unlimited;
+	// embed=30s and audio=120s restore slow-client-DoS defense on
+	// non-streaming routes now justified by rate-limiting.
+	WriteTimeoutChatS  int // GATEWAY_WRITE_TIMEOUT_CHAT_S  (default 0 — unlimited for SSE)
+	WriteTimeoutEmbedS int // GATEWAY_WRITE_TIMEOUT_EMBED_S (default 30)
+	WriteTimeoutAudioS int // GATEWAY_WRITE_TIMEOUT_AUDIO_S (default 120; Whisper multipart)
 }
 
 // ErrMissingEnv is returned by Load when one or more required env vars are unset.
@@ -130,6 +158,15 @@ func Load() (Config, error) {
 		Env:       envOr("ENV", "production"),
 
 		BootstrapTenantSlug: envOr("BOOTSTRAP_TENANT_SLUG", "converseai"),
+
+		// Phase 4 — admin bootstrap, fail policy, fx default, per-route write timeouts.
+		AdminKeyBootstrap:  envOr("AI_GATEWAY_ADMIN_KEY_BOOTSTRAP", ""),
+		RateLimitFailOpen:  boolOr(os.Getenv("AI_GATEWAY_RATE_LIMIT_FAIL_OPEN"), true),
+		QuotaFailOpen:      boolOr(os.Getenv("AI_GATEWAY_QUOTA_FAIL_OPEN"), false),
+		USDBRLDefault:      floatOr(os.Getenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT"), 5.10),
+		WriteTimeoutChatS:  atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_CHAT_S"), 0),
+		WriteTimeoutEmbedS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 30),
+		WriteTimeoutAudioS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S"), 120),
 	}
 
 	// Iterate in a fixed order so error messages are deterministic — tests
@@ -218,4 +255,17 @@ func boolOr(s string, def bool) bool {
 		return false
 	}
 	return def
+}
+
+// floatOr parses a float64 from s; empty string or parse error returns def.
+// Matches the shape of atoiOr so Phase 4 price/fx env vars plug in cleanly.
+func floatOr(s string, def float64) float64 {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return def
+	}
+	return v
 }

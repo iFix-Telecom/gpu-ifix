@@ -134,3 +134,36 @@ type ErrorDetail struct {
 	Type    string `json:"type"`
 	Code    string `json:"code,omitempty"`
 }
+
+// Phase 4 — discriminated error envelope types/codes (D-A4).
+// Used by quota/billing/schedule middleware to emit OpenAI-compatible error
+// envelopes so client apps (Cobranças, Campanhas) can branch programmatically
+// on Type+Code (e.g., pause campaign on monthly quota vs degrade template on
+// daily tokens). Sentinel errors in gateway/internal/quota, schedule, admin
+// map 1:1 to these strings.
+const (
+	// RateLimitErrorType — OpenAI envelope "type" for HTTP 429 rate-limit rejections.
+	RateLimitErrorType = "rate_limit_error"
+	// InsufficientQuotaErrorType — OpenAI envelope "type" for HTTP 429 quota-exhausted rejections.
+	InsufficientQuotaErrorType = "insufficient_quota"
+	// ServiceUnavailableType — OpenAI envelope "type" for HTTP 503 gateway-side unavailability.
+	ServiceUnavailableType = "service_unavailable"
+
+	// Rate-limit codes (TEN-03).
+	RateLimitRPSCode = "rate_limit_rps"
+	RateLimitRPMCode = "rate_limit_rpm"
+
+	// Daily quota codes (TEN-04).
+	QuotaExceededDailyTokensCode       = "quota_exceeded_daily_tokens"
+	QuotaExceededDailyAudioMinutesCode = "quota_exceeded_daily_audio_minutes"
+	QuotaExceededDailyEmbedsCode       = "quota_exceeded_daily_embeds"
+
+	// Monthly quota codes (TEN-04).
+	QuotaExceededMonthlyTokensCode       = "quota_exceeded_monthly_tokens"
+	QuotaExceededMonthlyAudioMinutesCode = "quota_exceeded_monthly_audio_minutes"
+	QuotaExceededMonthlyEmbedsCode       = "quota_exceeded_monthly_embeds"
+
+	// Service-unavailable codes (D-A2 fail-closed quota; D-C2 off-hours block).
+	QuotaCheckUnavailableCode       = "quota_check_unavailable"
+	OffHoursUpstreamUnavailableCode = "off_hours_upstream_unavailable"
+)

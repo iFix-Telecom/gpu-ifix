@@ -325,3 +325,120 @@ func TestLoad_Phase3ExternalURLsOptional(t *testing.T) {
 			cfg.UpstreamOpenAIEmbedURL)
 	}
 }
+
+// phase4OptionalEnv enumerates the env vars introduced in Plan 04-01. Tests
+// clear them in setUp so a stray value from a previous test does not leak
+// into the default-value assertions.
+var phase4OptionalEnv = []string{
+	"AI_GATEWAY_ADMIN_KEY_BOOTSTRAP",
+	"AI_GATEWAY_RATE_LIMIT_FAIL_OPEN",
+	"AI_GATEWAY_QUOTA_FAIL_OPEN",
+	"AI_GATEWAY_USD_BRL_RATE_DEFAULT",
+	"GATEWAY_WRITE_TIMEOUT_CHAT_S",
+	"GATEWAY_WRITE_TIMEOUT_EMBED_S",
+	"GATEWAY_WRITE_TIMEOUT_AUDIO_S",
+}
+
+func clearPhase4(t *testing.T) {
+	t.Helper()
+	for _, v := range phase4OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestLoad_Phase4Defaults verifies that with only the 5 required vars set
+// and no Phase 4 vars configured, Load returns the documented defaults:
+// AdminKeyBootstrap="", RateLimitFailOpen=true (fail-open preserves failover
+// invisibility during Redis blips), QuotaFailOpen=false (fail-closed stops
+// runaway external cost when visibility is lost), USDBRLDefault=5.10,
+// WriteTimeoutChatS=0 (SSE), WriteTimeoutEmbedS=30, WriteTimeoutAudioS=120.
+func TestLoad_Phase4Defaults(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AdminKeyBootstrap != "" {
+		t.Errorf("AdminKeyBootstrap default: want empty, got %q", cfg.AdminKeyBootstrap)
+	}
+	if !cfg.RateLimitFailOpen {
+		t.Error("RateLimitFailOpen default: want true")
+	}
+	if cfg.QuotaFailOpen {
+		t.Error("QuotaFailOpen default: want false")
+	}
+	if cfg.USDBRLDefault != 5.10 {
+		t.Errorf("USDBRLDefault default: want 5.10, got %v", cfg.USDBRLDefault)
+	}
+	if cfg.WriteTimeoutChatS != 0 {
+		t.Errorf("WriteTimeoutChatS default: want 0 (SSE), got %d", cfg.WriteTimeoutChatS)
+	}
+	if cfg.WriteTimeoutEmbedS != 30 {
+		t.Errorf("WriteTimeoutEmbedS default: want 30, got %d", cfg.WriteTimeoutEmbedS)
+	}
+	if cfg.WriteTimeoutAudioS != 120 {
+		t.Errorf("WriteTimeoutAudioS default: want 120, got %d", cfg.WriteTimeoutAudioS)
+	}
+}
+
+// TestLoad_Phase4FromEnv exercises overrides for every Phase 4 env var,
+// including the floatOr helper (USD/BRL) and boolOr polarity flips.
+func TestLoad_Phase4FromEnv(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	setAllRequired(t)
+	t.Setenv("AI_GATEWAY_ADMIN_KEY_BOOTSTRAP", "ifix_admin_deadbeef")
+	t.Setenv("AI_GATEWAY_RATE_LIMIT_FAIL_OPEN", "false")
+	t.Setenv("AI_GATEWAY_QUOTA_FAIL_OPEN", "true")
+	t.Setenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT", "5.42")
+	t.Setenv("GATEWAY_WRITE_TIMEOUT_CHAT_S", "45")
+	t.Setenv("GATEWAY_WRITE_TIMEOUT_EMBED_S", "15")
+	t.Setenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S", "180")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AdminKeyBootstrap != "ifix_admin_deadbeef" {
+		t.Errorf("AdminKeyBootstrap = %q, want ifix_admin_deadbeef", cfg.AdminKeyBootstrap)
+	}
+	if cfg.RateLimitFailOpen {
+		t.Error("RateLimitFailOpen: want false override")
+	}
+	if !cfg.QuotaFailOpen {
+		t.Error("QuotaFailOpen: want true override")
+	}
+	if cfg.USDBRLDefault != 5.42 {
+		t.Errorf("USDBRLDefault = %v, want 5.42", cfg.USDBRLDefault)
+	}
+	if cfg.WriteTimeoutChatS != 45 {
+		t.Errorf("WriteTimeoutChatS = %d, want 45", cfg.WriteTimeoutChatS)
+	}
+	if cfg.WriteTimeoutEmbedS != 15 {
+		t.Errorf("WriteTimeoutEmbedS = %d, want 15", cfg.WriteTimeoutEmbedS)
+	}
+	if cfg.WriteTimeoutAudioS != 180 {
+		t.Errorf("WriteTimeoutAudioS = %d, want 180", cfg.WriteTimeoutAudioS)
+	}
+}
+
+// TestLoad_Phase4FloatOrBogusValue confirms that a bogus USD/BRL env value
+// falls back to the default 5.10 rather than silently becoming 0 (which
+// would produce zero BRL costs for all rows — a Pitfall 6 catastrophe).
+func TestLoad_Phase4FloatOrBogusValue(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	setAllRequired(t)
+	t.Setenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT", "not-a-number")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.USDBRLDefault != 5.10 {
+		t.Errorf("USDBRLDefault on bogus input: want 5.10 fallback, got %v", cfg.USDBRLDefault)
+	}
+}

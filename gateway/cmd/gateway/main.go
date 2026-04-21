@@ -20,6 +20,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	// Phase 4 — embed all IANA timezone data into the binary so distroless
+	// (or any minimal image without /usr/share/zoneinfo) can resolve
+	// "America/Sao_Paulo" at boot. See RESEARCH §Pitfall 4. Cost ~400 KB.
+	_ "time/tzdata"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -594,6 +598,21 @@ func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger) (*htt
 		ErrorHandler: proxy.ErrorHandler("openai-whisper", log),
 	}
 	return rp, nil
+}
+
+// mustLoadLocation returns the *time.Location for name or fails the process
+// fast at boot. Called by Phase 4 wiring (schedule middleware in 04-06) so a
+// missing tzdata package or typo in the tenant's schedule_timezone column
+// is caught at startup rather than on the first peak-mode request. The
+// stdlib blank-import `_ "time/tzdata"` above guarantees all IANA zones
+// resolve in any container image (distroless/static included).
+func mustLoadLocation(name string, log *slog.Logger) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Error("failed to load time.Location; tzdata missing?", "zone", name, "err", err)
+		os.Exit(1)
+	}
+	return loc
 }
 
 // newLogger builds the slog.Logger wrapped in the Redactor so sensitive
