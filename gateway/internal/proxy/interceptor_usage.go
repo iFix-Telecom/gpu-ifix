@@ -89,31 +89,56 @@ func NewUsageInterceptor(
 	}
 }
 
-// Intercept wraps the response body with a tee that scans for SSE frames.
-// For non-streaming responses it returns nil and leaves resp.Body alone —
-// caller should invoke ExtractFromBody post-Read of the buffered body.
+// Intercept wraps the response body with a tee that either (a) scans SSE
+// frames for a top-level "usage" object, or (b) for non-streaming JSON
+// buffers the entire body and parses "usage" on Close. HI-02 fix (Phase 4
+// review): previously JSON responses silently lost usage data — every
+// non-streaming chat/embed request wrote a billing.Event with tokens_in=
+// tokens_out=0.
+//
+// Binary/multipart responses (audio/*, application/octet-stream, etc.)
+// are passed through untouched.
 func (u *UsageInterceptor) Intercept(resp *http.Response) error {
 	if resp == nil || resp.Request == nil {
-		return nil
-	}
-	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return nil
 	}
 	reqID := httpx.RequestIDFrom(resp.Request.Context())
 	if reqID == "" {
 		return nil
 	}
-	usage := &billing.RequestUsage{}
-	u.accountant.Set(reqID, usage)
-	resp.Body = &usageTeeReader{
-		upstream: resp.Body,
-		usage:    usage,
-		reqCtx:   resp.Request.Context(),
-		reqPath:  resp.Request.URL.Path,
-		reqID:    reqID,
-		start:    time.Now(),
-		ix:       u,
-		log:      u.log,
+	contentType := resp.Header.Get("Content-Type")
+
+	switch {
+	case strings.HasPrefix(contentType, "text/event-stream"):
+		usage := &billing.RequestUsage{}
+		u.accountant.Set(reqID, usage)
+		resp.Body = &usageTeeReader{
+			upstream: resp.Body,
+			usage:    usage,
+			reqCtx:   resp.Request.Context(),
+			reqPath:  resp.Request.URL.Path,
+			reqID:    reqID,
+			start:    time.Now(),
+			ix:       u,
+			log:      u.log,
+		}
+	case strings.HasPrefix(contentType, "application/json"):
+		// HI-02 fix: buffer the JSON body so Close can extract usage
+		// AND FinalizeRequest can enqueue the billing.Event. Without
+		// this the caller must have a ctx-aware codepath to invoke
+		// ExtractFromBody — which the dispatcher did not.
+		usage := &billing.RequestUsage{}
+		u.accountant.Set(reqID, usage)
+		resp.Body = &usageJSONBuffer{
+			upstream: resp.Body,
+			usage:    usage,
+			reqCtx:   resp.Request.Context(),
+			reqPath:  resp.Request.URL.Path,
+			reqID:    reqID,
+			start:    time.Now(),
+			ix:       u,
+			log:      u.log,
+		}
 	}
 	return nil
 }
@@ -436,4 +461,93 @@ func (r *usageTeeReader) scanFrames() {
 			}
 		}
 	}
+}
+
+// usageJSONBuffer tees a non-streaming JSON response body while forwarding
+// bytes to the client. On Close the buffered body is parsed for the
+// top-level "usage" key (OpenAI + OpenRouter + llama.cpp shape), the
+// accountant slot is updated, and FinalizeRequest enqueues the
+// billing.Event (HI-02 fix).
+//
+// Size-bounded at jsonBufferCap bytes so a malicious upstream cannot
+// exhaust memory via a giant response. The cap exceeds any plausible
+// chat/embed JSON response (128 KiB — same ceiling as the audit body
+// capture) — larger bodies simply miss the usage capture and produce
+// source=partial, which is fine.
+const jsonBufferCap = 128 * 1024
+
+type usageJSONBuffer struct {
+	upstream io.ReadCloser
+	usage    *billing.RequestUsage
+	reqCtx   context.Context
+	reqPath  string
+	reqID    string
+	start    time.Time
+	ix       *UsageInterceptor
+	log      *slog.Logger
+	buf      bytes.Buffer
+	capped   bool
+	closed   bool
+}
+
+// Read forwards bytes to the client AND copies up to jsonBufferCap into
+// the in-memory buffer for post-close parsing.
+func (b *usageJSONBuffer) Read(p []byte) (int, error) {
+	n, err := b.upstream.Read(p)
+	if n > 0 && !b.capped {
+		remaining := jsonBufferCap - b.buf.Len()
+		if remaining > 0 {
+			copyN := n
+			if copyN > remaining {
+				copyN = remaining
+				b.capped = true
+			}
+			_, _ = b.buf.Write(p[:copyN])
+		} else {
+			b.capped = true
+		}
+	}
+	return n, err
+}
+
+// Close parses the buffered body for "usage", updates the accountant,
+// and calls FinalizeRequest. The slot is deleted by FinalizeRequest's
+// deferred cleanup (BL-02).
+func (b *usageJSONBuffer) Close() error {
+	closeErr := b.upstream.Close()
+	if b.closed {
+		return closeErr
+	}
+	b.closed = true
+
+	// Parse the buffered body for top-level "usage".
+	var f sseUsageFrame
+	if b.buf.Len() > 0 {
+		if err := json.Unmarshal(b.buf.Bytes(), &f); err == nil {
+			if f.Model != "" && b.usage != nil {
+				b.usage.SetModel(f.Model)
+			}
+			if f.Usage != nil && b.usage != nil {
+				b.usage.TokensIn.Store(int64(f.Usage.PromptTokens))
+				b.usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+				if b.log != nil {
+					b.log.Debug("usage extracted from JSON",
+						"prompt", f.Usage.PromptTokens,
+						"completion", f.Usage.CompletionTokens)
+				}
+			}
+		}
+	}
+
+	source := "final"
+	if closeErr != nil || b.capped {
+		source = "partial"
+	}
+	if b.usage != nil && b.usage.TokensIn.Load() == 0 && b.usage.TokensOut.Load() == 0 {
+		source = "partial"
+	}
+	if b.ix != nil && b.reqID != "" {
+		b.ix.FinalizeRequest(b.reqCtx, b.reqID, b.reqPath, source)
+	}
+	return closeErr
 }
