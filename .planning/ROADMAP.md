@@ -101,7 +101,7 @@ Plans:
 - [x] 04-04-PLAN.md — Foundation A: quota Lua bucket + counters + tenants loader + listen + schedule policy/window + 5 obs collectors (TEN-03, TEN-04, TEN-05)
 - [x] 04-05-PLAN.md — Foundation B: billing prices/fx loaders + listen + accountant + flusher + cost helper + admin middleware/usage + dual-shape SSE usage interceptor + 4 obs collectors (TEN-06, TEN-07)
 - [x] 04-06-PLAN.md — Middleware integration: rate-limit + quota + schedule + metrics middlewares; main.go wires loaders + listeners + flusher + boot-time invariant + per-route WriteTimeout + /admin sub-router; dispatcher upstream-override + director stream_options injection (TEN-03..06)
-- [ ] 04-07-PLAN.md — gatewayctl subcommands: tenant set-mode/set-quota + prices set/list/set-fx + billing reconcile + usage report + admin-key create/revoke/list (TEN-04..07)
+- [x] 04-07-PLAN.md — gatewayctl subcommands: tenant set-mode/set-quota + prices set/list/set-fx + billing reconcile + usage report + admin-key create/revoke/list (TEN-04..07)
 - [ ] 04-08-PLAN.md — Integration tests (testcontainers): SC-1/3/5 + sensitive+peak triple-defense + hot-reload (prices, fx, tenants) + reconcile drift + middleware chain replay semantics (TEN-03..07)
 - [ ] 04-09-PLAN.md — HUMAN-UAT: SC-1 LIVE rate-limit headers + SC-4 LIVE peak routing + Sentry breadcrumbs + RUNBOOK-QUOTAS-BILLING.md (TEN-03..07)
 **Research hint:** no (Redis Lua rate-limit is standard; only open question is Postgres DO headroom for billing writes — covered by batching)
