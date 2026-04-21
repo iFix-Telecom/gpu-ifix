@@ -227,6 +227,10 @@ func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Requ
 		"upstream", name,
 		"request_id", httpx.RequestIDFrom(r.Context()),
 	)
+	// Phase 4 (BL-01 fix): same billing ctx plumbing as dispatchTo so the
+	// schedule-override path (peak off-hours) also attributes cost to the
+	// resolved external upstream.
+	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
 	proxy.ServeHTTP(w, r)
 }
 
@@ -246,6 +250,11 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 		"streaming", streaming,
 		"request_id", httpx.RequestIDFrom(r.Context()),
 	)
+	// Phase 4 (BL-01 fix): stash the resolved upstream name on the ctx so
+	// the billing UsageInterceptor can attribute cost + external flag at
+	// Flush time (the interceptor runs inside ModifyResponse where the
+	// dispatch decision is otherwise opaque).
+	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
 	// RES-02 deferral: ReverseProxy.ServeHTTP writes directly to the
 	// ResponseWriter — backoff retry would require a buffering layer
 	// (see retry.go godoc). Phase 3 relies on breaker fallback instead.

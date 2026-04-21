@@ -211,38 +211,19 @@ func main() {
 	}
 	resolver.Start(ctx)
 
-	// Phase 4 — Accountant + UsageInterceptor (Plan 04-05 billing). The
-	// accountant holds per-request usage counters; the interceptor reads
+	// Phase 4 — Accountant (Plan 04-05 billing). The accountant holds
+	// per-request usage counters; the interceptor built below reads
 	// SSE/JSON usage from the upstream response and writes them into the
-	// accountant slot keyed by request_id. Defined BEFORE chatRP so the
-	// chat proxy ModifyResponse chain includes it alongside
-	// auditInterceptor + toolCallInterceptor.
+	// accountant slot keyed by request_id.
+	//
+	// BL-01 fix: the UsageInterceptor is built AFTER billingFlusher +
+	// pricesLoader + fxLoader + tenantsLoader are constructed (below), so
+	// it can enqueue billing.Event records on Close with full cost
+	// attribution. Consequently the chat/embed/audio reverse proxies are
+	// ALSO constructed later (they need the interceptor at
+	// NewChatProxy-time for ModifyResponse).
 	accountant := billing.NewAccountant()
-	usageInterceptor := proxy.NewUsageInterceptor(accountant, log)
-
-	// Build the LOCAL reverse proxies (Plan 02-04). Interceptors are passed
-	// at construction time per Codex review [HIGH/MEDIUM] 02-05 decoupling.
-	// Chat gets the audit interceptor (SSE streaming) AND the tool-call
-	// interceptor (Phase 3 RES-06 / SC-4 — emit terminal SSE error event
-	// on disconnect after tool_calls); embeddings + audio never stream so
-	// their non-SSE bodies are captured by audit.Middleware directly.
-	// Phase 4: chat ALSO gets the usageInterceptor for billing capture.
 	toolCallInterceptor := proxy.NewToolCallInterceptor()
-	chatRP, err := proxy.NewChatProxy(cfg.UpstreamLLMURL, log, auditInterceptor, toolCallInterceptor, usageInterceptor)
-	if err != nil {
-		log.Error("build chat proxy", "err", err)
-		os.Exit(2)
-	}
-	embedRP, err := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedURL, log)
-	if err != nil {
-		log.Error("build embeddings proxy", "err", err)
-		os.Exit(2)
-	}
-	audioRP, err := proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
-	if err != nil {
-		log.Error("build audio proxy", "err", err)
-		os.Exit(2)
-	}
 
 	// Idempotency store (Plan 02-06). Shares the same Redis client as auth
 	// cache; keys live under `gw:idem:<tenant>:<key>` with SET NX EX
@@ -349,9 +330,42 @@ func main() {
 	// gateway_billing_flush_dropped_total.
 	billingFlusher := billing.NewFlusher(pool, log)
 	go billingFlusher.Run(ctx)
-	_ = pricesLoader // pricesLoader + fxLoader + accountant are consumed
-	_ = fxLoader     // downstream by the billing.NewFlusher goroutine path
-	_ = accountant   // and by the UsageInterceptor wired above on chatRP.
+
+	// Phase 4 (BL-01 fix) — UsageInterceptor now receives the full billing
+	// pipeline wiring so SSE Close can compute cost + Enqueue a
+	// billing.Event. Without this wiring (as shipped by Plan 04-06)
+	// ai_gateway.billing_events never received rows in production.
+	usageInterceptor := proxy.NewUsageInterceptor(
+		accountant,
+		billingFlusher,
+		pricesLoader,
+		fxLoader,
+		tenantsLoader,
+		cfg.USDBRLDefault,
+		log,
+	)
+
+	// Build the LOCAL reverse proxies (Plan 02-04). Interceptors are passed
+	// at construction time per Codex review [HIGH/MEDIUM] 02-05 decoupling.
+	// Chat gets the audit interceptor (SSE streaming), the tool-call
+	// interceptor (Phase 3 RES-06 / SC-4), AND the UsageInterceptor
+	// (Phase 4 billing capture). Embeddings + audio never stream so their
+	// non-SSE bodies are captured by audit.Middleware directly.
+	chatRP, err := proxy.NewChatProxy(cfg.UpstreamLLMURL, log, auditInterceptor, toolCallInterceptor, usageInterceptor)
+	if err != nil {
+		log.Error("build chat proxy", "err", err)
+		os.Exit(2)
+	}
+	embedRP, err := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedURL, log)
+	if err != nil {
+		log.Error("build embeddings proxy", "err", err)
+		os.Exit(2)
+	}
+	audioRP, err := proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
+	if err != nil {
+		log.Error("build audio proxy", "err", err)
+		os.Exit(2)
+	}
 
 	// Phase 4 — admin verifier + quota checker. The admin verifier uses
 	// the SAME Redis client as the auth verifier (gw:admin:<hash> vs

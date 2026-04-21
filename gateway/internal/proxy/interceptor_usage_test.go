@@ -32,9 +32,13 @@ func discardLog() *slog.Logger {
 
 // TestUsageExtractorOpenAIShape: OpenAI-style "separate final chunk, empty
 // choices[], usage populated".
+//
+// BL-02 semantics: Close() deletes the accountant slot to prevent the
+// copy-on-write map leak. The test therefore inspects the usage slot
+// AFTER draining the body but BEFORE Close.
 func TestUsageExtractorOpenAIShape(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 
 	ctx := httpx.ContextWithRequestID(context.Background(), "req-openai")
 	body := `data: {"id":"a","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":100,"total_tokens":150}}` + "\n\ndata: [DONE]\n\n"
@@ -45,9 +49,6 @@ func TestUsageExtractorOpenAIShape(t *testing.T) {
 	var sink bytes.Buffer
 	if _, err := io.Copy(&sink, resp.Body); err != nil {
 		t.Fatalf("Copy: %v", err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
 	}
 
 	u := acct.Get("req-openai")
@@ -60,13 +61,21 @@ func TestUsageExtractorOpenAIShape(t *testing.T) {
 	if got := u.TokensOut.Load(); got != 100 {
 		t.Errorf("TokensOut: want 100, got %d", got)
 	}
+
+	// Close triggers FinalizeRequest + slot Delete (BL-02).
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if acct.Get("req-openai") != nil {
+		t.Fatal("slot should be Deleted after Close (BL-02)")
+	}
 }
 
 // TestUsageExtractorLlamaCppShape: llama.cpp-style "usage in same chunk as
 // finish_reason=stop".
 func TestUsageExtractorLlamaCppShape(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 
 	ctx := httpx.ContextWithRequestID(context.Background(), "req-llama")
 	body := `data: {"choices":[{"finish_reason":"stop","delta":{},"index":0}],"usage":{"prompt_tokens":42,"completion_tokens":99}}` + "\n\n"
@@ -76,7 +85,6 @@ func TestUsageExtractorLlamaCppShape(t *testing.T) {
 	}
 	var sink bytes.Buffer
 	_, _ = io.Copy(&sink, resp.Body)
-	_ = resp.Body.Close()
 
 	u := acct.Get("req-llama")
 	if u == nil {
@@ -88,20 +96,20 @@ func TestUsageExtractorLlamaCppShape(t *testing.T) {
 	if got := u.TokensOut.Load(); got != 99 {
 		t.Errorf("TokensOut: %d", got)
 	}
+	_ = resp.Body.Close()
 }
 
 // TestUsageExtractorIgnoresChunksWithoutUsage: chunks without a top-level
 // "usage" key do not change counters.
 func TestUsageExtractorIgnoresChunksWithoutUsage(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 	ctx := httpx.ContextWithRequestID(context.Background(), "req-no-usage")
 	body := `data: {"id":"x","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"
 	resp := mkResp("text/event-stream", body, ctx)
 	_ = ix.Intercept(resp)
 	var sink bytes.Buffer
 	_, _ = io.Copy(&sink, resp.Body)
-	_ = resp.Body.Close()
 	u := acct.Get("req-no-usage")
 	if u == nil {
 		t.Fatal("nil usage (Set should still have created slot)")
@@ -112,13 +120,14 @@ func TestUsageExtractorIgnoresChunksWithoutUsage(t *testing.T) {
 	if got := u.TokensOut.Load(); got != 0 {
 		t.Errorf("TokensOut: want 0, got %d", got)
 	}
+	_ = resp.Body.Close()
 }
 
 // TestUsageExtractorDoneChunkIgnored: Pitfall 5 guard — the SSE sentinel
 // `data: [DONE]\n\n` must NOT panic and must NOT spuriously update counters.
 func TestUsageExtractorDoneChunkIgnored(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 	ctx := httpx.ContextWithRequestID(context.Background(), "req-done-only")
 	body := "data: [DONE]\n\n"
 	resp := mkResp("text/event-stream", body, ctx)
@@ -127,9 +136,6 @@ func TestUsageExtractorDoneChunkIgnored(t *testing.T) {
 	}
 	var sink bytes.Buffer
 	_, _ = io.Copy(&sink, resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
 	u := acct.Get("req-done-only")
 	if u == nil {
 		t.Fatal("nil usage (Set should have created slot)")
@@ -140,13 +146,16 @@ func TestUsageExtractorDoneChunkIgnored(t *testing.T) {
 	if got := u.TokensOut.Load(); got != 0 {
 		t.Errorf("TokensOut: want 0, got %d", got)
 	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }
 
 // TestUsageExtractorNonStreamingPassthrough: Content-Type application/json
 // is a no-op — body is unchanged and no slot is created.
 func TestUsageExtractorNonStreamingPassthrough(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 	resp := mkResp("application/json", `{"choices":[]}`, context.Background())
 	if err := ix.Intercept(resp); err != nil {
 		t.Fatal(err)
@@ -161,7 +170,7 @@ func TestUsageExtractorNonStreamingPassthrough(t *testing.T) {
 // caller invokes ExtractFromBody post-buffer.
 func TestUsageExtractorExtractFromBody(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 	body := []byte(`{"id":"x","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":13}}`)
 	ix.ExtractFromBody("req-nonstream", body)
 	u := acct.Get("req-nonstream")
@@ -180,7 +189,7 @@ func TestUsageExtractorExtractFromBody(t *testing.T) {
 // context must not panic and must not register a slot.
 func TestUsageExtractorNoRequestContext(t *testing.T) {
 	acct := billing.NewAccountant()
-	ix := proxy.NewUsageInterceptor(acct, discardLog())
+	ix := proxy.NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
 	resp := mkResp("text/event-stream", "data: [DONE]\n\n", context.Background())
 	if err := ix.Intercept(resp); err != nil {
 		t.Fatal(err)

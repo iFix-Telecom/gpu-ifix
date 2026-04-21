@@ -13,11 +13,37 @@ import (
 // AudioSecondsMs10 is audio_seconds × 10 (decisecond precision) so the
 // counter stays integer-typed. Convert to float64 at flush time via
 // float64(v) / 10.0.
+//
+// model is the resolved model name captured from the SSE/JSON frame
+// (BL-01 extension). Access via Model()/SetModel() — concurrent-safe via
+// atomic.Value.
 type RequestUsage struct {
 	TokensIn         atomic.Int64
 	TokensOut        atomic.Int64
 	AudioSecondsMs10 atomic.Int64
 	EmbedsCount      atomic.Int64
+	model            atomic.Value // string
+}
+
+// Model returns the cached model name, or "" when none was set.
+func (u *RequestUsage) Model() string {
+	if u == nil {
+		return ""
+	}
+	if v, ok := u.model.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// SetModel stores the model name atomically. Idempotent — later writes
+// overwrite earlier ones; most upstreams emit the model in every frame,
+// so the last frame wins (they agree on the value).
+func (u *RequestUsage) SetModel(name string) {
+	if u == nil || name == "" {
+		return
+	}
+	u.model.Store(name)
 }
 
 // Accountant holds the per-request usage counters keyed by request_id.

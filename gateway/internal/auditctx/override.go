@@ -43,3 +43,27 @@ func UpstreamOverrideFrom(ctx context.Context) string {
 func UpstreamOverrideFromContext(ctx context.Context) string {
 	return UpstreamOverrideFrom(ctx)
 }
+
+type billingUpstreamKey struct{}
+
+// WithBillingUpstream stashes the resolved upstream name (e.g. "local-llm",
+// "openrouter-chat", "local-embed") on the request context. Consumed by
+// the Phase 4 billing UsageInterceptor when building billing.Event records
+// at flush time — the interceptor runs inside ModifyResponse where the
+// dispatcher's dispatch decision is already opaque.
+//
+// Separate from WithUpstreamOverride (which carries the schedule routing
+// signal "off_hours" / "blocked_sensitive"). This key carries the FACTUAL
+// upstream chosen by the dispatcher; the override signals INTENT.
+func WithBillingUpstream(parent context.Context, upstream string) context.Context {
+	return context.WithValue(parent, billingUpstreamKey{}, upstream)
+}
+
+// BillingUpstreamFrom returns the upstream name or empty string when none
+// was set.
+func BillingUpstreamFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(billingUpstreamKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
