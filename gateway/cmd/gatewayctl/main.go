@@ -25,9 +25,13 @@ Usage:
 
 Commands:
   migrate           Apply or revert Postgres migrations.
-  tenant            Create and list tenants.
+  tenant            Create tenants, set mode (24/7 or peak), set per-tenant quotas.
   key               Create and revoke API keys.
   upstreams         List, update, enable, or disable rows in ai_gateway.upstreams.
+  prices            Set / list / set-fx for ai_gateway.prices and fx_rates (hot-reload via NOTIFY).
+  billing           Reconcile usage_counters cache against authoritative billing_events.
+  usage             Report per-tenant billing breakdown (day granularity, json|table).
+  admin-key         Create / revoke / list X-Admin-Key bcrypt credentials.
   audit             Export audit-log partitions to MinIO cold storage (Plan 02-09).
 
 Use "gatewayctl <command> --help" for subcommand flags.
@@ -54,6 +58,14 @@ func main() {
 		os.Exit(runKey(ctx, args, log))
 	case "upstreams":
 		os.Exit(runUpstreams(ctx, args, log))
+	case "prices":
+		os.Exit(runPrices(ctx, args, log))
+	case "billing":
+		os.Exit(runBilling(ctx, args, log))
+	case "usage":
+		os.Exit(runUsage(ctx, args, log))
+	case "admin-key":
+		os.Exit(runAdminKey(ctx, args, log))
 	case "audit":
 		fmt.Fprintln(os.Stderr, "gatewayctl audit: not yet implemented (Plan 02-09)")
 		os.Exit(1)
