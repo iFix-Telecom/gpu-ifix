@@ -579,13 +579,25 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 	r.Handle("/metrics", obs.Handler())
 
 	// Authenticated /v1/* group. Chain order (D-D1):
+	//   obs.RequestsMiddleware (outermost — counts every response status) →
 	//   auth → audit → rate-limit → quota → schedule → (per-handler)
-	//   idempotency → tokencount (inside dispatcher) → proxy → metricsMiddleware
+	//   idempotency → tokencount (inside dispatcher) → proxy
 	//
-	// metricsMiddleware is mounted LAST in the chain so it observes the
-	// final status code (after every other middleware has potentially
-	// written 4xx/5xx).
+	// HI-04 fix (Phase 4 review): obs.RequestsMiddleware was originally
+	// mounted LAST. chi.Use stacks OUTERMOST-first, so a "last" mount is
+	// the INNERMOST wrapper — it never observes 4xx/5xx written by
+	// rate-limit, quota, schedule, or auth because those run OUTSIDE it
+	// and write to the raw ResponseWriter. Mounting FIRST makes the
+	// statusRecorder wrap every other middleware, so gateway_requests_total
+	// counts every exit path (429 rate-limit, 429 quota, 503 schedule,
+	// 401 auth, etc.).
 	r.Group(func(pg chi.Router) {
+		// Phase 4 folded TODO — request instrumentation (RequestsTotal).
+		// Mounted FIRST so the statusRecorder wraps every subsequent
+		// middleware's response writer and captures the final status
+		// regardless of which middleware wrote it.
+		pg.Use(obs.RequestsMiddleware(log))
+
 		if verifier != nil {
 			pg.Use(auth.Middleware(verifier, log))
 		}
@@ -605,10 +617,6 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.tenantsLoader != nil {
 			pg.Use(schedule.Middleware(px.tenantsLoader, log))
 		}
-		// Phase 4 folded TODO — request instrumentation (RequestsTotal).
-		// Mounted last so it observes the final status emitted by any
-		// middleware earlier in the chain.
-		pg.Use(obs.RequestsMiddleware(log))
 
 		// Wrap chat + embed with model rewrite when a resolver is present.
 		chatHandler := px.chat
