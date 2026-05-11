@@ -1,0 +1,38 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Phase 5 — audit_log.upstream new reserved values (docs-only).
+--
+-- Per 05-WAVE0-GATES.md Gate A (resolved 2026-05-11):
+--   * gateway/db/migrations/0003_create_audit_log_partitioned.sql declares
+--     audit_log.upstream as TEXT with NO CHECK constraint and NO ENUM type.
+--   * `grep -rn "ALTER TABLE.*audit_log\|CREATE.*audit_log" gateway/db/migrations`
+--     confirmed no later migration adds a constraint.
+--
+-- Therefore: NO DDL is required. The column already accepts any TEXT value.
+-- The shed middleware introduces three new reserved values that callers
+-- (gatewayctl, dashboards, audit-export tooling) should recognize:
+--
+--   * shed_saturated         — normal tenant routed to tier-1 because the
+--                              tier-0 upstream FSM=ON and the per-tenant
+--                              cap was hit (CONTEXT D-B1 / D-D4).
+--   * shed_blocked_sensitive — sensitive tenant blocked with 503 because
+--                              tier-0 is saturated and LGPD forbids tier-1
+--                              egress (D-B3).
+--   * shed_tier1_unavailable — chat-only edge case: both tier-0 shed AND
+--                              tier-1 (openrouter-chat) unavailable, so
+--                              the request 503s with code
+--                              all_chat_upstreams_saturated (D-D1).
+--
+-- Plan 05-08 integration tests will round-trip these literal strings to
+-- prove no operator-introduced CHECK has appeared between migrations.
+--
+-- Goose requires at least one statement per block; SELECT 1 is a no-op
+-- that satisfies the parser without touching schema.
+SELECT 1;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- No-op: nothing to roll back (no DDL was applied).
+SELECT 1;
+-- +goose StatementEnd
