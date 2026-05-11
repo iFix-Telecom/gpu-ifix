@@ -19,18 +19,22 @@ import (
 	"sync/atomic"
 
 	"github.com/google/uuid"
+
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 )
 
 // InflightRegistry tracks in-flight requests per (upstream, tenant).
 // Construct via NewInflightRegistry; mutate via Inc/Dec; read via
 // GlobalInflight / TenantInflight.
+//
+// Both `global` and `tenant` are protected by the same RWMutex so
+// AddUpstream (called during upstream hot-reload) can grow the map
+// safely. Inc/Dec/Read paths take the read lock briefly to look up
+// the *atomic.Int64 pointer, then operate on it lockless via
+// atomic.AddInt64 / Load.
 type InflightRegistry struct {
-	// global is preallocated at construction; new upstream names cannot
-	// be added at runtime (Rebuild on upstream hot-reload re-creates the
-	// registry via NewInflightRegistry).
-	global map[string]*atomic.Int64
-
 	mu     sync.RWMutex
+	global map[string]*atomic.Int64
 	tenant map[string]map[uuid.UUID]*atomic.Int64
 }
 
@@ -50,9 +54,12 @@ func NewInflightRegistry(upstreams []string) *InflightRegistry {
 }
 
 // Inc bumps both the global and per-tenant counters for (upstream,
-// tenantID). Inc on an unknown upstream is a silent no-op — the
-// upstream set is fixed at construction and the middleware is expected
-// to have resolved a real upstream before calling.
+// tenantID). Inc on an unknown upstream is a no-op for the counters
+// but bumps gateway_shed_inflight_unknown_upstream_total so dashboards
+// surface the wiring bug (WR-05). Typical cause: a new upstream row was
+// inserted via `gatewayctl upstreams create` but the inflight registry
+// has not been rebuilt for it yet. Call AddUpstream / NewInflightRegistry
+// in the hot-reload listener to track newly-added upstreams.
 //
 // The first Inc for a new tenantID on a known upstream takes the write
 // lock to insert the counter; subsequent Inc/Dec for the same tenantID
@@ -61,19 +68,29 @@ func (r *InflightRegistry) Inc(upstream string, tenantID uuid.UUID) {
 	if r == nil {
 		return
 	}
-	g, ok := r.global[upstream]
-	if !ok {
-		return // unknown upstream — middleware bug; do not auto-create
+	// Fast path: read-lock + look up the upstream's global counter
+	// and tenant counter together. If both exist, atomically Add.
+	r.mu.RLock()
+	g, gok := r.global[upstream]
+	tmap := r.tenant[upstream]
+	var c *atomic.Int64
+	var cok bool
+	if tmap != nil {
+		c, cok = tmap[tenantID]
+	}
+	r.mu.RUnlock()
+
+	if !gok {
+		// WR-05: surface the wiring bug instead of silently dropping.
+		// The in-process FSM will never see inflight signal for this
+		// upstream until the registry is rebuilt — shedding is broken
+		// for it. Operators need visibility on this state.
+		obs.GatewayShedInflightUnknownUpstream.WithLabelValues(upstream, "inc").Inc()
+		return
 	}
 	g.Add(1)
 
-	// Fast path: read-lock + map lookup. If the tenant counter exists,
-	// just add — lockless on the AddInt64 itself.
-	r.mu.RLock()
-	tmap := r.tenant[upstream]
-	c, exists := tmap[tenantID]
-	r.mu.RUnlock()
-	if exists {
+	if cok {
 		c.Add(1)
 		return
 	}
@@ -83,7 +100,14 @@ func (r *InflightRegistry) Inc(upstream string, tenantID uuid.UUID) {
 	// we were waiting.
 	r.mu.Lock()
 	tmap = r.tenant[upstream]
-	if c, exists = tmap[tenantID]; !exists {
+	if tmap == nil {
+		// AddUpstream guarantees tenant[upstream] exists for any
+		// upstream in r.global; this branch covers an edge race
+		// where AddUpstream ran between the read-lock and write-lock.
+		tmap = make(map[uuid.UUID]*atomic.Int64)
+		r.tenant[upstream] = tmap
+	}
+	if c, cok = tmap[tenantID]; !cok {
 		c = &atomic.Int64{}
 		tmap[tenantID] = c
 	}
@@ -96,22 +120,31 @@ func (r *InflightRegistry) Inc(upstream string, tenantID uuid.UUID) {
 // stays arithmetically sound (the next Inc restores the balance) but
 // dashboards may flicker — middleware MUST pair Inc with a defer'd Dec.
 //
-// Dec on an unknown upstream or unknown tenant is a silent no-op.
+// Dec on an unknown upstream bumps
+// gateway_shed_inflight_unknown_upstream_total (WR-05) so the wiring
+// bug is visible. Dec on an unknown tenant for a KNOWN upstream stays
+// a silent no-op (it is the symptom of an Inc/Dec mismatch on a
+// rebuilt tenant map, not a wiring bug).
 func (r *InflightRegistry) Dec(upstream string, tenantID uuid.UUID) {
 	if r == nil {
 		return
 	}
-	g, ok := r.global[upstream]
-	if !ok {
+	r.mu.RLock()
+	g, gok := r.global[upstream]
+	tmap := r.tenant[upstream]
+	var c *atomic.Int64
+	var cok bool
+	if tmap != nil {
+		c, cok = tmap[tenantID]
+	}
+	r.mu.RUnlock()
+
+	if !gok {
+		obs.GatewayShedInflightUnknownUpstream.WithLabelValues(upstream, "dec").Inc()
 		return
 	}
 	g.Add(-1)
-
-	r.mu.RLock()
-	tmap := r.tenant[upstream]
-	c, exists := tmap[tenantID]
-	r.mu.RUnlock()
-	if exists {
+	if cok {
 		c.Add(-1)
 	}
 }
@@ -123,7 +156,9 @@ func (r *InflightRegistry) GlobalInflight(upstream string) int64 {
 	if r == nil {
 		return 0
 	}
+	r.mu.RLock()
 	g, ok := r.global[upstream]
+	r.mu.RUnlock()
 	if !ok {
 		return 0
 	}
@@ -156,11 +191,33 @@ func (r *InflightRegistry) Upstreams() []string {
 	if r == nil {
 		return nil
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.global))
 	for n := range r.global {
 		out = append(out, n)
 	}
 	return out
+}
+
+// AddUpstream registers a new upstream in the registry if not already
+// present. Used by the upstreams hot-reload listener (WR-05) so that
+// rows inserted via `gatewayctl upstreams create` start being tracked
+// without a gateway restart. No-op for upstreams that are already
+// registered — preserves any existing counters in flight.
+func (r *InflightRegistry) AddUpstream(upstream string) {
+	if r == nil || upstream == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.global[upstream]; exists {
+		return
+	}
+	r.global[upstream] = &atomic.Int64{}
+	if _, exists := r.tenant[upstream]; !exists {
+		r.tenant[upstream] = make(map[uuid.UUID]*atomic.Int64)
+	}
 }
 
 // TenantsForUpstream returns a snapshot of tenant UUIDs that currently

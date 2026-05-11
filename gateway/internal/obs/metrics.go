@@ -308,6 +308,18 @@ var GatewayShedMirrorDropped = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "Count of FSM transitions dropped because the publish worker pool was saturated (WR-03).",
 })
 
+// GatewayShedInflightUnknownUpstream counts Inc/Dec calls on
+// InflightRegistry for an upstream name not present in the registry
+// (WR-05). Non-zero indicates a wiring bug — the shed middleware
+// resolved an upstream that the inflight registry has not been
+// rebuilt for. Most often surfaces during hot-reload windows when
+// a new upstream row was inserted but the inflight registry has not
+// yet been re-created.
+var GatewayShedInflightUnknownUpstream = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "gateway_shed_inflight_unknown_upstream_total",
+	Help: "Inflight Inc/Dec calls targeting an upstream missing from the registry (WR-05 wiring-bug detector).",
+}, []string{"upstream", "op"})
+
 // GatewayShedMirrorReconcile counts periodic HGETALL reconcile outcomes
 // (RESEARCH Pitfall 3 mitigation: boot may start in OFF while another
 // replica is ON). result=ok|diverged|error.

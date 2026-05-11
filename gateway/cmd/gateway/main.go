@@ -454,6 +454,14 @@ func main() {
 				if _, ok := shedLatency[n]; !ok {
 					shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)
 				}
+				// WR-05: register newly-added upstreams in the
+				// inflight registry so Inc/Dec from the middleware
+				// start tracking immediately. Without this, a fresh
+				// `gatewayctl upstreams create` would mean shed
+				// middleware silently no-ops (and bumps
+				// gateway_shed_inflight_unknown_upstream_total) until
+				// the next gateway restart.
+				shedInflight.AddUpstream(n)
 			}
 		}, log); err != nil {
 			log.Warn("upstreams listener exited", "err", err)
