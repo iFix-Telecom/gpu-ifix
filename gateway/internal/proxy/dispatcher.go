@@ -91,8 +91,47 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 		// NOT a fallback chain: if the override target is OPEN we return
 		// 503 off_hours_upstream_unavailable immediately. Per D-C2 the
 		// off-hours block on external = fail-fast; no local retry.
+		//
+		// Phase 5 — three NEW reserved override values arrive here when
+		// the shed middleware (gateway/internal/shed/middleware.go) has
+		// already written its own 503 response and stamped the audit row:
+		//   - UpstreamShedBlockedSensitiveValue (D-B3 sensitive 503)
+		//   - UpstreamShedTier1UnavailableValue (D-D1 no-tier-1 503)
+		// In both cases the wire body is already on its way to the
+		// client and the dispatcher MUST short-circuit without writing
+		// again. The remaining shed value (UpstreamShedSaturatedValue
+		// stamped on the *shed decision*; the override carries the
+		// tier-1 upstream NAME) flows through dispatchOverride with a
+		// special-cased envelope when that tier-1 breaker is OPEN
+		// (D-D1: emit all_chat_upstreams_saturated + Retry-After: 30
+		// instead of off_hours_upstream_unavailable).
 		if override := auditctx.UpstreamOverrideFromContext(r.Context()); override != "" &&
 			override != UpstreamBlockedSensitiveValue {
+			// Phase 5 short-circuit: shed middleware already responded.
+			if override == auditctx.UpstreamShedBlockedSensitiveValue ||
+				override == auditctx.UpstreamShedTier1UnavailableValue {
+				return
+			}
+			// Phase 5 — shed_saturated path: override is the tier-1
+			// upstream name. If its breaker is OPEN we emit the D-D1
+			// envelope (all_chat_upstreams_saturated + Retry-After: 30)
+			// instead of the schedule-derived off-hours envelope.
+			if auditctx.ShedDecisionFromContext(r.Context()) == auditctx.UpstreamShedSaturatedValue {
+				if cb, found := cfg.Breaker.Get(override); found && cb != nil && cb.State() == gobreaker.StateOpen {
+					// Re-stamp ctx for audit (D-D4) so the audit row
+					// reads upstream=shed_tier1_unavailable rather
+					// than the openrouter-chat upstream name that
+					// shed middleware wrote on its way down.
+					*r = *r.WithContext(auditctx.WithUpstreamOverride(r.Context(),
+						auditctx.UpstreamShedTier1UnavailableValue))
+					obs.GatewayShedDecisions.WithLabelValues(override, "tier1_unavailable").Inc()
+					w.Header().Set("Retry-After", "30")
+					httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+						"service_unavailable", "all_chat_upstreams_saturated",
+						"Primary saturated and secondary unavailable.")
+					return
+				}
+			}
 			cfg.dispatchOverride(w, r, override, log)
 			return
 		}
