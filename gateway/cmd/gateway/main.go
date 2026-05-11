@@ -43,6 +43,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/dcgm"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/idempotency"
@@ -52,6 +53,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/quota"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/schedule"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/shed"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/tenants"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/upstreams"
 )
@@ -86,6 +88,14 @@ type proxies struct {
 	rdb               redis.UniversalClient
 	rateLimitFailOpen bool
 	quotaFailOpen     bool
+
+	// Phase 5 — shed middleware collaborators. nil disables the shed
+	// middleware mount; production main always supplies all four
+	// pointers after the Phase 5 wiring block runs.
+	upstreamsLoader *upstreams.Loader
+	shedSet         *shed.Set
+	shedInflight    *shed.InflightRegistry
+	shedLatency     map[string]*shed.LatencyRing
 }
 
 func main() {
@@ -272,22 +282,16 @@ func main() {
 		log,
 	)
 	go probe.Run(ctx)
-	go func() {
-		// Hot-reload pipeline: NOTIFY → loader.Refresh → breaker.Rebuild
-		// so newly-added upstreams get fresh CLOSED breakers and
-		// removed upstreams have their breakers dropped.
-		if err := upstreams.ListenAndReload(ctx, cfg.PGDSN, loader, func() {
-			breakerSet.Rebuild(loader.Names())
-		}, log); err != nil {
-			log.Warn("upstreams listener exited", "err", err)
-		}
-	}()
 
 	// Phase 4 — tenants loader + NOTIFY tenants_changed listener. Loads
 	// the ai_gateway.tenants snapshot into atomic.Pointer (lock-free Get
 	// on the hot path) and keeps it fresh via LISTEN/NOTIFY. Fail-fast
 	// on initial refresh: a gateway without a tenants snapshot cannot
 	// enforce quota/schedule/rate-limits safely (D-A2 / D-C1).
+	//
+	// Phase 5 (re-ordering): tenantsLoader now constructed BEFORE the
+	// shed wiring so the shed.RunTicker TenantLabel closure can call
+	// tenantsLoader.Get without a forward reference.
 	tenantsLoader, err := tenants.NewLoader(ctx, pool, location, log)
 	if err != nil {
 		log.Error("tenants loader init failed", "err", err)
@@ -309,6 +313,148 @@ func main() {
 			"err", err)
 		os.Exit(1)
 	}
+
+	// ====== Phase 5 — Load Shedding wiring ======
+	//
+	// Construction order matters:
+	//   1. LatencyRing per upstream + InflightRegistry (in-memory, no I/O).
+	//   2. dcgm.Scraper — optional; nil receiver is safe (ReadMiB returns
+	//      (0, true) which the FSM Evaluate treats as VRAM-unknown,
+	//      reducing the 2-of-3 gate to 1-of-2 over inflight + p95.
+	//   3. shed.Set with publishTransition wrapper into the Redis mirror.
+	//   4. HydrateFromRedis BEFORE Subscribe so the replica reads the
+	//      cluster-wide view before its first Pub/Sub event arrives.
+	//   5. 3 goroutines (scraper.Run conditional, set.Subscribe, set.ReconcileLoop)
+	//      + 1 ticker goroutine (RunTicker) that drives the FSM 1Hz.
+	//   6. shed.Middleware mounts AFTER schedule and BEFORE per-role
+	//      dispatchers — wired via the proxies struct fields below.
+	log.Info("shed: initializing subsystems")
+	upstreamNames := loader.Names()
+	shedLatency := make(map[string]*shed.LatencyRing, len(upstreamNames))
+	for _, n := range upstreamNames {
+		shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)
+	}
+	shedInflight := shed.NewInflightRegistry(upstreamNames)
+
+	// dcgmScraper declared BEFORE shed.NewSet so the OnChange closure
+	// captures a stable pointer. The pointer remains nil when
+	// DCGM_EXPORTER_URL is empty; ReadMiB() on a nil receiver still
+	// returns (0, true) so the FSM treats VRAM as unknown and the gate
+	// reduces to inflight + p95 (CONTEXT.md D-A3 fail-open contract).
+	var dcgmScraper *dcgm.Scraper
+	if cfg.DCGMExporterURL != "" {
+		dcgmScraper = dcgm.New(
+			cfg.DCGMExporterURL,
+			time.Duration(cfg.ShedDcgmScrapeIntervalMs)*time.Millisecond,
+			time.Duration(cfg.ShedDcgmTimeoutMs)*time.Millisecond,
+			log,
+		)
+		go dcgmScraper.Run(ctx)
+	} else {
+		log.Warn("shed: DCGM_EXPORTER_URL empty — VRAM signal disabled; FSM operates on inflight+P95 only")
+	}
+
+	// publishTransition mirrors each FSM transition into Redis (HSET
+	// gw:shed:{upstream} + PUBLISH gw:shed:events) for cross-replica
+	// visibility. Best-effort fire-and-forget — failures bump
+	// GatewayShedMirrorFailures but never block the FSM (D-C3).
+	pubTransition := shed.MakePublishTransition(rdb)
+	shedSet := shed.NewSet(rdb, log, shed.Options{
+		DefaultArmSeconds:     30,
+		DefaultRecoverSeconds: 60,
+		OnChange: func(upstream string, _, to shed.State, reason string) {
+			// Capture per-upstream signals at transition time for the
+			// event payload. Defensive nil-check on dcgmScraper covers
+			// both "DCGM disabled at boot" (scraper stays nil for the
+			// process lifetime) and "scraper not yet fired" early boot.
+			globalInflight := shedInflight.GlobalInflight(upstream)
+			p95 := uint32(0)
+			if ring, ok := shedLatency[upstream]; ok {
+				p95 = ring.P95()
+			}
+			vramMiB := int64(0)
+			if dcgmScraper != nil {
+				vramMiB, _ = dcgmScraper.ReadMiB()
+			}
+			sig := &redisx.ShedEventSignals{
+				Inflight: globalInflight,
+				P95Ms:    p95,
+				VramMiB:  vramMiB,
+			}
+			// Fire-and-forget publish — does not block the FSM tick.
+			go pubTransition(upstream, to, reason, sig)
+		},
+	})
+	shedSet.Rebuild(upstreamNames)
+
+	// Hydrate FSM remote-state overlay from Redis BEFORE Subscribe
+	// starts (RESEARCH Pitfall 3 mitigation #1). Lossy Pub/Sub may have
+	// missed the prior transitions; HGETALL gives the replica an
+	// initial cluster-wide view.
+	if rdb != nil {
+		shedSet.HydrateFromRedis(ctx, rdb, log)
+	}
+
+	// 3 goroutines: cross-replica Pub/Sub subscriber, periodic
+	// reconciliation (HGETALL convergence), and the 1Hz FSM ticker.
+	go shedSet.Subscribe(ctx, rdb)
+	go shedSet.ReconcileLoop(ctx, rdb, shed.DefaultReconcileInterval, log)
+
+	// thresholdSrc returns per-upstream Thresholds from the loader
+	// snapshot's CircuitConfig JSONB row. Hot-reload safe — the loader
+	// uses atomic.Pointer; this closure reads the same snapshot the
+	// dispatcher uses.
+	thresholdSrc := func(upstream string) shed.Thresholds {
+		u, ok := loader.Get(upstream)
+		if !ok {
+			return shed.Thresholds{}
+		}
+		return shed.Thresholds{
+			InflightMax: int64(u.CircuitConfig.ShedInflightMax),
+			P95Ms:       uint32(u.CircuitConfig.ShedP95Ms),
+			VramMiB:     u.CircuitConfig.ShedVramUsedMiB,
+		}
+	}
+
+	go shed.RunTicker(ctx, shed.TickerDeps{
+		Set:          shedSet,
+		Inflight:     shedInflight,
+		Latency:      shedLatency,
+		VramReader:   dcgmScraper, // nil-safe: ReadMiB on nil returns (0, true)
+		ThresholdSrc: thresholdSrc,
+		Rdb:          rdb,
+		Interval:     time.Duration(cfg.ShedTickIntervalMs) * time.Millisecond,
+		TenantLabel: func(id uuid.UUID) string {
+			// Inline closure avoids SlugByID on the Loader API — Get
+			// returns (TenantConfig, error). On miss we emit the empty
+			// slug so the Prometheus fanout drops the sample
+			// (high-cardinality safe).
+			tc, err := tenantsLoader.Get(id)
+			if err != nil {
+				return ""
+			}
+			return tc.Slug
+		},
+	}, log)
+
+	// Upstreams hot-reload listener — rebuilds BOTH breakerSet and
+	// shedSet when NOTIFY upstreams_changed fires (Phase 3 D-D4 + Phase 5
+	// D-C5). Also tops up shedLatency with rings for newly-added
+	// upstreams; rings for removed upstreams stay (small constant memory
+	// cost) — pruning would risk racing the dispatcher mid-write.
+	go func() {
+		if err := upstreams.ListenAndReload(ctx, cfg.PGDSN, loader, func() {
+			breakerSet.Rebuild(loader.Names())
+			shedSet.Rebuild(loader.Names())
+			for _, n := range loader.Names() {
+				if _, ok := shedLatency[n]; !ok {
+					shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)
+				}
+			}
+		}, log); err != nil {
+			log.Warn("upstreams listener exited", "err", err)
+		}
+	}()
 
 	// Phase 4 — prices + fx loaders with multiplexed NOTIFY listener on a
 	// single pgx connection (Research Pattern 4). Fail-fast on initial
@@ -512,6 +658,11 @@ func main() {
 		rdb:               rdb,
 		rateLimitFailOpen: cfg.RateLimitFailOpen,
 		quotaFailOpen:     cfg.QuotaFailOpen,
+		// Phase 5 — shed middleware wiring (D-B4).
+		upstreamsLoader: loader,
+		shedSet:         shedSet,
+		shedInflight:    shedInflight,
+		shedLatency:     shedLatency,
 	})
 
 	srv := &http.Server{
@@ -623,6 +774,23 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		}
 		if px.tenantsLoader != nil {
 			pg.Use(schedule.Middleware(px.tenantsLoader, log))
+		}
+
+		// Phase 5 — shed middleware (D-B4). Mounted AFTER schedule so a
+		// peak-off-hours override stamped by schedule is observed (and
+		// becomes shed_decision=skipped_peak_offhours); mounted BEFORE
+		// the per-role dispatcher so the override+decision both flow
+		// into dispatch / audit. Skipped if any of the four shed
+		// collaborators is nil (scaffold test variant).
+		if px.shedSet != nil && px.shedInflight != nil &&
+			px.upstreamsLoader != nil && px.tenantsLoader != nil {
+			pg.Use(shed.Middleware(shed.MiddlewareDeps{
+				Loader:   px.upstreamsLoader,
+				Tenants:  px.tenantsLoader,
+				Set:      px.shedSet,
+				Inflight: px.shedInflight,
+				Latency:  px.shedLatency,
+			}, log))
 		}
 
 		// Wrap chat + embed with model rewrite when a resolver is present.
