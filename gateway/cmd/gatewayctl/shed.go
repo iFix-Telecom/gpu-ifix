@@ -190,12 +190,24 @@ func runShedForce(ctx context.Context, args []string, log *slog.Logger) int {
 
 	// Parse TTL up-front for on/off so we surface bad input before
 	// opening a Redis connection. Skipped for clear (no TTL needed).
+	//
+	// WR-06: reject sub-second resolutions explicitly. time.ParseDuration
+	// accepts "300us"/"300ns"/etc, which would parse to a TTL that
+	// redisx.WriteShedForce then rejects as "out of range" — a confusing
+	// error for an operator who meant "300 seconds" and typed the wrong
+	// suffix. Surface the unit mistake at the CLI layer instead.
 	var ttl time.Duration
 	if action == "on" || action == "off" {
 		var err error
 		ttl, err = time.ParseDuration(*ttlStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid --ttl %q: %v\n", *ttlStr, err)
+			return 2
+		}
+		if ttl > 0 && ttl < time.Second {
+			fmt.Fprintf(os.Stderr,
+				"invalid --ttl %q: must be at least 1 second (got %s — did you mean %ds?)\n",
+				*ttlStr, ttl, int64(ttl/time.Microsecond))
 			return 2
 		}
 	}
