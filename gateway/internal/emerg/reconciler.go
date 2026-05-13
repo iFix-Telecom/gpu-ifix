@@ -320,9 +320,13 @@ func (r *Reconciler) runOneTick(ctx context.Context, mutex *redsync.Mutex, now t
 		r.isLeader.Store(true)
 		r.lastExtendUnix.Store(now.Unix())
 		log.Info("acquired leadership", "fsm_state", r.deps.FSM.State().String())
-		// Plan 07 wires r.recoverOrphanLifecycles(ctx) here so a fresh
-		// leader (e.g., crash recovery) reconciles in-flight lifecycles
-		// before evaluating new transitions.
+		// Plan 07 D-D5 — fresh leader reconciles in-flight lifecycles
+		// (orphan recovery) BEFORE evaluating new transitions. 4 cenários:
+		// pre-create / lost / zombie / active-resume. Failures are logged
+		// but do not block the FSM tick — next leader acquisition retries.
+		if err := r.recoverOrphanLifecycles(ctx); err != nil {
+			log.Error("orphan recovery failed", "err", err)
+		}
 	} else {
 		// Renew gate: only call ExtendContext when 10s have elapsed since
 		// the last successful extend (or initial acquire). This keeps
