@@ -27,12 +27,12 @@ progress:
 
 ## Current Position
 
-Phase: 05 (load-shedding-saturation-aware-routing) — EXECUTING
+Phase: 05 (load-shedding-saturation-aware-routing) — PARTIAL_PASS (2026-05-13)
 Plan: 1 of 8
 
-- **Phase:** 4 complete; next recommended: Phase 5 (Load Shedding — saturation-aware routing)
+- **Phase:** 5 complete (3/5 SCs validated; SC-4 + SC-5 deferred); next: Phase 6 (Auto-provisioning Emergency Pod)
 - **Phase 4 close (2026-04-21):** All 9 plans (04-01..04-09) shipped + 13-scenario integration suite green (70s testcontainers). Code review found 2 BLOCKERs + 4 HIGH + 6 MEDIUM — all fixed in commits `8b45240..6859ce9`. `04-VERIFICATION.md` status=human_needed (SC-1/SC-2/SC-4 LIVE UAT deferred pending ai-gateway-dev Portainer stack deploy — same pattern as Phase 2 SC-5 PARTIAL).
-- **Status:** Executing Phase 05
+- **Status:** Phase 5 partial pass; transitioning to Phase 6
 - **Progress:** [██████████] 77% (34/44 plans; 02-09 + Phase 4 live UAT deferred + Phase 1 HUMAN-UAT smoke.yml pending)
 
 ## Performance Metrics

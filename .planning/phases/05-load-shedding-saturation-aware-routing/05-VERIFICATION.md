@@ -1,8 +1,8 @@
 ---
 phase: 05-load-shedding-saturation-aware-routing
 verified: 2026-05-11T23:16:09Z
-status: human_needed
-score: 8/8 must-haves verified (automated); 4 LIVE UAT items + 1 testcontainers-host smoke pending human verification
+status: passed_partial
+score: 8/8 must-haves verified (automated); SC-1 PARTIAL + SC-2 IMPLIED + SC-3 PASS in 2026-05-13 UAT session; SC-4 + SC-5 deferred (see 05-UAT-2026-05-13.md)
 overrides_applied: 0
 re_verification:
   previous_status: none
