@@ -7,17 +7,17 @@
 //
 // Decision tree (D-B4):
 //
-//	01. auth missing                    → next (defensive fallthrough)
-//	02. tenant_id malformed UUID        → next (defensive fallthrough)
-//	03. tenant snapshot missing         → next (tenant snapshot stale)
-//	04. schedule already overrode       → stamp shed_decision=skipped_peak_offhours + next
-//	05. route does not classify         → next (admin / health / etc.)
-//	06. tier-0 upstream not configured  → next (dispatcher handles 503)
-//	07. FSM != ON (Off/Armed/Recovering)→ trackAndPass (Inc/Dec + p95 record)
-//	08. FSM=ON + inflight < cap         → trackAndPass (slot livre)
-//	09. FSM=ON + inflight ≥ cap + normal+ tier-1 available → divert to tier-1
-//	10a. FSM=ON + inflight ≥ cap + sensitive → 503 upstream_saturated_for_sensitive_tenant + Retry-After: 5 (D-B3)
-//	10b. FSM=ON + inflight ≥ cap + normal + no tier-1 → 503 all_chat_upstreams_saturated + Retry-After: 30 (D-D1)
+//  01. auth missing                    → next (defensive fallthrough)
+//  02. tenant_id malformed UUID        → next (defensive fallthrough)
+//  03. tenant snapshot missing         → next (tenant snapshot stale)
+//  04. schedule already overrode       → stamp shed_decision=skipped_peak_offhours + next
+//  05. route does not classify         → next (admin / health / etc.)
+//  06. tier-0 upstream not configured  → next (dispatcher handles 503)
+//  07. FSM != ON (Off/Armed/Recovering)→ trackAndPass (Inc/Dec + p95 record)
+//  08. FSM=ON + inflight < cap         → trackAndPass (slot livre)
+//  09. FSM=ON + inflight ≥ cap + normal+ tier-1 available → divert to tier-1
+//     10a. FSM=ON + inflight ≥ cap + sensitive → 503 upstream_saturated_for_sensitive_tenant + Retry-After: 5 (D-B3)
+//     10b. FSM=ON + inflight ≥ cap + normal + no tier-1 → 503 all_chat_upstreams_saturated + Retry-After: 30 (D-D1)
 //
 // Every decision emits exactly one GatewayShedDecisions{upstream,reason}
 // counter sample so dashboards can break down routing volume by cause.

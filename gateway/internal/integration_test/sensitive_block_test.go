@@ -3,12 +3,12 @@
 // Phase 3 Plan 03-07 Task 2 — sensitive tenant block end-to-end.
 //
 // Two scenarios:
-//   1. Non-streaming sensitive request, tier-0 OPEN → SensitiveRetry exhausts
-//      → 503 with envelope code "upstream_unavailable_for_sensitive_tenant"
-//      + Retry-After: 30 + audit_log row with upstream='blocked_sensitive'
-//      + NO audit_log_content row (D-B3 + D-B2).
-//   2. Streaming sensitive request, tier-0 OPEN → fail-fast in <500ms
-//      (D-B4 — no retry loop pre-flight).
+//  1. Non-streaming sensitive request, tier-0 OPEN → SensitiveRetry exhausts
+//     → 503 with envelope code "upstream_unavailable_for_sensitive_tenant"
+//     + Retry-After: 30 + audit_log row with upstream='blocked_sensitive'
+//     + NO audit_log_content row (D-B3 + D-B2).
+//  2. Streaming sensitive request, tier-0 OPEN → fail-fast in <500ms
+//     (D-B4 — no retry loop pre-flight).
 //
 // Both scenarios assert tier-1 (external) hits == 0 (sensitive NEVER goes
 // external — LGPD).

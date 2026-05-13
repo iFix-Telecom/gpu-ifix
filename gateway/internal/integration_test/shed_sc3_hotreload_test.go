@@ -5,23 +5,24 @@
 // in <2s.
 //
 // SC-3 (CONTEXT.md §Success Criteria):
-//   "Thresholds (inflight_max, P95_ms, VRAM_bytes, hysteresis_seconds)
-//    can be changed by updating rows in Postgres and take effect within
-//    2s without restarting the gateway."
+//
+//	"Thresholds (inflight_max, P95_ms, VRAM_bytes, hysteresis_seconds)
+//	 can be changed by updating rows in Postgres and take effect within
+//	 2s without restarting the gateway."
 //
 // Scenario:
-//   1. Drive the FSM into StateOn by hammering local-llm with a slow
-//      mock (600ms latency × 10 RPS = ~6 inflight, above shed_inflight_max=4).
-//   2. Confirm gw:shed:local-llm Hash shows state=on (FSM published).
-//   3. UPDATE circuit_config.shed_inflight_max=1000 (effectively disable
-//      shed). This fires the upstreams_changed NOTIFY trigger which the
-//      gateway's pgxlisten consumer picks up, calls loader.Refresh + the
-//      onReload callback rebuilds shed.Set thresholds via UpdateConfig.
-//   4. Assert FSM transitions out of StateOn within 2s. With the load
-//      still applied + threshold raised, the signal evaluates as "not
-//      saturated" so FSM goes ON → RECOVERING (hysteresis preserved per
-//      D-C5: a hot-reload does not skip the recover window — strict
-//      stability).
+//  1. Drive the FSM into StateOn by hammering local-llm with a slow
+//     mock (600ms latency × 10 RPS = ~6 inflight, above shed_inflight_max=4).
+//  2. Confirm gw:shed:local-llm Hash shows state=on (FSM published).
+//  3. UPDATE circuit_config.shed_inflight_max=1000 (effectively disable
+//     shed). This fires the upstreams_changed NOTIFY trigger which the
+//     gateway's pgxlisten consumer picks up, calls loader.Refresh + the
+//     onReload callback rebuilds shed.Set thresholds via UpdateConfig.
+//  4. Assert FSM transitions out of StateOn within 2s. With the load
+//     still applied + threshold raised, the signal evaluates as "not
+//     saturated" so FSM goes ON → RECOVERING (hysteresis preserved per
+//     D-C5: a hot-reload does not skip the recover window — strict
+//     stability).
 //
 // Failure modes this catches:
 //   - NOTIFY trigger not firing (migration 0009 / 0016 trigger bug)

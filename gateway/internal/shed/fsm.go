@@ -5,14 +5,14 @@
 // State semantics:
 //   - StateOff:        signals below threshold; requests pass to tier-0 normally
 //   - StateArmed:      signal saturated; waiting ArmSeconds of sustained
-//                      saturation before committing to ON. Drops back to OFF
-//                      immediately if signal clears (D-C1 hysteresis-in).
+//     saturation before committing to ON. Drops back to OFF
+//     immediately if signal clears (D-C1 hysteresis-in).
 //   - StateOn:         signal sustained ArmSeconds; shed middleware overrides
-//                      tier-0 → tier-1 for tenants whose inflight ≥ cap
-//                      (D-B1, D-B4).
+//     tier-0 → tier-1 for tenants whose inflight ≥ cap
+//     (D-B1, D-B4).
 //   - StateRecovering: signal cleared; waiting RecoverSeconds clean before
-//                      committing to OFF. Returns to ON immediately if signal
-//                      re-saturates (D-C1 hysteresis-out: skip Armed).
+//     committing to OFF. Returns to ON immediately if signal
+//     re-saturates (D-C1 hysteresis-out: skip Armed).
 //
 // All hot-path reads (State, EnteredAt) are lockless atomic.Load. The
 // transition CAS guards against the rare case of two ticks racing —

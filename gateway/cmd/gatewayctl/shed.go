@@ -1,11 +1,11 @@
 // Package main (shed.go): `gatewayctl shed-state` and `gatewayctl shed-force`
 // subcommands for the Phase 5 load-shedding subsystem (CONTEXT.md D-C5).
 //
-//   shed-state   — read-only diagnostic that lists gw:shed:{*} Hash mirrors
-//                  and overlays any active gw:shed:force:{*} override.
-//   shed-force   — operator override with bounded TTL (max 1h). Writes
-//                  the gw:shed:force:{upstream} shadow key the ticker
-//                  consumes on its next iteration.
+//	shed-state   — read-only diagnostic that lists gw:shed:{*} Hash mirrors
+//	               and overlays any active gw:shed:force:{*} override.
+//	shed-force   — operator override with bounded TTL (max 1h). Writes
+//	               the gw:shed:force:{upstream} shadow key the ticker
+//	               consumes on its next iteration.
 //
 // Both subcommands are thin wrappers over redisx.* helpers; the in-process
 // FSM is authoritative — see internal/redisx/shed.go for the layered key

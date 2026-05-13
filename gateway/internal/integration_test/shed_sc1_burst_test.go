@@ -4,9 +4,10 @@
 // goes to tier-1, FSM recovers when load drops.
 //
 // SC-1 (CONTEXT.md §Success Criteria):
-//   "Under a burst where inflight on local LLM exceeds the configured
-//    slot count, excess requests are routed to OpenRouter automatically;
-//    below threshold, traffic returns to local."
+//
+//	"Under a burst where inflight on local LLM exceeds the configured
+//	 slot count, excess requests are routed to OpenRouter automatically;
+//	 below threshold, traffic returns to local."
 //
 // Scenario (test-scaled timings from helpers_shed_test.go seedShedThresholds):
 //   - tenant cap_llm=4, shed_inflight_max=4, shed_arm_seconds=1, shed_recover_seconds=2

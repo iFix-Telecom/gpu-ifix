@@ -3,12 +3,12 @@
 //
 // Key layout (namespace "gw:shed:"):
 //   - gw:shed:{upstream}       — Hash holding {state, since_unix, reason,
-//                                inflight, p95_ms, vram_mib} for the
-//                                authoritative in-process FSM state.
+//     inflight, p95_ms, vram_mib} for the
+//     authoritative in-process FSM state.
 //   - gw:shed:events           — Pub/Sub channel for state transitions
-//                                consumed cross-replica.
+//     consumed cross-replica.
 //   - gw:shed:force:{upstream} — Operator override shadow key with TTL.
-//                                Holds "off"|"on" while active.
+//     Holds "off"|"on" while active.
 //
 // Semantics: the in-process FSM is authoritative; Redis is a mirror only.
 // Redis-down does NOT stop the FSM from operating (CONTEXT.md D-C3, same

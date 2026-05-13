@@ -4,9 +4,10 @@
 // oscillating load.
 //
 // SC-2 (CONTEXT.md §Success Criteria):
-//   "Under sustained P95 latency spike or VRAM > 21 GB, shedding activates
-//    within 30s; no flapping occurs during 60s of oscillating load
-//    (hysteresis verified)."
+//
+//	"Under sustained P95 latency spike or VRAM > 21 GB, shedding activates
+//	 within 30s; no flapping occurs during 60s of oscillating load
+//	 (hysteresis verified)."
 //
 // Opt-in slow test: ~125s runtime. Built only with the `integration_slow`
 // build tag so the default `go test -tags=integration` suite stays under

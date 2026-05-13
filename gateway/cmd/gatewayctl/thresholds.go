@@ -46,17 +46,17 @@ import (
 // values: -1 / 0 mean "leave unchanged" depending on the field (see
 // ranges above). anyDirty is true iff at least one flag was provided.
 type thresholdFlags struct {
-	upstream         string
-	inflight         int
-	p95Ms            int
-	vramMiB          int64
-	armSeconds       int
-	recoverSeconds   int
-	inflightSet      bool
-	p95Set           bool
-	vramSet          bool
-	armSet           bool
-	recoverSet       bool
+	upstream       string
+	inflight       int
+	p95Ms          int
+	vramMiB        int64
+	armSeconds     int
+	recoverSeconds int
+	inflightSet    bool
+	p95Set         bool
+	vramSet        bool
+	armSet         bool
+	recoverSet     bool
 }
 
 // runThresholds dispatches `gatewayctl thresholds <subcommand>`. Today

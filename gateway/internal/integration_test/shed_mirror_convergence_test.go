@@ -5,12 +5,12 @@
 //
 // CONTEXT.md D-C3: in-process FSM is authoritative; Redis is a mirror.
 // Cross-replica convergence happens via two paths:
-//   1. Live: replica A publishes a transition; replica B's Subscribe
-//      loop reads gw:shed:events and calls Set.ApplyRemoteEvent →
-//      updates remoteState overlay.
-//   2. Boot: a new replica starts late and misses the live event. It
-//      runs Set.HydrateFromRedis at startup which HGETALLs every
-//      gw:shed:{upstream} Hash and seeds remoteState from the mirror.
+//  1. Live: replica A publishes a transition; replica B's Subscribe
+//     loop reads gw:shed:events and calls Set.ApplyRemoteEvent →
+//     updates remoteState overlay.
+//  2. Boot: a new replica starts late and misses the live event. It
+//     runs Set.HydrateFromRedis at startup which HGETALLs every
+//     gw:shed:{upstream} Hash and seeds remoteState from the mirror.
 //
 // These tests use TWO in-process shed.Set instances against the same
 // testcontainer Redis — no gateway subprocess needed. The tests

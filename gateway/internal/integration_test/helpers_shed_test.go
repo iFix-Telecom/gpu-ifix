@@ -27,16 +27,16 @@
 // gateway involved) so it does not need bootGateway at all.
 //
 // Concretely the bootGateway helper:
-//   1. builds the gateway binary into t.TempDir() (cached across tests
-//      via package-level once.Do — pays the ~3s build cost once)
-//   2. picks a free port via net.Listen("tcp", "127.0.0.1:0").Close()
-//   3. starts the binary with env vars overriding tier-0/tier-1 URLs to
-//      point at the test ControlledMockServer instances + DCGM URL + the
-//      Phase 5 SHED_TICK_INTERVAL_MS=100 (10x faster than prod for fast
-//      convergence in tests) + AI_GATEWAY_MIGRATE_ON_BOOT=true so the
-//      gateway applies migrations 0001..0017 against the testcontainer DB
-//   4. polls /health for up to 30s until the gateway is ready
-//   5. registers t.Cleanup to SIGTERM the subprocess + drain stdout/stderr
+//  1. builds the gateway binary into t.TempDir() (cached across tests
+//     via package-level once.Do — pays the ~3s build cost once)
+//  2. picks a free port via net.Listen("tcp", "127.0.0.1:0").Close()
+//  3. starts the binary with env vars overriding tier-0/tier-1 URLs to
+//     point at the test ControlledMockServer instances + DCGM URL + the
+//     Phase 5 SHED_TICK_INTERVAL_MS=100 (10x faster than prod for fast
+//     convergence in tests) + AI_GATEWAY_MIGRATE_ON_BOOT=true so the
+//     gateway applies migrations 0001..0017 against the testcontainer DB
+//  4. polls /health for up to 30s until the gateway is ready
+//  5. registers t.Cleanup to SIGTERM the subprocess + drain stdout/stderr
 //
 // Test-scaled shed thresholds: the SC tests need fast FSM convergence so
 // 30s arm + 60s recover (prod defaults) would balloon SC-1 runtime to

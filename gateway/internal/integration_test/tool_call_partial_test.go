@@ -3,10 +3,10 @@
 // Phase 3 Plan 03-07 Task 2 — tool-call partial stream regression
 // (RES-06 / SC-4). When the upstream emits a tool_call delta then
 // disconnects mid-stream, the gateway MUST:
-//   1. NOT failover to tier-1 (tool_call side-effects are non-replayable)
-//   2. Surface a terminal `event: error` SSE frame with code
-//      "tool_call_partial_stream" to the client
-//   3. Increment gateway_tool_call_partial_total{route, upstream}
+//  1. NOT failover to tier-1 (tool_call side-effects are non-replayable)
+//  2. Surface a terminal `event: error` SSE frame with code
+//     "tool_call_partial_stream" to the client
+//  3. Increment gateway_tool_call_partial_total{route, upstream}
 //
 // This test exercises the production proxy.NewChatProxy +
 // proxy.NewDispatcher path with a mock tier-0 that hijacks the SSE
@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"

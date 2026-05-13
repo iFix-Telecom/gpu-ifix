@@ -79,7 +79,7 @@ func TestToolCallTee_NoFlagWithoutSubstring(t *testing.T) {
 // Threat T-03-06-07 — a malicious upstream cannot OOM the gateway by
 // streaming an unbounded probe before the substring.
 func TestToolCallTee_HeadCappedAt8KB(t *testing.T) {
-	prefix := bytes.Repeat([]byte("a"), 9000)            // > 8 KB
+	prefix := bytes.Repeat([]byte("a"), 9000) // > 8 KB
 	suffix := []byte(`"tool_calls":[{"id":"late"}]`)
 	full := append(prefix, suffix...)
 	upstream := io.NopCloser(bytes.NewReader(full))

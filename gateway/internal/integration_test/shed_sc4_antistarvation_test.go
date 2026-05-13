@@ -4,9 +4,10 @@
 // bursting does not degrade a quiet tenant's quality of service.
 //
 // SC-4 (CONTEXT.md §Success Criteria):
-//   "During shedding, one tenant's burst does not starve other tenants —
-//    per-tenant inflight quotas keep smaller apps responsive while
-//    overflow from the noisy tenant hits OpenRouter."
+//
+//	"During shedding, one tenant's burst does not starve other tenants —
+//	 per-tenant inflight quotas keep smaller apps responsive while
+//	 overflow from the noisy tenant hits OpenRouter."
 //
 // Scenario:
 //   - Tenant A ("converseai", local_inflight_max_llm=4) bursts at 100 RPS

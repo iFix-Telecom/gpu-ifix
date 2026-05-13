@@ -5,11 +5,12 @@
 // (shed-force operator override), and DCGM fail-open.
 //
 // CONTEXT.md references:
-//   D-B3: sensitive saturated → 503 + Retry-After:5 (LGPD)
-//   D-D1: tier-1 also unavailable → 503 all_chat_upstreams_saturated + Retry-After:30
-//   D-D3: peak-off-hours is noop for shed; metric records 'skipped_peak_offhours'
-//   D-C5: operator shed-force overrides FSM via gw:shed:force:{upstream} Redis key
-//   D-A3: DCGM scrape fail-open — VRAM signal becomes unknown; FSM continues via inflight+P95
+//
+//	D-B3: sensitive saturated → 503 + Retry-After:5 (LGPD)
+//	D-D1: tier-1 also unavailable → 503 all_chat_upstreams_saturated + Retry-After:30
+//	D-D3: peak-off-hours is noop for shed; metric records 'skipped_peak_offhours'
+//	D-C5: operator shed-force overrides FSM via gw:shed:force:{upstream} Redis key
+//	D-A3: DCGM scrape fail-open — VRAM signal becomes unknown; FSM continues via inflight+P95
 package integration
 
 import (
