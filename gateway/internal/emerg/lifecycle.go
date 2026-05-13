@@ -63,6 +63,7 @@ import (
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
 
 const (
@@ -718,5 +719,78 @@ func (r *Reconciler) IsActive() bool {
 	}
 	_, ok := r.ActivePodURL()
 	return ok
+}
+
+// cancelActiveLifecycle implements the D-C3 triple-layer cancel:
+//
+//  1. Layer 1 — context cancel: invokes the stored CancelFunc so the
+//     in-flight provisionLifecycle goroutine sees ctx.Err() != nil at its
+//     next checkpoint (post-search, post-create, during /health poll).
+//     waitForReadyOrDestroy already handles the ctx.Done() branch by
+//     issuing a best-effort Destroy + closing the row with
+//     shutdown_reason='cancelled_in_flight' (Pitfall 8: separate
+//     background ctx with 30s budget for the destroy call).
+//
+//  2. Layer 2 — Pub/Sub broadcast: publishes a `cancel_in_flight` event
+//     on gw:emerg:events so non-leader replicas (and gatewayctl observers)
+//     can update in-memory state for visibility. Non-leader applyEmergCommand
+//     drops it on the floor (visibility-only).
+//
+//  3. Layer 3 — post-create destroy: enforced inside waitForReadyOrDestroy's
+//     ctx.Done() branch (Plan 06 — already implemented). When cancel fires
+//     AFTER vast_instance_id is known, the provisioning goroutine runs
+//     bestEffortDestroy(instanceID) before close.
+//
+// MUST only be called by the leader (caller responsibility — typically
+// from inside evaluateEmergencyProvisioning which already gates on the
+// tracker state). Idempotent: a second call after the goroutine has
+// already cleared activeLifecycle is a no-op.
+//
+// This method does NOT clear activeLifecycle directly — closeLifecycle
+// (called from inside the goroutine on its way out) owns that write.
+// Clearing here would race the goroutine and could leave the FSM in a
+// state where startProvisioning thinks the slot is free but the goroutine
+// has not yet finished its destroy.
+func (r *Reconciler) cancelActiveLifecycle(ctx context.Context, reason string) {
+	lc := r.activeLifecycle.Load()
+	if lc == nil {
+		return
+	}
+	r.deps.Log.Info("cancelling active lifecycle (D-C3)",
+		"id", lc.ID, "reason", reason, "vast_instance_id", lc.VastInstanceID)
+
+	// Layer 1: context cancel. The lifecycleCancel pointer was stored by
+	// startProvisioning; Swap so a second cancelActiveLifecycle call is a
+	// no-op (idempotent).
+	if cancelPtr := r.lifecycleCancel.Swap(nil); cancelPtr != nil {
+		(*cancelPtr)()
+	}
+
+	// Layer 2: Pub/Sub broadcast for cross-replica visibility.
+	if r.deps.Redis != nil {
+		ev := redisx.EmergEvent{
+			Type:        "cancel_in_flight",
+			State:       r.deps.FSM.State().String(),
+			LifecycleID: lc.ID,
+			Reason:      reason,
+			SinceUnix:   time.Now().Unix(),
+			ReplicaID:   r.replicaID,
+		}
+		if err := redisx.PublishEmergEvent(ctx, r.deps.Redis, ev); err != nil {
+			r.deps.Log.Warn("cancelActiveLifecycle: PublishEmergEvent failed",
+				"err", err, "lifecycle_id", lc.ID)
+		}
+	}
+
+	// Layer 3 (post-create destroy) is enforced inside waitForReadyOrDestroy's
+	// ctx.Done() branch — see lifecycle.go waitForReadyOrDestroy for the
+	// bestEffortDestroy(instanceID) + closeLifecycle('cancelled_in_flight')
+	// path. No additional work needed here.
+
+	r.captureBreadcrumb("cancel_in_flight", map[string]any{
+		"lifecycle_id":     lc.ID,
+		"reason":           reason,
+		"vast_instance_id": lc.VastInstanceID,
+	})
 }
 

@@ -365,19 +365,66 @@ func (r *Reconciler) evaluateTick(ctx context.Context, now time.Time, log *slog.
 	case StateHealthy:
 		r.evaluateHealthy(ctx, now, log)
 	case StateEmergencyProvisioning:
-		// Plan 06-06 — spawn the provisioning goroutine on the first tick
-		// after the FSM enters this state (idempotent: subsequent ticks
-		// are no-ops while activeLifecycle is non-nil).
-		if r.activeLifecycle.Load() == nil {
-			r.startProvisioning(ctx)
-		}
+		r.evaluateEmergencyProvisioning(ctx, now, log)
+	case StateEmergencyActive:
+		// D-C4 multi-failover ride-out: even if local-llm OPEN again, do
+		// NOT spawn additional lifecycles (the partial unique index on
+		// emergency_lifecycles enforces this at the DB layer; this branch
+		// is just the leader-side noise gate). Plan 08 (cutback) implements
+		// the EmergencyActive → Recovering transition when tracker.State()
+		// shows local-llm CLOSED sustained ≥ ProvisionHealthyDurationSeconds.
+		log.Debug("evaluateEmergencyActive: ride-out (Plan 08 implements cutback)",
+			"tracker_state", r.tracker.State())
 	default:
-		// Plans 06-07 (cancel/recovery) + 06-08 (cutback) extend this
-		// dispatcher with cases for the remaining states. Until then, log
-		// at Debug so the leader path is exercised in tests without
-		// firing trigger/provisioning logic.
-		log.Debug("evaluateTick: state not yet handled (Plans 06-07/08)",
+		// Plan 06-08 (cutback) extends this dispatcher with cases for
+		// StateRecovering + StateCooldown + StateDegraded + StateFailedOver.
+		// Until then, log at Debug so the leader path is exercised in tests
+		// without firing trigger/provisioning logic.
+		log.Debug("evaluateTick: state not yet handled (Plan 06-08)",
 			"state", r.deps.FSM.State().String())
+	}
+}
+
+// evaluateEmergencyProvisioning is the StateEmergencyProvisioning branch.
+// Two responsibilities:
+//
+//  1. Bootstrap: when no activeLifecycle is in flight (first tick after
+//     FSM entered this state), spawn provisionLifecycle goroutine via
+//     startProvisioning. Idempotent — subsequent ticks while the goroutine
+//     is running observe activeLifecycle != nil and short-circuit.
+//
+//  2. Cancel detection (D-C3): when the local-llm breaker has flipped
+//     back to CLOSED or HALF_OPEN while we are mid-provisioning, cancel
+//     the in-flight lifecycle (triple layer: context cancel + Pub/Sub
+//     broadcast + post-create destroy enforced in waitForReadyOrDestroy).
+//     The FSM transitions back to Healthy with reason
+//     'cancelled_local_llm_recovered' — closeLifecycle inside the
+//     goroutine writes shutdown_reason='cancelled_in_flight' to the DB.
+//
+// The cancel branch ONLY fires while activeLifecycle != nil — calling
+// cancelActiveLifecycle on a nil pointer is a no-op, but the FSM
+// transition would still race startProvisioning if we tried to cancel
+// before the goroutine spawned.
+func (r *Reconciler) evaluateEmergencyProvisioning(ctx context.Context, now time.Time, log *slog.Logger) {
+	if r.activeLifecycle.Load() == nil {
+		// Fresh entry into EmergencyProvisioning — spawn provisioning.
+		r.startProvisioning(ctx)
+		return
+	}
+	// Cancel detection: tracker shows local-llm recovered (CLOSED) or is
+	// re-probing (HALF_OPEN). D-C3 — cancel and return FSM to Healthy.
+	trackerState := r.tracker.State()
+	if trackerState == "closed" || trackerState == "half-open" {
+		log.Info("local-llm recovered during provisioning; cancelling (D-C3)",
+			"tracker_state", trackerState,
+			"lifecycle_id", r.activeLifecycle.Load().ID)
+		r.cancelActiveLifecycle(ctx, "local_llm_recovered_during_provisioning")
+		// Transition FSM back to Healthy. The provisioning goroutine will
+		// write shutdown_reason='cancelled_in_flight' to the DB on its way
+		// out (closeLifecycle is called from waitForReadyOrDestroy's
+		// ctx.Done() branch OR provisionLifecycle's bid-loop ctx-check).
+		r.deps.FSM.Transition(StateEmergencyProvisioning, StateHealthy,
+			now, "cancelled_local_llm_recovered")
 	}
 }
 
