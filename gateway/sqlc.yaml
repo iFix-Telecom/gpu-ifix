@@ -13,6 +13,7 @@ sql:
       - db/queries/fx_rates.sql
       - db/queries/tenants_admin.sql
       - db/queries/admin_keys.sql
+      - db/queries/emergency_lifecycles.sql
     schema: db/migrations
     gen:
       go:
