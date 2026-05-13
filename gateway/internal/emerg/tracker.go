@@ -37,15 +37,27 @@ import (
 // newLocalLlmTracker — the zero-value State is "closed" so a fresh
 // tracker behaves identically to a process that has just observed a
 // CLOSED event.
+//
+// Plan 06-08 (D-D1) — closedSince mirrors openSince but for CLOSED state.
+// SustainedClosedSeconds() drives the cutback timer in
+// evaluateEmergencyActive: when local-llm has been CLOSED for at least
+// PROVISION_HEALTHY_DURATION_SECONDS while the FSM is in EmergencyActive,
+// the reconciler restores tier-0 routing and transitions to Recovering.
 type localLlmTracker struct {
-	state     atomic.Value // string: "closed" | "half-open" | "open"
-	openSince atomic.Int64 // unix-seconds at most-recent CLOSED→OPEN transition; 0 when state != "open"
+	state       atomic.Value // string: "closed" | "half-open" | "open"
+	openSince   atomic.Int64 // unix-seconds at most-recent CLOSED→OPEN transition; 0 when state != "open"
+	closedSince atomic.Int64 // unix-seconds at most-recent OPEN→CLOSED transition; 0 when state != "closed"
 }
 
 // newLocalLlmTracker returns a tracker initialised at "closed" /
 // openSince=0. Callers (NewReconciler) construct exactly one tracker per
 // replica and share it between the Subscribe goroutine (writer) and the
 // reconciler tick (reader) via the Reconciler struct.
+//
+// closedSince is initialised to 0 (NOT now) — a fresh tracker has not
+// yet OBSERVED a CLOSED event, so SustainedClosedSeconds returns 0 until
+// the first ApplyEvent(closed) lands. Avoids a stale tracker triggering
+// premature cutback the moment the FSM enters EmergencyActive.
 func newLocalLlmTracker() *localLlmTracker {
 	t := &localLlmTracker{}
 	t.state.Store("closed")
@@ -77,10 +89,26 @@ func (t *localLlmTracker) ApplyEvent(ev redisx.BreakerEvent) {
 		if t.openSince.Load() == 0 {
 			t.openSince.Store(time.Now().Unix())
 		}
+		// Leaving OPEN cleared closedSince — entering OPEN again does NOT
+		// re-clear (already 0) but is defensive against ordering bugs.
+		t.closedSince.Store(0)
 		return
 	}
-	// HALF_OPEN, CLOSED, or any future state — reset the sustained timer.
+	// HALF_OPEN or CLOSED — reset the sustained-OPEN timer.
 	t.openSince.Store(0)
+	if ev.State == "closed" {
+		// Plan 06-08 (D-D1): mirror the OPEN idempotency for CLOSED. Only
+		// set closedSince on the FIRST transition into CLOSED — a resend
+		// must NOT reset the cutback timer (a flaky Pub/Sub link would
+		// otherwise indefinitely delay cutback).
+		if t.closedSince.Load() == 0 {
+			t.closedSince.Store(time.Now().Unix())
+		}
+		return
+	}
+	// HALF_OPEN — clear closedSince. half-open is "probing", not yet
+	// stable enough to count as cutback evidence.
+	t.closedSince.Store(0)
 }
 
 // SustainedFailedOverSeconds returns the number of whole seconds the
@@ -111,4 +139,25 @@ func (t *localLlmTracker) SustainedFailedOverSeconds() int64 {
 func (t *localLlmTracker) State() string {
 	s, _ := t.state.Load().(string)
 	return s
+}
+
+// SustainedClosedSeconds returns the number of whole seconds the tracker
+// has been in the CLOSED state continuously. Returns 0 when state !=
+// "closed" OR closedSince==0 (defensive — closedSince is set to NOW only
+// on the first OPEN→CLOSED transition; a fresh tracker that never
+// observed an event returns 0 even though state defaults to "closed").
+//
+// Plan 06-08 (D-D1): the reconciler compares this against
+// cfg.ProvisionHealthyDurationSeconds in evaluateEmergencyActive — when
+// the result crosses the threshold, the FSM cutback fires.
+func (t *localLlmTracker) SustainedClosedSeconds() int64 {
+	s, _ := t.state.Load().(string)
+	if s != "closed" {
+		return 0
+	}
+	since := t.closedSince.Load()
+	if since == 0 {
+		return 0
+	}
+	return time.Now().Unix() - since
 }

@@ -119,3 +119,85 @@ func TestTracker_NoSinceWhenClosed(t *testing.T) {
 		t.Fatalf("SustainedFailedOverSeconds with state=closed = %d, want 0", got)
 	}
 }
+
+// TestTracker_SustainedClosed_FreshTracker — a fresh tracker has not
+// observed any events. State defaults to "closed" but closedSince==0,
+// so SustainedClosedSeconds returns 0 (NOT "infinity since boot"). This
+// prevents a brand-new replica from triggering immediate cutback the
+// moment it lands in EmergencyActive via leader recovery.
+func TestTracker_SustainedClosed_FreshTracker(t *testing.T) {
+	tr := newLocalLlmTracker()
+	if got := tr.SustainedClosedSeconds(); got != 0 {
+		t.Fatalf("SustainedClosedSeconds on fresh tracker = %d, want 0", got)
+	}
+}
+
+// TestTracker_SustainedClosed_AfterFirstClosed — first OPEN→CLOSED
+// transition sets closedSince. SustainedClosedSeconds returns elapsed
+// seconds since that event.
+func TestTracker_SustainedClosed_AfterFirstClosed(t *testing.T) {
+	tr := newLocalLlmTracker()
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "open"})
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "closed"})
+	if tr.closedSince.Load() == 0 {
+		t.Fatalf("closedSince should be > 0 after CLOSED")
+	}
+	// Force backwards-time so SustainedClosedSeconds returns a known value.
+	tr.closedSince.Store(time.Now().Unix() - 10)
+	got := tr.SustainedClosedSeconds()
+	if got < 10 || got > 12 {
+		t.Fatalf("SustainedClosedSeconds = %d, want 10-12", got)
+	}
+}
+
+// TestTracker_SustainedClosed_ResetByOpen — observing CLOSED sets
+// closedSince; subsequent OPEN clears it. SustainedClosedSeconds
+// returns 0 immediately.
+func TestTracker_SustainedClosed_ResetByOpen(t *testing.T) {
+	tr := newLocalLlmTracker()
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "closed"})
+	if tr.closedSince.Load() == 0 {
+		t.Fatalf("closedSince should be > 0 after first CLOSED")
+	}
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "open"})
+	if tr.closedSince.Load() != 0 {
+		t.Fatalf("closedSince should be 0 after OPEN; got %d", tr.closedSince.Load())
+	}
+	if got := tr.SustainedClosedSeconds(); got != 0 {
+		t.Fatalf("SustainedClosedSeconds after OPEN = %d, want 0", got)
+	}
+}
+
+// TestTracker_SustainedClosed_HalfOpenClears — HALF_OPEN means probing,
+// NOT stable cutback evidence. closedSince must clear so cutback waits
+// for a definitive CLOSED event.
+func TestTracker_SustainedClosed_HalfOpenClears(t *testing.T) {
+	tr := newLocalLlmTracker()
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "closed"})
+	if tr.closedSince.Load() == 0 {
+		t.Fatalf("closedSince should be > 0 after CLOSED")
+	}
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "half-open"})
+	if got := tr.SustainedClosedSeconds(); got != 0 {
+		t.Fatalf("SustainedClosedSeconds after half-open = %d, want 0", got)
+	}
+}
+
+// TestTracker_SustainedClosed_IdempotentClosed — duplicate CLOSED events
+// (Pitfall 3 Pub/Sub resend) MUST NOT reset the cutback timer. Mirrors
+// the OPEN idempotency contract.
+func TestTracker_SustainedClosed_IdempotentClosed(t *testing.T) {
+	tr := newLocalLlmTracker()
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "closed"})
+	first := tr.closedSince.Load()
+	if first == 0 {
+		t.Fatalf("closedSince = 0 after CLOSED")
+	}
+	time.Sleep(1100 * time.Millisecond)
+	tr.ApplyEvent(redisx.BreakerEvent{Upstream: "local-llm", State: "closed"})
+	second := tr.closedSince.Load()
+	if second != first {
+		t.Fatalf("closedSince mutated on duplicate CLOSED: first=%d second=%d",
+			first, second)
+	}
+}

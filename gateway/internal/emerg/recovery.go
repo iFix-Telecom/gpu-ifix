@@ -249,10 +249,17 @@ func (r *Reconciler) resumeFSMFromEvents(parentCtx context.Context, row gen.List
 			"actual_status", inst.ActualStatus, "public_ipaddr", inst.PublicIPAddr)
 	}
 
-	// 5. TODO(plan-08): when Plan 08 lands the dispatcher integration,
-	//    invoke r.deps.Loader.OverrideTier0("local-llm", podURL) here.
-	//    For Plan 07 we only store activePodURL — Plan 08 reads it on each
-	//    request via Reconciler.ActivePodURL() (existing public method).
+	// 5. Plan 06-08 (D-E3): activate dispatcher tier-0 override on resume
+	//    so requests route to the resumed pod immediately. Strip /health
+	//    suffix to get the upstream base URL (markHealthy uses the same
+	//    helper).
+	if podURL != "" && r.deps.Loader != nil {
+		baseURL := stripHealthSuffix(podURL)
+		r.deps.Loader.OverrideTier0("llm", baseURL)
+	}
+	// Arm the idle-grace timer so a fresh-resumed pod is not immediately
+	// classified as idle.
+	r.lastEmergencyTrafficAt.Store(time.Now().Unix())
 
 	// 6. Restart healthcheck polling goroutine if recovered state is
 	//    EMERGENCY_ACTIVE. EMERGENCY_PROVISIONING is delegated to the next

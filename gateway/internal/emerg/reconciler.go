@@ -31,6 +31,7 @@ package emerg
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -45,6 +46,7 @@ import (
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/upstreams"
 )
 
 // emergLockExpiry is the redsync mutex TTL (CONTEXT.md D-B2). Constant
@@ -112,6 +114,14 @@ type Deps struct {
 	// inject a mock via the SetVastClient helper instead. Plan 06-06+
 	// reads this for the provisioning lifecycle.
 	Vast VastAPI
+
+	// Loader is the upstreams.Loader used by Plan 06-08 (D-E3) cutback —
+	// markHealthy calls Loader.OverrideTier0("llm", podURL) when the
+	// emergency pod becomes healthy; evaluateEmergencyActive calls
+	// Loader.RestoreTier0("llm") on cutback. Optional in tests that do
+	// not exercise the dispatcher integration; nil-safe (the call sites
+	// short-circuit when Loader is nil).
+	Loader *upstreams.Loader
 }
 
 // Reconciler is the leader-elected loop owner. Construct via
@@ -151,6 +161,25 @@ type Reconciler struct {
 	// returns the previous pointer cleanly. nil when no provisioning
 	// goroutine is running.
 	lifecycleCancel atomic.Pointer[context.CancelFunc]
+
+	// lastEmergencyTrafficAt is the unix-second timestamp of the most
+	// recent dispatcher RegisterTraffic call. Used by IsIdle to drive the
+	// D-D1 idle-grace destroy timer (PROVISION_IDLE_GRACE_SECONDS, default
+	// 300s). 0 when no traffic has ever been registered. Plan 06-08.
+	lastEmergencyTrafficAt atomic.Int64
+
+	// recoveringEnteredAt is the unix-second timestamp at which the FSM
+	// transitioned EmergencyActive → Recovering (Plan 06-08 cutback). The
+	// idle-grace destroy timer in evaluateRecovering compares against
+	// this so a fresh-Recovering tick has the FULL grace window even if
+	// no traffic has been registered yet.
+	recoveringEnteredAt atomic.Int64
+
+	// cooldownEnteredAt is the unix-second timestamp at which the FSM
+	// transitioned Recovering → Cooldown. evaluateCooldown re-arms the
+	// trigger by transitioning Cooldown → Healthy after
+	// PROVISION_HEALTHY_DURATION_SECONDS.
+	cooldownEnteredAt atomic.Int64
 
 	// vastOverride and healthCheckOverride are test-only injection slots.
 	// Production leaves both nil and reads VastAPI from deps.Vast / does
@@ -371,22 +400,187 @@ func (r *Reconciler) evaluateTick(ctx context.Context, now time.Time, log *slog.
 	case StateEmergencyProvisioning:
 		r.evaluateEmergencyProvisioning(ctx, now, log)
 	case StateEmergencyActive:
-		// D-C4 multi-failover ride-out: even if local-llm OPEN again, do
-		// NOT spawn additional lifecycles (the partial unique index on
-		// emergency_lifecycles enforces this at the DB layer; this branch
-		// is just the leader-side noise gate). Plan 08 (cutback) implements
-		// the EmergencyActive → Recovering transition when tracker.State()
-		// shows local-llm CLOSED sustained ≥ ProvisionHealthyDurationSeconds.
-		log.Debug("evaluateEmergencyActive: ride-out (Plan 08 implements cutback)",
-			"tracker_state", r.tracker.State())
+		r.evaluateEmergencyActive(ctx, now, log)
+	case StateRecovering:
+		r.evaluateRecovering(ctx, now, log)
+	case StateCooldown:
+		r.evaluateCooldown(ctx, now, log)
 	default:
-		// Plan 06-08 (cutback) extends this dispatcher with cases for
-		// StateRecovering + StateCooldown + StateDegraded + StateFailedOver.
-		// Until then, log at Debug so the leader path is exercised in tests
-		// without firing trigger/provisioning logic.
-		log.Debug("evaluateTick: state not yet handled (Plan 06-08)",
+		// Plan 06-08 still leaves StateDegraded + StateFailedOver to Phase
+		// 5 / Phase 3 ownership respectively (degraded → shed FSM in
+		// internal/shed; failed_over is a transient marker observed only
+		// during the trigger transition). Log at Debug to keep tests
+		// exercising the leader path without spurious noise.
+		log.Debug("evaluateTick: state not handled in Plan 06-08",
 			"state", r.deps.FSM.State().String())
 	}
+}
+
+// evaluateEmergencyActive — Plan 06-08 (D-D1 + D-C4) cutback gate.
+//
+//  1. D-C4 ride-out: if local-llm is OPEN/HALF_OPEN again (a second
+//     failover during emergency), DO NOT spawn a new lifecycle. The
+//     partial unique index `emergency_live_singleton` enforces this at
+//     the DB layer; this branch is the leader-side noise gate that just
+//     logs at Debug so dashboards see the multi-failover event without
+//     destabilising the FSM.
+//
+//  2. D-D1 cutback: when the local-llm tracker has been CLOSED for
+//     ≥ ProvisionHealthyDurationSeconds (default 300s; tests override to
+//     1s), restore tier-0 routing via Loader.RestoreTier0("llm") and
+//     transition FSM EmergencyActive → Recovering. The emergency pod
+//     remains live — destroy is delayed until evaluateRecovering's idle
+//     grace fires (so requests already in flight to the pod can drain).
+func (r *Reconciler) evaluateEmergencyActive(_ context.Context, now time.Time, log *slog.Logger) {
+	trackerState := r.tracker.State()
+	if trackerState != "closed" {
+		// D-C4: ride-out. local-llm still OPEN/HALF_OPEN. No action.
+		log.Debug("evaluateEmergencyActive: tracker not CLOSED; ride-out",
+			"tracker_state", trackerState)
+		return
+	}
+	sustained := r.tracker.SustainedClosedSeconds()
+	if sustained < int64(r.deps.Cfg.ProvisionHealthyDurationSeconds) {
+		log.Debug("evaluateEmergencyActive: cutback gate not yet armed",
+			"sustained_closed_seconds", sustained,
+			"threshold", r.deps.Cfg.ProvisionHealthyDurationSeconds)
+		return
+	}
+	// CUTBACK FIRES. Restore tier-0 routing FIRST (so dispatcher stops
+	// sending new requests to the emergency pod) THEN transition FSM.
+	// Restore is race-free + idempotent (atomic.Pointer.Store(nil)).
+	if r.deps.Loader != nil {
+		r.deps.Loader.RestoreTier0("llm")
+	}
+	log.Info("emergency cutback: primary healthy; restoring tier-0 (D-D1)",
+		"sustained_closed_seconds", sustained,
+		"threshold", r.deps.Cfg.ProvisionHealthyDurationSeconds)
+	r.deps.FSM.Transition(StateEmergencyActive, StateRecovering, now,
+		"primary_healthy_sustained")
+	r.recoveringEnteredAt.Store(now.Unix())
+	// Reset traffic timer — entering Recovering is the "fresh window"
+	// for idle-grace counting. Without this reset, traffic registered
+	// minutes ago during ACTIVE would falsely keep IsIdle false during
+	// the new Recovering phase.
+	r.lastEmergencyTrafficAt.Store(now.Unix())
+	r.captureBreadcrumb("cutback", map[string]any{
+		"sustained_closed_seconds": sustained,
+		"threshold":                r.deps.Cfg.ProvisionHealthyDurationSeconds,
+	})
+}
+
+// evaluateRecovering — Plan 06-08 (D-D1) idle-grace destroy gate.
+//
+// After cutback (Recovering entered), wait until no traffic has flowed
+// to the emergency pod for PROVISION_IDLE_GRACE_SECONDS (default 300s;
+// tests override to 1s). Then destroy the Vast.ai instance, close the
+// lifecycle row with shutdown_reason='cutback_idle', and transition
+// Recovering → Cooldown.
+//
+// IsIdle is computed from the lastEmergencyTrafficAt atomic — set by
+// dispatcher.RegisterTraffic on each request that hit the emergency pod.
+// The grace window is anchored to the LATER of (recoveringEnteredAt,
+// lastEmergencyTrafficAt) so a fresh-Recovering tick has the FULL grace
+// window even if RegisterTraffic was called moments ago during ACTIVE.
+func (r *Reconciler) evaluateRecovering(ctx context.Context, now time.Time, log *slog.Logger) {
+	graceSeconds := int64(r.deps.Cfg.ProvisionIdleGraceSeconds)
+	if graceSeconds <= 0 {
+		// Defense in depth — refuse to destroy if env was tampered with
+		// (operator override to 0 would mean "destroy immediately on
+		// cutback"). Log Error so the misconfig is visible.
+		log.Error("evaluateRecovering: idle grace seconds <= 0; refusing to destroy",
+			"idle_grace_seconds", r.deps.Cfg.ProvisionIdleGraceSeconds)
+		return
+	}
+	lastTraffic := r.lastEmergencyTrafficAt.Load()
+	enteredAt := r.recoveringEnteredAt.Load()
+	idleAnchor := lastTraffic
+	if enteredAt > idleAnchor {
+		idleAnchor = enteredAt
+	}
+	idleSeconds := now.Unix() - idleAnchor
+	if idleSeconds < graceSeconds {
+		log.Debug("evaluateRecovering: idle grace not yet elapsed",
+			"idle_seconds", idleSeconds, "grace_seconds", graceSeconds)
+		return
+	}
+	lc := r.activeLifecycle.Load()
+	if lc == nil {
+		// Defensive: Recovering without an active lifecycle means a prior
+		// close already cleared the pointer. Just transition to Cooldown.
+		log.Warn("evaluateRecovering: no active lifecycle; transitioning to Cooldown",
+			"idle_seconds", idleSeconds)
+		r.deps.FSM.Transition(StateRecovering, StateCooldown, now, "idle_grace_no_lifecycle")
+		r.cooldownEnteredAt.Store(now.Unix())
+		return
+	}
+	log.Info("emergency idle-grace elapsed: destroying pod (D-D1)",
+		"lifecycle_id", lc.ID, "vast_instance_id", lc.VastInstanceID,
+		"idle_seconds", idleSeconds, "grace_seconds", graceSeconds)
+	if err := r.destroyAndCloseLifecycle(ctx, lc, "cutback_idle"); err != nil {
+		log.Error("evaluateRecovering: destroyAndCloseLifecycle failed; transitioning anyway",
+			"lifecycle_id", lc.ID, "err", err)
+	}
+	r.deps.FSM.Transition(StateRecovering, StateCooldown, now, "idle_grace_elapsed")
+	r.cooldownEnteredAt.Store(now.Unix())
+}
+
+// evaluateCooldown — Plan 06-08 oscillation suppression. Holds the FSM
+// in Cooldown for PROVISION_HEALTHY_DURATION_SECONDS (same as the
+// cutback gate; defaults to 300s). Once elapsed, transitions Cooldown
+// → Healthy so a future trigger can re-arm.
+func (r *Reconciler) evaluateCooldown(_ context.Context, now time.Time, log *slog.Logger) {
+	holdSeconds := int64(r.deps.Cfg.ProvisionHealthyDurationSeconds)
+	if holdSeconds < 0 {
+		holdSeconds = 0
+	}
+	enteredAt := r.cooldownEnteredAt.Load()
+	if enteredAt == 0 {
+		// Cooldown without an entry timestamp — defensive (e.g. leader
+		// recovery resumed FSM directly into Cooldown). Stamp now and
+		// re-evaluate on next tick.
+		r.cooldownEnteredAt.Store(now.Unix())
+		return
+	}
+	elapsed := now.Unix() - enteredAt
+	if elapsed < holdSeconds {
+		log.Debug("evaluateCooldown: hold window not yet elapsed",
+			"elapsed_seconds", elapsed, "hold_seconds", holdSeconds)
+		return
+	}
+	log.Info("emergency cooldown elapsed: re-arming trigger (Healthy)",
+		"elapsed_seconds", elapsed, "hold_seconds", holdSeconds)
+	r.deps.FSM.Transition(StateCooldown, StateHealthy, now, "cooldown_elapsed")
+	// Reset the cooldown anchor so a future Cooldown re-entry has a
+	// fresh stamp.
+	r.cooldownEnteredAt.Store(0)
+}
+
+// RegisterTraffic implements the EmergTrafficRegistrar interface for the
+// dispatcher (Plan 06-08 / D-E3). Stores the current unix-second
+// timestamp into lastEmergencyTrafficAt so IsIdle can answer "has the
+// emergency pod been silent for PROVISION_IDLE_GRACE_SECONDS?". Lockless
+// + safe to call on the request hot path.
+func (r *Reconciler) RegisterTraffic() {
+	r.lastEmergencyTrafficAt.Store(time.Now().Unix())
+}
+
+// IsIdle returns true when the emergency pod has had no registered
+// traffic for at least graceSeconds. Exposed for tests + future
+// gatewayctl emerg-state output. Returns false defensively when
+// graceSeconds <= 0 (cannot enter "idle" state with a non-positive
+// grace window).
+func (r *Reconciler) IsIdle(graceSeconds int) bool {
+	if graceSeconds <= 0 {
+		return false
+	}
+	last := r.lastEmergencyTrafficAt.Load()
+	enteredAt := r.recoveringEnteredAt.Load()
+	anchor := last
+	if enteredAt > anchor {
+		anchor = enteredAt
+	}
+	return time.Now().Unix()-anchor >= int64(graceSeconds)
 }
 
 // evaluateEmergencyProvisioning is the StateEmergencyProvisioning branch.
@@ -594,19 +788,87 @@ func (r *Reconciler) handleForceDestroy(ctx context.Context, ev redisx.EmergEven
 			"id", lc.ID, "err", err, "by_replica", ev.ReplicaID)
 		return
 	}
-	r.deps.FSM.Transition(r.deps.FSM.State(), StateCooldown, time.Now(), "manual_force_destroy")
+	now := time.Now()
+	r.deps.FSM.Transition(r.deps.FSM.State(), StateCooldown, now, "manual_force_destroy")
+	r.cooldownEnteredAt.Store(now.Unix())
 	log.Info("force-destroy accepted",
 		"lifecycle_id", lc.ID, "by_replica", ev.ReplicaID)
 }
 
-// destroyAndCloseLifecycle is a Plan 06-08 helper. Plan 06-05 ships a
-// logging-only stub so handleForceDestroy can be wired + tested
-// end-to-end. When Plan 06-08 lands, this method body is replaced with
-// the real Vast.ai destroy_instance + CloseEmergencyLifecycle path; the
-// signature is kept stable so handleForceDestroy does not need to change.
-func (r *Reconciler) destroyAndCloseLifecycle(_ context.Context, lc *ActiveLifecycle, reason string) error {
-	r.deps.Log.Info("destroyAndCloseLifecycle stub (Plan 06-08 implements)",
-		"lifecycle_id", lc.ID, "reason", reason)
-	r.activeLifecycle.Store(nil)
+// destroyAndCloseLifecycle is the Plan 06-08 cutback + force-destroy
+// helper. Single shared path so the audit row close + Vast destroy +
+// dispatcher RestoreTier0 + cost calculation happen in lock-step
+// regardless of trigger (operator force_destroy_request from
+// gatewayctl OR D-D1 idle-grace cutback).
+//
+// Sequence (W7 revision 2026-05-13: events JSONB written FIRST so the
+// audit trail completes even if subsequent in-process operations fail):
+//
+//  1. Append `lifecycle_close` event JSONB via closeLifecycle (the
+//     existing Plan 06 helper which itself emits the event with
+//     {reason, total_cost_brl}).
+//  2. RestoreTier0("llm") if we did not already (ride-out from cutback
+//     idle-grace OR force_destroy from operator while ACTIVE).
+//  3. bestEffortDestroy(VastInstanceID) using a fresh background ctx
+//     with destroyShutdownBudget = 30s (Pitfall 8).
+//  4. Cost calculation is folded into closeLifecycle via
+//     calculateCostBRL — D-D4 hours_active = NOW() - first_health_pass_at.
+//
+// closeLifecycle handles activeLifecycle.Store(nil) +
+// activePodURL.Store(nil) + lifecycleCancel.Swap(nil) → CancelFunc(),
+// so this helper does not need to repeat them. The cancel propagates
+// to any goroutine still running for the lifecycle (e.g. healthcheck
+// resume loop) so they exit cleanly.
+//
+// Returns the closeLifecycle error if any. The caller (force-destroy
+// handler in reconciler.go OR evaluateRecovering in the same file) is
+// responsible for FSM transitions — destroyAndCloseLifecycle is a pure
+// data-plane helper.
+func (r *Reconciler) destroyAndCloseLifecycle(ctx context.Context, lc *ActiveLifecycle, reason string) error {
+	if lc == nil {
+		return errors.New("destroyAndCloseLifecycle: nil lifecycle")
+	}
+	if r.q == nil {
+		return errors.New("destroyAndCloseLifecycle: no DB pool wired")
+	}
+	r.deps.Log.Info("destroyAndCloseLifecycle (Plan 06-08)",
+		"lifecycle_id", lc.ID, "vast_instance_id", lc.VastInstanceID, "reason", reason)
+	// Step 2 — restore tier-0 routing. Idempotent (atomic Store(nil) of
+	// already-nil is cheap). Must happen BEFORE destroy so any in-flight
+	// dispatcher request that resolves AFTER this point routes back to
+	// the primary, not the about-to-be-destroyed pod.
+	if r.deps.Loader != nil {
+		r.deps.Loader.RestoreTier0("llm")
+	}
+	// Step 3 — destroy Vast.ai instance. Best-effort: failure is logged
+	// + swallowed by the helper; the orphan-recovery branch on the next
+	// leader acquisition will reconcile any leak.
+	r.bestEffortDestroy(lc.VastInstanceID)
+	// Step 1 (intentionally last in code order, but the actual SQL UPDATE
+	// runs INSIDE closeLifecycle which itself emits the
+	// `lifecycle_close` event via mustEventJSON before the UPDATE — the
+	// W7 "events first" invariant is preserved by closeLifecycle's
+	// internal sequencing) — see lifecycle.go closeLifecycle for the
+	// SQL ordering. We need the destroy to happen before the close so
+	// the audit row reflects the actual destroy outcome (cost = hours
+	// from first_health_pass_at to NOW(); the destroy doesn't affect
+	// the calculation but a future enhancement might want to record
+	// destroy_at separately).
+	//
+	// Use the calc helper to get cost for the close event payload —
+	// closeLifecycle re-runs the calc internally, but we'd like the
+	// breadcrumb here to carry it for forensics.
+	cost := r.calculateCostBRL(ctx, lc.ID, 0)
+	if err := r.closeLifecycle(ctx, lc.ID, reason, 0); err != nil {
+		r.deps.Log.Error("destroyAndCloseLifecycle: closeLifecycle failed",
+			"lifecycle_id", lc.ID, "reason", reason, "err", err)
+		return err
+	}
+	r.captureBreadcrumb("destroy_and_close", map[string]any{
+		"lifecycle_id":     lc.ID,
+		"vast_instance_id": lc.VastInstanceID,
+		"reason":           reason,
+		"total_cost_brl":   cost,
+	})
 	return nil
 }

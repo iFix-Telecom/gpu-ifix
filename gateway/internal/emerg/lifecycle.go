@@ -374,7 +374,15 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 
 // markHealthy is the success exit of waitForReadyOrDestroy. Updates the DB
 // row (first_health_pass_at = NOW()), flips the FSM to EmergencyActive,
-// and stores the active pod URL for the dispatcher (Plan 08 reads).
+// stores the active pod URL, AND activates the dispatcher tier-0
+// override (Plan 06-08, D-E3) so subsequent LLM requests route to the
+// emergency pod instead of the (failed) primary.
+//
+// The dispatcher resets when evaluateEmergencyActive triggers cutback —
+// see reconciler.go evaluateEmergencyActive for the RestoreTier0 call.
+// Also reset r.lastEmergencyTrafficAt to NOW so the idle-grace timer
+// in evaluateRecovering uses a sensible baseline (rather than 0 which
+// would falsely classify a fresh-ACTIVE pod as immediately idle).
 func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthURL string, acceptedDPH float64) error {
 	eventJSON := mustEventJSON("health_pass", map[string]any{
 		"lifecycle_id": lifecycleID,
@@ -389,11 +397,36 @@ func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthU
 	}
 	r.activePodURL.Store(&healthURL)
 	obs.GatewayEmergencyActivePod.WithLabelValues(healthURL).Set(1)
+	// Plan 06-08 (D-E3): activate dispatcher tier-0 override. Use the
+	// emergency pod's BASE URL (strip /health) as the upstream URL so the
+	// dispatcher's ReverseProxy target matches the OpenAI-compatible
+	// llama.cpp endpoint. podHealthURL produces e.g.
+	// "http://1.2.3.4:40713/health"; the upstream URL is the same minus
+	// "/health".
+	if r.deps.Loader != nil {
+		baseURL := stripHealthSuffix(healthURL)
+		r.deps.Loader.OverrideTier0("llm", baseURL)
+	}
+	// Plan 06-08: arm the idle-grace timer with NOW so a fresh ACTIVE
+	// pod is not immediately classified as idle (lastEmergencyTrafficAt
+	// defaulted to 0 before any RegisterTraffic call lands).
+	r.lastEmergencyTrafficAt.Store(time.Now().Unix())
 	r.captureBreadcrumb("health_pass", map[string]any{
 		"lifecycle_id": lifecycleID, "health_url": healthURL,
 	})
 	r.deps.FSM.Transition(StateEmergencyProvisioning, StateEmergencyActive, time.Now(), "health_passed")
 	return nil
+}
+
+// stripHealthSuffix removes a trailing "/health" from the given URL.
+// Helper for markHealthy + leader-recovery resume so the dispatcher
+// override receives the upstream BASE URL, not the probe URL.
+func stripHealthSuffix(u string) string {
+	const suffix = "/health"
+	if len(u) > len(suffix) && u[len(u)-len(suffix):] == suffix {
+		return u[:len(u)-len(suffix)]
+	}
+	return u
 }
 
 // closeLifecycle is the single point of contact for closing a lifecycle
@@ -430,6 +463,15 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 	}
 	if podURLPtr := r.activePodURL.Swap(nil); podURLPtr != nil {
 		obs.GatewayEmergencyActivePod.WithLabelValues(*podURLPtr).Set(0)
+	}
+	// Plan 06-08 (D-E3): defensive RestoreTier0 on every close. If the
+	// override was already cleared (e.g. evaluateEmergencyActive's cutback
+	// path called RestoreTier0 before destroyAndCloseLifecycle), this is
+	// a cheap atomic.Pointer.Store(nil) no-op. Safety: prevents the
+	// dispatcher from continuing to route to a pod whose lifecycle row
+	// is closed (orphan dispatcher state).
+	if r.deps.Loader != nil {
+		r.deps.Loader.RestoreTier0("llm")
 	}
 	obs.GatewayEmergencyLifecyclesTotal.WithLabelValues("failed_over_sustained", reason).Inc()
 	return nil
