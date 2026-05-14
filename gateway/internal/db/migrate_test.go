@@ -15,7 +15,9 @@ import (
 //   - Phase 4: 0010-0015 (billing_events, usage_counters evolve, prices+fx, tenants schedule/quota, admin_keys, seed)
 //   - Phase 5: 0016-0018 (tenants shedding limits, upstreams shed thresholds, audit_log shed values docs-only)
 //   - Phase 6: 0019 (emergency_lifecycles audit table)
-//   - Phase 7: 0020 (audit_log.event_kind additive nullable column)
+//   - Phase 7: 0020 (audit_log.event_kind additive nullable column),
+//     0021 (audit_log idx on (ts, tenant_id, route) — CR-02),
+//     0022 (audit_log.reason additive nullable column — CR-03)
 //
 // When adding migrations, append the filename to the want slice; the test
 // fails if a migration is missing, out of order, or unexpected.
@@ -52,6 +54,8 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0018_audit_log_shed_values.sql",
 		"0019_emergency_lifecycles.sql",
 		"0020_audit_log_event_kind.sql",
+		"0021_audit_log_ts_index.sql",
+		"0022_audit_log_reason.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)
