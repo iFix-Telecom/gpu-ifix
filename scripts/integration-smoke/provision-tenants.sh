@@ -26,7 +26,11 @@
 #
 #   --gatewayctl PATH  path to the compiled gatewayctl binary, or a wrapper
 #                      such as a `docker exec ifix-ai-gateway /gatewayctl`
-#                      shim (default: `gatewayctl` on PATH)
+#                      shim (default: `gatewayctl` on PATH). A multi-word
+#                      value is split on spaces into an argv array — so the
+#                      components themselves MUST NOT contain spaces (use a
+#                      wrapper script on PATH if gatewayctl lives under a
+#                      space-containing path).
 #   --mint-keys        opt-in: also mint the 2 tenant API keys + the dashboard
 #                      admin key (NON-idempotent — pass exactly once)
 #   --dry-run          print the gatewayctl commands that WOULD run, execute
@@ -45,13 +49,17 @@ log() { printf '[%s] [provision-tenants] %s\n' "$(date -Iseconds)" "$*" >&2; }
 : "${AI_GATEWAY_PG_DSN:?missing}"
 
 # --- defaults + arg parse -------------------------------------------------
-GATEWAYCTL="gatewayctl"
+# GATEWAYCTL is an array so a multi-word wrapper (e.g.
+# `docker exec ifix-ai-gateway /gatewayctl`) is passed to exec as distinct
+# argv entries without relying on unquoted word-splitting. The split is on
+# spaces, so the components themselves must not contain spaces.
+GATEWAYCTL=(gatewayctl)
 MINT_KEYS=0
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --gatewayctl) GATEWAYCTL="$2"; shift 2;;
+    --gatewayctl) IFS=' ' read -r -a GATEWAYCTL <<< "$2"; shift 2;;
     --mint-keys)  MINT_KEYS=1;     shift 1;;
     --dry-run)    DRY_RUN=1;       shift 1;;
     *) log "unknown arg $1"; exit 2;;
@@ -63,8 +71,9 @@ for bin in grep date; do
   command -v "$bin" >/dev/null 2>&1 || { log "missing required binary: $bin"; exit 1; }
 done
 # The gatewayctl entry may be multi-word (e.g. "docker exec ... /gatewayctl");
-# only verify the leading executable.
-GATEWAYCTL_BIN="${GATEWAYCTL%% *}"
+# only verify the leading executable. (A wrapper whose later words are wrong
+# still passes this precheck and fails at runtime — documented limitation.)
+GATEWAYCTL_BIN="${GATEWAYCTL[0]}"
 if [[ "$DRY_RUN" -eq 0 ]]; then
   command -v "$GATEWAYCTL_BIN" >/dev/null 2>&1 \
     || { log "missing gatewayctl executable: $GATEWAYCTL_BIN (pass --gatewayctl PATH)"; exit 1; }
@@ -84,13 +93,13 @@ GW_OUT=""
 GW_RC=0
 run_gatewayctl() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '[dry-run] would run: %s %s\n' "$GATEWAYCTL" "$*"
+    printf '[dry-run] would run: %s %s\n' "${GATEWAYCTL[*]}" "$*"
     GW_OUT=""
     GW_RC=0
     return 0
   fi
   set +e
-  GW_OUT="$($GATEWAYCTL "$@" 2>&1)"
+  GW_OUT="$("${GATEWAYCTL[@]}" "$@" 2>&1)"
   GW_RC=$?
   set -e
 }
