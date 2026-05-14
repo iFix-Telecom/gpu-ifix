@@ -209,9 +209,9 @@ Plans:
   4. Each app has an individual smoke-test on production and a <5 min rollback playbook; LGPD review is documented before sensitive tenants go live in prod.
 **Plans:** 4 plans (2 waves)
 Plans:
-- [ ] 09-01-PLAN.md — Extend provision-tenants.sh to 4 mixed-data-class tenants (telefonia + cobrancas sensitive, campanhas + voice-api normal) + per-tenant quotas + README update (INT-03, INT-04, INT-05)
-- [ ] 09-02-PLAN.md — smoke-sensitive-failover.py (RES-08 fail-closed + never-external + audit gates) + sensitive-failover-report-schema.json (INT-03, INT-04)
-- [ ] 09-03-PLAN.md — RUNBOOK-CLIENT-INTEGRATION-SENSITIVE.md (4 per-app <5-min rollback procedures) + LGPD-SUBPROCESSORS.md + LGPD-REVIEW-CHECKLIST.md (INT-03, INT-04, INT-05)
+- [x] 09-01-PLAN.md — Extend provision-tenants.sh to 4 mixed-data-class tenants (telefonia + cobrancas sensitive, campanhas + voice-api normal) + per-tenant quotas + README update (INT-03, INT-04, INT-05)
+- [x] 09-02-PLAN.md — smoke-sensitive-failover.py (RES-08 fail-closed + never-external + audit gates) + sensitive-failover-report-schema.json (INT-03, INT-04)
+- [x] 09-03-PLAN.md — RUNBOOK-CLIENT-INTEGRATION-SENSITIVE.md (4 per-app <5-min rollback procedures) + LGPD-SUBPROCESSORS.md + LGPD-REVIEW-CHECKLIST.md (INT-03, INT-04, INT-05)
 - [ ] 09-04-PLAN.md — HUMAN-UAT: 09-HUMAN-UAT.md scenario sheet (SC1-SC4) + blocking live-UAT checkpoint + blocking LGPD legal sign-off gate (INT-03, INT-04, INT-05)
 **Research hint:** yes (LGPD review with Ifix legal — external input required before GA of sensitive tenants)
 **UI hint:** no
