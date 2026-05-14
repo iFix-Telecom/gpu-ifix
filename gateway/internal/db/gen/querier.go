@@ -6,6 +6,7 @@ package gen
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -142,6 +143,15 @@ type Querier interface {
 	SumBillingEventsByDate(ctx context.Context, arg SumBillingEventsByDateParams) ([]SumBillingEventsByDateRow, error)
 	// Aggregate over the entire range -- for the `summary` field.
 	SumBillingEventsRange(ctx context.Context, arg SumBillingEventsRangeParams) (SumBillingEventsRangeRow, error)
+	// Phase 7 — per-tenant/route latency percentiles for the observability
+	// dashboard's /admin/metrics JSON (consumed by the admin handler in plan
+	// 07-03). Postgres computes percentile_cont natively over latency_ms, so
+	// the dashboard gets true P50/P95/P99 with zero Prometheus-cardinality
+	// cost (Pitfall 1 — no tenant label on a histogram). $1 is the window-start
+	// timestamp; the handler passes NOW() - window (default 5 minutes). The
+	// ts >= $1 scan is served by idx_audit_log_tenant_ts and bounded by the
+	// window + the ~6-tenant cardinality (threat T-07-10, accept).
+	TenantLatencyPercentiles(ctx context.Context, ts time.Time) ([]TenantLatencyPercentilesRow, error)
 	// Updated periodically by middleware (low frequency; ok in hot path occasionally).
 	TouchAdminKeyLastUsed(ctx context.Context, id uuid.UUID) error
 	// NOT called per-request by 02-03 (Codex review [MEDIUM] 02-03 — TouchKeyLastUsed

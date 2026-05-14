@@ -18,3 +18,23 @@ FROM ai_gateway.audit_log
 WHERE event_kind IS NOT NULL
 ORDER BY ts DESC
 LIMIT $1 OFFSET $2;
+
+-- name: TenantLatencyPercentiles :many
+-- Phase 7 — per-tenant/route latency percentiles for the observability
+-- dashboard's /admin/metrics JSON (consumed by the admin handler in plan
+-- 07-03). Postgres computes percentile_cont natively over latency_ms, so
+-- the dashboard gets true P50/P95/P99 with zero Prometheus-cardinality
+-- cost (Pitfall 1 — no tenant label on a histogram). $1 is the window-start
+-- timestamp; the handler passes NOW() - window (default 5 minutes). The
+-- ts >= $1 scan is served by idx_audit_log_tenant_ts and bounded by the
+-- window + the ~6-tenant cardinality (threat T-07-10, accept).
+SELECT tenant_id,
+       route,
+       percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms) AS p50,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95,
+       percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99,
+       count(*) AS requests,
+       (count(*) FILTER (WHERE status_code >= 500)::float / NULLIF(count(*), 0))::float8 AS error_rate
+FROM ai_gateway.audit_log
+WHERE ts >= $1
+GROUP BY tenant_id, route;
