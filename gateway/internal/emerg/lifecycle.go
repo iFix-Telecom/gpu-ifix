@@ -19,10 +19,10 @@
 //
 //   - SearchOffers (filter epsilon cap+0.0001 per Pitfall 5)
 //   - Up to 3 attempts with 2s/4s/8s exponential backoff:
-//       * CreateInstance
-//       * On ErrOfferGone (404+no_such_ask), re-search and retry
-//       * On any other error, abort
-//       * On success, transition to waitForReadyOrDestroy
+//   - CreateInstance
+//   - On ErrOfferGone (404+no_such_ask), re-search and retry
+//   - On any other error, abort
+//   - On success, transition to waitForReadyOrDestroy
 //   - On 3 race losses: Sentry CaptureMessage + close lifecycle with
 //     shutdown_reason='offer_race_lost'.
 //
@@ -223,13 +223,13 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 			// SUCCESS — record vast IDs + offer_accepted event in ONE UPDATE
 			// (D-D3: events JSONB written FIRST per W7 revision 2026-05-13).
 			eventJSON := mustEventJSON("offer_accepted", map[string]any{
-				"offer_id":     offer.ID,
-				"instance_id":  instance.ID,
-				"dph":          offer.DphTotal,
-				"host_id":      offer.HostID,
-				"machine_id":   offer.MachineID,
-				"geolocation":  offer.Geolocation,
-				"attempt":      attempt + 1,
+				"offer_id":    offer.ID,
+				"instance_id": instance.ID,
+				"dph":         offer.DphTotal,
+				"host_id":     offer.HostID,
+				"machine_id":  offer.MachineID,
+				"geolocation": offer.Geolocation,
+				"attempt":     attempt + 1,
 			})
 			if err := r.q.UpdateEmergencyLifecycleVastIDs(ctx, gen.UpdateEmergencyLifecycleVastIDsParams{
 				ID:             id,
@@ -835,4 +835,3 @@ func (r *Reconciler) cancelActiveLifecycle(ctx context.Context, reason string) {
 		"vast_instance_id": lc.VastInstanceID,
 	})
 }
-

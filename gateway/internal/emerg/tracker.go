@@ -68,11 +68,11 @@ func newLocalLlmTracker() *localLlmTracker {
 // event whose Upstream != "local-llm" (D-C2 — chat is the only signal
 // source). For local-llm events:
 //   - OPEN:           store state="open" + set openSince to now (only if
-//                     openSince==0 — idempotent on duplicate OPEN events
-//                     so an event resend does not reset the sustained
-//                     timer).
+//     openSince==0 — idempotent on duplicate OPEN events
+//     so an event resend does not reset the sustained
+//     timer).
 //   - HALF_OPEN/CLOSED: store the new state + reset openSince=0 so
-//                     SustainedFailedOverSeconds returns 0 immediately.
+//     SustainedFailedOverSeconds returns 0 immediately.
 //
 // All writes are atomic; safe to call from the Subscribe goroutine while
 // the reconciler tick reads concurrently.

@@ -28,9 +28,9 @@
 // # Sentry payload
 //
 //   - Level   : Warning (informational; budget is exceeded but the
-//               provisioning path is NOT blocked — D-D2 explicitly
-//               leaves the operator in charge via gatewayctl emerg
-//               force-stop).
+//     provisioning path is NOT blocked — D-D2 explicitly
+//     leaves the operator in charge via gatewayctl emerg
+//     force-stop).
 //   - Tags    : subsystem=emerg, alert=budget_exceeded.
 //   - Extras  : month_cost_brl, budget_brl.
 //   - Message : "monthly emergency budget exceeded".

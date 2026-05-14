@@ -176,7 +176,7 @@ func runEmergStateWithRedis(ctx context.Context, rdb *redis.Client, args []strin
 		// }`. For non-empty maps, fall back to MarshalIndent for human
 		// readability.
 		var (
-			out []byte
+			out  []byte
 			mErr error
 		)
 		if len(m) == 0 {

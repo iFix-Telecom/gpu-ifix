@@ -8,18 +8,18 @@
 // Two test scenarios:
 //
 // 1. TestEmergLeaderRecoveryActiveResume (happy path)
-//    - Pre-seed lifecycle row with vast_instance_id=99 + events JSONB
-//      containing offer_accepted + health_pass.
-//    - mockVast GetInstance(99) returns running + populated ports.
-//    - mockPodHealthServer returns 200 healthy.
-//    - Assert FSM == EmergencyActive (recovered from events.health_pass)
-//      AND activeLifecycle != nil AND activePodURL != nil.
+//   - Pre-seed lifecycle row with vast_instance_id=99 + events JSONB
+//     containing offer_accepted + health_pass.
+//   - mockVast GetInstance(99) returns running + populated ports.
+//   - mockPodHealthServer returns 200 healthy.
+//   - Assert FSM == EmergencyActive (recovered from events.health_pass)
+//     AND activeLifecycle != nil AND activePodURL != nil.
 //
 // 2. TestEmergLeaderRecoveryActiveResume_HealthFailureCancels (sad path)
-//    - Same setup but mockPodHealthServer returns 500.
-//    - Assert: after 3 consecutive failures (~15s), the resumed lifecycle
-//      is cancelled — FSM returns to Healthy AND activeLifecycle == nil
-//      AND lifecycle row is closed with cancel-related shutdown_reason.
+//   - Same setup but mockPodHealthServer returns 500.
+//   - Assert: after 3 consecutive failures (~15s), the resumed lifecycle
+//     is cancelled — FSM returns to Healthy AND activeLifecycle == nil
+//     AND lifecycle row is closed with cancel-related shutdown_reason.
 package integration
 
 import (

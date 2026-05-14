@@ -15,11 +15,11 @@
 //   - vast_instance_id       12345 (mock new_contract)
 //   - accepted_dph           > 0 (offer 0.35)
 //   - total_cost_brl         >= 0 (D-D4 calc; may be 0 if elapsed
-//                            < 1s but the column itself MUST be set)
+//     < 1s but the column itself MUST be set)
 //   - shutdown_reason        "cutback_idle"
 //   - leader_replica         non-empty (os.Hostname() at boot)
 //   - events JSONB           ≥3 entries (offer_accepted + healthy +
-//                            lifecycle_close at minimum)
+//     lifecycle_close at minimum)
 package integration
 
 import (

@@ -27,10 +27,10 @@ import (
 // markHealthy) to the FSM state the recovery code reconstructs.
 func TestInferStateFromEvents(t *testing.T) {
 	cases := []struct {
-		name     string
-		events   []map[string]any
-		want     State
-		wantOK   bool
+		name   string
+		events []map[string]any
+		want   State
+		wantOK bool
 	}{
 		{
 			name:   "empty events array → no inference",

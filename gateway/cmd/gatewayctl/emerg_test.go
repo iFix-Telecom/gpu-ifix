@@ -74,8 +74,8 @@ func captureStdout(t *testing.T, fn func()) string {
 		_, _ = io.Copy(&buf, r)
 	}()
 	fn()
-	_ = w.Close()  // signal EOF to the goroutine
-	wg.Wait()       // synchronise: goroutine exits, buffer write completes
+	_ = w.Close() // signal EOF to the goroutine
+	wg.Wait()     // synchronise: goroutine exits, buffer write completes
 	os.Stdout = orig
 	return buf.String()
 }

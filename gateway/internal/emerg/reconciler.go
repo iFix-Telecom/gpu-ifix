@@ -415,13 +415,13 @@ func (r *Reconciler) runOneTick(ctx context.Context, mutex *redsync.Mutex, now t
 // the remaining cases incrementally:
 //
 //   - Plan 05 (trigger):     HEALTHY → FAILED_OVER → EMERGENCY_PROVISIONING
-//                            when local-llm OPEN sustained ≥ threshold.
+//     when local-llm OPEN sustained ≥ threshold.
 //   - Plan 06 (provisioning): EMERGENCY_PROVISIONING → EMERGENCY_ACTIVE
-//                            via Vast.ai bid+create+/health poll.
+//     via Vast.ai bid+create+/health poll.
 //   - Plan 07 (cancel/recovery): cancel-in-flight + leader-recovery orphan
-//                            reconcile.
+//     reconcile.
 //   - Plan 08 (cutback):     RECOVERING grace + IDLE_GRACE destroy +
-//                            COOLDOWN suppression window.
+//     COOLDOWN suppression window.
 func (r *Reconciler) evaluateTick(ctx context.Context, now time.Time, log *slog.Logger) {
 	switch r.deps.FSM.State() {
 	case StateHealthy:

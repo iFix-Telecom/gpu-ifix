@@ -140,17 +140,17 @@ type Config struct {
 	// disabled channel at startup; config.go itself does not log and these
 	// fields are never added to the required-env validation slice. Credentials
 	// are plain strings here and MUST NOT be logged (threat T-07-01).
-	ChatwootAPIURL          string // CHATWOOT_API_URL
-	ChatwootAPIToken        string // CHATWOOT_API_TOKEN
-	ChatwootOncallAccountID string // CHATWOOT_ONCALL_ACCOUNT_ID
-	ChatwootOncallInboxID   string // CHATWOOT_ONCALL_INBOX_ID
-	ChatwootOncallContactID string // CHATWOOT_ONCALL_CONTACT_ID
-	ClickUpAPIToken         string // CLICKUP_API_TOKEN
-	ClickUpAlertListID      string // CLICKUP_ALERT_LIST_ID
-	BrevoSMTPHost           string // BREVO_SMTP_HOST
-	BrevoSMTPPort           int    // BREVO_SMTP_PORT (default 587)
-	BrevoSMTPUser           string // BREVO_SMTP_USER
-	BrevoSMTPPass           string // BREVO_SMTP_PASS
+	ChatwootAPIURL          string   // CHATWOOT_API_URL
+	ChatwootAPIToken        string   // CHATWOOT_API_TOKEN
+	ChatwootOncallAccountID string   // CHATWOOT_ONCALL_ACCOUNT_ID
+	ChatwootOncallInboxID   string   // CHATWOOT_ONCALL_INBOX_ID
+	ChatwootOncallContactID string   // CHATWOOT_ONCALL_CONTACT_ID
+	ClickUpAPIToken         string   // CLICKUP_API_TOKEN
+	ClickUpAlertListID      string   // CLICKUP_ALERT_LIST_ID
+	BrevoSMTPHost           string   // BREVO_SMTP_HOST
+	BrevoSMTPPort           int      // BREVO_SMTP_PORT (default 587)
+	BrevoSMTPUser           string   // BREVO_SMTP_USER
+	BrevoSMTPPass           string   // BREVO_SMTP_PASS
 	AlertEmailTo            []string // ALERT_EMAIL_TO (CSV; empty default = email channel disabled)
 	AlertEmailFrom          string   // ALERT_EMAIL_FROM
 }

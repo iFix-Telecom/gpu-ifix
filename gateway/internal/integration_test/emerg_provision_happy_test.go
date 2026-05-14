@@ -55,13 +55,13 @@ import (
 // test can assert how many times each endpoint was hit.
 type mockVastServer struct {
 	*httptest.Server
-	searchHits     atomic.Int64
-	createHits     atomic.Int64
-	destroyHits    atomic.Int64
-	statusHits     atomic.Int64
-	searchResponse atomic.Pointer[[]vast.Offer]
-	createStatus   atomic.Int32 // HTTP status to return on PUT /asks; 0 → 200
-	getResponse    atomic.Pointer[vast.Instance]
+	searchHits        atomic.Int64
+	createHits        atomic.Int64
+	destroyHits       atomic.Int64
+	statusHits        atomic.Int64
+	searchResponse    atomic.Pointer[[]vast.Offer]
+	createStatus      atomic.Int32 // HTTP status to return on PUT /asks; 0 → 200
+	getResponse       atomic.Pointer[vast.Instance]
 	lastCreateOfferID atomic.Int64
 }
 
