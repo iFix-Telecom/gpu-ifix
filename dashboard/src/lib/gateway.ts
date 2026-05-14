@@ -26,12 +26,32 @@ const GATEWAY_PROXY_BASE = "/api/gateway";
 /** Per-tenant + per-route latency percentiles and error rate. */
 export interface TenantMetricRow {
   tenant_id: string;
+  /**
+   * Human-readable tenant slug/name from the gateway's LEFT JOIN on
+   * ai_gateway.tenants (WR-10). Both are `null` when the audit row's
+   * tenant no longer exists in the tenants table — use `tenantLabel`
+   * to render, which falls back name → slug → raw UUID.
+   */
+  tenant_slug: string | null;
+  tenant_name: string | null;
   route: string;
   p50: number;
   p95: number;
   p99: number;
   requests: number;
   error_rate: number;
+}
+
+/**
+ * Operator-facing label for a tenant row (WR-10). Prefers the human name,
+ * then the slug, then the raw UUID — an operator triaging an incident
+ * should see `ConverseAI`, not `8f1c0d2e-4a5b-…`. The UUID fallback keeps
+ * the row identifiable even for a since-deleted tenant.
+ */
+export function tenantLabel(
+  row: Pick<TenantMetricRow, "tenant_id" | "tenant_slug" | "tenant_name">,
+): string {
+  return row.tenant_name ?? row.tenant_slug ?? row.tenant_id;
 }
 
 /** One upstream's current in-flight request count. */

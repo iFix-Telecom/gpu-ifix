@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg"
@@ -50,13 +51,15 @@ func TestMetricsHandler_OK_JSONShape(t *testing.T) {
 	fake := &fakeMetricsQueries{
 		rows: []gen.TenantLatencyPercentilesRow{
 			{
-				TenantID:  tid,
-				Route:     "/v1/chat/completions",
-				P50:       42.0,
-				P95:       180.0,
-				P99:       420.0,
-				Requests:  100,
-				ErrorRate: 0.02,
+				TenantID:   tid,
+				TenantSlug: pgtype.Text{String: "converseai", Valid: true},
+				TenantName: pgtype.Text{String: "ConverseAI", Valid: true},
+				Route:      "/v1/chat/completions",
+				P50:        42.0,
+				P95:        180.0,
+				P99:        420.0,
+				Requests:   100,
+				ErrorRate:  0.02,
 			},
 		},
 	}
@@ -90,6 +93,14 @@ func TestMetricsHandler_OK_JSONShape(t *testing.T) {
 	row := resp.Tenants[0]
 	if row.TenantID != tid.String() {
 		t.Errorf("tenant_id: want %s, got %s", tid, row.TenantID)
+	}
+	// WR-10: the human-readable slug/name from the tenants LEFT JOIN are
+	// surfaced as non-nil *string when the join matched.
+	if row.TenantSlug == nil || *row.TenantSlug != "converseai" {
+		t.Errorf("tenant_slug: want converseai, got %v", row.TenantSlug)
+	}
+	if row.TenantName == nil || *row.TenantName != "ConverseAI" {
+		t.Errorf("tenant_name: want ConverseAI, got %v", row.TenantName)
 	}
 	if row.P95 != 180.0 || row.ErrorRate != 0.02 {
 		t.Errorf("percentile/error_rate not echoed: p95=%v error_rate=%v", row.P95, row.ErrorRate)

@@ -50,14 +50,22 @@ type MetricsResponse struct {
 
 // TenantLatencyRow is one per-(tenant,route) percentile row, sourced from
 // the TenantLatencyPercentiles sqlc query.
+//
+// WR-10: TenantSlug + TenantName carry the human-readable identifiers from
+// the LEFT JOIN on ai_gateway.tenants. They are JSON null when the audit
+// row's tenant no longer exists in the tenants table (deleted tenant); the
+// dashboard falls back to TenantID in that case. TenantID is always a
+// non-null raw UUID — the stable join key and the fallback label.
 type TenantLatencyRow struct {
-	TenantID  string  `json:"tenant_id"`
-	Route     string  `json:"route"`
-	P50       float64 `json:"p50"`
-	P95       float64 `json:"p95"`
-	P99       float64 `json:"p99"`
-	Requests  int64   `json:"requests"`
-	ErrorRate float64 `json:"error_rate"`
+	TenantID   string  `json:"tenant_id"`
+	TenantSlug *string `json:"tenant_slug"`
+	TenantName *string `json:"tenant_name"`
+	Route      string  `json:"route"`
+	P50        float64 `json:"p50"`
+	P95        float64 `json:"p95"`
+	P99        float64 `json:"p99"`
+	Requests   int64   `json:"requests"`
+	ErrorRate  float64 `json:"error_rate"`
 }
 
 // InflightRow is the current in-flight request count for one upstream,
@@ -131,13 +139,15 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, row := range rows {
 		resp.Tenants = append(resp.Tenants, TenantLatencyRow{
-			TenantID:  row.TenantID.String(),
-			Route:     row.Route,
-			P50:       row.P50,
-			P95:       row.P95,
-			P99:       row.P99,
-			Requests:  row.Requests,
-			ErrorRate: row.ErrorRate,
+			TenantID:   row.TenantID.String(),
+			TenantSlug: pgTextPtr(row.TenantSlug),
+			TenantName: pgTextPtr(row.TenantName),
+			Route:      row.Route,
+			P50:        row.P50,
+			P95:        row.P95,
+			P99:        row.P99,
+			Requests:   row.Requests,
+			ErrorRate:  row.ErrorRate,
 		})
 	}
 

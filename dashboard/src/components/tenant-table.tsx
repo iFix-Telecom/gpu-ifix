@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/table";
 import { errorRateTier, formatCount, formatErrorRate } from "@/lib/format";
 import type { StatusTier } from "@/lib/fsm";
-import type { TenantMetricRow } from "@/lib/gateway";
+import { type TenantMetricRow, tenantLabel } from "@/lib/gateway";
 import { cn } from "@/lib/utils";
 
 /** error-rate tier → badge classes (UI-SPEC status palette). */
@@ -81,7 +81,12 @@ export function TenantTable({ rows }: TenantTableProps) {
               // 36px fixed row height (UI-SPEC §Layout Constraints).
               className="h-9"
             >
-              <TableCell className="text-[14px]">{row.tenant_id}</TableCell>
+              {/* WR-10: render the human label (name → slug → UUID), not
+                  the raw UUID, so an operator triaging an incident sees a
+                  recognizable tenant. The UUID stays the row key above. */}
+              <TableCell className="text-[14px]">
+                {tenantLabel(row)}
+              </TableCell>
               <TableCell className="text-[14px] text-muted-foreground">
                 {row.route}
               </TableCell>

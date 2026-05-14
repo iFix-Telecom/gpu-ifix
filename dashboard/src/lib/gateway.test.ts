@@ -4,6 +4,7 @@ import {
   fetchAudit,
   fetchMetrics,
   fetchUsage,
+  tenantLabel,
 } from "@/lib/gateway";
 
 /**
@@ -31,8 +32,9 @@ describe("fetchMetrics", () => {
   it("hits the /api/gateway/metrics proxy path and parses MetricsResponse", async () => {
     // This payload is the ACTUAL `admin.MetricsResponse` shape the Go
     // handler emits (gateway/internal/admin/metrics.go) — window,
-    // fsm_state, tenants[] with raw-UUID tenant_id, inflight as an
-    // InflightRow[] array. No generated_at / by_route / by_upstream /
+    // fsm_state, tenants[] with raw-UUID tenant_id plus the WR-10
+    // tenant_slug / tenant_name from the tenants LEFT JOIN, inflight as
+    // an InflightRow[] array. No generated_at / by_route / by_upstream /
     // scalar inflight — the gateway never emits those.
     const payload = {
       window: "5m0s",
@@ -40,6 +42,8 @@ describe("fetchMetrics", () => {
       tenants: [
         {
           tenant_id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+          tenant_slug: "converseai",
+          tenant_name: "ConverseAI",
           route: "/v1/chat/completions",
           p50: 120,
           p95: 480,
@@ -64,8 +68,36 @@ describe("fetchMetrics", () => {
     expect(calledUrl.startsWith("/api/gateway/")).toBe(true);
     expect(result.fsm_state).toBe("healthy");
     expect(result.tenants[0].p95).toBe(480);
+    expect(result.tenants[0].tenant_slug).toBe("converseai");
+    expect(result.tenants[0].tenant_name).toBe("ConverseAI");
     expect(result.inflight[0].upstream).toBe("local-llm");
     expect(result.inflight[0].inflight).toBe(3);
+  });
+});
+
+describe("tenantLabel", () => {
+  it("prefers name, falls back to slug, then the raw UUID (WR-10)", () => {
+    expect(
+      tenantLabel({
+        tenant_id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+        tenant_slug: "converseai",
+        tenant_name: "ConverseAI",
+      }),
+    ).toBe("ConverseAI");
+    expect(
+      tenantLabel({
+        tenant_id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+        tenant_slug: "converseai",
+        tenant_name: null,
+      }),
+    ).toBe("converseai");
+    expect(
+      tenantLabel({
+        tenant_id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+        tenant_slug: null,
+        tenant_name: null,
+      }),
+    ).toBe("8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f");
   });
 });
 

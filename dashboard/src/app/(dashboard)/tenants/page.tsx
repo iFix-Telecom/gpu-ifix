@@ -41,7 +41,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatBrl } from "@/lib/format";
-import { fetchMetrics, fetchUsage, GatewayError } from "@/lib/gateway";
+import {
+  fetchMetrics,
+  fetchUsage,
+  GatewayError,
+  tenantLabel,
+} from "@/lib/gateway";
 
 /** WR-06: the specific proxy/gateway cause, or the generic fallback. */
 function errorMessage(error: unknown): string {
@@ -88,8 +93,16 @@ export default function TenantsPage() {
     enabled: applied !== null,
   });
 
-  const tenantIds = Array.from(
-    new Set((metricsQuery.data?.tenants ?? []).map((t) => t.tenant_id)),
+  // De-duplicate tenants by UUID, keeping the human label for display.
+  // The Select VALUE stays the UUID (the stable id `/admin/usage` accepts),
+  // but the operator sees the name/slug, not a bare UUID (WR-10).
+  const tenantOptions = Array.from(
+    new Map(
+      (metricsQuery.data?.tenants ?? []).map((t) => [
+        t.tenant_id,
+        { id: t.tenant_id, label: tenantLabel(t) },
+      ]),
+    ).values(),
   );
 
   const canApply =
@@ -156,9 +169,9 @@ export default function TenantsPage() {
                 <SelectValue placeholder="Selecione um tenant" />
               </SelectTrigger>
               <SelectContent>
-                {tenantIds.map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {id}
+                {tenantOptions.map((opt) => (
+                  <SelectItem key={opt.id} value={opt.id}>
+                    {opt.label}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -29,18 +29,27 @@ LIMIT $1 OFFSET $2;
 -- the dashboard gets true P50/P95/P99 with zero Prometheus-cardinality
 -- cost (Pitfall 1 — no tenant label on a histogram). $1 is the window-start
 -- timestamp; the handler passes NOW() - window (default 5 minutes). The
--- `ts >= $1` range scan + the `GROUP BY tenant_id, route` are served by
+-- `ts >= $1` range scan + the `GROUP BY al.tenant_id, al.route` are served by
 -- idx_audit_log_ts (ts, tenant_id, route), added by migration 0021 — the
 -- (tenant_id, ts) index cannot serve a predicate with no tenant_id
 -- equality. Bounded by the window + the ~6-tenant cardinality
 -- (threat T-07-10, accept).
-SELECT tenant_id,
-       route,
-       percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms) AS p50,
-       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95,
-       percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99,
+-- WR-10: LEFT JOIN ai_gateway.tenants so the row carries the human-readable
+-- slug + name. The dashboard renders the name (falling back to slug, then
+-- the raw UUID) instead of showing an operator a bare UUID during incident
+-- triage. LEFT JOIN — not INNER — so an audit row whose tenant was deleted
+-- still surfaces (slug/name come back NULL, the dashboard falls back to the
+-- UUID). The join keys on tenants.id PK, a single index probe per group.
+SELECT al.tenant_id,
+       t.slug AS tenant_slug,
+       t.name AS tenant_name,
+       al.route,
+       percentile_cont(0.50) WITHIN GROUP (ORDER BY al.latency_ms) AS p50,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY al.latency_ms) AS p95,
+       percentile_cont(0.99) WITHIN GROUP (ORDER BY al.latency_ms) AS p99,
        count(*) AS requests,
-       (count(*) FILTER (WHERE status_code >= 500)::float / NULLIF(count(*), 0))::float8 AS error_rate
-FROM ai_gateway.audit_log
-WHERE ts >= $1
-GROUP BY tenant_id, route;
+       (count(*) FILTER (WHERE al.status_code >= 500)::float / NULLIF(count(*), 0))::float8 AS error_rate
+FROM ai_gateway.audit_log al
+LEFT JOIN ai_gateway.tenants t ON t.id = al.tenant_id
+WHERE al.ts >= $1
+GROUP BY al.tenant_id, t.slug, t.name, al.route;
