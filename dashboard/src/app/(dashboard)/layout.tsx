@@ -11,6 +11,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { CriticalBanner } from "@/components/critical-banner";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryProvider } from "@/lib/query-client";
 
 export default function DashboardLayout({
@@ -18,18 +19,23 @@ export default function DashboardLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <QueryProvider>
-      <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset>
-          {/* Sticky critical/warning banner — above the page content. */}
-          <CriticalBanner />
-          {/* Page content region: 2xl/48px top padding, lg/24px sides. */}
-          <div className="flex flex-1 flex-col gap-8 px-6 pt-12 pb-8">
-            {children}
-          </div>
-        </SidebarInset>
-        <Toaster />
-      </SidebarProvider>
+      {/* SidebarMenuButton renders collapsed-state tooltips — they need a
+          TooltipProvider in scope (the shadcn SidebarProvider does not add
+          one). */}
+      <TooltipProvider delayDuration={0}>
+        <SidebarProvider>
+          <AppSidebar />
+          <SidebarInset>
+            {/* Sticky critical/warning banner — above the page content. */}
+            <CriticalBanner />
+            {/* Page content region: 2xl/48px top padding, lg/24px sides. */}
+            <div className="flex flex-1 flex-col gap-8 px-6 pt-12 pb-8">
+              {children}
+            </div>
+          </SidebarInset>
+          <Toaster />
+        </SidebarProvider>
+      </TooltipProvider>
     </QueryProvider>
   );
 }
