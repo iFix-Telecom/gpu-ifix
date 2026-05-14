@@ -207,7 +207,12 @@ Plans:
   2. Cobranças and Campanhas send LLM personalization + embedding lookups through the gateway with tenant-specific quotas, and metrics confirm cost-per-request is reported correctly.
   3. voice-api continues to run TTS locally on CPU but retrieves LLM-generated scripts through the gateway.
   4. Each app has an individual smoke-test on production and a <5 min rollback playbook; LGPD review is documented before sensitive tenants go live in prod.
-**Plans:** 8 plans (estimate — not yet planned; run /gsd-plan-phase 9)
+**Plans:** 4 plans (2 waves)
+Plans:
+- [ ] 09-01-PLAN.md — Extend provision-tenants.sh to 4 mixed-data-class tenants (telefonia + cobrancas sensitive, campanhas + voice-api normal) + per-tenant quotas + README update (INT-03, INT-04, INT-05)
+- [ ] 09-02-PLAN.md — smoke-sensitive-failover.py (RES-08 fail-closed + never-external + audit gates) + sensitive-failover-report-schema.json (INT-03, INT-04)
+- [ ] 09-03-PLAN.md — RUNBOOK-CLIENT-INTEGRATION-SENSITIVE.md (4 per-app <5-min rollback procedures) + LGPD-SUBPROCESSORS.md + LGPD-REVIEW-CHECKLIST.md (INT-03, INT-04, INT-05)
+- [ ] 09-04-PLAN.md — HUMAN-UAT: 09-HUMAN-UAT.md scenario sheet (SC1-SC4) + blocking live-UAT checkpoint + blocking LGPD legal sign-off gate (INT-03, INT-04, INT-05)
 **Research hint:** yes (LGPD review with Ifix legal — external input required before GA of sensitive tenants)
 **UI hint:** no
 
@@ -240,7 +245,7 @@ Plans:
 | 6. Auto-provisioning Emergency Pod | 10/11 | In Progress (autonomous plans done; 06-11 HUMAN-UAT blocking + VERIFICATION pending) | - |
 | 7. Observability — Dashboard & Alerting | 0/9 | Planned (9 plans, 5 waves) | - |
 | 8. Client Integration — ConverseAI + Chat Ifix | 0/4 | Planned (4 plans, 3 waves) | - |
-| 9. Client Integration — Sensitive Tenants | 0/? | Not started | - |
+| 9. Client Integration — Sensitive Tenants | 0/4 | Planned (4 plans, 2 waves) | - |
 | 10. Production Hardening & GA | 0/? | Not started | - |
 
 ---
@@ -270,3 +275,4 @@ Plans:
 *Phase 6 plans created: 2026-05-13 (11 plans)*
 *Phase 7 plans created: 2026-05-14 (9 plans, 5 waves)*
 *Phase 8 plans created: 2026-05-14 (4 plans, 3 waves)*
+*Phase 9 plans created: 2026-05-14 (4 plans, 2 waves)*
