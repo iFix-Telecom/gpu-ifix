@@ -191,8 +191,8 @@ Plans:
   4. Dashboard shows both apps' traffic as separate tenants with independent latency and cost panels.
 **Plans:** 4 plans (3 waves)
 Plans:
-- [ ] 08-01-PLAN.md — Idempotent provision-tenants.sh seed script (wraps gatewayctl tenant/key/admin-key create) + integration-smoke README (INT-01, INT-02)
-- [ ] 08-02-PLAN.md — smoke-converseai.py (chat/streaming/tool-call/embedding gateway smoke) + report schema + trimmed requirements (INT-01)
+- [x] 08-01-PLAN.md — Idempotent provision-tenants.sh seed script (wraps gatewayctl tenant/key/admin-key create) + integration-smoke README (INT-01, INT-02)
+- [x] 08-02-PLAN.md — smoke-converseai.py (chat/streaming/tool-call/embedding gateway smoke) + report schema + trimmed requirements (INT-01)
 - [ ] 08-03-PLAN.md — smoke-chat-ifix.py (Whisper transcription smoke, ±10% latency + WER quality gates) + committed WhatsApp audio fixture + baseline (INT-02)
 - [ ] 08-04-PLAN.md — RUNBOOK-CLIENT-INTEGRATION.md (<5-min rollback procedure) + 08-HUMAN-UAT.md scenario sheet + blocking live-UAT checkpoint (INT-01, INT-02)
 **Research hint:** no (straightforward env-var migration)
