@@ -1,0 +1,8 @@
+# scripts/integration-smoke/requirements.txt
+# Integration-smoke runtime deps — covers smoke-converseai.py and smoke-chat-ifix.py.
+# Python 3.12+ assumed (matches converseai-v4/agents). Trimmed vs the pod smoke
+# deps — no DCGM scrape in the gateway smoke, so the metrics-parser dep is gone.
+httpx>=0.27.0
+numpy>=1.26.0
+structlog>=24.1.0
+jsonschema>=4.21.0

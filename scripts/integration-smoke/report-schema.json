@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifixtelecom.com.br/schemas/integration-smoke/converseai-report/1.0.0",
+  "title": "ConverseAI Integration Smoke Report",
+  "version": "1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "started_at",
+    "finished_at",
+    "target",
+    "chat",
+    "chat_stream",
+    "tool_call",
+    "embeddings",
+    "errors",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "required": ["gateway_url", "tenant"],
+      "properties": {
+        "gateway_url": { "type": "string", "format": "uri" },
+        "tenant": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "chat": {
+      "type": "object",
+      "required": ["status_code", "ok"],
+      "properties": {
+        "status_code": { "type": "integer" },
+        "ok": { "type": "boolean" },
+        "raw_error_body": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "chat_stream": {
+      "type": "object",
+      "required": ["ttft_ms", "chunks", "flushed"],
+      "properties": {
+        "ttft_ms": { "type": "integer" },
+        "chunks": { "type": "integer", "minimum": 0 },
+        "flushed": { "type": "boolean" },
+        "raw_error_body": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "tool_call": {
+      "type": "object",
+      "required": ["valid", "errors"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "embeddings": {
+      "type": "object",
+      "required": ["p95_ms", "successes", "errors"],
+      "properties": {
+        "p95_ms": { "type": "integer" },
+        "successes": { "type": "integer", "minimum": 0 },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "chat_ok",
+        "streaming_flushes",
+        "tool_call_valid",
+        "embeddings_ok",
+        "all_passed"
+      ],
+      "properties": {
+        "chat_ok": { "type": "boolean" },
+        "streaming_flushes": { "type": "boolean" },
+        "tool_call_valid": { "type": "boolean" },
+        "embeddings_ok": { "type": "boolean" },
+        "all_passed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
