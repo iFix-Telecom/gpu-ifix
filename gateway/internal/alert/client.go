@@ -33,6 +33,11 @@ const (
 	// SeverityWarning is a degraded-but-serving class event — a ClickUp
 	// task + an email is enough; it does not page WhatsApp.
 	SeverityWarning Severity = "warning"
+	// SeverityInfo is a benign / recovery-class event — recorded for the
+	// dashboard banner + the logs, but it fans out to NO external channel
+	// (see channelsFor in severity.go). A breaker closing, the shed FSM
+	// disarming, or the emergency FSM returning to healthy are info-tier.
+	SeverityInfo Severity = "info"
 )
 
 // Message is the channel-agnostic alert payload. The alerter builds one
