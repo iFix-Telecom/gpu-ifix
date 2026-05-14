@@ -8,6 +8,7 @@ package alert
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -392,6 +393,65 @@ func TestAlerter_ReconcileBootSurfacesActiveIncident(t *testing.T) {
 	a.ReconcileBoot(ctx)
 
 	waitFor(t, "ReconcileBoot to surface a critical alert for the active incident", func() bool {
+		return chatwoot.callCount() == 1 && clickup.callCount() == 1 && brevo.callCount() == 1
+	})
+}
+
+// TestAlerter_ReconcileBootRePagesActiveCriticalDespiteDedupKey covers
+// WR-03/WR-04: when the live alerter ALREADY claimed the dedup key for
+// the active critical incident (simulating "the original alerter paged,
+// then the gateway crashed"), a restart's ReconcileBoot must STILL page
+// — a silenced active critical incident after a crash is worse than a
+// duplicate page. The pre-claimed key would suppress a live event, so
+// this proves the critical-state dedup bypass works.
+func TestAlerter_ReconcileBootRePagesActiveCriticalDespiteDedupKey(t *testing.T) {
+	a, rdb, _, chatwoot, clickup, brevo := newAlerterTestRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := redisx.WriteEmergState(ctx, rdb, "emergency_active", "42", "http://pod", "inst-1", time.Now().Unix()); err != nil {
+		t.Fatalf("WriteEmergState: %v", err)
+	}
+
+	// Simulate the live alerter having already paged this incident: claim
+	// the dedup key for the fingerprint a "transition → emergency_active"
+	// event produces. WR-04: assert the synthetic ReconcileBoot event and
+	// a live transition event yield the IDENTICAL fingerprint, so the
+	// pre-claimed key is genuinely the one that would dedup a live event.
+	liveEv := redisx.EmergEvent{Type: "transition", State: "emergency_active"}
+	livePayload, err := json.Marshal(liveEv)
+	if err != nil {
+		t.Fatalf("marshal live event: %v", err)
+	}
+	_, liveMsg, err := severityFor(redisx.EmergEventsChannel, livePayload)
+	if err != nil {
+		t.Fatalf("severityFor live event: %v", err)
+	}
+	synthEv := redisx.EmergEvent{Type: "transition", State: "emergency_active"}
+	synthPayload, err := json.Marshal(synthEv)
+	if err != nil {
+		t.Fatalf("marshal synthetic event: %v", err)
+	}
+	_, synthMsg, err := severityFor(redisx.EmergEventsChannel, synthPayload)
+	if err != nil {
+		t.Fatalf("severityFor synthetic event: %v", err)
+	}
+	if liveMsg.Fingerprint != synthMsg.Fingerprint {
+		t.Fatalf("live vs synthetic fingerprint mismatch: live=%q synthetic=%q",
+			liveMsg.Fingerprint, synthMsg.Fingerprint)
+	}
+
+	// Claim the dedup key exactly as the live alerter would have.
+	if err := rdb.Set(ctx, redisx.AlertDedupKey(liveMsg.Fingerprint), "1", 5*time.Minute).Err(); err != nil {
+		t.Fatalf("pre-claim dedup key: %v", err)
+	}
+
+	go a.Run(ctx)
+	time.Sleep(100 * time.Millisecond) // let the workers start
+
+	a.ReconcileBoot(ctx)
+
+	waitFor(t, "ReconcileBoot to re-page the active critical incident despite the pre-claimed dedup key", func() bool {
 		return chatwoot.callCount() == 1 && clickup.callCount() == 1 && brevo.callCount() == 1
 	})
 }
