@@ -90,6 +90,61 @@ services:
         - "traefik.http.services.ai_gateway.loadbalancer.server.port=8080"
         - "traefik.http.services.ai_gateway.loadbalancer.passHostHeader=true"
 
+  # ifix-ai-dashboard — the Next.js 15 operator observability dashboard
+  # (Phase 7). Standalone Better Auth + a server-side proxy to the gateway's
+  # /admin API; deployed in the same Portainer stack, single GitHub webhook.
+  #
+  # All five env vars are SERVER-SIDE ONLY (no NEXT_PUBLIC_ prefix) — see
+  # dashboard/.env.example. GATEWAY_BASE_URL points at the gateway service on
+  # the shared `worker_intra` overlay (e.g. http://gateway:8080).
+  # DASHBOARD_DATABASE_URL is the dashboard's OWN Postgres schema/db, isolated
+  # from the gateway's ai_gateway schema (RESEARCH.md Pitfall 7).
+  dashboard:
+    image: ghcr.io/ifixtelecom/ifix-ai-dashboard:${DASHBOARD_TAG:-develop}
+    environment:
+      TZ: America/Sao_Paulo
+      NODE_ENV: production
+      PORT: 3001
+      # Better Auth (standalone instance)
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      DASHBOARD_DATABASE_URL: ${DASHBOARD_DATABASE_URL}
+      # Server-side gateway proxy
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-http://gateway:8080}
+      GATEWAY_ADMIN_KEY: ${GATEWAY_ADMIN_KEY}
+    networks:
+      - worker_intra
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+        window: 60s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.ai_dashboard.rule=Host(`${DASHBOARD_DOMAIN}`)"
+        - "traefik.http.routers.ai_dashboard.entrypoints=websecure"
+        - "traefik.http.routers.ai_dashboard.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.ai_dashboard.loadbalancer.server.port=3001"
+        - "traefik.http.services.ai_dashboard.loadbalancer.passHostHeader=true"
+
 networks:
   worker_intra:
     external: true

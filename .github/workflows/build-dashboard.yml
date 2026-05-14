@@ -1,0 +1,215 @@
+name: build-dashboard
+
+# Mirrors build-gateway.yml. The paths filter lives ONLY on pull_request —
+# keeping it off `push:` matches build-gateway.yml / build-pod.yml so stable
+# release tag pushes (which may not touch dashboard/** in the tag commit
+# itself) are not silently skipped.
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/build-dashboard.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional explicit tag (else branch-sha)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_DASHBOARD: ghcr.io/ifixtelecom/ifix-ai-dashboard
+  NODE_VERSION: '20'
+
+jobs:
+  test:
+    name: Lint + type-check + vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Vitest
+        run: npx vitest run
+
+      - name: Next.js build
+        run: npm run build
+
+  compute-tags:
+    name: Compute image tags
+    runs-on: ubuntu-latest
+    needs: [test]
+    outputs:
+      dashboard_tags: ${{ steps.set.outputs.dashboard_tags }}
+      dashboard_version: ${{ steps.set.outputs.dashboard_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tags (mirrors build-gateway.yml)
+        id: set
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo "${SHA}" | cut -c1-7)"
+          DASH_TAGS=""
+          DASH_VERSION=""
+
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            VER="${REF##refs/tags/}"
+            DASH_TAGS="${IMAGE_DASHBOARD}:${VER}
+          ${IMAGE_DASHBOARD}:latest
+          ${IMAGE_DASHBOARD}:${VER}-${SHORT_SHA}"
+            DASH_VERSION="${VER}"
+          elif [[ "${REF}" == refs/heads/main ]]; then
+            DASH_TAGS="${IMAGE_DASHBOARD}:main
+          ${IMAGE_DASHBOARD}:main-${SHORT_SHA}"
+            DASH_VERSION="main-${SHORT_SHA}"
+          elif [[ "${REF}" == refs/heads/develop ]]; then
+            DASH_TAGS="${IMAGE_DASHBOARD}:develop
+          ${IMAGE_DASHBOARD}:develop-${SHORT_SHA}
+          ${IMAGE_DASHBOARD}:latest-dev"
+            DASH_VERSION="develop-${SHORT_SHA}"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            DASH_TAGS="${IMAGE_DASHBOARD}:${INPUT_TAG}"
+            DASH_VERSION="${INPUT_TAG}"
+          else
+            DASH_TAGS="${IMAGE_DASHBOARD}:pr-${SHORT_SHA}"
+            DASH_VERSION="pr-${SHORT_SHA}"
+          fi
+
+          {
+            echo "dashboard_tags<<EOF"
+            printf '%s\n' "${DASH_TAGS}"
+            echo "EOF"
+            printf 'dashboard_version=%s\n' "${DASH_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "resolved tags:"; echo "${DASH_TAGS}"
+
+  build-dashboard:
+    name: Build & push dashboard image
+    runs-on: ubuntu-latest
+    needs: [test, compute-tags]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (or build-only for PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: dashboard
+          file: dashboard/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64
+          tags: ${{ needs.compute-tags.outputs.dashboard_tags }}
+          cache-from: type=gha,scope=ifix-ai-dashboard
+          cache-to: type=gha,scope=ifix-ai-dashboard,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy-dev:
+    name: Trigger Portainer redeploy (dev)
+    runs-on: ubuntu-latest
+    needs: [build-dashboard]
+    if: github.ref == 'refs/heads/develop' && needs.build-dashboard.result == 'success'
+    steps:
+      - name: Trigger Portainer webhook (dev)
+        env:
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL_DEV_GATEWAY }}
+        run: |
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL_DEV_GATEWAY not set — skipping dev deploy"
+            exit 0
+          fi
+          curl -X POST "${WEBHOOK}" --fail --silent --show-error
+          echo "Portainer dev webhook triggered — ai-gateway-dev will recreate"
+
+  deploy-prod:
+    name: Trigger Portainer redeploy (prod)
+    runs-on: ubuntu-latest
+    needs: [build-dashboard]
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.build-dashboard.result == 'success'
+    steps:
+      - name: Trigger Portainer webhook (prod)
+        env:
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL_PROD_GATEWAY }}
+        run: |
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL_PROD_GATEWAY not set — skipping prod deploy"
+            exit 0
+          fi
+          curl -X POST "${WEBHOOK}" --fail --silent --show-error
+          echo "Portainer prod webhook triggered — ai-gateway-prod will recreate"
+
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [build-dashboard, compute-tags]
+    if: always()
+    steps:
+      - name: Print summary
+        env:
+          DASH_TAGS: ${{ needs.compute-tags.outputs.dashboard_tags }}
+          VERSION: ${{ needs.compute-tags.outputs.dashboard_version }}
+        run: |
+          {
+            echo "## Dashboard Build Summary"
+            echo ""
+            echo "**Version:** ${VERSION}"
+            echo ""
+            echo "### Image tags"
+            echo '```'
+            echo "${DASH_TAGS}"
+            echo '```'
+            echo ""
+            echo "### Deploy"
+            echo "- Dev (develop): auto-deploys to the Portainer stack alongside the gateway"
+            echo "- Prod (main / tag): auto-deploys to the prod Portainer stack"
+            echo "- Set the 5 dashboard env vars (see dashboard/.env.example) in the Portainer stack UI before first deploy"
+          } >> "$GITHUB_STEP_SUMMARY"
