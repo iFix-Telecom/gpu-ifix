@@ -160,16 +160,25 @@ func fsmStateString(fsm *emerg.FSM) string {
 // readInflight reads the current value of every label of the
 // GatewayInflight gauge. A GaugeVec is not directly indexable by value,
 // so we Collect each child Metric, Write it into its protobuf dto form,
-// and read the gauge value + the "upstream" label off each. Collect is
-// called synchronously into a generously buffered channel — the gauge
-// has ~6 upstream series, far under the buffer — then drained after
-// close. Bounded, lockless, no goroutine.
+// and read the gauge value + the "upstream" label off each.
+//
+// WR-02: Collect is synchronous and writes EVERY child series into the
+// channel. The upstream set is hot-reloadable (shedInflight.AddUpstream)
+// with no enforced ceiling — so a fixed buffer is not a correctness
+// guarantee: if the series count ever exceeds the buffer, Collect blocks
+// forever on a full channel and deadlocks the request goroutine. Running
+// Collect in its own goroutine and closing the channel from there means
+// a full channel can never block the request: the drain `for range`
+// below keeps the buffer moving, and the goroutine closes the channel
+// once Collect returns. The buffer is just to reduce goroutine handoffs.
 func readInflight() []InflightRow {
 	ch := make(chan prometheus.Metric, 256)
-	obs.GatewayInflight.Collect(ch)
-	close(ch)
+	go func() {
+		obs.GatewayInflight.Collect(ch)
+		close(ch)
+	}()
 
-	out := make([]InflightRow, 0, len(ch))
+	out := make([]InflightRow, 0)
 	for m := range ch {
 		pb := &dto.Metric{}
 		if err := m.Write(pb); err != nil {
