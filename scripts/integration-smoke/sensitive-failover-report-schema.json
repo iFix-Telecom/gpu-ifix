@@ -82,6 +82,7 @@
     },
     "streaming_fail_fast": {
       "type": "object",
+      "description": "Optional gate. TIMING+STATUS ONLY: proves a sensitive streaming request 503s in <500ms (fail-FAST). It does NOT prove the streaming path fails CLOSED / never-external — that proof is the in-process sensitive_block_test.go (D-B4). No request_id is captured for this request and the audit gates do not run against it.",
       "required": ["status_code", "ok", "elapsed_ms"],
       "properties": {
         "status_code": { "type": "integer" },

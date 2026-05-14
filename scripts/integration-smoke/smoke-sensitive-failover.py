@@ -23,7 +23,13 @@ The gates (each maps `sensitive_block_test.go` assertions to a black-box check):
                     test asserts `tier1.hits.Load() == 0`)
   - audit_decision: an audit_log row exists for the request_id AND
                     `SELECT COUNT(*) FROM ai_gateway.audit_log_content` is 0
-  - streaming_fail_fast (optional): sensitive + stream:true 503s in <500ms
+  - streaming_fail_fast (optional): sensitive + stream:true 503s in <500ms.
+                    NOTE (WR-02): this is a TIMING+STATUS-ONLY check — it fires
+                    a second sensitive request but does NOT run the
+                    never_external / audit_decision correlation against it. The
+                    streaming code path's fail-CLOSED (no external proxy) proof
+                    is covered by the in-process `sensitive_block_test.go`
+                    (D-B4); this black-box gate only proves it fails FAST.
 
 WHY direct DB access: the gateway `/admin/audit` endpoint is FILTERED to
 `event_kind IS NOT NULL` (FSM/state-change rows only) — it does NOT surface
@@ -380,6 +386,13 @@ async def run_streaming_fail_fast_request(
     Mirrors sensitive_block_test.go:154-205 (D-B4) — sensitive + streaming must
     503 fail-fast in <500ms with no retry-loop pre-flight.
 
+    SCOPE (WR-02): this is a TIMING+STATUS check ONLY. It deliberately does NOT
+    capture/correlate an X-Request-ID or run the audit gates against this
+    request — so it does NOT prove the streaming path fails *closed* (never
+    proxied externally) the way run_fail_closed_request + query_audit prove it
+    for the non-streaming path. The streaming fail-CLOSED proof lives in the
+    in-process `sensitive_block_test.go`; this gate only proves fail-FAST.
+
     Returns {status_code, ok, elapsed_ms, raw_error_body?}.
     `ok` is True only when (503 AND elapsed_ms < 500).
     """
@@ -499,7 +512,10 @@ def apply_gates(report: dict[str, Any], streaming_evaluated: bool) -> dict[str, 
                            audit_log_content_rows == 0)
     - streaming_fail_fast: report.streaming_fail_fast.ok — ONLY included when
                            the streaming gate was evaluated (it is optional per
-                           the schema; skipped via --skip-streaming-gate)
+                           the schema; skipped via --skip-streaming-gate).
+                           TIMING+STATUS ONLY (WR-02) — NOT a fail-closed /
+                           never-external proof for the streaming path; that is
+                           covered by in-process sensitive_block_test.go.
     - all_passed:          all evaluated gates above
     """
     gates: dict[str, bool] = {
@@ -626,6 +642,11 @@ async def main_async(cfg: Config) -> int:
             return 1
 
         # --- Step 3: streaming_fail_fast gate (optional) ------------------
+        # WR-02: this fires a SECOND sensitive request but is a TIMING+STATUS
+        # check ONLY — its request_id is intentionally not captured and the
+        # audit gates do NOT run against it. The streaming path's fail-CLOSED
+        # (never-external) proof is the in-process sensitive_block_test.go;
+        # this gate only proves fail-FAST (503 in <500ms).
         streaming_evaluated = not cfg.skip_streaming_gate
         streaming_fail_fast: dict[str, Any] | None = None
         if streaming_evaluated:
