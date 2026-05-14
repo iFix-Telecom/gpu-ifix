@@ -528,37 +528,43 @@ export const config = { matcher: ["/((?!login|api/auth|_next|favicon).*)"] };
 | A6 | The Ifix Chatwoot has (or can have) a designated "on-call operator" contact + inbox that the alerter posts into | Pattern 4 / Open Questions | HIGH — if no such contact/inbox exists, the WhatsApp-alert path has nowhere to send. This is the single biggest external-dependency unknown. |
 | A7 | A single ClickUp `list_id` is an acceptable target for all alert tasks (critical + warning) | Pattern 3 / Open Questions | LOW — worst case, two lists (critical / warning). Discuss-phase decision. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Chatwoot on-call routing target**
    - What we know: campanhas-chatifix calls `POST /api/v1/accounts/{account_id}/conversations` with `inbox_id` + `contact_id`; the Ifix Chatwoot host is `crm.ifixtelecom.com.br`.
    - What's unclear: which `account_id`, `inbox_id`, and `contact_id` represent "the on-call operator's WhatsApp". campanhas-chatifix resolves these per-campaign — Phase 7 needs a fixed, pre-created target.
    - Recommendation: discuss-phase must get these three IDs (or a contact phone number to create-or-lookup) from the Ifix Chatwoot admin. Treat as env config; empty token = Chatwoot channel disabled with a WARN (gateway's established optional-feature pattern).
+   - **RESOLVED:** Treated as optional env vars (`CHATWOOT_ONCALL_ACCOUNT_ID`, `CHATWOOT_INBOX_ID`, `CHATWOOT_CONTACT_ID`, plus `CHATWOOT_API_TOKEN`); empty = Chatwoot channel disabled with a WARN log per the gateway optional-feature pattern. The specific IDs are an operator prerequisite captured in 07-HUMAN-UAT.md (plan 07-09), obtained from the Ifix Chatwoot admin before deploy.
 
 2. **ClickUp target list + token**
    - What we know: Create task = `POST /list/{list_id}/task`, auth = raw token in `Authorization`.
    - What's unclear: which ClickUp list receives alert tasks; whether critical and warning go to the same list; which token (a dedicated integration token vs a personal token).
    - Recommendation: get a dedicated ClickUp list + a service token from Ifix. Default to one list; revisit if noise.
+   - **RESOLVED:** `CLICKUP_ALERT_LIST_ID` and `CLICKUP_API_TOKEN` are optional env vars; empty = ClickUp channel disabled with a WARN. Single target list for v1 (revisit if noise). Token + list ID come from the Ifix team — an operator prerequisite in 07-HUMAN-UAT.md.
 
 3. **Brevo SMTP credentials + the `ALERT_EMAIL_TO` distribution**
    - What we know: converseai-v4 uses `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS`; Brevo is the standard Ifix relay.
    - What's unclear: exact relay host, the sending identity, and which email address(es) the ~4 operators monitor.
    - Recommendation: reuse Ifix's existing Brevo SMTP creds; `ALERT_EMAIL_TO` is an env-config comma list.
+   - **RESOLVED:** Reuse the standard Ifix Brevo SMTP credentials; `ALERT_EMAIL_TO` is a comma-separated env var. Empty = email channel disabled with a WARN. Operator prerequisite in 07-HUMAN-UAT.md.
 
 4. **Better Auth storage substrate**
    - What we know: standalone instance, converseai-v4 uses `drizzleAdapter` over Postgres.
    - What's unclear: separate Postgres schema in the DO cluster vs separate DB vs SQLite-on-volume (the dashboard is single-replica).
    - Recommendation: separate Postgres schema (`dashboard_auth`) in the existing DO cluster — consistent with the gateway's "shared cluster, dedicated schema" model. Discuss-phase to confirm.
+   - **RESOLVED via 07-CONTEXT.md:** Standalone Better Auth instance on a separate Postgres schema (`dashboard_auth`) in the shared DO cluster, isolated from the `ai_gateway` schema (plan 07-07 Task 2).
 
 5. **Dedup fail-open vs fail-closed per severity tier**
    - What we know: dedup = Redis `SET NX EX 300`.
    - What's unclear: behaviour when Redis is unreachable during a dedup check.
    - Recommendation: fail-OPEN for `critical` (never silence a page), fail-CLOSED for `warning`/`info` (alert fatigue). Confirm in discuss-phase.
+   - **RESOLVED via 07-CONTEXT.md:** Fail-OPEN for `critical` (never suppress a critical alert on a Redis error), fail-CLOSED for `warning`/`info`. Implemented in plan 07-05 `dedup.go`.
 
 6. **`/admin/metrics` time window**
    - What we know: SC-1 wants "live" P50/P95/P99/error-rate/cost.
    - What's unclear: the rolling window for the percentiles (last 5 min? last 1h? since boot?).
    - Recommendation: a short rolling window (5–15 min) computed from `audit_log` SQL, with the window configurable. The UI-SPEC's date-range filter is for the cost/usage view, separate from the live KPI window.
+   - **RESOLVED:** 5-minute rolling window computed from `audit_log` via Postgres `percentile_cont`, configurable via a `?window` query param. Implemented in plan 07-03.
 
 ## Environment Availability
 
