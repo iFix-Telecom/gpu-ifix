@@ -1,7 +1,7 @@
 ---
 phase: 7
 slug: observability-dashboard-alerting
-status: approved
+status: draft
 shadcn_initialized: false
 preset: radix-nova
 created: 2026-05-14
@@ -51,7 +51,7 @@ Secondary tier: the FSM-state panel and per-tenant metrics table. Tertiary tier:
 
 ## Spacing Scale
 
-Declared values (multiples of 4 — matches shadcn radix-nova `--radius` system and Tailwind defaults):
+The spacing scale contains **only** the standard token set `{4, 8, 16, 24, 32, 48, 64}` — every margin, gap, and padding value in this phase resolves to one of these seven tokens. There are **no exceptions** to the scale. Fixed component box heights that are not members of this set are deliberately kept out of the scale and documented separately under [Layout Constraints](#layout-constraints) below.
 
 | Token | Value | Usage |
 |-------|-------|-------|
@@ -63,16 +63,18 @@ Declared values (multiples of 4 — matches shadcn radix-nova `--radius` system 
 | 2xl | 48px | Page top padding below the global banner/header |
 | 3xl | 64px | Reserved — not expected on a density-first ops screen |
 
-Exceptions: none — the spacing scale contains only the standard token set {4, 8, 16, 24, 32, 48, 64}.
+**Exceptions: none.** The spacing scale is exactly `{4, 8, 16, 24, 32, 48, 64}` with nothing added or substituted.
 
-### Component Dimensions (fixed component heights — NOT spacing-scale tokens)
+---
 
-The following are fixed heights of specific components, not spacing values. They are documented here explicitly so they are never mistaken for spacing tokens. Internal padding of these components still uses the spacing scale above.
+## Layout Constraints
 
-| Component | Fixed height | Justification |
-|-----------|--------------|---------------|
-| Data table row | 36px | Deliberate compact-table row height so the audit-log and per-tenant tables stay scannable. Built from `sm` (8px) vertical padding × 2 + a 20px text line. A 32px row would force padding below `sm` and break cell legibility on a dense ops screen; a 48px row wastes vertical space and reduces the number of visible rows. This is a component constraint, not a spacing token. |
-| Critical-event banner | 44px min height | Fixed sticky-bar minimum height — internal padding uses `sm` (8px), but the banner is pinned to a 44px minimum so the persistent status target is a consistent size regardless of copy length. This is a component constraint, not a spacing token. |
+This section is **not part of the spacing scale.** The values below are fixed pixel heights of two specific component boxes — they size a component, they do not describe space between or inside elements. They are listed here, in their own top-level section outside the Spacing Scale, precisely so they are never read as spacing-scale tokens. The internal padding of both components still uses the spacing scale above (`sm` = 8px).
+
+| Component | Fixed height | Type | Justification |
+|-----------|--------------|------|---------------|
+| Data table row | 36px | Component height constraint — not a spacing token | Deliberate compact-table row height so the audit-log and per-tenant tables stay scannable. Composed of `sm` (8px) vertical padding × 2 + a 20px text line. A 32px row would force padding below `sm` and break cell legibility on a dense ops screen; a 48px row wastes vertical space and reduces the number of visible rows. |
+| Critical-event banner | 44px min height | Component height constraint — not a spacing token | Fixed sticky-bar minimum height — internal padding uses `sm` (8px), but the banner box is pinned to a 44px floor so the persistent status target stays a consistent size regardless of copy length, and meets the conventional 44px minimum pointer/touch target. |
 
 ---
 
