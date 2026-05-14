@@ -458,5 +458,56 @@ var GatewayVastAPIRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Vast.ai REST requests by operation and HTTP status (or 'transport_error', 'started').",
 }, []string{"op", "status"})
 
+// ============================================================================
+// Phase 7 — Observability dashboard latency histograms + alerting drop counter.
+// Cardinality budget (well under the OBS-02 10k-series ceiling):
+//   - RequestDurationByRoute:    ~4 routes    × 9 buckets ≈ 44 series
+//   - RequestDurationByUpstream: ~6 upstreams × 9 buckets ≈ 60 series
+//   - AlertDroppedTotal:         1 plain counter
+//   Total Phase 7 baseline: ~105 series.
+// Deliberately NOT crossed: there is no tenant × route × upstream histogram.
+// Per-tenant percentiles come from audit_log SQL aggregation in plan 07-03,
+// not from a Prometheus label — adding a tenant label here would multiply
+// every bucket by the tenant count and blow the cardinality budget.
+// ============================================================================
+
+// RequestDurationByRoute is the end-to-end gateway request latency in
+// milliseconds, bucketed by route template only (bounded cardinality —
+// the route label is the same small fixed set used by RequestsTotal).
+// Consumed by the observability dashboard's per-route p50/p95/p99 panels.
+var RequestDurationByRoute = promauto.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "gateway_request_duration_ms_by_route",
+		Help:    "End-to-end gateway request latency (ms), bucketed by route template. ~4 routes x 9 buckets.",
+		Buckets: []float64{25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
+	},
+	[]string{"route"},
+)
+
+// RequestDurationByUpstream is the end-to-end gateway request latency in
+// milliseconds, bucketed by the resolved upstream only. Lets the dashboard
+// compare local-GPU vs OpenRouter/OpenAI fallback latency without a
+// per-tenant explosion.
+var RequestDurationByUpstream = promauto.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "gateway_request_duration_ms_by_upstream",
+		Help:    "End-to-end gateway request latency (ms), bucketed by resolved upstream. ~6 upstreams x 9 buckets.",
+		Buckets: []float64{25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
+	},
+	[]string{"upstream"},
+)
+
+// AlertDroppedTotal counts alert events the alerter dropped because a
+// per-channel worker queue was full (same fail-safe shape as
+// AuditDroppedTotal — a non-blocking back-pressure signal). A non-zero
+// value means the gateway is mid-incident and producing alerts faster
+// than the Chatwoot/ClickUp/Brevo channels can drain them.
+var AlertDroppedTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "gateway_alert_dropped_total",
+		Help: "Alert events dropped because a per-channel worker queue was full (back-pressure fail-safe).",
+	},
+)
+
 // Handler returns the /metrics endpoint handler.
 func Handler() http.Handler { return promhttp.Handler() }
