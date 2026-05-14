@@ -187,6 +187,24 @@ type Reconciler struct {
 	// SetHealthCheck (lifecycle.go) populate these in tests.
 	vastOverride        VastAPI
 	healthCheckOverride HealthChecker
+
+	// budgetDedupe gates Sentry monthly-budget warnings to once per UTC
+	// day (Plan 06-09 D-D2 / Pitfall 11). Constructed inside NewReconciler
+	// so checkBudget can rely on a non-nil pointer.
+	budgetDedupe *budgetAlertDedupe
+
+	// lastBudgetCheckUnix is the unix-second timestamp of the last
+	// checkBudget invocation from runOneTick. Used to rate-limit the
+	// monthly cost SUM aggregate to once per 60s — the 1Hz hot path
+	// stays cheap and the alert stays fresh enough to catch a runaway
+	// spend within a minute. Plan 06-09.
+	lastBudgetCheckUnix atomic.Int64
+
+	// monthlyCostOverride is a test-only injection slot consumed by
+	// invokeMonthlyCost (budget.go). Production leaves this nil and
+	// invokeMonthlyCost falls through to r.q.GetMonthlyCostBRL — letting
+	// unit tests drive checkBudget without standing up a real pgxpool.
+	monthlyCostOverride monthlyCostFn
 }
 
 // ActiveLifecycle is the minimal in-memory snapshot of the live
@@ -229,9 +247,10 @@ func NewReconciler(deps Deps) *Reconciler {
 		deps.Vast = vast.NewClient(deps.Cfg.VastAIAPIKey)
 	}
 	r := &Reconciler{
-		deps:      deps,
-		replicaID: hostname,
-		tracker:   newLocalLlmTracker(),
+		deps:         deps,
+		replicaID:    hostname,
+		tracker:      newLocalLlmTracker(),
+		budgetDedupe: &budgetAlertDedupe{},
 	}
 	if deps.DB != nil {
 		r.q = gen.New(deps.DB)
@@ -379,6 +398,16 @@ func (r *Reconciler) runOneTick(ctx context.Context, mutex *redsync.Mutex, now t
 
 	// Leader path: evaluate FSM transitions. STUB in Plan 04.
 	r.evaluateTick(ctx, now, log)
+
+	// Plan 06-09 (D-D2): leader-only monthly budget alert. Rate-limited
+	// to once per 60s so the SUM aggregate does not run every tick. The
+	// budget check is decoupled from FSM transitions because spend can
+	// cross the threshold whether or not the FSM is currently active —
+	// e.g. a long-running ACTIVE lifecycle steadily accumulating cost.
+	if r.isLeader.Load() && now.Unix()-r.lastBudgetCheckUnix.Load() >= 60 {
+		r.lastBudgetCheckUnix.Store(now.Unix())
+		r.checkBudget(ctx)
+	}
 }
 
 // evaluateTick is the FSM transition evaluation dispatcher. Plan 06-05
