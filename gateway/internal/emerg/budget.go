@@ -133,6 +133,15 @@ func (r *Reconciler) invokeMonthlyCost(ctx context.Context) (pgtype.Numeric, err
 	return r.q.GetMonthlyCostBRL(ctx)
 }
 
+// CheckBudgetForTest is the integration-test entry point that bypasses
+// the 60s rate-limit gate in runOneTick. Production code MUST NOT call
+// this — use the rate-limited path inside runOneTick instead. Exposed
+// here so the integration test in emerg_budget_alert_test.go can drive
+// the alert deterministically without waiting 60 wall-clock seconds.
+func (r *Reconciler) CheckBudgetForTest(ctx context.Context) {
+	r.checkBudget(ctx)
+}
+
 // numericToFloat converts a pgtype.Numeric to float64. Handles both the
 // happy path (Float64Value() succeeds) and the rare InvalidNumeric case
 // (NaN-like values from a malformed DB row) by falling back to 0 — a
