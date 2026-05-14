@@ -230,10 +230,20 @@ parse_id() {
 # mint_tenant_key: mints one tenant key with the given per-tenant data_class
 # and echoes the raw key to stdout (caller captures it). The raw key is NEVER
 # passed to log() — only the non-secret id= is logged.
+#
+# WR-06: the caller wraps this in `$(...)` (TENANT_KEYS["$slug"]="$(...)") to
+# capture the raw key. That command substitution also captures
+# run_gatewayctl's `[dry-run] would run:` stdout line — so under --dry-run the
+# would-run line is swallowed into the (then-discarded) assoc array instead of
+# reaching the operator's terminal. Re-surface the intent on stderr via log()
+# so --dry-run still previews the per-tenant `key create` step. (The captured
+# run_gatewayctl printf is harmless: it lands in the substitution and is
+# discarded at the dry-run exit; no real key is ever minted under --dry-run.)
 mint_tenant_key() {
   local slug="$1" data_class="$2"
   run_gatewayctl key create --tenant "$slug" --data-class "$data_class"
   if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[dry-run] would mint tenant key for '$slug' (data_class=$data_class)"
     return 0
   fi
   [[ "$GW_RC" -eq 0 ]] || { log "key create ($slug) failed (exit $GW_RC): $GW_OUT"; exit 1; }
