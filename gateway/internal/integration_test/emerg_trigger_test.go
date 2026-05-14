@@ -151,6 +151,29 @@ func TestEmergTriggerTransient(t *testing.T) {
 // emergency_lifecycles row so D-C5 reconciler check fires. Sustained
 // OPEN must NOT cause a transition; FSM stays HEALTHY and the reconciler
 // logs an error (not asserted directly — visible in -v output).
+//
+// 2026-05-14 — stale-test fix (debug session emerg-integration-tests-ci,
+// cause 2). The original pre-seed INSERTed a row with NO vast_instance_id.
+// This test was authored against the Plan 06-05 reconciler; Plan 06-07
+// then added recoverOrphanLifecycles, which runs on the FIRST tick after
+// a fresh leader acquires the lock — BEFORE evaluateTick / the D-C5 check.
+// recoverOneLifecycle's branch (a) treats a live row with
+// vast_instance_id IS NULL as a "pre-create orphan" and immediately
+// closes it (shutdown_reason='leader_recovery_pre_create'). The pre-seeded
+// row the test relied on therefore stopped being "live" before the D-C5
+// check ever ran, so the sustained-OPEN trigger fired and the FSM
+// advanced to emergency_provisioning ("FSM transitioned despite live
+// lifecycle").
+//
+// Fix: pre-seed the row WITH a vast_instance_id. recoverOneLifecycle then
+// skips branch (a) and falls through to the Vast.GetInstance branches —
+// but this test wires no Vast client, so recoverOneLifecycle hits its
+// `vastClient == nil` guard and SKIPS the row entirely (logged Warn,
+// "next leader acquisition will retry"), leaving it live. The D-C5
+// reconciler check in evaluateHealthy then correctly observes the live
+// lifecycle and blocks the trigger — exactly the behaviour this test
+// exists to prove. The fake instance ID is never dialled because no Vast
+// client exists.
 func TestEmergTriggerNoSpawnIfLiveLifecycle(t *testing.T) {
 	rootCtx, rootCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer rootCancel()
@@ -158,12 +181,17 @@ func TestEmergTriggerNoSpawnIfLiveLifecycle(t *testing.T) {
 	pool, rdb := freshSchema(t, rootCtx)
 	cfg := defaultTestCfg(t)
 
-	// Pre-seed: insert an unclosed lifecycle row (ended_at IS NULL). The
-	// partial unique index `emergency_live_singleton` (Plan 06-02)
-	// guarantees ≤1 such row at a time, so this single INSERT trips the
-	// D-C5 reconciler check on every subsequent trigger evaluation.
+	// Pre-seed: insert an unclosed lifecycle row (ended_at IS NULL) WITH a
+	// vast_instance_id set. The partial unique index `emergency_live_singleton`
+	// (Plan 06-02) guarantees ≤1 such row at a time. The vast_instance_id is
+	// what makes leader recovery (Plan 06-07 recoverOrphanLifecycles) treat
+	// the row as a real in-flight lifecycle rather than a pre-create orphan
+	// to garbage-collect — and because this test wires no Vast client,
+	// recovery skips the row and leaves it live, so it trips the D-C5
+	// reconciler check on every subsequent trigger evaluation.
 	if _, err := pool.Exec(rootCtx,
-		`INSERT INTO ai_gateway.emergency_lifecycles (trigger_reason) VALUES ('manual_force')`); err != nil {
+		`INSERT INTO ai_gateway.emergency_lifecycles (trigger_reason, vast_instance_id)
+		 VALUES ('manual_force', 999999)`); err != nil {
 		t.Fatalf("pre-seed lifecycle: %v", err)
 	}
 
@@ -193,6 +221,18 @@ func TestEmergTriggerNoSpawnIfLiveLifecycle(t *testing.T) {
 
 	if got := fsm.State(); got != emerg.StateHealthy {
 		t.Fatalf("FSM transitioned despite live lifecycle (D-C5 check failed): got %s, want healthy", got)
+	}
+
+	// The pre-seeded live lifecycle must still be live — leader recovery
+	// skipped it (no Vast client) rather than closing it.
+	var liveCount int
+	if err := pool.QueryRow(rootCtx,
+		`SELECT COUNT(*) FROM ai_gateway.emergency_lifecycles WHERE ended_at IS NULL`,
+	).Scan(&liveCount); err != nil {
+		t.Fatalf("count live lifecycles: %v", err)
+	}
+	if liveCount != 1 {
+		t.Fatalf("pre-seeded live lifecycle count = %d, want 1 (leader recovery must not close it)", liveCount)
 	}
 
 	cancel()

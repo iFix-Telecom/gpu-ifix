@@ -17,6 +17,35 @@
 // The active-lifecycle force-destroy path (TestEmergReconcilerHandlesForceDestroyEvent)
 // is DEFERRED to Plan 06-08 alongside the destroyAndCloseLifecycle helper
 // it depends on.
+//
+// 2026-05-14 — stale-test fix (debug session emerg-integration-tests-ci,
+// cause 2). These tests were authored against the Plan 06-05 reconciler,
+// whose StateEmergencyProvisioning branch was a no-op stub ("Plan 06-05
+// stops at the FSM transition"). Plans 06-06/06-07 added the real
+// evaluateEmergencyProvisioning, which on the very next tick after the
+// force-provision INSERT:
+//
+//   - sees activeLifecycle != nil → takes the D-C3 cancel-detection branch;
+//   - reads r.tracker.State(), which for a fresh tracker (no breaker event
+//     ever published) is the zero-value "closed";
+//   - "closed" matches the cancel condition → it transitions the FSM back
+//     EmergencyProvisioning → Healthy with reason
+//     'cancelled_local_llm_recovered'.
+//
+// The FSM therefore bounced Healthy → EmergencyProvisioning → Healthy
+// within ~one tick, and the assertion polling caught "healthy"
+// ("FSM did not advance" / "NEITHER FSM advanced"). The reconciler
+// behaviour is CORRECT — the tests simply never published a local-llm
+// OPEN event, so the reconciler legitimately read "primary recovered,
+// cancel the provisioning". The fix mirrors the established idiom from
+// every other passing emerg integration test (emerg_provision_happy_test.go,
+// emerg_force_destroy_event_test.go): publish a sustained local-llm OPEN
+// so the tracker stays "open" (no spurious cancel) AND wire a mock Vast.ai
+// server + stub /health so provisionLifecycle has a working client instead
+// of self-aborting with shutdown_reason='no_vast_client'. The intent of
+// the tests — leader INSERTs exactly one manual_force lifecycle row and
+// advances the FSM out of HEALTHY; the non-leader does neither — is
+// preserved.
 package integration
 
 import (
@@ -26,8 +55,53 @@ import (
 	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
+
+// forceProvisionVastMock builds a mock Vast.ai server pre-loaded with a
+// single below-cap offer + a running instance, matching the happy-path
+// fixture used by emerg_provision_happy_test.go. Shared by the two
+// force_provision_request tests so the reconciler's provisioning goroutine
+// has a working client (otherwise provisionLifecycle aborts immediately
+// with shutdown_reason='no_vast_client' and bounces the FSM to HEALTHY).
+func forceProvisionVastMock(t *testing.T) *vast.Client {
+	t.Helper()
+	mock := newMockVastServer(t)
+	offers := []vast.Offer{{
+		ID: 9001, DphTotal: 0.35, GpuName: "RTX 4090", Reliability: 0.99,
+		HostID: 100, MachineID: 50, NumGpus: 1,
+	}}
+	mock.searchResponse.Store(&offers)
+	inst := vast.Instance{
+		ID: 12345, ActualStatus: "running", IntendedStatus: "running",
+		PublicIPAddr: "127.0.0.1",
+		Ports: map[string][]vast.PortBinding{
+			"9100/tcp": {{HostIP: "0.0.0.0", HostPort: "40713"}},
+		},
+		HostID: 100, DphTotal: 0.35, MachineID: 50,
+	}
+	mock.getResponse.Store(&inst)
+	return vast.NewClientWithBaseURL("test-key", mock.Server.URL)
+}
+
+// stateAtLeastProvisioning is true once the FSM has advanced out of
+// HEALTHY into the emergency path. With the real (post-06-06) reconciler
+// the FSM does not park in EMERGENCY_PROVISIONING — once provisioning
+// succeeds it continues to EMERGENCY_ACTIVE. The force-provision tests
+// only care that the leader DID advance the FSM (and the follower did
+// NOT), so we accept any of the emergency-path states.
+func stateAtLeastProvisioning(s emerg.State) bool {
+	switch s {
+	case emerg.StateEmergencyProvisioning,
+		emerg.StateEmergencyActive,
+		emerg.StateRecovering,
+		emerg.StateCooldown:
+		return true
+	default:
+		return false
+	}
+}
 
 // TestEmergReconcilerHandlesForceProvisionEvent — single reconciler
 // acquires leadership, gatewayctl-style force_provision_request is
@@ -47,9 +121,11 @@ func TestEmergReconcilerHandlesForceProvisionEvent(t *testing.T) {
 		Redsync:      redisx.NewEmergRedsync(rdb),
 		FSM:          fsm,
 		Cfg:          cfg,
+		Vast:         forceProvisionVastMock(t),
 		TickInterval: 100 * time.Millisecond,
 		Log:          slog.New(slog.DiscardHandler),
 	})
+	r.SetHealthCheck(func(_ context.Context, _ string) bool { return true })
 
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
@@ -60,6 +136,12 @@ func TestEmergReconcilerHandlesForceProvisionEvent(t *testing.T) {
 		t.Fatalf("reconciler did not acquire leadership within 3s")
 	}
 
+	// Sustained local-llm OPEN keeps the per-replica tracker in "open" so
+	// evaluateEmergencyProvisioning's D-C3 cancel-detection branch does NOT
+	// fire (a fresh tracker defaults to "closed", which the reconciler
+	// correctly reads as "primary recovered → cancel provisioning").
+	publishBreakerEvent(t, rdb, "local-llm", "open")
+
 	if err := redisx.PublishEmergEvent(ctx, rdb, redisx.EmergEvent{
 		Type:      "force_provision_request",
 		Reason:    "smoke",
@@ -69,14 +151,17 @@ func TestEmergReconcilerHandlesForceProvisionEvent(t *testing.T) {
 		t.Fatalf("PublishEmergEvent: %v", err)
 	}
 
-	// Eventually FSM advances + lifecycle row INSERTed with
-	// trigger_reason='manual_force'.
+	// Eventually the FSM advances out of HEALTHY into the emergency path
+	// (the leader consumed the command, INSERTed the lifecycle row, and
+	// drove the FSM transition).
 	if !waitFor(t, 5*time.Second, 100*time.Millisecond, func() bool {
-		return fsm.State() == emerg.StateEmergencyProvisioning
+		return stateAtLeastProvisioning(fsm.State())
 	}) {
 		t.Fatalf("FSM did not advance after force-provision; got %s", fsm.State())
 	}
 
+	// Exactly one lifecycle row with trigger_reason='manual_force' was
+	// INSERTed by the leader's handleForceProvision.
 	var count int
 	if err := pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM ai_gateway.emergency_lifecycles WHERE trigger_reason = 'manual_force'`,
@@ -121,6 +206,7 @@ func TestEmergReconcilerForceProvisionRejectedNonLeader(t *testing.T) {
 		Redsync:      redisx.NewEmergRedsync(rdb),
 		FSM:          fsm1,
 		Cfg:          cfg,
+		Vast:         forceProvisionVastMock(t),
 		TickInterval: 100 * time.Millisecond,
 		Log:          slog.New(slog.DiscardHandler),
 	})
@@ -130,9 +216,12 @@ func TestEmergReconcilerForceProvisionRejectedNonLeader(t *testing.T) {
 		Redsync:      redisx.NewEmergRedsync(rdb),
 		FSM:          fsm2,
 		Cfg:          cfg,
+		Vast:         forceProvisionVastMock(t),
 		TickInterval: 100 * time.Millisecond,
 		Log:          slog.New(slog.DiscardHandler),
 	})
+	r1.SetHealthCheck(func(_ context.Context, _ string) bool { return true })
+	r2.SetHealthCheck(func(_ context.Context, _ string) bool { return true })
 
 	done1 := make(chan struct{})
 	done2 := make(chan struct{})
@@ -146,6 +235,11 @@ func TestEmergReconcilerForceProvisionRejectedNonLeader(t *testing.T) {
 		t.Fatalf("expected exactly 1 leader; r1.IsLeader=%v r2.IsLeader=%v",
 			r1.IsLeader(), r2.IsLeader())
 	}
+
+	// Sustained local-llm OPEN — both replicas' trackers go "open" so the
+	// leader's evaluateEmergencyProvisioning does not spuriously cancel the
+	// provisioning it is about to start (see file-level comment).
+	publishBreakerEvent(t, rdb, "local-llm", "open")
 
 	// Publish force-provision command.
 	if err := redisx.PublishEmergEvent(rootCtx, rdb, redisx.EmergEvent{
@@ -193,8 +287,8 @@ func TestEmergReconcilerForceProvisionRejectedNonLeader(t *testing.T) {
 	// Verify exactly one FSM advanced (the leader's). The follower's FSM
 	// must remain in HEALTHY because applyEmergCommand short-circuits on
 	// !isLeader BEFORE the type switch.
-	leaderAdvanced := fsm1.State() == emerg.StateEmergencyProvisioning
-	followerAdvanced := fsm2.State() == emerg.StateEmergencyProvisioning
+	leaderAdvanced := stateAtLeastProvisioning(fsm1.State())
+	followerAdvanced := stateAtLeastProvisioning(fsm2.State())
 	if leaderAdvanced && followerAdvanced {
 		t.Fatalf("BOTH FSMs advanced (PRV-03 violated)")
 	}
