@@ -22,6 +22,12 @@ pod/weights/*.safetensors
 pod/smoke/fixtures/*.wav
 pod/smoke/fixtures/*.mp3
 
+# Phase 8 INT-02 deliberately commits ONE short real WhatsApp speech clip —
+# the transcription-quality gate needs real speech, not synthetic noise.
+# Allow-rule so the committed fixture + baseline are always tracked.
+!scripts/integration-smoke/fixtures/whatsapp-sample.ogg
+!scripts/integration-smoke/fixtures/whatsapp-sample.baseline.json
+
 # Smoke reports (archived to .planning/, not repo root)
 smoke-report.json
 smoke-report-*.json

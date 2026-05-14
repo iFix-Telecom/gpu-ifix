@@ -1,0 +1,13 @@
+{
+  "audio_file": "whatsapp-sample.ogg",
+  "format": "audio/ogg",
+  "codec": "opus",
+  "sample_rate_hz": 16000,
+  "channels": 1,
+  "duration_s": 5.14,
+  "transcript": "Olá, este é um teste de transcrição de áudio para o gateway de inteligência artificial.",
+  "baseline_latency_s": 4.0,
+  "baseline_latency_note": "Conservative placeholder — NOT a measured direct-integration number. Whisper transcription of a ~5s clip on a warm GPU is typically well under 4s, but the prior direct-integration latency for Chat Ifix has not been measured yet. The Phase 8 HUMAN-UAT MUST re-measure the real direct-integration latency for a clip this size and update this field before the +/-10% latency gate is meaningful. Until then the latency_within_10pct gate compares against this conservative estimate.",
+  "wer_threshold": 0.10,
+  "latency_tolerance": 0.10
+}
