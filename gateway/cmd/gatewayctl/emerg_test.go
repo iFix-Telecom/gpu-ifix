@@ -51,6 +51,13 @@ func newEmergMiniRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 // captureStdout swaps os.Stdout for a pipe + buffer for the duration of
 // fn() and returns the captured bytes. Used to assert JSON / tabwriter
 // output without exec'ing the binary.
+//
+// IMPORTANT: ordering of cleanup matters — we MUST close the write end
+// of the pipe BEFORE waiting on the io.Copy goroutine (so io.Copy sees
+// EOF and returns) AND BEFORE calling buf.String() (so the buffer write
+// from the goroutine happens-before the buffer read in the test). Doing
+// the close in `defer` while reading `buf.String()` in the return value
+// produces a data race that go test -race catches immediately.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	orig := os.Stdout
@@ -59,23 +66,23 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stdout = w
-	var wg sync.WaitGroup
 	var buf bytes.Buffer
+	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		_, _ = io.Copy(&buf, r)
 	}()
-	defer func() {
-		_ = w.Close()
-		wg.Wait()
-		os.Stdout = orig
-	}()
 	fn()
+	_ = w.Close()  // signal EOF to the goroutine
+	wg.Wait()       // synchronise: goroutine exits, buffer write completes
+	os.Stdout = orig
 	return buf.String()
 }
 
-// captureStderr is the stderr counterpart to captureStdout.
+// captureStderr is the stderr counterpart to captureStdout. Same
+// ordering invariant — close write end + wait on goroutine BEFORE
+// reading the buffer.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	orig := os.Stderr
@@ -84,19 +91,17 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stderr = w
-	var wg sync.WaitGroup
 	var buf bytes.Buffer
+	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		_, _ = io.Copy(&buf, r)
 	}()
-	defer func() {
-		_ = w.Close()
-		wg.Wait()
-		os.Stderr = orig
-	}()
 	fn()
+	_ = w.Close()
+	wg.Wait()
+	os.Stderr = orig
 	return buf.String()
 }
 

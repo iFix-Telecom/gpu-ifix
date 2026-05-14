@@ -35,6 +35,7 @@ Commands:
   shed-state        Phase 5: print shed FSM state for all upstreams (read-only).
   shed-force        Phase 5: force shed FSM on|off|clear via gw:shed:force:* (TTL <= 1h).
   thresholds        Phase 5: tune shed thresholds via JSONB merge on upstreams.circuit_config.
+  emerg             Phase 6: emergency-pod operator surface (state, force-provision, force-destroy, lifecycles).
   audit             Export audit-log partitions to MinIO cold storage (Plan 02-09).
 
 Use "gatewayctl <command> --help" for subcommand flags.
@@ -75,6 +76,8 @@ func main() {
 		os.Exit(runShedForce(ctx, args, log))
 	case "thresholds":
 		os.Exit(runThresholds(ctx, args, log))
+	case "emerg":
+		os.Exit(runEmerg(ctx, args, log))
 	case "audit":
 		fmt.Fprintln(os.Stderr, "gatewayctl audit: not yet implemented (Plan 02-09)")
 		os.Exit(1)
