@@ -1,9 +1,15 @@
 # scripts/integration-smoke/requirements.txt
-# Integration-smoke runtime deps — covers smoke-converseai.py and smoke-chat-ifix.py.
+# Integration-smoke runtime deps — covers smoke-converseai.py, smoke-chat-ifix.py,
+# and smoke-sensitive-failover.py.
 # Python 3.12+ assumed (matches converseai-v4/agents). Trimmed vs the pod smoke
 # deps — no DCGM scrape in the gateway smoke, so the metrics-parser dep is gone.
 # numpy was dropped (WR-04): it was a multi-MB compiled dep imported for a
 # single percentile call, now computed inline with an exact-rank helper.
+# psycopg (binary build) is the audit-DB reader for smoke-sensitive-failover.py:
+# the /admin/audit endpoint is event_kind-filtered and cannot surface
+# request-level blocked_sensitive rows, so the sensitive smoke reads
+# ai_gateway.audit_log + audit_log_content directly via AI_GATEWAY_PG_DSN.
 httpx>=0.27.0
 structlog>=24.1.0
 jsonschema>=4.21.0
+psycopg[binary]>=3.1.0
