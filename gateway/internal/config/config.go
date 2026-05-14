@@ -133,6 +133,26 @@ type Config struct {
 	VastAIAPIKey                      string  // VAST_AI_API_KEY (D-A5; empty = Phase 6 disabled with warning, NOT fail-loud)
 	VastAPIQPSLimit                   int     // VAST_API_QPS_LIMIT (default 1; RESEARCH Open Question 12 — conservative 1 req/s token bucket)
 	VastPriceCapDPH                   float64 // VAST_PRICE_CAP_DPH (default 0.40; D-A2 — RTX 4090 cap; epsilon comparison cap+0.0001 per Pitfall 5)
+
+	// Phase 7 — alerting (all optional; empty = channel disabled with WARN).
+	// Mirrors the SentryDSN precedent: an unset alert var NEVER fails boot.
+	// The downstream alert clients (plans 07-04/07-05) log a single WARN per
+	// disabled channel at startup; config.go itself does not log and these
+	// fields are never added to the required-env validation slice. Credentials
+	// are plain strings here and MUST NOT be logged (threat T-07-01).
+	ChatwootAPIURL          string // CHATWOOT_API_URL
+	ChatwootAPIToken        string // CHATWOOT_API_TOKEN
+	ChatwootOncallAccountID string // CHATWOOT_ONCALL_ACCOUNT_ID
+	ChatwootOncallInboxID   string // CHATWOOT_ONCALL_INBOX_ID
+	ChatwootOncallContactID string // CHATWOOT_ONCALL_CONTACT_ID
+	ClickUpAPIToken         string // CLICKUP_API_TOKEN
+	ClickUpAlertListID      string // CLICKUP_ALERT_LIST_ID
+	BrevoSMTPHost           string // BREVO_SMTP_HOST
+	BrevoSMTPPort           int    // BREVO_SMTP_PORT (default 587)
+	BrevoSMTPUser           string // BREVO_SMTP_USER
+	BrevoSMTPPass           string // BREVO_SMTP_PASS
+	AlertEmailTo            []string // ALERT_EMAIL_TO (CSV; empty default = email channel disabled)
+	AlertEmailFrom          string   // ALERT_EMAIL_FROM
 }
 
 // ErrMissingEnv is returned by Load when one or more required env vars are unset.
@@ -217,6 +237,21 @@ func Load() (Config, error) {
 		VastAIAPIKey:                      os.Getenv("VAST_AI_API_KEY"),
 		VastAPIQPSLimit:                   atoiOr(os.Getenv("VAST_API_QPS_LIMIT"), 1),
 		VastPriceCapDPH:                   floatOr(os.Getenv("VAST_PRICE_CAP_DPH"), 0.40),
+
+		// Phase 7 — alerting. All optional; not added to requiredOrder below.
+		ChatwootAPIURL:          os.Getenv("CHATWOOT_API_URL"),
+		ChatwootAPIToken:        os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootOncallAccountID: os.Getenv("CHATWOOT_ONCALL_ACCOUNT_ID"),
+		ChatwootOncallInboxID:   os.Getenv("CHATWOOT_ONCALL_INBOX_ID"),
+		ChatwootOncallContactID: os.Getenv("CHATWOOT_ONCALL_CONTACT_ID"),
+		ClickUpAPIToken:         os.Getenv("CLICKUP_API_TOKEN"),
+		ClickUpAlertListID:      os.Getenv("CLICKUP_ALERT_LIST_ID"),
+		BrevoSMTPHost:           os.Getenv("BREVO_SMTP_HOST"),
+		BrevoSMTPPort:           atoiOr(os.Getenv("BREVO_SMTP_PORT"), 587),
+		BrevoSMTPUser:           os.Getenv("BREVO_SMTP_USER"),
+		BrevoSMTPPass:           os.Getenv("BREVO_SMTP_PASS"),
+		AlertEmailTo:            csvOr(os.Getenv("ALERT_EMAIL_TO"), nil),
+		AlertEmailFrom:          os.Getenv("ALERT_EMAIL_FROM"),
 	}
 
 	// Iterate in a fixed order so error messages are deterministic — tests

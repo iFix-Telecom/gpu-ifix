@@ -593,3 +593,147 @@ func TestLoad_Phase6FloatOrBogusValue(t *testing.T) {
 		t.Errorf("MonthlyEmergencyBudgetBRL on bogus input: want 200.0 fallback, got %v", cfg.MonthlyEmergencyBudgetBRL)
 	}
 }
+
+// phase7OptionalEnv enumerates the twelve* Phase 7 alerting env vars
+// (*thirteen names — five Chatwoot, two ClickUp, five Brevo/email; the plan
+// frontmatter groups them as "12 channels worth" of config). Cleared in
+// setUp so a stray Portainer value does not leak into the default-value
+// assertions.
+var phase7OptionalEnv = []string{
+	"CHATWOOT_API_URL",
+	"CHATWOOT_API_TOKEN",
+	"CHATWOOT_ONCALL_ACCOUNT_ID",
+	"CHATWOOT_ONCALL_INBOX_ID",
+	"CHATWOOT_ONCALL_CONTACT_ID",
+	"CLICKUP_API_TOKEN",
+	"CLICKUP_ALERT_LIST_ID",
+	"BREVO_SMTP_HOST",
+	"BREVO_SMTP_PORT",
+	"BREVO_SMTP_USER",
+	"BREVO_SMTP_PASS",
+	"ALERT_EMAIL_TO",
+	"ALERT_EMAIL_FROM",
+}
+
+func clearPhase7(t *testing.T) {
+	t.Helper()
+	for _, v := range phase7OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestLoad_Phase7Defaults verifies that with only the 5 required vars set
+// and no Phase 7 alerting vars configured, Load succeeds (boot is NEVER
+// blocked by an unset alert var — same precedent as SentryDSN) and returns
+// the documented zero/default values: every string empty, AlertEmailTo nil,
+// BrevoSMTPPort defaulting to 587.
+func TestLoad_Phase7Defaults(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase7(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected Load to succeed with all alert vars unset, got: %v", err)
+	}
+	if cfg.ChatwootAPIURL != "" || cfg.ChatwootAPIToken != "" ||
+		cfg.ChatwootOncallAccountID != "" || cfg.ChatwootOncallInboxID != "" ||
+		cfg.ChatwootOncallContactID != "" {
+		t.Errorf("Chatwoot fields: want all empty, got %+v", cfg)
+	}
+	if cfg.ClickUpAPIToken != "" || cfg.ClickUpAlertListID != "" {
+		t.Errorf("ClickUp fields: want all empty, got token=%q list=%q",
+			cfg.ClickUpAPIToken, cfg.ClickUpAlertListID)
+	}
+	if cfg.BrevoSMTPHost != "" || cfg.BrevoSMTPUser != "" || cfg.BrevoSMTPPass != "" {
+		t.Errorf("Brevo string fields: want all empty, got host=%q user=%q",
+			cfg.BrevoSMTPHost, cfg.BrevoSMTPUser)
+	}
+	if cfg.BrevoSMTPPort != 587 {
+		t.Errorf("BrevoSMTPPort default: want 587, got %d", cfg.BrevoSMTPPort)
+	}
+	if cfg.AlertEmailFrom != "" {
+		t.Errorf("AlertEmailFrom: want empty, got %q", cfg.AlertEmailFrom)
+	}
+	if len(cfg.AlertEmailTo) != 0 {
+		t.Errorf("AlertEmailTo: want nil/empty (email channel disabled), got %v", cfg.AlertEmailTo)
+	}
+}
+
+// TestLoad_Phase7FromEnv exercises overrides for every Phase 7 alert env
+// var, including atoiOr (BREVO_SMTP_PORT) and csvOr (ALERT_EMAIL_TO with
+// whitespace around commas).
+func TestLoad_Phase7FromEnv(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase7(t)
+	setAllRequired(t)
+	t.Setenv("CHATWOOT_API_URL", "https://crm.ifixtelecom.com.br")
+	t.Setenv("CHATWOOT_API_TOKEN", "cw_token_abc")
+	t.Setenv("CHATWOOT_ONCALL_ACCOUNT_ID", "7")
+	t.Setenv("CHATWOOT_ONCALL_INBOX_ID", "12")
+	t.Setenv("CHATWOOT_ONCALL_CONTACT_ID", "345")
+	t.Setenv("CLICKUP_API_TOKEN", "pk_clickup_xyz")
+	t.Setenv("CLICKUP_ALERT_LIST_ID", "901100")
+	t.Setenv("BREVO_SMTP_HOST", "smtp-relay.brevo.com")
+	t.Setenv("BREVO_SMTP_PORT", "2525")
+	t.Setenv("BREVO_SMTP_USER", "brevo_login")
+	t.Setenv("BREVO_SMTP_PASS", "brevo_key")
+	t.Setenv("ALERT_EMAIL_TO", "ops1@ifix.com, ops2@ifix.com ,ops3@ifix.com")
+	t.Setenv("ALERT_EMAIL_FROM", "alerts@ifix.com")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ChatwootAPIURL != "https://crm.ifixtelecom.com.br" {
+		t.Errorf("ChatwootAPIURL = %q", cfg.ChatwootAPIURL)
+	}
+	if cfg.ChatwootAPIToken != "cw_token_abc" {
+		t.Errorf("ChatwootAPIToken = %q", cfg.ChatwootAPIToken)
+	}
+	if cfg.ChatwootOncallAccountID != "7" || cfg.ChatwootOncallInboxID != "12" ||
+		cfg.ChatwootOncallContactID != "345" {
+		t.Errorf("Chatwoot on-call ids = %q/%q/%q", cfg.ChatwootOncallAccountID,
+			cfg.ChatwootOncallInboxID, cfg.ChatwootOncallContactID)
+	}
+	if cfg.ClickUpAPIToken != "pk_clickup_xyz" || cfg.ClickUpAlertListID != "901100" {
+		t.Errorf("ClickUp = %q/%q", cfg.ClickUpAPIToken, cfg.ClickUpAlertListID)
+	}
+	if cfg.BrevoSMTPHost != "smtp-relay.brevo.com" || cfg.BrevoSMTPPort != 2525 ||
+		cfg.BrevoSMTPUser != "brevo_login" || cfg.BrevoSMTPPass != "brevo_key" {
+		t.Errorf("Brevo = host=%q port=%d user=%q", cfg.BrevoSMTPHost,
+			cfg.BrevoSMTPPort, cfg.BrevoSMTPUser)
+	}
+	if cfg.AlertEmailFrom != "alerts@ifix.com" {
+		t.Errorf("AlertEmailFrom = %q", cfg.AlertEmailFrom)
+	}
+	if got := cfg.AlertEmailTo; len(got) != 3 || got[0] != "ops1@ifix.com" ||
+		got[1] != "ops2@ifix.com" || got[2] != "ops3@ifix.com" {
+		t.Errorf("AlertEmailTo = %v, want 3 trimmed entries", got)
+	}
+}
+
+// TestLoad_Phase7NotRequired is the explicit guard for threat T-07-01 /
+// the must_have truth "Gateway boots with all 12 new alert env vars unset":
+// none of the alert vars may appear in the required-var error string.
+func TestLoad_Phase7NotRequired(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase7(t)
+	// Deliberately do NOT call setAllRequired — force the missing-var error.
+	_, err := config.Load()
+	if err == nil {
+		t.Fatalf("expected ErrMissingEnv with required vars unset")
+	}
+	for _, name := range phase7OptionalEnv {
+		if strings.Contains(err.Error(), name) {
+			t.Errorf("alert var %q must NOT be in the required-var error: %q", name, err.Error())
+		}
+	}
+}
