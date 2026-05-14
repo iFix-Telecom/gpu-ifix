@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifixtelecom.com.br/schemas/integration-smoke/chat-ifix-report/1.0.0",
+  "title": "Chat Ifix Transcription Smoke Report",
+  "version": "1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "started_at",
+    "finished_at",
+    "target",
+    "transcription",
+    "baseline",
+    "comparison",
+    "errors",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "required": ["gateway_url", "tenant"],
+      "properties": {
+        "gateway_url": { "type": "string", "format": "uri" },
+        "tenant": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "transcription": {
+      "type": "object",
+      "required": ["status_code", "ok", "latency_s", "text"],
+      "properties": {
+        "status_code": { "type": "integer" },
+        "ok": { "type": "boolean" },
+        "latency_s": { "type": "number" },
+        "text": { "type": "string" },
+        "raw_error_body": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "baseline": {
+      "type": "object",
+      "required": ["transcript", "baseline_latency_s", "duration_s"],
+      "properties": {
+        "transcript": { "type": "string" },
+        "baseline_latency_s": { "type": "number" },
+        "duration_s": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "comparison": {
+      "type": "object",
+      "required": ["wer", "latency_ratio"],
+      "properties": {
+        "wer": { "type": "number" },
+        "latency_ratio": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "transcription_ok",
+        "quality_within_10pct",
+        "latency_within_10pct",
+        "all_passed"
+      ],
+      "properties": {
+        "transcription_ok": { "type": "boolean" },
+        "quality_within_10pct": { "type": "boolean" },
+        "latency_within_10pct": { "type": "boolean" },
+        "all_passed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
