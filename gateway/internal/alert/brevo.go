@@ -2,8 +2,28 @@ package alert
 
 // brevo.go — the Brevo SMTP alert channel (critical + warning email,
 // OBS-05). CONTEXT.md locks "Brevo SMTP" explicitly, so this uses Go's
-// net/smtp against the Brevo relay (host:587, STARTTLS) — NOT the Brevo
+// net/smtp against the Brevo relay (typically host:587) — NOT the Brevo
 // transactional HTTP API.
+//
+// # Transport security (WR-05 — accurate posture)
+//
+// Submission goes through net/smtp.SendMail, which does OPPORTUNISTIC
+// STARTTLS: it upgrades to TLS only if the relay advertises STARTTLS.
+// This code does NOT construct an explicit tls.Config, does NOT pin a
+// ServerName, and does NOT enforce port 587 or reject a plaintext relay.
+//
+// What this DOES guarantee: the auth step is smtp.PlainAuth, which
+// refuses to transmit the password unless the connection is already TLS
+// (or the host is localhost). So a MITM that strips the relay's STARTTLS
+// capability advertisement does NOT leak the credential — PlainAuth's
+// own guard fails the send with "unencrypted connection" instead. The
+// failure mode of a stripped-capability MITM is therefore a SILENTLY
+// FAILED ALERT, not a leaked password. That is acceptable for
+// secret-safety (T-07-11) but it is a degraded-availability outcome, not
+// a verified-encryption guarantee. If a future requirement needs the
+// latter, build the SMTP conversation explicitly with
+// tls.Config{ServerName: c.host} and require STARTTLS so a stripped
+// advertisement is a hard, observable error.
 //
 // Email is the least latency-sensitive channel, so the send is wrapped
 // in BOTH a per-service gobreaker (fast-fail when the relay is dead)
