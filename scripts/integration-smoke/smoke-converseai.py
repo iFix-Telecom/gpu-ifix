@@ -135,11 +135,16 @@ async def run_chat(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
 # --- Chat (streaming SSE) -------------------------------------------------
 
 async def run_chat_stream(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
-    """Streaming POST /v1/chat/completions; return {ttft_ms, chunks, flushed, raw_error_body?}.
+    """Streaming POST /v1/chat/completions; return {ttft_ms, chunks, flushed, status_code, raw_error_body?}.
 
     `flushed` is True when at least 2 SSE chunks arrived incrementally — evidence
     the gateway flushes the stream (it runs with FlushInterval: -1) rather than
     buffering the whole response.
+
+    `status_code` is ALWAYS carried (HTTP status on success/non-200, -1 on
+    exception) so a `not flushed` gate failure is never silent — see main_async,
+    which synthesises a diagnostic from status_code + chunks when a 200 simply
+    did not flush enough chunks and there is no `raw_error_body`.
     """
     payload = {
         "model": CHAT_MODEL,
@@ -160,8 +165,10 @@ async def run_chat_stream(client: httpx.AsyncClient, url: str) -> dict[str, Any]
                     "ttft_ms": -1,
                     "chunks": 0,
                     "flushed": False,
+                    "status_code": r.status_code,
                     "raw_error_body": body[:500],
                 }
+            status_code = r.status_code
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -171,8 +178,19 @@ async def run_chat_stream(client: httpx.AsyncClient, url: str) -> dict[str, Any]
                     ttft_ms = int((time.monotonic() - start) * 1000)
                 chunks += 1
     except Exception as e:
-        return {"ttft_ms": -1, "chunks": chunks, "flushed": False, "raw_error_body": str(e)[:500]}
-    return {"ttft_ms": ttft_ms, "chunks": chunks, "flushed": chunks >= 2}
+        return {
+            "ttft_ms": -1,
+            "chunks": chunks,
+            "flushed": False,
+            "status_code": -1,
+            "raw_error_body": str(e)[:500],
+        }
+    return {
+        "ttft_ms": ttft_ms,
+        "chunks": chunks,
+        "flushed": chunks >= 2,
+        "status_code": status_code,
+    }
 
 
 # --- Tool-call validation -------------------------------------------------
@@ -324,8 +342,17 @@ async def main_async(cfg: Config) -> int:
     errors: list[str] = []
     if not chat.get("ok") and chat.get("raw_error_body"):
         errors.append(f"chat: {chat['raw_error_body']}")
-    if not chat_stream.get("flushed") and chat_stream.get("raw_error_body"):
-        errors.append(f"chat_stream: {chat_stream['raw_error_body']}")
+    if not chat_stream.get("flushed"):
+        # A non-200 / exception carries raw_error_body; a 200 that simply did
+        # not flush enough chunks does not — synthesise a diagnostic from the
+        # status_code + chunk count so a streaming-gate failure is never a
+        # silent exit 3 with an empty errors array.
+        reason = chat_stream.get("raw_error_body") or (
+            f"stream returned status {chat_stream.get('status_code')} "
+            f"with only {chat_stream.get('chunks', 0)} chunk(s) — "
+            f"expected >= 2 (gateway not flushing incrementally?)"
+        )
+        errors.append(f"chat_stream: {reason}")
     errors.extend(f"tool_call: {e}" for e in tool_errors)
     errors.extend(f"embeddings: {e}" for e in embeddings.get("errors", []))
 

@@ -49,11 +49,12 @@
     },
     "chat_stream": {
       "type": "object",
-      "required": ["ttft_ms", "chunks", "flushed"],
+      "required": ["ttft_ms", "chunks", "flushed", "status_code"],
       "properties": {
         "ttft_ms": { "type": "integer" },
         "chunks": { "type": "integer", "minimum": 0 },
         "flushed": { "type": "boolean" },
+        "status_code": { "type": "integer" },
         "raw_error_body": { "type": "string" }
       },
       "additionalProperties": false
