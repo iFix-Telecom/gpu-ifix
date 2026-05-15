@@ -696,8 +696,19 @@ func (r *Reconciler) evaluateEmergencyProvisioning(ctx context.Context, now time
 	}
 	// Cancel detection: tracker shows local-llm recovered (CLOSED) or is
 	// re-probing (HALF_OPEN). D-C3 — cancel and return FSM to Healthy.
+	//
+	// Fresh-tracker guard: tracker.State() defaults to "closed" until the
+	// first ApplyEvent lands (zero-value). A fresh replica that just
+	// accepted a force-provision would otherwise cancel itself on the
+	// very next tick because state == "closed" with no recovery ever
+	// observed. closedSince > 0 means an actual OPEN→CLOSED transition
+	// (real recovery); closedSince == 0 means the tracker has never seen
+	// a CLOSED event, so the "closed" reading is initial-state, not
+	// recovery. HALF_OPEN always indicates active probing — keep it as a
+	// cancel signal regardless of recovery history.
 	trackerState := r.tracker.State()
-	if trackerState == "closed" || trackerState == "half-open" {
+	closedAfterRecovery := trackerState == "closed" && r.tracker.SustainedClosedSeconds() > 0
+	if trackerState == "half-open" || closedAfterRecovery {
 		log.Info("local-llm recovered during provisioning; cancelling (D-C3)",
 			"tracker_state", trackerState,
 			"lifecycle_id", r.activeLifecycle.Load().ID)
