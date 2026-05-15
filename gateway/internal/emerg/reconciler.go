@@ -858,6 +858,12 @@ func (r *Reconciler) handleForceProvision(ctx context.Context, ev redisx.EmergEv
 	now := time.Now()
 	r.deps.FSM.Transition(StateHealthy, StateFailedOver, now, "manual_force_provision:"+ev.Reason)
 	r.deps.FSM.Transition(StateFailedOver, StateEmergencyProvisioning, now, "manual_force_provision:"+ev.Reason)
+	// Spawn the same SearchOffers → CreateInstance → markHealthy goroutine
+	// that the auto-trigger path uses. Without this the reconciler tick
+	// would skip startProvisioning (activeLifecycle != nil) and the pod
+	// would never be created — see fix commit for the operator-initiated
+	// regression.
+	r.spawnProvisionGoroutine(ctx, id)
 	log.Info("force-provision accepted",
 		"lifecycle_id", id, "reason", ev.Reason, "by_replica", ev.ReplicaID)
 }

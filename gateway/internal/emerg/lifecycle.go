@@ -138,6 +138,23 @@ func (r *Reconciler) startProvisioning(parentCtx context.Context) {
 		StartedUnix: time.Now().Unix(),
 	})
 
+	r.spawnProvisionGoroutine(parentCtx, id)
+}
+
+// spawnProvisionGoroutine kicks off the long-running provisionLifecycle
+// goroutine for an already-inserted lifecycle row whose activeLifecycle
+// pointer has already been stored. Shared between startProvisioning (the
+// auto-trigger HEALTHY → EMERGENCY_PROVISIONING path) and
+// handleForceProvision (the operator-initiated path) so both code paths
+// converge on identical SearchOffers → CreateInstance → markHealthy
+// behaviour and identical error-routing semantics (Cooldown for
+// offer_race_lost, Healthy for everything else).
+//
+// Pre-conditions enforced by callers, not re-checked here:
+//   - r.q != nil
+//   - r.activeLifecycle.Load() != nil (caller stored it with ID == id)
+//   - FSM is already in StateEmergencyProvisioning
+func (r *Reconciler) spawnProvisionGoroutine(parentCtx context.Context, id int64) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	r.lifecycleCancel.Store(&cancel)
 
