@@ -546,8 +546,12 @@ func (r *Reconciler) calculateCostBRL(ctx context.Context, id int64, acceptedDPH
 	return acceptedDPH * hours * r.deps.Cfg.USDToBRLRate
 }
 
-// podHealthURL formats the /health URL from a vast.Instance using the
-// spike-derived field path (instances.ports["9100/tcp"][0].HostPort).
+// podHealthURL formats the /health URL from a vast.Instance. Emergency
+// pods run only llama-server (no health-bridge), so the readiness probe
+// targets llama-server's native /v1/models endpoint on container port
+// 8000 — when this returns HTTP 200 with at least one model entry, the
+// Qwen weights have been mmap'd onto the GPU and chat requests will
+// succeed.
 //
 // Returns "" when the instance is not yet ready to serve traffic — the
 // caller (waitForReadyOrDestroy) treats empty as "keep polling" rather
@@ -556,7 +560,7 @@ func (r *Reconciler) podHealthURL(inst vast.Instance) string {
 	if inst.PublicIPAddr == "" {
 		return ""
 	}
-	bindings, ok := inst.Ports["9100/tcp"]
+	bindings, ok := inst.Ports["8000/tcp"]
 	if !ok || len(bindings) == 0 {
 		return ""
 	}
@@ -564,11 +568,16 @@ func (r *Reconciler) podHealthURL(inst vast.Instance) string {
 	if port == "" {
 		return ""
 	}
-	return "http://" + inst.PublicIPAddr + ":" + port + "/health"
+	return "http://" + inst.PublicIPAddr + ":" + port + "/v1/models"
 }
 
-// checkHealth issues a single GET against the pod /health endpoint. Returns
-// true only when HTTP 200 + body.status == "healthy" + body.services.llm.status == "healthy".
+// checkHealth issues a single GET against the pod readiness endpoint
+// (podHealthURL — currently llama-server's /v1/models on port 8000).
+// Returns true only when HTTP 200 + the OpenAI-compatible response body
+// contains at least one model entry under data[]. llama-server only
+// answers 200 after the weights are mmap'd onto the GPU and at least
+// one slot is ready, which is the readiness signal the reconciler
+// needs to flip the FSM to EmergencyActive.
 //
 // Tests can override via Reconciler.healthCheckOverride to short-circuit
 // the HTTP path. Production always returns the default checker.
@@ -592,18 +601,15 @@ func (r *Reconciler) checkHealth(ctx context.Context, url string) bool {
 		return false
 	}
 	var body struct {
-		Status   string `json:"status"`
-		Services struct {
-			LLM struct {
-				Status string `json:"status"`
-			} `json:"llm"`
-		} `json:"services"`
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return false
 	}
-	return body.Status == "healthy" && body.Services.LLM.Status == "healthy"
+	return len(body.Data) > 0
 }
 
 // vastAPI returns the configured VastAPI client. Unit tests override via
@@ -649,10 +655,15 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) vas
 		Env: map[string]string{
 			// Vast.ai Docker port forwarding convention (per spike capture):
 			// keys are literal `-p HOST_PORT:CONTAINER_PORT` flag strings.
-			"-p 9100:9100": "1",
+			// Emergency pods serve LLM-only (D-C2), so only 8000 is exposed;
+			// Whisper/embed/health-bridge ports from the Phase 1 multi-service
+			// stack are intentionally omitted.
 			"-p 8000:8000": "1",
-			// Phase 1 onstart consumes these to pull weights from MinIO.
-			// Mirrors smoke.yml secrets so onstart preflight passes.
+			// Only Qwen weights are needed for the LLM-only emergency pod.
+			// Whisper + BGE keys/hashes still forwarded so Phase 1 host-mode
+			// pod deployments (smoke.yml) keep working with the same image —
+			// emerg-bootstrap.sh ignores them; Phase 1 onstart.sh consumes
+			// them when present.
 			"MINIO_ENDPOINT":         r.deps.Cfg.MinioEndpoint,
 			"MINIO_BUCKET":           r.deps.Cfg.MinioBucket,
 			"MINIO_ACCESS_KEY":       r.deps.Cfg.MinioAccessKey,
@@ -664,7 +675,11 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) vas
 			"WEIGHTS_BGE_M3_KEY":     r.deps.Cfg.WeightsBGEM3Key,
 			"WEIGHTS_BGE_M3_SHA256":  r.deps.Cfg.WeightsBGEM3SHA256,
 		},
-		Onstart:     "/root/onstart.sh", // Phase 1 image bakes this script in
+		// Emergency pods run the image's baked-in CMD (emerg-bootstrap.sh),
+		// which downloads qwen weights from MinIO then execs llama-server.
+		// No Onstart hook needed — Vast.ai's onstart runs on the VM host,
+		// not inside the container, and the host has no application code.
+		Onstart:     "",
 		Runtype:     "ssh",
 		Disk:        50,
 		Label:       fmt.Sprintf("ifix-emerg-lifecycle-%d", lifecycleID),

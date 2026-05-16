@@ -44,6 +44,13 @@ RUN apt-get update \
 COPY pod/templates/qwen3.5-27b-tool-calling.jinja /app/templates/qwen3.5-27b-tool-calling.jinja
 COPY pod/templates/qwen3.5-27b-tool-calling.jinja.sha256 /app/templates/qwen3.5-27b-tool-calling.jinja.sha256
 
+# Phase 6 emergency-pod LLM-only bootstrap. Phase 1 compose overrides CMD,
+# so embedding this script does not change the multi-service flow. Reading
+# this script as image CMD lets emergency pods (created by the gateway
+# reconciler without SSH access) self-bootstrap qwen weights from MinIO.
+COPY pod/scripts/emerg-bootstrap.sh /usr/local/bin/emerg-bootstrap.sh
+RUN chmod +x /usr/local/bin/emerg-bootstrap.sh
+
 # Sanity: verify template integrity at build time (fails the build if drift)
 RUN EXPECTED="$(tr -d '[:space:]' < /app/templates/qwen3.5-27b-tool-calling.jinja.sha256)" \
   && ACTUAL="$(sha256sum /app/templates/qwen3.5-27b-tool-calling.jinja | awk '{print $1}')" \
@@ -55,14 +62,8 @@ RUN mkdir -p /weights/qwen /weights/whisper /weights/bge-m3
 EXPOSE 8000
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# Default CMD: llama-server with Qwen 3.5 27B + tool-calling template (D-07/D-08).
-# Use absolute path /app/llama-server — backends are co-located in /app/.
-CMD ["/app/llama-server", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "-m", "/weights/qwen/model.gguf", \
-     "-ngl", "99", \
-     "-np", "2", \
-     "--ctx-size", "16384", \
-     "--jinja", \
-     "--chat-template-file", "/app/templates/qwen3.5-27b-tool-calling.jinja"]
+# Default CMD: emergency-pod bootstrap — downloads qwen weights if missing,
+# then execs llama-server with the same Phase 1 D-07/D-08 flags. Phase 1
+# compose service `llama` overrides this CMD with the explicit llama-server
+# invocation, so multi-service deployments are unaffected.
+CMD ["/usr/local/bin/emerg-bootstrap.sh"]

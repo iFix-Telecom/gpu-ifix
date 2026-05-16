@@ -121,10 +121,10 @@ func TestPodHealthURL_RunningWithPort(t *testing.T) {
 	inst := vast.Instance{
 		PublicIPAddr: "1.2.3.4",
 		Ports: map[string][]vast.PortBinding{
-			"9100/tcp": {{HostIP: "0.0.0.0", HostPort: "40713"}},
+			"8000/tcp": {{HostIP: "0.0.0.0", HostPort: "40713"}},
 		},
 	}
-	require.Equal(t, "http://1.2.3.4:40713/health", r.podHealthURL(inst))
+	require.Equal(t, "http://1.2.3.4:40713/v1/models", r.podHealthURL(inst))
 }
 
 // TestPodHealthURL_W6_Empty — Pitfall 6 fix: any of (no IP, no ports
@@ -134,7 +134,7 @@ func TestPodHealthURL_W6_Empty(t *testing.T) {
 
 	// No IP.
 	require.Equal(t, "", r.podHealthURL(vast.Instance{
-		Ports: map[string][]vast.PortBinding{"9100/tcp": {{HostPort: "40713"}}},
+		Ports: map[string][]vast.PortBinding{"8000/tcp": {{HostPort: "40713"}}},
 	}))
 
 	// No ports map at all.
@@ -149,13 +149,13 @@ func TestPodHealthURL_W6_Empty(t *testing.T) {
 	// Empty bindings list.
 	require.Equal(t, "", r.podHealthURL(vast.Instance{
 		PublicIPAddr: "1.2.3.4",
-		Ports:        map[string][]vast.PortBinding{"9100/tcp": {}},
+		Ports:        map[string][]vast.PortBinding{"8000/tcp": {}},
 	}))
 
 	// Empty HostPort string.
 	require.Equal(t, "", r.podHealthURL(vast.Instance{
 		PublicIPAddr: "1.2.3.4",
-		Ports:        map[string][]vast.PortBinding{"9100/tcp": {{HostPort: ""}}},
+		Ports:        map[string][]vast.PortBinding{"8000/tcp": {{HostPort: ""}}},
 	}))
 }
 
