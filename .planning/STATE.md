@@ -89,7 +89,7 @@ Next autonomous-eligible work: Phase 07 (Observability — Dashboard & Alerting)
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260515-ayc | Fix STATE.md corruption (heading `## Current Position` duplicado injetado no meio do Phase 6 bullet) | 2026-05-15 | f44cf11 | [260515-ayc-fix-state-md-corruption-linha-40-42-tem-](./quick/260515-ayc-fix-state-md-corruption-linha-40-42-tem-/) |
-| 260516-rym | Fix handleForceProvision não trata FSM em cooldown — pod Vast.ai órfão queimava $$ quando operator force-provision após falha. Precheck FSM.State() + SetState(EmergencyProvisioning) em vez de 2x Transition. +2 regression tests. | 2026-05-16 | TBD | [260516-rym-fix-force-provision-cooldown-transition](./quick/260516-rym-fix-force-provision-cooldown-transition/) |
+| 260516-rym | Fix handleForceProvision não trata FSM em cooldown — pod Vast.ai órfão queimava $$ quando operator force-provision após falha. Precheck FSM.State() + SetState(EmergencyProvisioning) em vez de 2x Transition. +2 regression tests. | 2026-05-16 | 5aec0eb | [260516-rym-fix-force-provision-cooldown-transition](./quick/260516-rym-fix-force-provision-cooldown-transition/) |
 
 ## Session Continuity
 
