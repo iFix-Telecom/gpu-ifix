@@ -352,13 +352,23 @@ func (c *Client) parseErrorBody(resp *http.Response) error {
 		msg = strings.TrimSpace(string(body))
 	}
 
+	// Vast.ai is inconsistent: PUT /asks/{id}/ for a stale offer can come
+	// back as HTTP 400 with body `error="no_such_ask"` instead of the
+	// documented 404/410 envelope. Normalise both shapes to ErrOfferGone
+	// so the lifecycle's bid-race retry kicks in (3 attempts with fresh
+	// SearchOffers) before bubbling up as ErrOfferRaceLost.
+	msgLower := strings.ToLower(msg)
+	bodyLower := strings.ToLower(string(body))
+	if env.Error == "no_such_ask" ||
+		strings.Contains(msgLower, "no longer available") ||
+		strings.Contains(msgLower, "no_such_ask") ||
+		strings.Contains(bodyLower, "no_such_ask") {
+		return ErrOfferGone
+	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return ErrUnauthorized
 	case http.StatusNotFound, http.StatusGone:
-		if env.Error == "no_such_ask" || strings.Contains(strings.ToLower(msg), "no longer available") {
-			return ErrOfferGone
-		}
 		if env.Error == "no_such_instance" {
 			return ErrInstanceNotFound
 		}
