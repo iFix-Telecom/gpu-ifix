@@ -460,13 +460,17 @@ func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthU
 	return nil
 }
 
-// stripHealthSuffix removes a trailing "/health" from the given URL.
-// Helper for markHealthy + leader-recovery resume so the dispatcher
-// override receives the upstream BASE URL, not the probe URL.
+// stripHealthSuffix removes the readiness-probe suffix ("/v1/models" or
+// the legacy "/health") from the given URL. Helper for markHealthy +
+// leader-recovery resume so the dispatcher override receives the
+// upstream BASE URL, not the probe URL. The legacy "/health" branch
+// preserves compatibility with lifecycle rows that recorded the
+// pre-LLM-only readiness URL during a previous gateway boot.
 func stripHealthSuffix(u string) string {
-	const suffix = "/health"
-	if len(u) > len(suffix) && u[len(u)-len(suffix):] == suffix {
-		return u[:len(u)-len(suffix)]
+	for _, suffix := range []string{"/v1/models", "/health"} {
+		if len(u) > len(suffix) && u[len(u)-len(suffix):] == suffix {
+			return u[:len(u)-len(suffix)]
+		}
 	}
 	return u
 }

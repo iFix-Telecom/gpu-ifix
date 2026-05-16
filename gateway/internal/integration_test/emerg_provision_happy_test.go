@@ -219,7 +219,7 @@ func TestEmergProvisionHappyPath(t *testing.T) {
 	// ActivePodURL exposed for dispatcher (Plan 08).
 	url, ok := r.ActivePodURL()
 	require.True(t, ok)
-	require.Equal(t, "http://127.0.0.1:40713/health", url)
+	require.Equal(t, "http://127.0.0.1:40713/v1/models", url)
 
 	// Counters: search ≥1, create==1, destroy==0 (happy path).
 	require.GreaterOrEqual(t, mock.searchHits.Load(), int64(1))

@@ -100,7 +100,8 @@ func newMockPodHealthServer(t *testing.T, healthy bool) *mockPodHealthServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"healthy","services":{"llm":{"status":"healthy"}}}`))
+		// Mirror llama-server /v1/models (OpenAI-compatible).
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen","object":"model"}]}`))
 	}))
 	t.Cleanup(m.Server.Close)
 	return m
@@ -113,10 +114,10 @@ func newMockPodHealthServer(t *testing.T, healthy bool) *mockPodHealthServer {
 // the same string.
 func instanceFromHealthURL(t *testing.T, instanceID int64, healthURL string) vast.Instance {
 	t.Helper()
-	// Parse "http://<ip>:<port>/health"
+	// Parse "http://<ip>:<port>/v1/models"
 	require.True(t, strings.HasPrefix(healthURL, "http://"))
 	rest := strings.TrimPrefix(healthURL, "http://")
-	rest = strings.TrimSuffix(rest, "/health")
+	rest = strings.TrimSuffix(rest, "/v1/models")
 	parts := strings.Split(rest, ":")
 	require.Len(t, parts, 2)
 	ip, port := parts[0], parts[1]
@@ -146,7 +147,7 @@ func TestEmergLeaderRecoveryActiveResume(t *testing.T) {
 	// offer_accepted → health_pass progression.
 	events := `[
 	  {"ts":"2026-05-13T00:00:00Z","type":"offer_accepted","payload":{"offer_id":7777,"instance_id":99,"dph":0.35}},
-	  {"ts":"2026-05-13T00:01:00Z","type":"health_pass","payload":{"lifecycle_id":1,"health_url":"` + mockHealth.URL + `/health","dph":0.35}}
+	  {"ts":"2026-05-13T00:01:00Z","type":"health_pass","payload":{"lifecycle_id":1,"health_url":"` + mockHealth.URL + `/v1/models","dph":0.35}}
 	]`
 	var orphanID int64
 	require.NoError(t, pool.QueryRow(rootCtx,
@@ -157,7 +158,7 @@ func TestEmergLeaderRecoveryActiveResume(t *testing.T) {
 
 	mockVast := newResumeMockVastServer(t)
 	// Build instance whose podHealthURL produces mockHealth.URL/health.
-	resumedInst := instanceFromHealthURL(t, 99, mockHealth.URL+"/health")
+	resumedInst := instanceFromHealthURL(t, 99, mockHealth.URL+"/v1/models")
 	mockVast.getResponse.Store(&resumedInst)
 
 	vastClient := vast.NewClientWithBaseURL("test-key", mockVast.Server.URL)
@@ -197,7 +198,7 @@ func TestEmergLeaderRecoveryActiveResume(t *testing.T) {
 	// activeLifecycle is re-attached.
 	url, ok := r.ActivePodURL()
 	require.True(t, ok, "activePodURL must be set after resume")
-	require.Equal(t, mockHealth.URL+"/health", url,
+	require.Equal(t, mockHealth.URL+"/v1/models", url,
 		"podURL must match the value derived from the resumed instance")
 
 	// IsActive() — the dispatcher contract Plan 08 reads.
@@ -249,7 +250,7 @@ func TestEmergLeaderRecoveryActiveResume_HealthFailureCancels(t *testing.T) {
 
 	events := `[
 	  {"ts":"2026-05-13T00:00:00Z","type":"offer_accepted","payload":{"offer_id":7777,"instance_id":100,"dph":0.35}},
-	  {"ts":"2026-05-13T00:01:00Z","type":"health_pass","payload":{"lifecycle_id":1,"health_url":"` + mockHealth.URL + `/health","dph":0.35}}
+	  {"ts":"2026-05-13T00:01:00Z","type":"health_pass","payload":{"lifecycle_id":1,"health_url":"` + mockHealth.URL + `/v1/models","dph":0.35}}
 	]`
 	var orphanID int64
 	require.NoError(t, pool.QueryRow(rootCtx,
@@ -259,7 +260,7 @@ func TestEmergLeaderRecoveryActiveResume_HealthFailureCancels(t *testing.T) {
 		 RETURNING id`, events).Scan(&orphanID))
 
 	mockVast := newResumeMockVastServer(t)
-	resumedInst := instanceFromHealthURL(t, 100, mockHealth.URL+"/health")
+	resumedInst := instanceFromHealthURL(t, 100, mockHealth.URL+"/v1/models")
 	mockVast.getResponse.Store(&resumedInst)
 
 	vastClient := vast.NewClientWithBaseURL("test-key", mockVast.Server.URL)
