@@ -443,11 +443,17 @@ func TestLoad_Phase4FloatOrBogusValue(t *testing.T) {
 	}
 }
 
-// phase6OptionalEnv enumerates the twelve Phase 6 emergency-pod env vars.
-// Cleared in setUp so a stray Portainer value does not leak into the
-// default-value assertions.
+// phase6OptionalEnv enumerates the fifteen Phase 6 emergency-pod env vars
+// after the Strategy B Locked refactor (06-02-PLAN): EMERGENCY_POD_IMAGE_TAG
+// is gone (custom GHCR image dropped per CONTEXT.md D-01-B..D-08-B), replaced
+// by EMERGENCY_TEMPLATE_IMAGE + EMERGENCY_JINJA_TEMPLATE_KEY +
+// EMERGENCY_JINJA_TEMPLATE_SHA256 + EMERGENCY_LLAMA_ARGS. Cleared in setUp
+// so a stray Portainer value does not leak into the default-value assertions.
 var phase6OptionalEnv = []string{
-	"EMERGENCY_POD_IMAGE_TAG",
+	"EMERGENCY_JINJA_TEMPLATE_KEY",
+	"EMERGENCY_JINJA_TEMPLATE_SHA256",
+	"EMERGENCY_LLAMA_ARGS",
+	"EMERGENCY_TEMPLATE_IMAGE",
 	"MONTHLY_EMERGENCY_BUDGET_BRL",
 	"PRIMARY_HOST_ID",
 	"PROVISION_COLDSTART_BUDGET_SECONDS",
@@ -470,11 +476,15 @@ func clearPhase6(t *testing.T) {
 
 // TestLoad_Phase6Defaults validates that with no Phase 6 env vars set,
 // Load returns the documented Wave-0 defaults from
-// .planning/phases/06-auto-provisioning-emergency-pod-vast-ai/06-CONTEXT.md
-// decisions D-A1, D-A4, D-A5, D-C1, D-D1, D-D2, D-D4 (per 06-01 Plan
-// Behavior Test 6). VastAIAPIKey defaults empty to graceful-degrade
-// (the reconciler logs a warning and stays disabled rather than
-// failing boot — Phase 6 is opt-in until 06-WAVE0-GATES.md is closed).
+// .planning/phases/06-emergency-pod-template-refactor/06-CONTEXT.md
+// decisions D-01-B (template image), D-04-B option B2 (Jinja MinIO key+sha256
+// non-empty defaults — locked by 06-WAVE0-GATES.md Decision 2), D-07-B
+// (EmergencyLlamaArgs CSV empty → nil → lifecycle.go uses hardcoded const),
+// plus legacy phase-6 emergency-pod defaults D-A1, D-A4, D-A5, D-C1, D-D1,
+// D-D2, D-D4 (per 06-02 Plan Behavior Test 1-8 Strategy B Locked).
+// VastAIAPIKey defaults empty to graceful-degrade (the reconciler logs a
+// warning and stays disabled rather than failing boot — Phase 6 is opt-in
+// until 06-WAVE0-GATES.md is closed).
 func TestLoad_Phase6Defaults(t *testing.T) {
 	clearAll(t)
 	clearPhase3(t)
@@ -485,8 +495,24 @@ func TestLoad_Phase6Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if cfg.EmergencyPodImageTag != "v1.0" {
-		t.Errorf("EmergencyPodImageTag = %q, want v1.0", cfg.EmergencyPodImageTag)
+	// Strategy B Locked defaults (06-WAVE0-GATES.md Decisions 2 + 3).
+	if cfg.EmergencyTemplateImage != "ghcr.io/ggml-org/llama.cpp:server-cuda-b9128" {
+		t.Errorf("EmergencyTemplateImage = %q, want ghcr.io/ggml-org/llama.cpp:server-cuda-b9128 (D-01-B locked)", cfg.EmergencyTemplateImage)
+	}
+	// 06-WAVE0-GATES.md Decision 2 locked Strategy B2 → Jinja key+sha256
+	// default to the production MinIO coordinates, NOT empty. Empty would
+	// represent Strategy B1 (image overlay path) which the operator did
+	// not select.
+	const wantJinjaKey = "emerg-onstart/templates/qwen3.5-27b-tool-calling-1067302cc6d927210a84775b9a060f724da15debc168c79710cbf763512e9f67.jinja"
+	const wantJinjaSHA = "1067302cc6d927210a84775b9a060f724da15debc168c79710cbf763512e9f67"
+	if cfg.EmergencyJinjaTemplateKey != wantJinjaKey {
+		t.Errorf("EmergencyJinjaTemplateKey = %q, want %q (D-04-B B2 locked)", cfg.EmergencyJinjaTemplateKey, wantJinjaKey)
+	}
+	if cfg.EmergencyJinjaTemplateSHA256 != wantJinjaSHA {
+		t.Errorf("EmergencyJinjaTemplateSHA256 = %q, want %q (D-04-B B2 locked)", cfg.EmergencyJinjaTemplateSHA256, wantJinjaSHA)
+	}
+	if cfg.EmergencyLlamaArgs != nil {
+		t.Errorf("EmergencyLlamaArgs = %v, want nil (D-07-B; empty CSV → nil; lifecycle.go uses hardcoded const)", cfg.EmergencyLlamaArgs)
 	}
 	if cfg.MonthlyEmergencyBudgetBRL != 200.0 {
 		t.Errorf("MonthlyEmergencyBudgetBRL = %v, want 200.0 (D-D2)", cfg.MonthlyEmergencyBudgetBRL)
@@ -523,9 +549,12 @@ func TestLoad_Phase6Defaults(t *testing.T) {
 	}
 }
 
-// TestLoad_Phase6CustomValues exercises floatOr / atoiOr overrides for the
-// Phase 6 env vars. Includes a bogus VAST_PRICE_CAP_DPH to confirm the
-// floatOr fallback prevents 0.0 cap (which would reject every offer).
+// TestLoad_Phase6CustomValues exercises floatOr / atoiOr / csvOr overrides
+// for the Phase 6 env vars. Includes a bogus VAST_PRICE_CAP_DPH to confirm
+// the floatOr fallback prevents 0.0 cap (which would reject every offer).
+// Strategy B Locked fields (EmergencyTemplateImage, EmergencyJinjaTemplateKey,
+// EmergencyJinjaTemplateSHA256, EmergencyLlamaArgs) overrideable via env per
+// 06-02 Plan Behavior Test 5-8.
 func TestLoad_Phase6CustomValues(t *testing.T) {
 	clearAll(t)
 	clearPhase3(t)
@@ -540,7 +569,10 @@ func TestLoad_Phase6CustomValues(t *testing.T) {
 	t.Setenv("PROVISION_FAILURE_COOLDOWN_SECONDS", "90")
 	t.Setenv("VAST_AI_API_KEY", "fake-key-1234")
 	t.Setenv("PRIMARY_HOST_ID", "987654")
-	t.Setenv("EMERGENCY_POD_IMAGE_TAG", "v1.1-rc2")
+	t.Setenv("EMERGENCY_TEMPLATE_IMAGE", "ghcr.io/ggml-org/llama.cpp:server-cuda-b9200")
+	t.Setenv("EMERGENCY_JINJA_TEMPLATE_KEY", "emerg-onstart/templates/qwen-abc.jinja")
+	t.Setenv("EMERGENCY_JINJA_TEMPLATE_SHA256", "deadbeef")
+	t.Setenv("EMERGENCY_LLAMA_ARGS", "--host,0.0.0.0,--port,8000")
 	t.Setenv("VAST_API_QPS_LIMIT", "2")
 	cfg, err := config.Load()
 	if err != nil {
@@ -570,8 +602,20 @@ func TestLoad_Phase6CustomValues(t *testing.T) {
 	if cfg.PrimaryHostID != 987654 {
 		t.Errorf("PrimaryHostID override = %d, want 987654", cfg.PrimaryHostID)
 	}
-	if cfg.EmergencyPodImageTag != "v1.1-rc2" {
-		t.Errorf("EmergencyPodImageTag override = %q, want v1.1-rc2", cfg.EmergencyPodImageTag)
+	// Strategy B Locked overrides — 06-02 Plan Behavior Test 5-8.
+	if cfg.EmergencyTemplateImage != "ghcr.io/ggml-org/llama.cpp:server-cuda-b9200" {
+		t.Errorf("EmergencyTemplateImage override = %q, want ghcr.io/ggml-org/llama.cpp:server-cuda-b9200", cfg.EmergencyTemplateImage)
+	}
+	if cfg.EmergencyJinjaTemplateKey != "emerg-onstart/templates/qwen-abc.jinja" {
+		t.Errorf("EmergencyJinjaTemplateKey override = %q, want emerg-onstart/templates/qwen-abc.jinja", cfg.EmergencyJinjaTemplateKey)
+	}
+	if cfg.EmergencyJinjaTemplateSHA256 != "deadbeef" {
+		t.Errorf("EmergencyJinjaTemplateSHA256 override = %q, want deadbeef", cfg.EmergencyJinjaTemplateSHA256)
+	}
+	if got := cfg.EmergencyLlamaArgs; len(got) != 4 ||
+		got[0] != "--host" || got[1] != "0.0.0.0" ||
+		got[2] != "--port" || got[3] != "8000" {
+		t.Errorf("EmergencyLlamaArgs override = %v, want [--host 0.0.0.0 --port 8000]", got)
 	}
 	if cfg.VastAPIQPSLimit != 2 {
 		t.Errorf("VastAPIQPSLimit override = %d, want 2", cfg.VastAPIQPSLimit)
