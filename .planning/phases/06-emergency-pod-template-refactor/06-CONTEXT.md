@@ -24,20 +24,51 @@ Trocar bootstrap-path do emergency pod usado pelo reconciler `gateway/internal/e
 <decisions>
 ## Implementation Decisions
 
+> **REVISION 2026-05-16 (post-research, Strategy B locked):** Research (06-RESEARCH.md) confirmou TGI archived 2026-03-21; HF oficialmente endorsa llama.cpp como replacement. Pedro escolheu **Strategy B**: imagem oficial `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128` (HF-endorsed via Inference Endpoints docs) + `runtype=args` (preserva ENTRYPOINT da image) + `args=[...llama-server flags...]`. Decisões D-01/D-02/D-03/D-06/D-07 abaixo foram SUPERSEDED — bloco autoritativo está em **"Strategy B Locked"** logo abaixo. Decisões originais ficam como histórico tachado.
+
+### Strategy B Locked (autoritativo para planner)
+
+- **D-01-B:** Image = `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128` (GHCR oficial ggml-org, 109k+ stars, HF-endorsed). Tag SHA-pinned via config gateway env. ENTRYPOINT da image = `/app/llama-server`. Sem download de binário em runtime — paridade Phase 1 D-08 mantida (mesmo TAG b9128 que `pod/Dockerfile:23` já usa para construir custom image atual).
+- **D-02-B:** ZERO download de binário em runtime. Image traz `/app/llama-server` baked. Eliminado: GitHub release download, sha256-bin-verify, MinIO mirror para llama-bin. Cleanup vs path original: removido D-02/D-03 inteiros.
+- **D-03-B:** Onstart Vast baixa SÓ Qwen weights de MinIO (`s3.ifixtelecom.com.br/ai-gateway/<WEIGHTS_QWEN_KEY>`) com sha256-verify (pattern Phase 1 D-05 reused 1:1). Onstart inline ~700 chars — bem abaixo do limite Vast 4048. Sem script externo MinIO (não precisa de `emerg-onstart/<VERSION>.sh` storage).
+- **D-04-B:** Jinja template `qwen3.5-27b-tool-calling.jinja` precisa decisão final em plan-phase Wave 0 — duas opções:
+  - (B1) Pre-bake em image overlay minúscula `ghcr.io/ifixtelecom/qwen-templates:v1` (~10KB layer sobre `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128`) + CI workflow novo + tag-pinned. Reprodutibilidade alta, custo CI baixo.
+  - (B2) Fetch inline no onstart de MinIO (`emerg-onstart/templates/qwen3.5-27b-tool-calling-<sha>.jinja`) + write para `/app/templates/` antes do llama-server iniciar. Onstart +~5 linhas. Sem novo image.
+  - Recomendação default: **B2** (mais simples, mantém princípio "imagem oficial pública + config externa"). Planner decide.
+- **D-06-B:** `Runtype: "args"` (campo JSON exato — NÃO "ssh_proxy", NÃO "ssh"). Preserva ENTRYPOINT da image. Campo JSON da API é **`args` (array de strings)** — NÃO `image_args`. Operator SSH debug continua via `vast ssh <id>` (sidecar Vast host-level, independente do container — VERIFIED por research). llama-server vira PID 1 direto, crash detection automático.
+- **D-07-B:** `args` payload exato (ordem-sensível, REMAINDER semantics — passado direto pro ENTRYPOINT):
+  ```
+  ["--host","0.0.0.0","--port","8000","-m","/weights/qwen/model.gguf","-ngl","99","-np","2","--ctx-size","16384","--jinja","--chat-template-file","/app/templates/qwen3.5-27b-tool-calling.jinja"]
+  ```
+  Idêntico a `emerg-bootstrap.sh:64-73` exceto que flags vão via Vast `args` field (não shell script). Paridade Phase 1 D-08 garantida.
+- **D-08-B:** Cleanup custom image — INALTERADO em relação ao original D-08 (PR separado após UAT 3 lifecycles GREEN). Mas now também deleta: PR1 mantém apenas o que Strategy B exige (lifecycle.go refactor + config fields + onstart inline). PR2 (delete) remove `pod/Dockerfile`, `pod/scripts/emerg-bootstrap.sh`, `.github/workflows/build-pod.yml`, `pod/sshd_config` (se existe), `pod/templates/` se decidir B2 (template vai pra MinIO), config field `EmergencyPodImageTag`, env var `EMERGENCY_POD_IMAGE_TAG`. GHCR cleanup manual.
+- **D-08-B-risk:** Burnt-bridge MITIGAÇÃO — Strategy B usa image pública (ggml-org GHCR), zero dependência do custom GHCR Ifix. Se Vast pull falhar (raro), reconciler já tem retry/destroy logic. Se llama.cpp upstream bump em b9128 quebrar Qwen3.5 compat (improvável, tag pinned), operator pode reverter `EmergencyTemplateImage` env via Portainer UI sem code change. Mais resiliente que original D-08.
+
+### Config Gateway Env Vars (Strategy B — 4 fields, era 6 no original)
+
+- `EmergencyTemplateImage` (string, e.g., `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128`)
+- `EmergencyLlamaArgs` (CSV ou JSON array — exato args do llama-server) — OU hardcoded em lifecycle.go se nunca muda (decidir em plan-phase)
+- `EmergencyJinjaTemplateKey` (MinIO key se B2: `emerg-onstart/templates/qwen3.5-27b-tool-calling-<sha>.jinja`) OU vazio se B1
+- `EmergencyJinjaTemplateSHA256` (hex, se B2)
+
+REMOVIDOS vs original D-08: `EmergencyLlamaBinTag`, `EmergencyLlamaBinSHA256`, `EmergencyLlamaBinMirrorURL`, `EmergencyOnstartVersion`, `EmergencyOnstartSHA256` (Strategy B não baixa binário, não usa script MinIO externo).
+
+### Original Decisions (HISTORICAL — superseded por Strategy B Locked acima)
+
 ### Template Vast.ai
-- **D-01:** Template = `nvidia/cuda:12.4-runtime-ubuntu22.04` (Docker Hub oficial NVIDIA). CUDA 12.4 runtime (~600MB) — não devel. Cache-hit em hosts 4090 esperado alto. sm_89 compute capability coberto pela toolkit 12.4. Sem ENTRYPOINT customizado (template puro), sshd injetado via runtype ssh_proxy + Onstart Vast escreve script.
+- ~~**D-01:** Template = `nvidia/cuda:12.4-runtime-ubuntu22.04` (Docker Hub oficial NVIDIA). CUDA 12.4 runtime (~600MB) — não devel. Cache-hit em hosts 4090 esperado alto. sm_89 compute capability coberto pela toolkit 12.4. Sem ENTRYPOINT customizado (template puro), sshd injetado via runtype ssh_proxy + Onstart Vast escreve script.~~ SUPERSEDED por D-01-B. Research mostrou ai-dock só publica CUDA 12.8, e Strategy B elimina necessidade de template + bin externo.
 
 ### llama-server binário (source + integrity + fallback)
-- **D-02:** Download path = `github.com/ggml-org/llama.cpp/releases/download/<TAG>/llama-<TAG>-bin-ubuntu-x64-cuda.zip` pinned por TAG (e.g., `b9128` — mesma versão que `pod/Dockerfile:23` usa em `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128`, mantém paridade Phase 1 D-08). sha256 verificado antes de unzip + exec.
-- **D-03:** Fallback MinIO mirror = `s3.ifixtelecom.com.br/ai-gateway/llama-bins/<TAG>/llama-<TAG>-bin-ubuntu-x64-cuda.zip`. Onstart tenta GitHub primário (5s timeout), fallback MinIO se falhar (rate-limit, outage). CI (build-llama-bin-mirror.yml novo) faz upload pra MinIO em cada bump de TAG na config gateway.
+- ~~**D-02:** Download path = `github.com/ggml-org/llama.cpp/releases/download/<TAG>/llama-<TAG>-bin-ubuntu-x64-cuda.zip`...~~ SUPERSEDED por D-02-B. Asset não existe no ggml-org Linux (research VERIFIED).
+- ~~**D-03:** Fallback MinIO mirror = `s3.ifixtelecom.com.br/ai-gateway/llama-bins/<TAG>/...`~~ SUPERSEDED por D-03-B. Não há binário a espelhar; image GHCR oficial já traz.
 
 ### Onstart script storage
-- **D-04:** Script `pod/scripts/emerg-onstart.sh` hospedado em MinIO `s3.ifixtelecom.com.br/ai-gateway/emerg-onstart/<VERSION>.sh` (versionado por filename, immutable). CI (extensão do upload-weights.sh OU novo workflow) faz upload em cada commit que toca o arquivo. Config gateway env `EMERG_ONSTART_VERSION=<VERSION>` + `EMERG_ONSTART_SHA256=<HEX>` determina qual versão é injetada no Onstart Vast.
-- **D-05:** Onstart Vast inline (curto, ~10 linhas) faz: `curl -fsSL "${MINIO_ENDPOINT}/${MINIO_BUCKET}/emerg-onstart/${VERSION}.sh" -o /onstart.sh && echo "${SHA256}  /onstart.sh" | sha256sum -c && chmod +x /onstart.sh`. Mesmo padrão sha256-check que `pod/onstart.sh:78-90` usa pra download-weights.sh.
+- ~~**D-04:** Script `pod/scripts/emerg-onstart.sh` hospedado em MinIO...~~ SUPERSEDED por D-04-B. Script externo eliminado; onstart inline ~700 chars cobre tudo.
+- ~~**D-05:** Onstart Vast inline (curto, ~10 linhas) faz curl + sha256...~~ SUPERSEDED por D-03-B. Lógica idem mas baixa só weights, não script.
 
 ### Runtype + exec strategy
-- **D-06:** `Runtype: "ssh_proxy"` + `Onstart: "<inline 10-line curl+sha256 + writes /onstart.sh>"` + `ImageArgs: ["bash", "/onstart.sh"]`. Vast garante sshd sidecar (operator pode `vast ssh <id>` pra debug), llama-server vira PID 1 do container principal (crash detect automático).
-- **D-07:** Script `/onstart.sh` (no MinIO, baixado e exec via Vast) faz: (1) curl llama-bin GitHub OR MinIO fallback + sha256 verify + unzip pra /app/llama-server; (2) curl Qwen weights MinIO + sha256 verify (idêntico ao emerg-bootstrap.sh:33-62 atual); (3) `exec /app/llama-server --host 0.0.0.0 --port 8000 -m /weights/qwen/model.gguf -ngl 99 -np 2 --ctx-size 16384 --jinja --chat-template-file /app/templates/qwen3.5-27b-tool-calling.jinja` (flags idênticos a emerg-bootstrap.sh:64-73); (4) Jinja template é embedded inline OR baixado de MinIO (decide em planning — template é pequeno ~20KB, inline simplifica).
+- ~~**D-06:** `Runtype: "ssh_proxy"` + `Onstart: "<inline 10-line curl+sha256 + writes /onstart.sh>"` + `ImageArgs: ["bash", "/onstart.sh"]`.~~ SUPERSEDED por D-06-B. ssh_proxy também substitui ENTRYPOINT (não preserva CMD); campo correto é `args` (não `image_args`).
+- ~~**D-07:** Script `/onstart.sh` (no MinIO, baixado e exec via Vast) faz curl llama-bin + weights + exec...~~ SUPERSEDED por D-07-B. Sem bin download, flags vão direto via campo `args` Vast.
 
 ### Cleanup custom image baseline
 - **D-08:** Custom image GHCR descontinuada (delete tudo). Phase 6 commit remove: `pod/Dockerfile`, `pod/scripts/emerg-bootstrap.sh`, `.github/workflows/build-pod.yml`, `pod/sshd_config` (se existe), config field `EmergencyPodImageTag` em `gateway/internal/config/config.go:243`, env var `EMERGENCY_POD_IMAGE_TAG` em `.env.portainer.dev`. GHCR cleanup manual operator pode rodar `gh api -X DELETE /repos/ifixtelecom/ifix-ai-pod/packages/container/...` pós-deploy.
