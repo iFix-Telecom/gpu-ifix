@@ -170,17 +170,17 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 06-01-PLAN.md — Wave 0 spike Vast.ai runtype=args + Jinja strategy decision (B1/B2) + grep survey (PRV-06)
-- [ ] 06-02-PLAN.md — Wave 1 config refactor: 4 fields novos (EmergencyTemplateImage, EmergencyJinjaTemplate*, EmergencyLlamaArgs) + remove EmergencyPodImageTag (PRV-06)
-- [ ] 06-03-PLAN.md — Wave 1 vast types.go: add Args []string field + Runtype comment update (PRV-06)
+- [x] 06-01-PLAN.md — Wave 0 spike Vast.ai runtype=args + Jinja strategy decision (B1/B2) + grep survey (PRV-06) — commit b997d25
+- [x] 06-02-PLAN.md — Wave 1 config refactor: 4 fields novos (EmergencyTemplateImage, EmergencyJinjaTemplate*, EmergencyLlamaArgs) + remove EmergencyPodImageTag (PRV-06) — commit 881e9c6
+- [x] 06-03-PLAN.md — Wave 1 vast types.go: add Args []string field + Runtype comment update (PRV-06) — commit d8c322c
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-04-PLAN.md — Wave 2 lifecycle.go buildCreateRequest Strategy B (Image upstream + Runtype=args + Args + Onstart inline MinIO+sha256) + 8 unit tests RED-GREEN (PRV-06, PRV-01, PRV-05, PRV-07, PRV-08, PRV-09, PRV-10)
+- [x] 06-04-PLAN.md — Wave 2 lifecycle.go buildCreateRequest Strategy B (Image upstream + Runtype=args + Args + Onstart inline MinIO+sha256) + 9 unit tests RED-GREEN (PRV-06, PRV-01, PRV-05, PRV-07, PRV-08, PRV-09, PRV-10) — commits 50e606d + 19942bc
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-05-PLAN.md — Wave 3 integration test update (emerg_leader_test EmergencyTemplateImage) + full-suite gate (PRV-06)
+- [x] 06-05-PLAN.md — Wave 3 integration test update (emerg_leader_test EmergencyTemplateImage) + full-suite gate (PRV-06) — commit e179104
 
 **Wave 4** *(blocked on Wave 3 completion)*
 

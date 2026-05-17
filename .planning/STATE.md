@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-17T01:54:32.437Z"
+last_updated: "2026-05-17T02:28:12.368Z"
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 78
-  completed_plans: 69
+  completed_plans: 74
   percent: 64
 ---
 
@@ -28,7 +28,7 @@ progress:
 ## Current Position
 
 Phase: 09 (client-integration-sensitive-tenants) — EXECUTING
-Plan: 1 of 4
+Plan: 2 of 4
 Next autonomous-eligible work: Phase 07 (Observability — Dashboard & Alerting)
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
@@ -37,7 +37,7 @@ Next autonomous-eligible work: Phase 07 (Observability — Dashboard & Alerting)
   - Phase 3: SC-1 live failover UAT pending (`03-VERIFICATION.md` human_needed)
   - Phase 4: SC-1/SC-2/SC-4 live UAT deferred pending ai-gateway-dev stack deploy (`04-VERIFICATION.md` human_needed)
   - Phase 5: SC-4 + SC-5 deferred (`05-VERIFICATION.md` passed_partial)
-- **Phase 6 (NOVO 2026-05-16):** Emergency-Pod Template Refactor (SEED-001 ativado). Goal: trocar custom GHCR image por template Vast.ai Ubuntu+CUDA + llama-server binário pinned. CONTEXT em curso (`/gsd-discuss-phase`). Phase 6 anterior renomeada → Phase 6.5 (swap por dependência arquitetural: refactor é foundation, auto-prov consome).
+- **Phase 6 (NOVO 2026-05-16):** Emergency-Pod Template Refactor (SEED-001 ativado). Goal: trocar custom GHCR image por template Vast.ai Ubuntu+CUDA + llama-server binário pinned. PR1 (Strategy B Locked migration) Waves 0-3 complete: 06-02 config refactor (881e9c6), 06-03 vast types (d8c322c), 06-04 lifecycle.go Strategy B (19942bc), **06-05 integration test fixture closeout (e179104, 2026-05-16)**. PR1 tecnicamente ready — falta apenas plan 06-06 HUMAN-UAT live. Phase 6 anterior renomeada → Phase 6.5 (swap por dependência arquitetural: refactor é foundation, auto-prov consome).
 - **Phase 6.5 (ex-Phase 6):** 10/11 plans executed (06.5-01..06.5-10 GREEN + summaries — renomeados de 06-* em 2026-05-16). 06.5-11 is `autonomous: false` HUMAN-UAT — Tasks 1+2 done (06.5-HUMAN-UAT.md + docs/RUNBOOK-EMERGENCY-POD.md created, commit 2b539fc); Task 3 is a **blocking** human-verify checkpoint (6 LIVE Vast.ai UAT scenarios, ~R$10-15) — BLOQUEADO por Phase 6 refactor (runtype=ssh bug torna UAT impossível end-to-end). No 06.5-11-SUMMARY.md, no 06.5-VERIFICATION.md yet.
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
@@ -47,7 +47,7 @@ Next autonomous-eligible work: Phase 07 (Observability — Dashboard & Alerting)
 ## Performance Metrics
 
 - **Phases completed:** 5 / 11 (1–5 on disk; Phase 6 novo SEED-001 em CONTEXT; Phase 6.5 plans done, pending human UAT bloqueado por Phase 6)
-- **Plans completed:** 52 / 54 (Phase 1: 9/9 · Phase 2: 8/9, 02-09 deferred · Phase 3: 8/8 · Phase 4: 9/9 · Phase 5: 8/8 · Phase 6.5: 10/11, 06.5-11 human UAT)
+- **Plans completed:** 56 / 61 (Phase 1: 9/9 · Phase 2: 8/9, 02-09 deferred · Phase 3: 8/8 · Phase 4: 9/9 · Phase 5: 8/8 · Phase 6: 4/7, 06-02/06-03/06-04/06-05 done — Wave 4 06-06 HUMAN-UAT + Wave 5 PR2 06-07 pending · Phase 6.5: 10/11, 06.5-11 human UAT)
 - **v1 requirements covered by executed plans:** POD-01..07, GW-01..10, TEN-01..09, RES-01..08, LSH-01..05, PRV-01..10 — 49/70 (remaining: OBS-01..08, INT-01..06, PRD-01..07 in Phases 7-10)
 
 ## Accumulated Context
