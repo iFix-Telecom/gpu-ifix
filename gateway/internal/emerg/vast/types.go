@@ -25,6 +25,16 @@
 //     API returns inconsistent shapes for 4xx vs 5xx responses (RESEARCH
 //     lines 745-779). `Error` carries the machine-readable code
 //     ("no_such_ask", "no_such_instance", "bad_request").
+//
+//   - Phase 6 Strategy B Locked (CONTEXT.md D-06-B + D-07-B): `Runtype="args"`
+//     preserves the image ENTRYPOINT and passes `Args []string` as the JSON
+//     `args` REMAINDER field (NOT `image_args`, NOT `args_str` — VERIFIED via
+//     vast-cli/vast.py:2509). Earlier Phase 6.5 lifecycles used `Runtype="ssh"`
+//     which silently overrode the image CMD (STATE.md:85 — bug fixed here).
+//     The llama.cpp:server-cuda image's ENTRYPOINT is `llama-server` direct,
+//     so Strategy B ALSO requires `Entrypoint: "/bin/bash"` override to run a
+//     bootstrap bash script (06-SPIKE-runtype-args.md empirical Round 2 —
+//     `--onstart-cmd` does NOT shell-wrap in args runtype).
 package vast
 
 // Offer is one row of the `offers` array returned by GET /bundles?q=...
@@ -118,14 +128,34 @@ func (i Instance) IsTerminal() bool {
 // `TargetState` defaults to "running" if omitted — kept explicit so test
 // fixtures can stop the instance for the leader-recovery zombie test.
 type CreateRequest struct {
-	ClientID    string            `json:"client_id"` // always "me"
-	Image       string            `json:"image"`
-	Env         map[string]string `json:"env"`
-	Onstart     string            `json:"onstart"`
-	Runtype     string            `json:"runtype"` // "ssh"
-	Disk        int               `json:"disk"`
-	Label       string            `json:"label"`
-	TargetState string            `json:"target_state,omitempty"` // "running" default
+	ClientID string            `json:"client_id"` // always "me"
+	Image    string            `json:"image"`
+	Env      map[string]string `json:"env"`
+	Onstart  string            `json:"onstart"`
+	// Runtype values: "args" (Phase 6 Strategy B Locked — preserves image
+	// ENTRYPOINT, args field is REMAINDER list passed to entrypoint),
+	// "ssh_proxy" (Vast injects sshd sidecar; REPLACES ENTRYPOINT with
+	// vast-ai/base-image chain — see RESEARCH.md Pitfall 1),
+	// "ssh" (deprecated alias for ssh_proxy; Phase 6 root cause STATE.md:85
+	// bug — CMD silently ignored, lifecycles 29-33 timeouts).
+	Runtype string `json:"runtype"`
+	// Entrypoint overrides the Docker image ENTRYPOINT when set. Required by
+	// Strategy B (Phase 6) — the llama.cpp:server-cuda image has ENTRYPOINT
+	// `llama-server` direct, so to run a bash bootstrap (curl Jinja from MinIO,
+	// sha256 verify, exec llama-server) we MUST set Entrypoint="/bin/bash" and
+	// pass Args=["-c","<script>"]. Empirically validated in
+	// 06-SPIKE-runtype-args.md Round 2 (Vast.ai CLI flag `--entrypoint`).
+	// Omitempty so legacy ssh/ssh_proxy runtypes do not send the field.
+	Entrypoint string `json:"entrypoint,omitempty"`
+	// Args is the JSON `args` field (NOT image_args, NOT args_str — VERIFIED
+	// via vast-cli/vast.py:2509 `json_blob["args"] = args.args`, RESEARCH.md
+	// Pitfall 5 line 436). Array of CLI tokens passed REMAINDER-style to the
+	// image ENTRYPOINT when Runtype="args". Omitempty so ssh_proxy / ssh
+	// runtypes do not send the field on the wire.
+	Args        []string `json:"args,omitempty"`
+	Disk        int      `json:"disk"`
+	Label       string   `json:"label"`
+	TargetState string   `json:"target_state,omitempty"` // "running" default
 }
 
 // CreateResponse is the body returned by PUT /asks/{offer_id}/. `NewContract`
