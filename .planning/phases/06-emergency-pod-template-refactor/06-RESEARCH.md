@@ -604,35 +604,27 @@ fi
 
 **If user prefers, discuss-phase can convert any [ASSUMED] line above into a locked decision OR add a Wave 0 spike task to validate empirically.**
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Strategy A vs Strategy B?**
+> All 6 questions resolved post-planning. Q1 by Pedro decision 2026-05-16 (Strategy B locked). Q2-Q6 by plan 06-01 (Wave 0 spike + decision gates) + CONTEXT.md "Strategy B Locked" block.
+
+1. **Strategy A vs Strategy B?** RESOLVED: Strategy B locked by Pedro (2026-05-16, post-HF-research). See CONTEXT.md "Strategy B Locked" + 06-04 PLAN.
    - What we know: Strategy B is simpler (no bin download, no sha256-bin-verify, fewer env vars, smaller delta), aligns with PRV-06 spirit (uses ghcr.io image), and matches Vast's own derivatives/llama-cpp pattern (sort of — they use ai-dock binary inside their own image). Strategy A more aligned with CONTEXT.md D-01..D-08 as written.
    - What's unclear: User intent re: "iteração dev sem rebuild image" — Strategy B (image tag bump = config change = redeploy) is comparable agility to Strategy A (script bump = MinIO upload = config bump = redeploy). Both ~2min cycles.
    - Recommendation: **Re-open discuss-phase** with this research; ask Pedro to pick. If pick B, redo CONTEXT.md D-01..D-08. If pick A, fix D-01 (12.8 not 12.4) + D-02 (ai-dock not ggml-org) + D-06 (`args` not `image_args` field name; choose explicit ssh_proxy or args).
 
-2. **Where does Ifix's patched Qwen 3.5 27B Jinja template live in Strategy B?**
-   - What we know: Phase 1 `pod/templates/qwen3.5-27b-tool-calling.jinja` (+`.sha256`). Currently baked into custom GHCR image at `/app/templates/`. Strategy B pulls public llama.cpp image which does NOT have it.
-   - What's unclear: MinIO upload + onstart-fetch (preserves D-08 delete intent) vs minimal custom image overlay `ghcr.io/ifixtelecom/qwen-templates` (~10MB, defeats "no custom image" goal).
-   - Recommendation: **MinIO upload + onstart-fetch (D-04-style versioning)**. Onstart writes template to `/app/templates/qwen3.5-27b-tool-calling.jinja` before image ENTRYPOINT runs (Strategy B uses `args` runtype — Vast's chain runs onstart in container before invoking ENTRYPOINT). Adds ~5 lines to onstart.
+2. **Where does Ifix's patched Qwen 3.5 27B Jinja template live in Strategy B?** RESOLVED in plan 06-01 Task 2 (decision gate: B1 overlay image vs B2 MinIO fetch). Default recommendation B2 documented in CONTEXT.md D-04-B.
 
-3. **What's the empirical cache-hit rate of `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128` on Vast 4090 hosts?**
+3. **What's the empirical cache-hit rate of `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128` on Vast 4090 hosts?** RESOLVED in plan 06-01 Task 1 Wave 0 spike (cache-hit measured across ≥3 distinct 4090 hosts). Success criteria conservatively cold-pull-tolerant (≤6min) per recommendation.
    - What we know: ggcr.io/ggml-org/llama.cpp:server-cuda is the "most downloaded" variant per pkgs.github.com snapshot. Vast hosts that ever ran any llama-server workload have it cached.
    - What's unclear: cache TTL (Vast doesn't document) + how Vast offers' `cached_images` set is exposed (filter doesn't exist per research).
    - Recommendation: **plan Phase 6 success criteria as cold-pull-tolerant** (<=6min including image pull). If empirical (spike) shows reliable cache-hit, plan-phase can tighten criteria post-spike.
 
-4. **Onstart in container OR on host VM?**
-   - What we know: Multiple docs ambiguous. Docs.vast.ai/instances/launch-modes says "called as part of the new entrypoint" (suggests in container). `35-sync-home-dirs.sh` symlinks `/root/onstart.sh -> /onstart.sh` (definitely in container). `vast.py` arguments suggest onstart-cmd content goes to file in container.
-   - What's unclear: Subtle differences for `args` runtype (does Vast still wrap an entrypoint that runs `/onstart.sh` first, or does it just pure-docker run with ENTRYPOINT + Args)?
-   - Recommendation: **Spike confirms**. Plan-phase Wave 0 spike does: `image=alpine`, `args=["sleep","60"]`, `runtype=args`, `onstart="echo INSIDE > /tmp/marker; date >> /tmp/marker"`. Then `vast ssh <id> cat /tmp/marker`. If file exists in container — confirmed in-container. If not — onstart in args mode silently ignored.
+4. **Onstart in container OR on host VM?** RESOLVED in plan 06-01 Task 1 Wave 0 spike (alpine + `cat /tmp/marker` empirical test).
 
-5. **Where to host the Jinja template + onstart script in MinIO — `emerg-onstart/v1.sh` vs `emerg-onstart/2026-05-16-a.sh` vs hash-named?**
-   - What we know: D-04 marks this as Claude's discretion.
-   - Recommendation: **Hash-named (immutable)**: `s3://ai-gateway/emerg-onstart/sha256-abc123def.sh`. Config gateway carries `EMERG_ONSTART_SHA256` + URL — same hash IS the integrity check. No version-numbering scheme to maintain. Pattern reusable for Jinja template (same MinIO bucket).
+5. **MinIO naming convention?** RESOLVED: hash-named immutable (`sha256-<hex>.sh` / `qwen3.5-27b-tool-calling-<sha>.jinja`) per CONTEXT.md D-04-B option B2 + config gateway env `EmergencyJinjaTemplateSHA256`.
 
-6. **Disk budget reduction (CONTEXT.md "Claude's discretion")?**
-   - What we know: Current 80GB filter. Strategy B template ~3GB + weights 16GB + tmp = 25GB. Strategy A template ~600MB + bin 160MB + weights 16GB + tmp = 22GB.
-   - Recommendation: **Set Disk=40GB**. Plenty of margin, opens more spot-market offers (4090 hosts with 50-80GB free disk are more common than 80+).
+6. **Disk budget reduction?** RESOLVED in plan 06-01 Task 2 (decision gate offers 40GB vs 80GB options).
 
 ## Validation Architecture
 
