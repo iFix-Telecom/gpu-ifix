@@ -116,14 +116,25 @@ type Config struct {
 	WriteTimeoutEmbedS int // GATEWAY_WRITE_TIMEOUT_EMBED_S (default 30)
 	WriteTimeoutAudioS int // GATEWAY_WRITE_TIMEOUT_AUDIO_S (default 120; Whisper multipart)
 
-	// Phase 6 — emergency-pod auto-provisioning (Vast.ai). All twelve
+	// Phase 6 — emergency-pod auto-provisioning (Vast.ai). All fifteen
 	// fields are read at boot; defaults match CONTEXT.md decisions
-	// D-A1..D-D4 + 06-WAVE0-GATES.md. VastAIAPIKey empty does NOT
-	// fail boot — the reconciler logs a warning and stays disabled
-	// (graceful degrade so a missing dev secret does not block the
-	// rest of the gateway from serving traffic).
-	EmergencyPodImageTag              string  // EMERGENCY_POD_IMAGE_TAG (default "v1.0"; Phase 1 publishes both :v1.0 and :latest)
-	MonthlyEmergencyBudgetBRL         float64 // MONTHLY_EMERGENCY_BUDGET_BRL (default 200.0; D-D2 — Sentry alert only, no auto-block)
+	// D-A1..D-D4 + Strategy B Locked (D-01-B..D-08-B) + 06-WAVE0-GATES.md.
+	// VastAIAPIKey empty does NOT fail boot — the reconciler logs a
+	// warning and stays disabled (graceful degrade so a missing dev
+	// secret does not block the rest of the gateway from serving
+	// traffic).
+	//
+	// Strategy B Locked per CONTEXT.md D-01-B..D-08-B + 06-WAVE0-GATES.md
+	// Decisions 2 & 3: emergency pod uses upstream llama.cpp server image
+	// (no custom GHCR build), fetches Jinja chat template from MinIO at
+	// onstart with sha256 integrity check (B2 default), and uses a
+	// hardcoded llama-server args slice in lifecycle.go (EmergencyLlamaArgs
+	// empty CSV → nil → const default).
+	EmergencyTemplateImage            string   // EMERGENCY_TEMPLATE_IMAGE (default "ghcr.io/ggml-org/llama.cpp:server-cuda-b9128"; CONTEXT.md D-01-B + 06-WAVE0-GATES.md Decision 3; tag SHA-pinned by ggml-org build process — operator can pin harder via @sha256:... per RESEARCH.md security domain)
+	EmergencyJinjaTemplateKey         string   // EMERGENCY_JINJA_TEMPLATE_KEY (MinIO object key; D-04-B option B2 LOCKED per 06-WAVE0-GATES.md Decision 2; default points at production qwen3.5-27b-tool-calling Jinja — empty would represent B1 image-overlay path, not selected)
+	EmergencyJinjaTemplateSHA256      string   // EMERGENCY_JINJA_TEMPLATE_SHA256 (hex sha256; D-04-B B2 LOCKED; default matches EmergencyJinjaTemplateKey; sha256 is public-grade integrity check, not secret — safe to log)
+	EmergencyLlamaArgs                []string // EMERGENCY_LLAMA_ARGS (CSV; D-07-B; empty → nil → lifecycle.go uses hardcoded const; override only if production needs different llama-server flags)
+	MonthlyEmergencyBudgetBRL         float64  // MONTHLY_EMERGENCY_BUDGET_BRL (default 200.0; D-D2 — Sentry alert only, no auto-block)
 	PrimaryHostID                     int64   // PRIMARY_HOST_ID (default 0 = unknown; D-A2 host_id != filter only applied if known)
 	ProvisionColdStartBudgetSeconds   int     // PROVISION_COLDSTART_BUDGET_SECONDS (default 600; D-A4 — /health poll budget)
 	ProvisionFailureCooldownSeconds   int     // PROVISION_FAILURE_COOLDOWN_SECONDS (default 60 — after a provisioning failure e.g. offer_race_lost, hold the FSM in Cooldown this long before re-arming the trigger; MUST exceed one 2+4+8≈14s attempt cycle so a single failed cycle actually backs off instead of hammer-looping the Vast.ai spot market)
@@ -237,10 +248,20 @@ func Load() (Config, error) {
 		WriteTimeoutEmbedS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 30),
 		WriteTimeoutAudioS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S"), 120),
 
-		// Phase 6 — emergency pod (CONTEXT.md D-A1..D-D4). All defaults
+		// Phase 6 — emergency pod (CONTEXT.md D-A1..D-D4 + Strategy B
+		// Locked D-01-B..D-08-B + 06-WAVE0-GATES.md). All defaults
 		// conservative. Operator confirms production values via
-		// 06-WAVE0-GATES.md before Phase 6 LIVE UAT (Plan 06-11).
-		EmergencyPodImageTag:              envOr("EMERGENCY_POD_IMAGE_TAG", "v1.0"),
+		// 06-WAVE0-GATES.md before Phase 6 LIVE UAT.
+		//
+		// Strategy B Locked defaults (06-WAVE0-GATES.md Decisions 2 & 3):
+		// EmergencyTemplateImage     = upstream llama.cpp server build b9128 (CUDA)
+		// EmergencyJinjaTemplateKey  = production qwen3.5-27b Jinja path (B2 LOCKED non-empty)
+		// EmergencyJinjaTemplateSHA  = sha256 of the Jinja above (B2 LOCKED non-empty)
+		// EmergencyLlamaArgs         = nil (empty CSV; lifecycle.go uses hardcoded const)
+		EmergencyTemplateImage:            envOr("EMERGENCY_TEMPLATE_IMAGE", "ghcr.io/ggml-org/llama.cpp:server-cuda-b9128"),
+		EmergencyJinjaTemplateKey:         envOr("EMERGENCY_JINJA_TEMPLATE_KEY", "emerg-onstart/templates/qwen3.5-27b-tool-calling-1067302cc6d927210a84775b9a060f724da15debc168c79710cbf763512e9f67.jinja"),
+		EmergencyJinjaTemplateSHA256:      envOr("EMERGENCY_JINJA_TEMPLATE_SHA256", "1067302cc6d927210a84775b9a060f724da15debc168c79710cbf763512e9f67"),
+		EmergencyLlamaArgs:                csvOr(os.Getenv("EMERGENCY_LLAMA_ARGS"), nil),
 		MonthlyEmergencyBudgetBRL:         floatOr(os.Getenv("MONTHLY_EMERGENCY_BUDGET_BRL"), 200.0),
 		PrimaryHostID:                     int64(atoiOr(os.Getenv("PRIMARY_HOST_ID"), 0)),
 		ProvisionColdStartBudgetSeconds:   atoiOr(os.Getenv("PROVISION_COLDSTART_BUDGET_SECONDS"), 600),
