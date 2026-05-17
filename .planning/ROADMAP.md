@@ -193,6 +193,28 @@ Plans:
 **Research hint:** yes (Vast.ai cache-hit rates por template/GPU classe, CUDA matrix compat com llama.cpp release, runtype "args" + onstart inline best-practice)
 **UI hint:** no
 
+### Phase 06.6: Primary Pod Refactor — Strategy B Full-Stack (Upstream Images + Inline Bootstrap) (INSERTED)
+
+**Goal:** Refactor primary pod to Strategy B Full-Stack pattern: upstream images + inline bash bootstrap + Vast.ai Runtype=args + schedule-based lifecycle. Eliminate custom GHCR `ifix-ai-pod` image dependency (gap left by Phase 6 PR2 deletes), drop health-bridge (D-05), keep DCGM exporter (D-07), add schedule env vars (D-08).
+**Requirements**: (refactor only — herda POD-01..07 via implementação diferente; tracked via D-01..D-10 decisions em 06.6-CONTEXT.md)
+**Depends on:** Phase 6
+**Plans:** 12 plans
+
+Plans:
+
+- [ ] 06.6-01-PLAN.md — Wave 0 spikes (DinD privileged + Qwen3.6 Jinja) + 4 image SHA pins + WAVE0-GATES.md operator lock doc
+- [ ] 06.6-02-PLAN.md — Extract vastutil shared helpers (FilterBelowCap, ExcludeHost, MustEventJSON, PgInt8, PgNumericFromFloat, CaptureBreadcrumb, BestEffortDestroy) from emerg/lifecycle.go
+- [ ] 06.6-03-PLAN.md — Add 22 Primary* config fields (PrimaryTemplateImage + 3 sidecar images + 3 weight key/sha pairs + 6 schedule fields + 4 lifecycle fields)
+- [ ] 06.6-04-PLAN.md — gateway/internal/primary/ scaffolding: onstart.go (raw-string Go const ~3.3KB) + lifecycle.go (buildCreateRequest Strategy B 4-services DinD) + 11 unit tests
+- [ ] 06.6-05-PLAN.md — primary/schedule.go (ScheduleRule + ParseScheduleEnv + IsInPeak + NextTransition; Pitfall #4 DST fail-fast) + primary/fsm.go (5-state atomic CAS)
+- [ ] 06.6-06-PLAN.md — primary/reconciler.go (5-state evaluateTick + drain ramp-down + leader-election) + primary/budget.go + extend upstreams.Loader (3-role) + dcgm.Scraper.SetURL + shed.InflightRegistry.Count
+- [ ] 06.6-07-PLAN.md — Migration 0023_primary_lifecycles.sql + sqlc queries + redisx/primary.go (gw:primary:events + gw:primary:lock namespace)
+- [ ] 06.6-08-PLAN.md — main.go wiring primary.Reconciler.Start + emerg.SubscribePrimaryEvents (Pitfall #11 primary precedence)
+- [ ] 06.6-09-PLAN.md — gatewayctl primary state|force-up|force-down|schedule|lifecycles CLI subcommands
+- [ ] 06.6-10-PLAN.md — Integration tests (primary_probe + primary_leader + primary_cancel_inflight + primary_emerg_coexist for Pitfall #11)
+- [ ] 06.6-11-PLAN.md — Live Vast.ai UAT (6 scenarios: provision, tool-calling, STT, embed, drain, emerg coexist) + RUNBOOK-PRIMARY-POD.md
+- [ ] 06.6-12-PLAN.md — PR3 cleanup: delete pod/onstart.sh + pod/docker-compose.yml + pod/health-bridge/ + pod/scripts/download-weights.sh; rewrite pod/README.md as redirect
+
 ### Phase 6.5: Auto-provisioning Emergency Pod (Vast.ai)
 
 **Goal:** When the primary GPU is gone for minutes, the system stands up an emergency Vast.ai pod, routes to it, and tears it down once primary is stable — with guardrails that prevent runaway cost or duplicated pods.
