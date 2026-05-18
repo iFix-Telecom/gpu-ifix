@@ -5,6 +5,7 @@ package emerg
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -171,4 +172,191 @@ func TestSubscribeEmergCommands_NonLeaderIgnores(t *testing.T) {
 	if got := r.activeLifecycle.Load(); got != nil {
 		t.Fatalf("non-leader activeLifecycle set: %+v", got)
 	}
+}
+
+// =============================================================================
+// Plan 06.6-08 Task 1 — SubscribePrimaryEvents (Pitfall #11) tests.
+// =============================================================================
+//
+// All three tests share the same SubscribePrimaryEvents subscriber goroutine
+// pattern: spawn → wait 100ms for SUBSCRIBE to register → publish via
+// redisx.PublishPrimaryEvent → wait 200-300ms for handler dispatch → assert.
+// The assertions hinge on whether r.cancelActiveLifecycle fires, observable
+// via the activeLifecycle pointer being cleared by the layer-1 cancel branch
+// (or remaining set when the leader/FSM-state gate refuses the cancel).
+
+// newPrimarySubscribeTestReconciler constructs a Reconciler wired with an
+// active lifecycle pre-seeded so cancelActiveLifecycle's "lc == nil" guard
+// does not short-circuit before the test can verify the cancel path. The
+// FSM is left at StateHealthy by default; callers explicitly transition via
+// FSM.SetState when they want StateEmergencyActive.
+func newPrimarySubscribeTestReconciler(t *testing.T) (*Reconciler, *redis.Client, *miniredis.Miniredis) {
+	t.Helper()
+	r, rdb, mr := newSubscribeTestReconciler(t)
+	// Pre-seed activeLifecycle so the Layer-1 cancelActiveLifecycle branch
+	// has something observable to act on. The lifecycleCancel pointer is
+	// left nil — Layer 1 is idempotent against a nil swap. Layer 2 (Pub/Sub
+	// broadcast on gw:emerg:events) still fires; we do not assert against
+	// it here because the test scope is the Pitfall #11 dispatch decision.
+	r.activeLifecycle.Store(&ActiveLifecycle{
+		ID:             7777,
+		VastInstanceID: 1234,
+		StartedUnix:    time.Now().Unix(),
+	})
+	return r, rdb, mr
+}
+
+// TestSubscribePrimaryEvents_ForceDestroyEmergOnPrimaryReady — leader emerg
+// replica AND FSM=EmergencyActive: a primary_ready event MUST trigger
+// cancelActiveLifecycle (Pitfall #11 Option B primary precedence).
+//
+// Observable signal: the Layer-2 Pub/Sub broadcast on gw:emerg:events
+// `cancel_in_flight` event proves cancelActiveLifecycle ran end-to-end.
+// We subscribe to gw:emerg:events and assert receipt within 2s.
+func TestSubscribePrimaryEvents_ForceDestroyEmergOnPrimaryReady(t *testing.T) {
+	r, rdb, _ := newPrimarySubscribeTestReconciler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up the prerequisites: leader=true AND FSM=EmergencyActive.
+	r.isLeader.Store(true)
+	r.deps.FSM.SetState(StateEmergencyActive, time.Now(), "test_force_emerg_active")
+
+	// Tap gw:emerg:events to observe the Layer-2 cancel_in_flight publish.
+	emergSub := rdb.Subscribe(ctx, redisx.EmergEventsChannel)
+	t.Cleanup(func() { _ = emergSub.Close() })
+	emergCh := emergSub.Channel()
+
+	go r.SubscribePrimaryEvents(ctx)
+	// Allow SUBSCRIBE on BOTH channels to register before publishing.
+	time.Sleep(150 * time.Millisecond)
+
+	if err := redisx.PublishPrimaryEvent(ctx, rdb, redisx.PrimaryEvent{
+		Type:        "primary_ready",
+		State:       "Ready",
+		LifecycleID: 99,
+		Reason:      "first_health_pass",
+		SinceUnix:   time.Now().Unix(),
+		ReplicaID:   "primary-leader",
+	}); err != nil {
+		t.Fatalf("PublishPrimaryEvent: %v", err)
+	}
+
+	// Wait for the layer-2 cancel_in_flight broadcast that proves
+	// cancelActiveLifecycle ran. Deadline 2s is generous; the actual
+	// dispatch typically lands within ~50ms.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case msg, ok := <-emergCh:
+			if !ok {
+				t.Fatalf("gw:emerg:events channel closed before cancel_in_flight observed")
+			}
+			var ev redisx.EmergEvent
+			if err := jsonUnmarshalForTest(msg.Payload, &ev); err != nil {
+				continue
+			}
+			if ev.Type == "cancel_in_flight" && ev.Reason == "primary_took_over" {
+				// Success — cancelActiveLifecycle ran with the expected
+				// reason string ("primary_took_over").
+				return
+			}
+		case <-deadline:
+			t.Fatalf("cancelActiveLifecycle did not fire: no cancel_in_flight event with reason=primary_took_over observed within 2s")
+		}
+	}
+}
+
+// TestSubscribePrimaryEvents_NoOpWhenNotLeader — non-leader emerg replica
+// MUST drop primary_ready events even when FSM=EmergencyActive. The
+// single-leader invariant (PRV-03) requires only the leader to mutate FSM
+// state; non-leaders observe but never act.
+func TestSubscribePrimaryEvents_NoOpWhenNotLeader(t *testing.T) {
+	r, rdb, _ := newPrimarySubscribeTestReconciler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Pre-conditions: NOT leader, FSM=EmergencyActive (would normally
+	// trigger the cancel if leadership were present).
+	if r.IsLeader() {
+		t.Fatalf("freshly constructed reconciler must not be leader")
+	}
+	r.deps.FSM.SetState(StateEmergencyActive, time.Now(), "test_force_emerg_active")
+
+	go r.SubscribePrimaryEvents(ctx)
+	time.Sleep(150 * time.Millisecond)
+
+	if err := redisx.PublishPrimaryEvent(ctx, rdb, redisx.PrimaryEvent{
+		Type:        "primary_ready",
+		State:       "Ready",
+		LifecycleID: 99,
+		Reason:      "first_health_pass",
+		SinceUnix:   time.Now().Unix(),
+		ReplicaID:   "primary-leader",
+	}); err != nil {
+		t.Fatalf("PublishPrimaryEvent: %v", err)
+	}
+
+	// Allow handler dispatch + drop on non-leader path. 250ms is generous —
+	// a buggy implementation would have cleared activeLifecycle by now.
+	time.Sleep(250 * time.Millisecond)
+
+	if got := r.activeLifecycle.Load(); got == nil {
+		t.Fatalf("non-leader replica acted on primary_ready: activeLifecycle was cleared")
+	}
+	if got := r.deps.FSM.State(); got != StateEmergencyActive {
+		t.Fatalf("non-leader replica mutated FSM state: got %s, want %s",
+			got, StateEmergencyActive)
+	}
+}
+
+// TestSubscribePrimaryEvents_NoOpWhenNotEmergActive — leader emerg replica
+// BUT FSM != EmergencyActive: cancelActiveLifecycle MUST NOT fire. The
+// Pitfall #11 handoff only applies when an emerg pod is actively serving;
+// other emerg states (Healthy / Cooldown / Recovering / Provisioning) have
+// no active lifecycle to cancel OR are already mid-cutback.
+func TestSubscribePrimaryEvents_NoOpWhenNotEmergActive(t *testing.T) {
+	r, rdb, _ := newPrimarySubscribeTestReconciler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Pre-conditions: leader=true, FSM=StateHealthy (no emerg pod live).
+	r.isLeader.Store(true)
+	// FSM stays at default StateHealthy (initial state from NewFSM).
+	if got := r.deps.FSM.State(); got != StateHealthy {
+		t.Fatalf("baseline FSM state mismatch: got %s, want %s", got, StateHealthy)
+	}
+
+	go r.SubscribePrimaryEvents(ctx)
+	time.Sleep(150 * time.Millisecond)
+
+	if err := redisx.PublishPrimaryEvent(ctx, rdb, redisx.PrimaryEvent{
+		Type:        "primary_ready",
+		State:       "Ready",
+		LifecycleID: 99,
+		Reason:      "first_health_pass",
+		SinceUnix:   time.Now().Unix(),
+		ReplicaID:   "primary-leader",
+	}); err != nil {
+		t.Fatalf("PublishPrimaryEvent: %v", err)
+	}
+
+	// Allow handler dispatch + drop on non-active path. A buggy
+	// implementation would have cleared activeLifecycle by now.
+	time.Sleep(250 * time.Millisecond)
+
+	if got := r.activeLifecycle.Load(); got == nil {
+		t.Fatalf("leader replica wrongly cleared activeLifecycle from non-Active FSM state")
+	}
+	if got := r.deps.FSM.State(); got != StateHealthy {
+		t.Fatalf("leader replica mutated FSM state from non-Active baseline: got %s, want %s",
+			got, StateHealthy)
+	}
+}
+
+// jsonUnmarshalForTest is a thin wrapper that callers `continue` past on
+// parse failure (e.g. concurrent publishes from other tests racing the
+// shared miniredis). Keeps the assertion loop terse.
+func jsonUnmarshalForTest(payload string, v any) error {
+	return json.Unmarshal([]byte(payload), v)
 }

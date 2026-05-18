@@ -52,6 +52,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/idempotency"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/proxy"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/quota"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
@@ -727,6 +728,166 @@ func main() {
 			"monthly_budget_brl", cfg.MonthlyEmergencyBudgetBRL,
 		)
 	}
+
+	// ====== Phase 6.6 — Primary Pod (scheduled-driven Vast.ai) wiring =========
+	//
+	// Construction order matters (depends on Plans 06.6-06a + 06.6-06b):
+	//   1. If VAST_AI_API_KEY is empty → log Warn + skip the entire block.
+	//      The primary reconciler shares Vast.ai credentials with emerg;
+	//      a missing key disables BOTH features. The primary FSM stays
+	//      unconstructed; gw:primary:events has no consumer.
+	//   2. ParseScheduleEnv resolves IANA timezone + UpHour/DownHour/Days
+	//      from cfg.PrimaryPodSchedule* env vars. Fail-fast on invalid
+	//      timezone (Pitfall #4) — operator misconfig must surface at boot.
+	//   3. Build primary.FSM. The optional stateChangeWriter is left nil
+	//      (audit emission deferred to a future plan — audit.Writer's
+	//      WriteStateChange signature `(kind string, ev Event)` does not
+	//      satisfy primary.stateChangeWriter `(kind string, ev any) error`).
+	//      onChange callback mirrors transitions to Redis (gw:primary:state
+	//      Hash + gw:primary:events Pub/Sub) for cross-replica + gatewayctl
+	//      visibility, mirroring the emerg FSM onChange shape.
+	//   4. Build primary.Reconciler with full Deps (11 fields). Concrete
+	//      types satisfy the 3 adapter interfaces via duck typing:
+	//      *upstreams.Loader satisfies LoaderAdapter (3-role override map
+	//      extended in Plan 06.6-06b), *dcgm.Scraper satisfies
+	//      DCGMScraperAdapter (SetURL added via sync.RWMutex in
+	//      Plan 06.6-06b), *shed.InflightRegistry satisfies InflightAdapter
+	//      (Count added in Plan 06.6-06b). dcgmScraper may be nil — nil
+	//      *dcgm.Scraper's SetURL is a defensive no-op (Plan 06.6-06b summary).
+	//   5. Spawn `go primaryReconciler.Start(ctx)` UNCONDITIONALLY per
+	//      reviews #2 (2026-05-17) — event subscriber always launches;
+	//      cfg.PrimaryPodScheduleDisabled gates only schedule ticks inside
+	//      runScheduleLoop, not Start() itself. gatewayctl primary force-up
+	//      works even under DISABLED=true soak-gate posture (WAVE0-GATES
+	//      Decision 5).
+	//   6. If the emerg reconciler was wired (Phase 6), spawn its primary
+	//      event subscriber so the Pitfall #11 force-destroy handoff runs
+	//      (Plan 06.6-08 Task 1). Without this the emerg + primary pair can
+	//      double-provision a tier-0 LLM pod during peak-window onset.
+	//
+	// Wave 0 orthogonality: this wiring is agnostic to in-pod orchestration
+	// (Plan 06.6-04 supervisord LOCKED). The gateway sees 4 HTTP endpoints
+	// on Vast-exposed host ports regardless of orchestration mechanism.
+	var primaryReconciler *primary.Reconciler
+	if cfg.VastAIAPIKey == "" {
+		log.Warn("Phase 6.6 primary reconciler DISABLED: VAST_AI_API_KEY not set (shared with emerg)")
+	} else {
+		primaryRule, perr := primary.ParseScheduleEnv(cfg)
+		if perr != nil {
+			// Pitfall #4 fail-fast — invalid IANA timezone or other schedule
+			// misconfig must surface at boot, not silently default. Operator
+			// fixes env var + redeploys.
+			log.Error("primary schedule parse failed", "err", perr)
+			os.Exit(1)
+		}
+
+		// onChange mirrors FSM transitions to Redis for cross-replica +
+		// gatewayctl observability. Best-effort writes — failures logged
+		// but do NOT block the in-process FSM (mirror philosophy from
+		// breaker/shed/emerg packages).
+		primaryFSM := primary.NewFSM(nil, func(from, to primary.State, at time.Time, reason string) {
+			ev := redisx.PrimaryEvent{
+				Type:      "transition",
+				State:     to.String(),
+				Reason:    reason,
+				SinceUnix: at.Unix(),
+				ReplicaID: hostnameOrUnknown(),
+			}
+			if pubErr := redisx.PublishPrimaryEvent(context.Background(), rdb, ev); pubErr != nil {
+				log.Warn("primary FSM onChange: PublishPrimaryEvent failed",
+					"from", from.String(), "to", to.String(), "err", pubErr)
+			}
+			if werr := redisx.WritePrimaryState(context.Background(), rdb,
+				to.String(), "", "", "", at.Unix()); werr != nil {
+				log.Warn("primary FSM onChange: WritePrimaryState failed",
+					"to", to.String(), "err", werr)
+			}
+		})
+
+		// Build the real vast.Client for primary. We construct a SEPARATE
+		// instance from emerg's vastClient so the two reconcilers do not
+		// share connection-level state (parity with emerg's own Ping at
+		// boot — covered there). Skipping a duplicate Ping here keeps boot
+		// time bounded.
+		primaryVastClient := vast.NewClient(cfg.VastAIAPIKey)
+
+		// Default per-endpoint HealthCheck implementation. Each call issues
+		// a single GET with a small timeout; 2xx → healthy. Matches the
+		// pattern emerg's internal checkHealth uses, exposed as a function
+		// here because the primary package's Deps.HealthCheck is a closure
+		// (so tests can inject without ceremony).
+		primaryHealthCheck := func(hctx context.Context, url string) bool {
+			if url == "" {
+				return false
+			}
+			probeCtx, cancel := context.WithTimeout(hctx, 5*time.Second)
+			defer cancel()
+			req, rerr := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
+			if rerr != nil {
+				return false
+			}
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, herr := client.Do(req)
+			if herr != nil {
+				return false
+			}
+			defer func() { _ = resp.Body.Close() }()
+			return resp.StatusCode >= 200 && resp.StatusCode < 300
+		}
+
+		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
+			Cfg:         cfg,
+			Log:         log.With("subsys", "primary"),
+			Vast:        primaryVastClient,
+			HealthCheck: primaryHealthCheck,
+			Loader:      loader,       // *upstreams.Loader satisfies LoaderAdapter (3-role per Plan 06.6-06b)
+			DCGMScraper: dcgmScraper,  // *dcgm.Scraper satisfies DCGMScraperAdapter (SetURL per Plan 06.6-06b); nil-safe
+			Inflight:    shedInflight, // *shed.InflightRegistry satisfies InflightAdapter (Count per Plan 06.6-06b)
+			FSM:         primaryFSM,
+			Rule:        primaryRule,
+			DB:          pool,
+			Redis:       rdb,
+			ReplicaID:   hostnameOrUnknown(),
+		})
+		// Reviews #2 (2026-05-17): Start runs UNCONDITIONALLY — event
+		// subscriber always launches; cfg.PrimaryPodScheduleDisabled gates
+		// only schedule ticks inside runScheduleLoop, not Start() itself.
+		// gatewayctl primary force-up works even under DISABLED=true
+		// soak-gate posture.
+		go primaryReconciler.Start(ctx)
+
+		// Pitfall #11 — emerg subscriber to primary_ready events (Plan
+		// 06.6-08 Task 1). Only spawned when emerg reconciler was wired
+		// (i.e. both share VAST_AI_API_KEY). The leader-only filter inside
+		// SubscribePrimaryEvents ensures non-leader replicas observe but
+		// do NOT mutate emerg state.
+		if emergReconciler != nil {
+			go emergReconciler.SubscribePrimaryEvents(ctx)
+		}
+
+		nextUp, nextKind := primaryRule.NextTransition(time.Now())
+		log.Info("Phase 6.6 primary reconciler started",
+			"replica_id", primaryReconciler.ReplicaID(),
+			"schedule_disabled", cfg.PrimaryPodScheduleDisabled,
+			"next_transition", nextUp.Format(time.RFC3339),
+			"next_kind", nextKind,
+			"tz", cfg.PrimaryPodScheduleTimezone,
+			"up_hour", cfg.PrimaryPodScheduleUpHour,
+			"down_hour", cfg.PrimaryPodScheduleDownHour,
+			"provision_lead_seconds", cfg.PrimaryPodScheduleProvisionLeadSeconds,
+			"grace_ramp_down_seconds", cfg.PrimaryPodScheduleGraceRampDownSeconds,
+			"coldstart_budget_seconds", cfg.PrimaryProvisionColdStartBudgetSeconds,
+			"failure_cooldown_seconds", cfg.PrimaryProvisionFailureCooldownSeconds,
+			"price_cap_dph", cfg.PrimaryVastPriceCapDPH,
+			"monthly_budget_brl", cfg.MonthlyPrimaryBudgetBRL,
+			"template_image", cfg.PrimaryTemplateImage, // Wave 0 SHA pin visibility for operator forensics
+		)
+	}
+	// primaryReconciler is currently unused beyond Start — keep the
+	// reference live so future plans (gatewayctl primary subcommand,
+	// dispatcher integration) can wire it without re-introducing the
+	// var declaration. Plan 06.6-09 (gatewayctl) will read this pointer.
+	_ = primaryReconciler
 
 	// emergTraffic is non-nil only when the Phase 6 reconciler is wired.
 	// Plan 06-08 D-E3: the chat dispatcher calls RegisterTraffic on each

@@ -120,3 +120,98 @@ func (r *Reconciler) SubscribeEmergCommands(ctx context.Context) {
 		}
 	}
 }
+
+// SubscribePrimaryEvents consumes gw:primary:events (the Phase 6.6 primary
+// reconciler's Pub/Sub channel) and resolves Pitfall #11 (emerg + primary
+// double-provision race / coexistence) using the Option B "primary
+// precedence" handoff:
+//
+//   - Phase 6.6 RESEARCH.md Pitfall #11 — when the primary pod transitions
+//     into StateReady (publishing a `primary_ready` event), an emergency
+//     pod that happens to be running at the same time (e.g. an emerg
+//     lifecycle that fired immediately before the schedule window opened)
+//     becomes redundant. The emerg leader replica force-destroys its
+//     active lifecycle so a single tier-0 LLM pod serves the peak window.
+//
+// Leader-only filter: non-leader emerg replicas drop events silently to
+// keep log volume manageable (the leader is authoritative for FSM
+// transitions; non-leaders observe via gw:emerg:events Pub/Sub instead).
+//
+// Reconnect-with-backoff loop is identical to SubscribeEmergCommands /
+// Subscribe (shared pattern from breaker/subscribe.go). Exits on ctx
+// cancel; reconnects on channel drop after 1s backoff.
+//
+// Spawned from gateway/cmd/gateway/main.go Plan 06.6-08 wiring as a
+// separate goroutine in lock-step with primary.Reconciler.Start so a
+// primary_ready publish that arrives during the boot gap is observed by
+// this subscriber.
+func (r *Reconciler) SubscribePrimaryEvents(ctx context.Context) {
+	log := r.deps.Log.With("subsystem", "emerg.primary_events")
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		ps := redisx.SubscribePrimaryEvents(ctx, r.deps.Redis)
+		ch := ps.Channel()
+		drained := false
+		for !drained {
+			select {
+			case <-ctx.Done():
+				_ = ps.Close()
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					drained = true
+					break
+				}
+				var ev redisx.PrimaryEvent
+				if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+					log.Warn("malformed primary event", "payload", msg.Payload, "err", err)
+					continue
+				}
+				// Leader-only gate (PRV-03 single-leader invariant parity
+				// with applyEmergCommand). Non-leaders observe but do NOT
+				// mutate emerg state. Drop silently to keep log volume
+				// manageable.
+				if !r.isLeader.Load() {
+					continue
+				}
+				switch ev.Type {
+				case "primary_ready":
+					// Pitfall #11 Option B — primary precedence handoff.
+					// Only fires when emerg FSM is currently in
+					// EmergencyActive (i.e. an emerg pod is actively
+					// serving). Other emerg states (Healthy / Cooldown
+					// / Recovering / Provisioning) are no-op: there is
+					// no active emerg lifecycle to force-destroy, OR the
+					// emerg path is already in the natural cutback /
+					// destroy sequence.
+					if r.deps.FSM.State() == StateEmergencyActive {
+						log.Info("primary_ready while emerg active; force-destroying emerg lifecycle (Pitfall #11)",
+							"primary_lifecycle_id", ev.LifecycleID,
+							"by_replica", ev.ReplicaID)
+						r.cancelActiveLifecycle(ctx, "primary_took_over")
+					} else {
+						log.Debug("primary_ready observed; emerg not active",
+							"emerg_state", r.deps.FSM.State().String(),
+							"primary_lifecycle_id", ev.LifecycleID)
+					}
+				default:
+					// Other primary event types (schedule_up_fired,
+					// provisioning_started, draining_started, destroyed,
+					// force_up_request, force_down_request,
+					// cancel_in_flight) are not actionable by the emerg
+					// reconciler — they are primary-internal state
+					// transitions. Drop silently.
+				}
+			}
+		}
+		_ = ps.Close()
+		log.Warn("primary pubsub channel closed; reconnecting")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
