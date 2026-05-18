@@ -107,3 +107,54 @@ func TestInflightRegistry_DecNeverGoesNegative(t *testing.T) {
 		t.Fatalf("expected counter to land at 0 after dec+inc, got %d", g)
 	}
 }
+
+// TestInflightRegistry_Count_DelegatesToGlobalInflight — Phase 6.6 —
+// Count is a thin semantic-clear wrapper over GlobalInflight kept for
+// API clarity at primary.Reconciler.evaluateDraining (Plan 06.6-06a).
+// Assert Count == GlobalInflight for known upstreams, and that defensive
+// nil/unknown semantics propagate (0, no panic).
+func TestInflightRegistry_Count_DelegatesToGlobalInflight(t *testing.T) {
+	r := NewInflightRegistry([]string{"local-llm", "local-stt", "local-embed"})
+
+	// Seed each upstream with a distinct count.
+	tenant := uuid.New()
+	for i := 0; i < 7; i++ {
+		r.Inc("local-llm", tenant)
+	}
+	for i := 0; i < 3; i++ {
+		r.Inc("local-stt", tenant)
+	}
+	for i := 0; i < 11; i++ {
+		r.Inc("local-embed", tenant)
+	}
+
+	cases := []struct {
+		upstream string
+		want     int64
+	}{
+		{"local-llm", 7},
+		{"local-stt", 3},
+		{"local-embed", 11},
+	}
+	for _, tc := range cases {
+		if got := r.Count(tc.upstream); got != tc.want {
+			t.Errorf("Count(%q) = %d, want %d", tc.upstream, got, tc.want)
+		}
+		// Delegation property: Count MUST equal GlobalInflight.
+		if got, want := r.Count(tc.upstream), r.GlobalInflight(tc.upstream); got != want {
+			t.Errorf("Count(%q) = %d, GlobalInflight = %d (delegation broken)",
+				tc.upstream, got, want)
+		}
+	}
+
+	// Unknown upstream → 0 (no panic).
+	if got := r.Count("nonexistent"); got != 0 {
+		t.Errorf("Count(unknown) = %d, want 0", got)
+	}
+
+	// Nil receiver → 0 (no panic).
+	var nilReg *InflightRegistry
+	if got := nilReg.Count("local-llm"); got != 0 {
+		t.Errorf("nil registry Count() = %d, want 0", got)
+	}
+}

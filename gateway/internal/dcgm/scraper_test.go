@@ -213,3 +213,150 @@ func TestScraper_NilReceiverReadMiBReturnsUnknown(t *testing.T) {
 		t.Fatalf("nil receiver expected val=0, got %d", val)
 	}
 }
+
+// TestScraper_SetURL_RuntimeOverride — Phase 6.6 — SetURL replaces the
+// scrape target URL at runtime. Construct with one httptest server,
+// SetURL to a second httptest server, then assert subsequent scrape
+// reads metrics from the second server (not the first).
+func TestScraper_SetURL_RuntimeOverride(t *testing.T) {
+	var hitsA, hitsB atomic.Int32
+
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hitsA.Add(1)
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(`# HELP DCGM_FI_DEV_FB_USED Framebuffer memory used (in MiB).
+# TYPE DCGM_FI_DEV_FB_USED gauge
+DCGM_FI_DEV_FB_USED{gpu="0"} 1000
+`))
+	}))
+	defer srvA.Close()
+
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hitsB.Add(1)
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(`# HELP DCGM_FI_DEV_FB_USED Framebuffer memory used (in MiB).
+# TYPE DCGM_FI_DEV_FB_USED gauge
+DCGM_FI_DEV_FB_USED{gpu="0"} 7777
+`))
+	}))
+	defer srvB.Close()
+
+	s := New(srvA.URL, 100*time.Millisecond, 1*time.Second, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// First scrape against srvA.
+	s.scrape(ctx)
+	val, unknown := s.ReadMiB()
+	if unknown || val != 1000 {
+		t.Fatalf("pre-SetURL scrape: val=%d unknown=%v, want val=1000 unknown=false", val, unknown)
+	}
+	if got := hitsA.Load(); got != 1 {
+		t.Fatalf("srvA hits = %d, want 1", got)
+	}
+
+	// Runtime override to srvB.
+	s.SetURL(srvB.URL)
+	s.scrape(ctx)
+	val, unknown = s.ReadMiB()
+	if unknown || val != 7777 {
+		t.Fatalf("post-SetURL scrape: val=%d unknown=%v, want val=7777 unknown=false", val, unknown)
+	}
+	if got := hitsB.Load(); got != 1 {
+		t.Fatalf("srvB hits = %d, want 1 (post-SetURL scrape MUST target srvB)", got)
+	}
+	if got := hitsA.Load(); got != 1 {
+		t.Fatalf("srvA hits = %d, want 1 (no additional hits after SetURL)", got)
+	}
+}
+
+// TestScraper_SetURL_EmptyFailsOpen — Phase 6.6 — SetURL("") signals
+// "no primary pod available". scrape() must short-circuit (no HTTP
+// request, no failure counted). Required for the primary lifecycle's
+// StateReady → StateAsleep transition (primary.Reconciler.markAsleep
+// calls SetURL("")).
+func TestScraper_SetURL_EmptyFailsOpen(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(validMetricsBody))
+	}))
+	defer srv.Close()
+
+	s := New(srv.URL, 100*time.Millisecond, 500*time.Millisecond, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Establish baseline (1 successful scrape).
+	s.scrape(ctx)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("pre: srv hits = %d, want 1", got)
+	}
+	if got := s.consecutiveFail.Load(); got != 0 {
+		t.Fatalf("pre: consecutiveFail = %d, want 0", got)
+	}
+
+	// Clear URL — subsequent scrapes must short-circuit.
+	s.SetURL("")
+	for i := 0; i < 5; i++ {
+		s.scrape(ctx)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("post-SetURL(\"\"): srv hits = %d, want still 1 (no scrape)", got)
+	}
+	if got := s.consecutiveFail.Load(); got != 0 {
+		t.Errorf("post-SetURL(\"\"): consecutiveFail = %d, want 0 (empty url is not a failure)", got)
+	}
+}
+
+// TestScraper_SetURL_ConcurrentSafe — Phase 6.6 — SetURL and scrape may
+// race in production: the primary lifecycle goroutine calls SetURL,
+// while the scraper's own ticker goroutine calls scrape(). Run -race
+// to verify sync.RWMutex protects the url field correctly. 100 mixed
+// goroutines (half SetURL, half scrape) over 1000 iterations.
+func TestScraper_SetURL_ConcurrentSafe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(validMetricsBody))
+	}))
+	defer srv.Close()
+
+	s := New(srv.URL, 100*time.Millisecond, 500*time.Millisecond, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const goroutines = 100
+	const iterations = 100
+
+	done := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < iterations; j++ {
+				if i%2 == 0 {
+					if j%2 == 0 {
+						s.SetURL(srv.URL)
+					} else {
+						s.SetURL("")
+					}
+				} else {
+					s.scrape(ctx)
+				}
+			}
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	// Test passes if -race detects no data race; we do not assert on
+	// hitsA/val because the interleaving is non-deterministic.
+}
+
+// TestScraper_SetURL_NilReceiver — defensive: calling SetURL on a nil
+// receiver must not panic. Mirrors ReadMiB nil-receiver contract.
+func TestScraper_SetURL_NilReceiver(t *testing.T) {
+	var s *Scraper
+	s.SetURL("http://anything") // must not panic
+}

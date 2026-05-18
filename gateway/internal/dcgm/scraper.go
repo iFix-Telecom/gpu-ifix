@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,7 +82,18 @@ const (
 // invoked sequentially by the ticker so internal state mutations do not
 // race with each other. Tests call scrape directly on the same goroutine
 // to keep assertions deterministic.
+//
+// Phase 6.6 — primary pod is dynamic, so the scrape URL must change
+// when primary transitions Asleep → Provisioning → Ready and
+// Ready → Asleep. urlMu (sync.RWMutex) protects the url field per
+// reviews suggestion #13 (Codex LOW): RWMutex chosen over
+// atomic.Pointer[string] because it's less invasive — existing scrape()
+// reads s.url as a plain field; switching to atomic.Pointer would force
+// every read to .Load() everywhere, rippling through tests + other call
+// sites. RWMutex preserves the read pattern (read lock around s.url
+// access, write lock around SetURL).
 type Scraper struct {
+	urlMu    sync.RWMutex
 	url      string
 	client   *http.Client
 	log      *slog.Logger
@@ -142,11 +154,53 @@ func (s *Scraper) Run(ctx context.Context) {
 	}
 }
 
+// SetURL replaces the scrape target URL at runtime.
+//
+// Phase 6.6 — the primary pod is dynamic (Vast.ai contract URL changes
+// each provision cycle). primary.Reconciler.markReady calls SetURL(pod
+// URL + ":9400/metrics") on transition StateProvisioning → StateReady,
+// and calls SetURL("") on Ready → Asleep so scrape() short-circuits
+// fail-open instead of hammering a dead host.
+//
+// Reviews suggestion #13 (Codex LOW, 2026-05-17): chose sync.RWMutex
+// over atomic.Pointer[string] — less invasive, matches the existing
+// scraper field-access pattern (plain field reads in scrape() rather
+// than .Load() at every callsite).
+//
+// Concurrent-safe: the ticker goroutine calls scrape() (which read-locks
+// urlMu) at most once per interval; SetURL takes the write lock so a
+// concurrent scrape sees either the old or the new URL, never garbage.
+// Empty url is valid and signals fail-open per Phase 5 design.
+func (s *Scraper) SetURL(url string) {
+	if s == nil {
+		return
+	}
+	s.urlMu.Lock()
+	defer s.urlMu.Unlock()
+	s.url = url
+}
+
 // scrape performs one GET + parse cycle. All failures are non-fatal —
 // they increment consecutiveFail and (after 3 in a row) flip vramUnknown.
 // The goroutine is never killed by a scrape failure.
+//
+// Phase 6.6 — the URL is captured under urlMu.RLock at the start of
+// each scrape so a concurrent SetURL never tears the request build.
+// Empty URL → fail-open (Phase 5 design preserved): the scrape is
+// skipped but no failure is counted, so vramUnknown stays whatever it
+// was. This is the contract the primary lifecycle relies on while the
+// pod is Asleep.
 func (s *Scraper) scrape(ctx context.Context) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	s.urlMu.RLock()
+	url := s.url
+	s.urlMu.RUnlock()
+	if url == "" {
+		// Fail-open by absence — caller (Phase 6.6 primary lifecycle)
+		// SetURL("") to signal "no pod available, skip scrape". Do not
+		// count this as a failure; vramUnknown stays at its prior value.
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		s.fail("request_build", err)
 		return

@@ -165,6 +165,22 @@ func (r *InflightRegistry) GlobalInflight(upstream string) int64 {
 	return g.Load()
 }
 
+// Count returns the number of in-flight requests for the given upstream.
+//
+// Thin delegation over GlobalInflight kept for API clarity at the
+// drain-polling call site (primary.Reconciler.evaluateDraining in
+// Plan 06.6-06a, which polls Count("local-llm"/"local-stt"/"local-embed")
+// to decide when the primary pod has fully drained and can transition
+// StateDraining → StateAsleep).
+//
+// Phase 6.6 — Decisions Resolved #10.
+func (r *InflightRegistry) Count(upstream string) int64 {
+	if r == nil {
+		return 0
+	}
+	return r.GlobalInflight(upstream)
+}
+
 // TenantInflight returns the current in-flight count for one
 // (upstream, tenantID) pair. Returns 0 if either is unknown.
 func (r *InflightRegistry) TenantInflight(upstream string, tenantID uuid.UUID) int64 {
