@@ -325,13 +325,17 @@ func testCfg(t *testing.T) config.Config {
 }
 
 // alwaysInPeakRule constructs a ScheduleRule whose IsInPeak +
-// ShouldBeProvisioned always return true (loc=UTC, all days enabled,
-// UpHour=0 DownHour=23 simple intra-day).
+// ShouldBeProvisioned always return true regardless of wall-clock hour.
+// Implemented via an overnight-wrap window with UpHour == DownHour == 0:
+// IsInPeak's wrap branch then returns Days[weekday] for every hour in
+// [0, 24). Previous form (UpHour=0, DownHour=23) excluded 23:00–23:59
+// UTC and caused deterministic CI failures whenever the runner clock
+// landed in that hour.
 func alwaysInPeakRule() ScheduleRule {
 	loc, _ := time.LoadLocation("UTC")
 	return ScheduleRule{
 		Timezone: loc,
-		UpHour:   0, DownHour: 23,
+		UpHour:   0, DownHour: 0,
 		Days: map[time.Weekday]bool{
 			time.Sunday: true, time.Monday: true, time.Tuesday: true,
 			time.Wednesday: true, time.Thursday: true, time.Friday: true,
