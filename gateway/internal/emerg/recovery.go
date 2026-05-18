@@ -57,6 +57,7 @@ import (
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
 
 // recoveryHealthcheckInterval is the cadence of the resumed lifecycle's
@@ -271,7 +272,7 @@ func (r *Reconciler) resumeFSMFromEvents(parentCtx context.Context, row gen.List
 		go r.runHealthcheckResumeLoop(ctx, row.ID, podURL)
 	}
 
-	r.captureBreadcrumb("leader_recovery_resume", map[string]any{
+	vastutil.CaptureBreadcrumb("emerg.leader_recovery_resume", map[string]any{
 		"lifecycle_id":     row.ID,
 		"recovered_state":  lastState.String(),
 		"vast_instance_id": row.VastInstanceID.Int64,
@@ -389,7 +390,7 @@ func (r *Reconciler) runHealthcheckResumeLoop(ctx context.Context, lifecycleID i
 				// perspective; we do NOT trust it as serving traffic.
 				lc := r.activeLifecycle.Load()
 				if lc != nil && lc.VastInstanceID != 0 {
-					r.bestEffortDestroy(lc.VastInstanceID)
+					vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID)
 				}
 				closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				_ = r.closeLifecycle(closeCtx, lifecycleID, "resume_health_failed", 0)

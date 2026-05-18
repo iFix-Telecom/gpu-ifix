@@ -37,6 +37,7 @@ import (
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
 
 // recordingTransport is a sentry.Transport implementation that captures
@@ -172,13 +173,13 @@ func reconcilerForBudgetTest(t *testing.T, monthCost float64, budget float64) *R
 	return r
 }
 
-// pgNumericFromFloatBudgetTest is a local copy of the lifecycle.go
-// helper so this test file does not need to import the unexported
-// version. Mirrors exp=-4 scaling.
+// pgNumericFromFloatBudgetTest is a thin alias around
+// vastutil.PgNumericFromFloat (the original lifecycle.go helper was
+// extracted into the vastutil package by Plan 06.6-02). Mirrors
+// exp=-4 scaling. Kept as a named wrapper so the budget test's
+// callsites read identically to the pre-extraction form.
 func pgNumericFromFloatBudgetTest(v float64) pgtype.Numeric {
-	// Reuse the production helper directly — it is package-internal so
-	// available to this _test.go file in the same package.
-	return pgNumericFromFloat(v)
+	return vastutil.PgNumericFromFloat(v)
 }
 
 // drain drains any backlog events from a recordingTransport without

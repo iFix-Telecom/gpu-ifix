@@ -52,7 +52,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,6 +64,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
 
 const (
@@ -245,7 +245,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 
 	// Pitfall 5 — epsilon comparison `cap + 0.0001`. Defense in depth on
 	// top of the server-side dph_total filter.
-	pickable := filterBelowCap(offers, r.deps.Cfg.VastPriceCapDPH)
+	pickable := vastutil.FilterBelowCap(offers, r.deps.Cfg.VastPriceCapDPH)
 	if len(pickable) == 0 {
 		r.deps.Log.Info("provisionLifecycle: no offers below cap",
 			"cap", r.deps.Cfg.VastPriceCapDPH, "raw_offer_count", len(offers))
@@ -265,7 +265,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 		if createErr == nil {
 			// SUCCESS — record vast IDs + offer_accepted event in ONE UPDATE
 			// (D-D3: events JSONB written FIRST per W7 revision 2026-05-13).
-			eventJSON := mustEventJSON("offer_accepted", map[string]any{
+			eventJSON := vastutil.MustEventJSON("offer_accepted", map[string]any{
 				"offer_id":    offer.ID,
 				"instance_id": instance.ID,
 				"dph":         offer.DphTotal,
@@ -276,14 +276,14 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 			})
 			if err := r.q.UpdateEmergencyLifecycleVastIDs(ctx, gen.UpdateEmergencyLifecycleVastIDsParams{
 				ID:             id,
-				VastOfferID:    pgInt8(offer.ID),
-				VastInstanceID: pgInt8(instance.ID),
-				AcceptedDph:    pgNumericFromFloat(offer.DphTotal),
+				VastOfferID:    vastutil.PgInt8(offer.ID),
+				VastInstanceID: vastutil.PgInt8(instance.ID),
+				AcceptedDph:    vastutil.PgNumericFromFloat(offer.DphTotal),
 				EventJson:      eventJSON,
 			}); err != nil {
 				// Audit failure — destroy instance + close lifecycle
 				// rather than leak a Vast pod whose DB row was never updated.
-				r.bestEffortDestroy(instance.ID)
+				vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, instance.ID)
 				_ = r.closeLifecycle(ctx, id, "audit_write_failed", 0)
 				return err
 			}
@@ -293,7 +293,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 				VastInstanceID: instance.ID,
 				StartedUnix:    time.Now().Unix(),
 			})
-			r.captureBreadcrumb("offer_accepted", map[string]any{
+			vastutil.CaptureBreadcrumb("emerg.offer_accepted", map[string]any{
 				"lifecycle_id": id, "offer_id": offer.ID,
 				"instance_id": instance.ID, "dph": offer.DphTotal,
 			})
@@ -308,7 +308,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 		}
 
 		// Bid race lost — back off and re-search.
-		r.captureBreadcrumb("offer_race_attempt", map[string]any{
+		vastutil.CaptureBreadcrumb("emerg.offer_race_attempt", map[string]any{
 			"lifecycle_id": id, "attempt": attempt + 1, "offer_id": offer.ID,
 		})
 		select {
@@ -322,7 +322,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, id int64) error {
 			_ = r.closeLifecycle(ctx, id, "search_failed", 0)
 			return err
 		}
-		pickable = filterBelowCap(offers, r.deps.Cfg.VastPriceCapDPH)
+		pickable = vastutil.FilterBelowCap(offers, r.deps.Cfg.VastPriceCapDPH)
 		if len(pickable) == 0 {
 			_ = r.closeLifecycle(ctx, id, "no_offers_below_cap", 0)
 			return ErrNoOffersBelowCap
@@ -355,12 +355,12 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	for {
 		select {
 		case <-ctx.Done():
-			r.bestEffortDestroy(instanceID)
+			vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
 			return ctx.Err()
 
 		case <-deadline.C:
-			r.bestEffortDestroy(instanceID)
+			vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
 			r.captureTerminalSentry(lifecycleID, "health_timeout", map[string]any{
 				"instance_id": instanceID,
@@ -382,7 +382,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			if inst.IsTerminal() {
-				r.bestEffortDestroy(instanceID)
+				vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, instanceID)
 				_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
 				r.captureTerminalSentry(lifecycleID, "instance_terminal_state", map[string]any{
 					"instance_id":   instanceID,
@@ -427,7 +427,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 // in evaluateRecovering uses a sensible baseline (rather than 0 which
 // would falsely classify a fresh-ACTIVE pod as immediately idle).
 func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthURL string, acceptedDPH float64) error {
-	eventJSON := mustEventJSON("health_pass", map[string]any{
+	eventJSON := vastutil.MustEventJSON("health_pass", map[string]any{
 		"lifecycle_id": lifecycleID,
 		"health_url":   healthURL,
 		"dph":          acceptedDPH,
@@ -454,7 +454,7 @@ func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthU
 	// pod is not immediately classified as idle (lastEmergencyTrafficAt
 	// defaulted to 0 before any RegisterTraffic call lands).
 	r.lastEmergencyTrafficAt.Store(time.Now().Unix())
-	r.captureBreadcrumb("health_pass", map[string]any{
+	vastutil.CaptureBreadcrumb("emerg.health_pass", map[string]any{
 		"lifecycle_id": lifecycleID, "health_url": healthURL,
 	})
 	r.deps.FSM.Transition(StateEmergencyProvisioning, StateEmergencyActive, time.Now(), "health_passed")
@@ -487,7 +487,7 @@ func stripHealthSuffix(u string) string {
 // cancellation does not also fail the audit write.
 func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string, acceptedDPH float64) error {
 	cost := r.calculateCostBRL(ctx, id, acceptedDPH)
-	eventJSON := mustEventJSON("lifecycle_close", map[string]any{
+	eventJSON := vastutil.MustEventJSON("lifecycle_close", map[string]any{
 		"reason":         reason,
 		"total_cost_brl": cost,
 	})
@@ -496,7 +496,7 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 	if err := r.q.CloseEmergencyLifecycle(dbCtx, gen.CloseEmergencyLifecycleParams{
 		ID:             id,
 		ShutdownReason: pgtype.Text{String: reason, Valid: true},
-		TotalCostBrl:   pgNumericFromFloat(cost),
+		TotalCostBrl:   vastutil.PgNumericFromFloat(cost),
 		EventJson:      eventJSON,
 	}); err != nil {
 		r.deps.Log.Error("closeLifecycle: CloseEmergencyLifecycle failed",
@@ -627,25 +627,11 @@ func (r *Reconciler) vastAPI() VastAPI {
 	return r.deps.Vast
 }
 
-// bestEffortDestroy issues DestroyInstance with a fresh background context
-// + 30s budget. Errors are logged and swallowed — caller is already on a
-// failure path and the orphan cleanup goroutine (Plan 07) will reconcile
-// any leaks.
-func (r *Reconciler) bestEffortDestroy(instanceID int64) {
-	if instanceID == 0 {
-		return
-	}
-	vastClient := r.vastAPI()
-	if vastClient == nil {
-		return
-	}
-	destroyCtx, cancel := context.WithTimeout(context.Background(), destroyShutdownBudget)
-	defer cancel()
-	if err := vastClient.DestroyInstance(destroyCtx, instanceID); err != nil {
-		r.deps.Log.Warn("bestEffortDestroy failed; orphan recovery will reconcile",
-			"instance_id", instanceID, "err", err)
-	}
-}
+// (bestEffortDestroy moved to gateway/internal/vastutil/helpers.go as
+// vastutil.BestEffortDestroy per Plan 06.6-02 D-08.3 — receiver-bound
+// form replaced by free function taking (ctx, VastDestroyer, *slog.Logger,
+// instanceID). The 30s background-ctx destroy budget invariant
+// (Pitfall 8) is preserved inside vastutil.)
 
 // emergencyLlamaArgsDefault is the canonical 13-flag llama-server CLI
 // invocation for the emergency pod (CONTEXT.md D-07-B, revised pattern
@@ -826,89 +812,15 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) vas
 	}
 }
 
-// filterBelowCap applies the Pitfall 5 epsilon comparison cap+0.0001 to
-// the offer list. Defense in depth on top of the server-side dph_total
-// filter (which can include hosts that priced at exactly cap+1e-6 due to
-// float rounding upstream).
-func filterBelowCap(offers []vast.Offer, cap float64) []vast.Offer {
-	out := make([]vast.Offer, 0, len(offers))
-	for _, o := range offers {
-		if o.DphTotal > cap+0.0001 {
-			continue
-		}
-		out = append(out, o)
-	}
-	return out
-}
-
-// excludeHost removes any offer whose HostID matches the given host. Used
-// when the primary host is known to avoid bidding on the same physical
-// machine (D-A2 host_id != filter). Returns a fresh slice.
-func excludeHost(offers []vast.Offer, hostID int64) []vast.Offer {
-	if hostID <= 0 {
-		return offers
-	}
-	out := make([]vast.Offer, 0, len(offers))
-	for _, o := range offers {
-		if o.HostID == hostID {
-			continue
-		}
-		out = append(out, o)
-	}
-	return out
-}
-
-// mustEventJSON marshals a single event row {ts, type, payload} for the
-// emergency_lifecycles.events JSONB column. Returns a length-1 JSON array
-// (the SQL `events || $::jsonb` operator requires the right side to be
-// JSONB-compatible — wrapping in [...] keeps the array-of-events shape).
-func mustEventJSON(eventType string, payload map[string]any) []byte {
-	row := map[string]any{
-		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-		"type":    eventType,
-		"payload": payload,
-	}
-	arr := []map[string]any{row}
-	out, err := json.Marshal(arr)
-	if err != nil {
-		// json.Marshal on a map[string]any with primitive values cannot
-		// realistically fail; use a fallback rather than panic to keep
-		// the goroutine alive.
-		return []byte(`[{"type":"event_marshal_failed"}]`)
-	}
-	return out
-}
-
-// pgInt8 wraps an int64 as a non-null pgtype.Int8 (sqlc's BIGINT mapping).
-func pgInt8(v int64) pgtype.Int8 {
-	return pgtype.Int8{Int64: v, Valid: true}
-}
-
-// pgNumericFromFloat converts a float64 to pgtype.Numeric. Used for
-// accepted_dph (NUMERIC(6,4)) and total_cost_brl (NUMERIC(10,4)). Values
-// are rounded to 4 decimal places — matches the column scale.
-func pgNumericFromFloat(v float64) pgtype.Numeric {
-	if v == 0 {
-		return pgtype.Numeric{Int: big.NewInt(0), Exp: 0, Valid: true}
-	}
-	// Multiply by 10^4 to capture 4 decimal places, then truncate to int.
-	scaled := int64(v * 10000)
-	return pgtype.Numeric{Int: big.NewInt(scaled), Exp: -4, Valid: true}
-}
-
-// captureBreadcrumb adds a Sentry breadcrumb at the info level. Used for
-// non-terminal events (offer_accepted, instance_created, health_pass).
-// Per D-E4 — breadcrumbs ride along the next CaptureMessage so terminal
-// errors land in Sentry with the full lifecycle timeline attached.
-func (r *Reconciler) captureBreadcrumb(category string, data map[string]any) {
-	sentry.AddBreadcrumb(&sentry.Breadcrumb{
-		Category:  "emerg." + category,
-		Message:   category,
-		Level:     sentry.LevelInfo,
-		Timestamp: time.Now(),
-		Data:      data,
-	})
-}
+// (filterBelowCap, excludeHost, mustEventJSON, pgInt8, pgNumericFromFloat,
+// captureBreadcrumb moved to gateway/internal/vastutil/helpers.go as
+// FilterBelowCap, ExcludeHost, MustEventJSON, PgInt8, PgNumericFromFloat,
+// CaptureBreadcrumb per Plan 06.6-02 D-08.3. The Pitfall 5 epsilon
+// (cap+0.0001), the W7 events-JSONB-first invariant, and the sqlc scalar
+// shapes are preserved byte-equivalent inside vastutil. CaptureBreadcrumb
+// callers now pass the full prefixed category string — emerg sites pass
+// "emerg.<event>" so the Sentry breadcrumb body is identical to the
+// pre-extraction form.)
 
 // captureTerminalSentry emits a Sentry CaptureMessage with WARNING level
 // + tags subsystem=emerg + lifecycle_id + shutdown_reason. Used for
@@ -1034,7 +946,7 @@ func (r *Reconciler) cancelActiveLifecycle(ctx context.Context, reason string) {
 	// bestEffortDestroy(instanceID) + closeLifecycle('cancelled_in_flight')
 	// path. No additional work needed here.
 
-	r.captureBreadcrumb("cancel_in_flight", map[string]any{
+	vastutil.CaptureBreadcrumb("emerg.cancel_in_flight", map[string]any{
 		"lifecycle_id":     lc.ID,
 		"reason":           reason,
 		"vast_instance_id": lc.VastInstanceID,

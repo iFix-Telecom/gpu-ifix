@@ -49,6 +49,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
 
 // budgetAlertDedupe gates Sentry budget warnings to at most one per
@@ -128,7 +129,7 @@ func (r *Reconciler) invokeMonthlyCost(ctx context.Context) (pgtype.Numeric, err
 	if r.q == nil {
 		// No DB pool wired AND no override — return 0 and let the
 		// caller short-circuit (no budget alert possible).
-		return pgNumericFromFloat(0), nil
+		return vastutil.PgNumericFromFloat(0), nil
 	}
 	return r.q.GetMonthlyCostBRL(ctx)
 }

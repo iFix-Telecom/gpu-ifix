@@ -47,6 +47,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/upstreams"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
 
 // emergLockExpiry is the redsync mutex TTL (CONTEXT.md D-B2). Constant
@@ -520,7 +521,7 @@ func (r *Reconciler) evaluateEmergencyActive(_ context.Context, now time.Time, l
 	// minutes ago during ACTIVE would falsely keep IsIdle false during
 	// the new Recovering phase.
 	r.lastEmergencyTrafficAt.Store(now.Unix())
-	r.captureBreadcrumb("cutback", map[string]any{
+	vastutil.CaptureBreadcrumb("emerg.cutback", map[string]any{
 		"sustained_closed_seconds": sustained,
 		"threshold":                r.deps.Cfg.ProvisionHealthyDurationSeconds,
 	})
@@ -966,7 +967,7 @@ func (r *Reconciler) destroyAndCloseLifecycle(ctx context.Context, lc *ActiveLif
 	// Step 3 — destroy Vast.ai instance. Best-effort: failure is logged
 	// + swallowed by the helper; the orphan-recovery branch on the next
 	// leader acquisition will reconcile any leak.
-	r.bestEffortDestroy(lc.VastInstanceID)
+	vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID)
 	// Step 1 (intentionally last in code order, but the actual SQL UPDATE
 	// runs INSIDE closeLifecycle which itself emits the
 	// `lifecycle_close` event via mustEventJSON before the UPDATE — the
@@ -987,7 +988,7 @@ func (r *Reconciler) destroyAndCloseLifecycle(ctx context.Context, lc *ActiveLif
 			"lifecycle_id", lc.ID, "reason", reason, "err", err)
 		return err
 	}
-	r.captureBreadcrumb("destroy_and_close", map[string]any{
+	vastutil.CaptureBreadcrumb("emerg.destroy_and_close", map[string]any{
 		"lifecycle_id":     lc.ID,
 		"vast_instance_id": lc.VastInstanceID,
 		"reason":           reason,
