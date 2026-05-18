@@ -271,17 +271,38 @@ func (r *Reconciler) handleForceUpRequest(ctx context.Context, ev redisx.Primary
 }
 
 // handleForceDownRequest is the operator-initiated drain entry point
-// (reviews #3). Transitions Ready→Draining (or no-op from other states).
+// (reviews #3). Three branches by current FSM state:
+//
+//   - StateProvisioning → cancelActiveLifecycle (triple-layer cancel +
+//     Pub/Sub `cancel_in_flight` event + Vast destroy). The lifecycle
+//     row is closed by the in-flight goroutine via the ctx.Done() branch
+//     of waitForReadyOrDestroy (`cancelled_in_flight` shutdown_reason).
+//   - StateReady / StateDraining → startDrain (ramp-down inflight then
+//     transition to Destroying).
+//   - Other states → noop.
+//
+// Without the Provisioning branch operators cannot abort a stuck
+// provisioning lifecycle until the cold-start budget expires. The
+// cancelActiveLifecycle helper has been in the codebase from the
+// Plan 06.6-06a landing but was previously unreachable.
 func (r *Reconciler) handleForceDownRequest(ctx context.Context, ev redisx.PrimaryEvent, log *slog.Logger) {
 	state := r.deps.FSM.State()
-	if state != StateReady && state != StateDraining {
-		log.Info("primary force-down: not in Ready/Draining; skipping",
+	switch state {
+	case StateProvisioning:
+		log.Info("primary force-down: cancelling in-flight provisioning lifecycle",
+			"reason", ev.Reason, "by_replica", ev.ReplicaID)
+		r.cancelActiveLifecycle(ctx, "operator_force_down:"+ev.ReplicaID+":"+ev.Reason, log)
+		return
+	case StateReady, StateDraining:
+		log.Info("primary force-down: initiating drain by operator request",
+			"reason", ev.Reason, "by_replica", ev.ReplicaID)
+		r.startDrain(ctx, "operator_force_down:"+ev.ReplicaID+":"+ev.Reason, log)
+		return
+	default:
+		log.Info("primary force-down: not in Provisioning/Ready/Draining; skipping",
 			"state", state.String(), "by_replica", ev.ReplicaID)
 		return
 	}
-	log.Info("primary force-down: initiating drain by operator request",
-		"reason", ev.Reason, "by_replica", ev.ReplicaID)
-	r.startDrain(ctx, "operator_force_down:"+ev.ReplicaID+":"+ev.Reason, log)
 }
 
 // evaluateTick is the FSM dispatcher. Reads State() once and routes to
