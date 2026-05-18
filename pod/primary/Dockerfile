@@ -44,17 +44,18 @@ FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840
 # pip install below) + build-essential (some PyTorch wheels need it).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor aria2 ca-certificates curl \
-        python3.11 python3.11-venv python3-pip git build-essential \
+        python3 python3-venv python3-pip git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Speaches + Infinity into dedicated venvs. Versions track the
 # upstream image tags previously SHA-pinned in Plan 04: Speaches 0.9.0rc3
 # (was ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3) and Infinity
-# 0.0.77 (was michaelf34/infinity:0.0.77).
-RUN python3.11 -m venv /opt/speaches-venv \
+# 0.0.77 (was michaelf34/infinity:0.0.77). Base image is Ubuntu 24.04 Noble
+# so python3 resolves to python3.12 (both wheels support 3.10+).
+RUN python3 -m venv /opt/speaches-venv \
     && /opt/speaches-venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/speaches-venv/bin/pip install --no-cache-dir "speaches==0.9.0rc3" \
-    && python3.11 -m venv /opt/infinity-venv \
+    && python3 -m venv /opt/infinity-venv \
     && /opt/infinity-venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/infinity-venv/bin/pip install --no-cache-dir "infinity-emb[all]==0.0.77"
 
