@@ -61,3 +61,16 @@ SELECT id, started_at, first_health_pass_at, drain_started_at, ended_at,
 FROM ai_gateway.primary_lifecycles
 WHERE ended_at IS NULL
 LIMIT 1;
+
+-- name: ListPrimaryLifecycles :many
+-- Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
+-- Excludes the events JSONB column (callers fetch via id when needed) so the
+-- listing is compact for tabwriter rendering. Mirrors ListEmergencyLifecycles
+-- shape from emergency_lifecycles.sql (parity per 06.6-PATTERNS.md).
+SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
+       vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
+       shutdown_reason, leader_replica
+FROM ai_gateway.primary_lifecycles
+WHERE started_at >= $1
+ORDER BY started_at DESC
+LIMIT $2;

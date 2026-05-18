@@ -143,6 +143,11 @@ type Querier interface {
 	// enough state for recovery: vast IDs (to GetInstance) + events (to resume FSM).
 	ListLiveEmergencyLifecycles(ctx context.Context) ([]ListLiveEmergencyLifecyclesRow, error)
 	ListModelAliases(ctx context.Context) ([]AiGatewayModelAlias, error)
+	// Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
+	// Excludes the events JSONB column (callers fetch via id when needed) so the
+	// listing is compact for tabwriter rendering. Mirrors ListEmergencyLifecycles
+	// shape from emergency_lifecycles.sql (parity per 06.6-PATTERNS.md).
+	ListPrimaryLifecycles(ctx context.Context, arg ListPrimaryLifecyclesParams) ([]ListPrimaryLifecyclesRow, error)
 	ListTenants(ctx context.Context) ([]ListTenantsRow, error)
 	// Bulk load at boot + on NOTIFY tenants_changed. Same columns as GetTenantConfig.
 	ListTenantsForLoader(ctx context.Context) ([]ListTenantsForLoaderRow, error)
