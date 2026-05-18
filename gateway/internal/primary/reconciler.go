@@ -724,6 +724,13 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		return errors.New("primary: no Vast.ai client wired")
 	}
 	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID)
+	// UAT 2026-05-18: 4 attempts failed because Vast picked hosts globally
+	// (US/Asia) with insufficient inet bandwidth to fetch 21 GB of weights
+	// from MinIO (s3.ifixtelecom.com.br, Hetzner DE) within the aria2c
+	// retry budget. Restrict to European hosts so weight transfer stays
+	// within the same continent as the MinIO bucket. Override via env if
+	// the operator wants a wider geography.
+	filter["geolocation"] = map[string]any{"in": []any{"DE", "FR", "NL", "GB", "ES", "IT", "PT", "PL", "AT", "CH", "BE", "FI", "SE", "NO", "DK"}}
 	offers, err := r.deps.Vast.SearchOffers(ctx, filter)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)

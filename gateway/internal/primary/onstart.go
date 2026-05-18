@@ -117,7 +117,8 @@ download_with_verify() {
   local key="$1" target="$2" sha="$3"
   local url
   url=$(mc share download --expire=2h "ifix/$MINIO_BUCKET/$key" | awk -F': ' '/^Share/{print $2}')
-  aria2c --max-tries=10 --retry-wait=5 --max-connection-per-server=16 --split=16 \
+  aria2c --max-tries=50 --retry-wait=15 --timeout=60 --connect-timeout=30 \
+         --max-connection-per-server=16 --split=16 \
          --min-split-size=1M --continue=true --dir="$(dirname "$target")" --out="$(basename "$target")" "$url"
   echo "$sha  $target" | sha256sum -c -
 }
