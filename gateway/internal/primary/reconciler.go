@@ -786,6 +786,16 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	deadline := time.NewTimer(time.Duration(r.cfg.PrimaryProvisionColdStartBudgetSeconds) * time.Second)
 	defer deadline.Stop()
 
+	// Counter for consecutive IsTerminal observations. Vast.ai reports
+	// `actual_status` from a polling agent on the host — during the boot
+	// window the host may transiently report `exited` / `offline` while
+	// the container is starting (image extract, supervisord launching).
+	// Require 3 consecutive terminal observations (~30s) before declaring
+	// the instance dead. UAT 2026-05-18 lifecycle 4 captured a false-positive
+	// terminal close 12s before 4 endpoints were actually reachable.
+	terminalStrikes := 0
+	const terminalConfirmStrikes = 3
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -822,10 +832,20 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				}
 			}
 			if inst.IsTerminal() {
-				vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
-				_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-				return errors.New("primary: instance terminal")
+				terminalStrikes++
+				log.Warn("primary provisioning: Vast reports terminal status",
+					"instance_id", instanceID, "actual_status", inst.ActualStatus,
+					"strike", terminalStrikes, "confirm_at", terminalConfirmStrikes)
+				if terminalStrikes >= terminalConfirmStrikes {
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
+					return errors.New("primary: instance terminal")
+				}
+				continue
 			}
+			// reset strikes on any non-terminal observation — Vast must report
+			// terminal `terminalConfirmStrikes` times IN A ROW for the close.
+			terminalStrikes = 0
 			if inst.ActualStatus != "running" {
 				continue
 			}
