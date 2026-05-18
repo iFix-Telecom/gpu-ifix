@@ -7,14 +7,14 @@
 // schedule loop and event subscriber begin, rehydrating in-memory state
 // from primary_lifecycles WHERE ended_at IS NULL. Four branches:
 //
-//   1. Healthy → restore in-memory state (lifecycle id, instance id,
-//      pod URLs) + OverrideTier0 3x + DCGMScraper.SetURL +
-//      FSM.SetState(Ready, "restart_recovery").
-//   2. Vast says destroyed (or not running) → close lifecycle with
-//      shutdown_reason='gateway_restart_orphan'. FSM stays Asleep.
-//   3. Healthy instance but 4-endpoint health probe fails → close with
-//      shutdown_reason='gateway_restart_orphan_unhealthy'.
-//   4. No open row → no-op (return nil, FSM stays Asleep).
+//  1. Healthy → restore in-memory state (lifecycle id, instance id,
+//     pod URLs) + OverrideTier0 3x + DCGMScraper.SetURL +
+//     FSM.SetState(Ready, "restart_recovery").
+//  2. Vast says destroyed (or not running) → close lifecycle with
+//     shutdown_reason='gateway_restart_orphan'. FSM stays Asleep.
+//  3. Healthy instance but 4-endpoint health probe fails → close with
+//     shutdown_reason='gateway_restart_orphan_unhealthy'.
+//  4. No open row → no-op (return nil, FSM stays Asleep).
 //
 // All 4 are driven through the public Start(ctx) API; assertions
 // inspect the DB row state + FSM + fakeLoader / fakeDCGM snapshots.

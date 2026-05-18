@@ -4,7 +4,7 @@
 // integration tests. Helpers in this file:
 //
 //   - primaryTestCfg: returns a config.Config with Wave 0 LOCKED defaults
-//     + accelerated timings for sub-30s test runs.
+//   - accelerated timings for sub-30s test runs.
 //   - fakeVastPrimary: in-process fake of primary.VastAPI (subset of the
 //     real *vast.Client). Per-test scriptable closures for SearchOffers /
 //     CreateInstance / GetInstance / DestroyInstance.

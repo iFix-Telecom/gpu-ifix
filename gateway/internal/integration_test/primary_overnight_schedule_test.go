@@ -12,10 +12,10 @@
 //
 // Four sub-tests fully cover the wrap matrix:
 //
-//   1. MonOnly_TueEarly_IsInPeak     (Days={mon}, now=Tue 02:00 → true)
-//   2. TueOnly_TueEarly_IsNotInPeak  (Days={tue}, now=Tue 02:00 → false)
-//   3. MonOnly_TueLate_IsNotInPeak   (Days={mon}, now=Tue 23:00 → false)
-//   4. TueOnly_TueLate_IsInPeak      (Days={tue}, now=Tue 23:00 → true)
+//  1. MonOnly_TueEarly_IsInPeak     (Days={mon}, now=Tue 02:00 → true)
+//  2. TueOnly_TueEarly_IsNotInPeak  (Days={tue}, now=Tue 02:00 → false)
+//  3. MonOnly_TueLate_IsNotInPeak   (Days={mon}, now=Tue 23:00 → false)
+//  4. TueOnly_TueLate_IsInPeak      (Days={tue}, now=Tue 23:00 → true)
 //
 // These tests are pure ScheduleRule.IsInPeak invocations — no
 // testcontainers, no miniredis, no DB. They live in the integration_test

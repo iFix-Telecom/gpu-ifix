@@ -138,9 +138,12 @@ func ParseScheduleEnv(cfg config.Config) (ScheduleRule, error) {
 // Algorithm:
 //
 //   - Disabled kill-switch short-circuits to false.
+//
 //   - Compute hour + weekday in r.Timezone.
+//
 //   - Simple window (UpHour < DownHour): require Days[weekday] AND
 //     UpHour <= hour < DownHour.
+//
 //   - Overnight wrap (UpHour >= DownHour): the window straddles
 //     midnight. Two cases:
 //

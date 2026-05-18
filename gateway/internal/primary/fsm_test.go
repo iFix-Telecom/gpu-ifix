@@ -192,9 +192,9 @@ func TestFSM_ConcurrentTransitions_OnlyOneWins(t *testing.T) {
 
 	const N = 100
 	var (
-		start   sync.WaitGroup
-		done    sync.WaitGroup
-		okCount atomic.Int32
+		start    sync.WaitGroup
+		done     sync.WaitGroup
+		okCount  atomic.Int32
 		errCount atomic.Int32
 	)
 	start.Add(1)

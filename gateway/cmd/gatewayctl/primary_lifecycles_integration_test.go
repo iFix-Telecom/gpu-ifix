@@ -11,15 +11,15 @@
 // (including 0023_primary_lifecycles.sql), seeds rows of varying
 // shapes, and asserts:
 //
-//   1. TestRunPrimaryLifecycles_FetchesFromDB: 3 seeded rows, default
-//      --since 7d, --limit 20 → tabwriter output contains all 3 IDs in
-//      DESC chronological order.
+//  1. TestRunPrimaryLifecycles_FetchesFromDB: 3 seeded rows, default
+//     --since 7d, --limit 20 → tabwriter output contains all 3 IDs in
+//     DESC chronological order.
 //
-//   2. TestRunPrimaryLifecycles_RespectsLimitFlag: 5 seeded rows,
-//      --limit 2 → tabwriter shows exactly 2 rows.
+//  2. TestRunPrimaryLifecycles_RespectsLimitFlag: 5 seeded rows,
+//     --limit 2 → tabwriter shows exactly 2 rows.
 //
-//   3. TestRunPrimaryLifecycles_EmptyTable_NoRows: empty table → the
-//      header row prints (table mode) but no data rows.
+//  3. TestRunPrimaryLifecycles_EmptyTable_NoRows: empty table → the
+//     header row prints (table mode) but no data rows.
 //
 // The test uses runPrimaryLifecyclesWithPool (Plan 06.6-10 Task 3
 // refactor) so the testcontainers pool can be threaded in directly

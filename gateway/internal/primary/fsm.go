@@ -6,15 +6,15 @@
 // lines 922–952):
 //
 //   - StateAsleep:       no pod is provisioned; reconciler waits for
-//                        schedule.ShouldBeProvisioned to flip true.
+//     schedule.ShouldBeProvisioned to flip true.
 //   - StateProvisioning: leader is bidding+creating a Vast.ai pod for
-//                        the upcoming peak window. Cancellable mid-flight
-//                        if the schedule window closes (Draining).
+//     the upcoming peak window. Cancellable mid-flight
+//     if the schedule window closes (Draining).
 //   - StateReady:        pod is healthy and serving as tier-0 LLM+STT+
-//                        embed substitute. Routing override is live via
-//                        loader.OverrideTier0.
+//     embed substitute. Routing override is live via
+//     loader.OverrideTier0.
 //   - StateDraining:     schedule turned off OR pod unhealthy — drain
-//                        in-flight requests up to GraceRampDownS.
+//     in-flight requests up to GraceRampDownS.
 //   - StateDestroying:   drain complete; vast.DestroyInstance in flight.
 //
 // All hot-path reads (State, EnteredAt) are lockless atomic.Load. The

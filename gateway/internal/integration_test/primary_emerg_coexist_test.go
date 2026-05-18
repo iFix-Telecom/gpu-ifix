@@ -13,14 +13,14 @@
 //
 // This test drives the full cross-package handoff:
 //
-//   1. Drive emerg from Healthy → EmergencyActive via the proven
-//      happy-path pattern (mock Vast + breaker open).
-//   2. Spawn emerg.SubscribePrimaryEvents in its own goroutine.
-//   3. Publish PrimaryEvent{Type:"primary_ready", LifecycleID: N} on
-//      gw:primary:events.
-//   4. Assert emerg cancels its active lifecycle: FSM transitions OUT of
-//      EmergencyActive AND emerg's fake Vast records DestroyInstance was
-//      called with the emerg instance ID.
+//  1. Drive emerg from Healthy → EmergencyActive via the proven
+//     happy-path pattern (mock Vast + breaker open).
+//  2. Spawn emerg.SubscribePrimaryEvents in its own goroutine.
+//  3. Publish PrimaryEvent{Type:"primary_ready", LifecycleID: N} on
+//     gw:primary:events.
+//  4. Assert emerg cancels its active lifecycle: FSM transitions OUT of
+//     EmergencyActive AND emerg's fake Vast records DestroyInstance was
+//     called with the emerg instance ID.
 package integration
 
 import (

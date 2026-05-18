@@ -167,30 +167,30 @@ type Config struct {
 	// orchestration; supervisord is PID 1 inside the custom multi-stage
 	// image (Plan 06.6-04 pod/primary/Dockerfile + supervisord.conf —
 	// implementation detail, not user-facing env).
-	PrimaryTemplateImage                      string   // PRIMARY_TEMPLATE_IMAGE (default llama.cpp:server-cuda-b9191 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage FROM base)
-	PrimarySpeachesImage                      string   // PRIMARY_SPEACHES_IMAGE (default speaches:0.9.0-rc.3-cuda-12.6.3 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
-	PrimaryInfinityImage                      string   // PRIMARY_INFINITY_IMAGE (default infinity:0.0.77 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
-	PrimaryDCGMImage                          string   // PRIMARY_DCGM_IMAGE (default dcgm-exporter:4.5.3-4.8.2-distroless SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
-	PrimaryQwenWeightsKey                     string   // PRIMARY_QWEN_WEIGHTS_KEY (MinIO object key; default qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf — CONTEXT.md D-04)
-	PrimaryQwenWeightsSHA256                  string   // PRIMARY_QWEN_WEIGHTS_SHA256 (Qwen3.6 sha256; default Wave 0 verified digest a7cbd3ec...; sha256 is public-grade integrity check, safe to log)
-	PrimaryQwenJinjaKey                       string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
-	PrimaryQwenJinjaSHA256                    string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
-	PrimaryLlamaArgs                          []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
-	PrimaryWhisperWeightsKey                  string   // PRIMARY_WHISPER_WEIGHTS_KEY (MinIO; default whisper-large-v3/v1.0.0/model.tar.gz)
-	PrimaryWhisperWeightsSHA256               string   // PRIMARY_WHISPER_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — Plan 06.6-04 buildPrimaryCreateRequest REJECTS empty value at build time with ErrMissingWhisperSHA; operator MUST set this env before deploy)
-	PrimaryBGEM3WeightsKey                    string   // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
-	PrimaryBGEM3WeightsSHA256                 string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above)
-	PrimaryVastPriceCapDPH                    float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 0.40; RTX 4090 cap; epsilon comparison cap+0.0001 per Pitfall 5)
-	PrimaryProvisionColdStartBudgetSeconds    int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
-	PrimaryProvisionFailureCooldownSeconds    int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
-	MonthlyPrimaryBudgetBRL                   float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
-	PrimaryPodScheduleTimezone                string   // PRIMARY_POD_SCHEDULE_TIMEZONE (default America/Sao_Paulo; D-08.1)
-	PrimaryPodScheduleUpHour                  int      // PRIMARY_POD_SCHEDULE_UP_HOUR (default 8; D-08.1 peak-hour start)
-	PrimaryPodScheduleDownHour                int      // PRIMARY_POD_SCHEDULE_DOWN_HOUR (default 22; D-08.1 peak-hour end)
-	PrimaryPodScheduleDays                    []string // PRIMARY_POD_SCHEDULE_DAYS (CSV; default mon,tue,wed,thu,fri; D-08.1 weekdays-only)
-	PrimaryPodScheduleGraceRampDownSeconds    int      // PRIMARY_POD_SCHEDULE_GRACE_RAMP_DOWN_SECONDS (default 300 = 5min drain inflight before destroy; D-08.1)
-	PrimaryPodScheduleDisabled                bool     // PRIMARY_POD_SCHEDULE_DISABLED (default true per WAVE0-GATES Decision 5 soak gate — operator manual flip to false after Plan 06.6-11 Live UAT GREEN)
-	PrimaryPodScheduleProvisionLeadSeconds    int      // PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS (default 1800 = 30min; reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality; Plan 06.6-05 consumer)
+	PrimaryTemplateImage                   string   // PRIMARY_TEMPLATE_IMAGE (default llama.cpp:server-cuda-b9191 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage FROM base)
+	PrimarySpeachesImage                   string   // PRIMARY_SPEACHES_IMAGE (default speaches:0.9.0-rc.3-cuda-12.6.3 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
+	PrimaryInfinityImage                   string   // PRIMARY_INFINITY_IMAGE (default infinity:0.0.77 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
+	PrimaryDCGMImage                       string   // PRIMARY_DCGM_IMAGE (default dcgm-exporter:4.5.3-4.8.2-distroless SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
+	PrimaryQwenWeightsKey                  string   // PRIMARY_QWEN_WEIGHTS_KEY (MinIO object key; default qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf — CONTEXT.md D-04)
+	PrimaryQwenWeightsSHA256               string   // PRIMARY_QWEN_WEIGHTS_SHA256 (Qwen3.6 sha256; default Wave 0 verified digest a7cbd3ec...; sha256 is public-grade integrity check, safe to log)
+	PrimaryQwenJinjaKey                    string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
+	PrimaryQwenJinjaSHA256                 string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
+	PrimaryLlamaArgs                       []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
+	PrimaryWhisperWeightsKey               string   // PRIMARY_WHISPER_WEIGHTS_KEY (MinIO; default whisper-large-v3/v1.0.0/model.tar.gz)
+	PrimaryWhisperWeightsSHA256            string   // PRIMARY_WHISPER_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — Plan 06.6-04 buildPrimaryCreateRequest REJECTS empty value at build time with ErrMissingWhisperSHA; operator MUST set this env before deploy)
+	PrimaryBGEM3WeightsKey                 string   // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
+	PrimaryBGEM3WeightsSHA256              string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above)
+	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 0.40; RTX 4090 cap; epsilon comparison cap+0.0001 per Pitfall 5)
+	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
+	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
+	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
+	PrimaryPodScheduleTimezone             string   // PRIMARY_POD_SCHEDULE_TIMEZONE (default America/Sao_Paulo; D-08.1)
+	PrimaryPodScheduleUpHour               int      // PRIMARY_POD_SCHEDULE_UP_HOUR (default 8; D-08.1 peak-hour start)
+	PrimaryPodScheduleDownHour             int      // PRIMARY_POD_SCHEDULE_DOWN_HOUR (default 22; D-08.1 peak-hour end)
+	PrimaryPodScheduleDays                 []string // PRIMARY_POD_SCHEDULE_DAYS (CSV; default mon,tue,wed,thu,fri; D-08.1 weekdays-only)
+	PrimaryPodScheduleGraceRampDownSeconds int      // PRIMARY_POD_SCHEDULE_GRACE_RAMP_DOWN_SECONDS (default 300 = 5min drain inflight before destroy; D-08.1)
+	PrimaryPodScheduleDisabled             bool     // PRIMARY_POD_SCHEDULE_DISABLED (default true per WAVE0-GATES Decision 5 soak gate — operator manual flip to false after Plan 06.6-11 Live UAT GREEN)
+	PrimaryPodScheduleProvisionLeadSeconds int      // PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS (default 1800 = 30min; reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality; Plan 06.6-05 consumer)
 
 	// Pod-side secrets forwarded to the Vast.ai emergency pod via CreateRequest.Env.
 	// Mirror Phase 1 smoke.yml — pod onstart aborts without them. Sensitive; never log.
@@ -326,20 +326,20 @@ func Load() (Config, error) {
 		// + Reviews 2026-05-17 #6 #8. See struct doc above for full
 		// rationale. NO DinD env vars added — Wave 0 REJECTED DinD;
 		// supervisord lives inside Plan 06.6-04 custom multi-stage image.
-		PrimaryTemplateImage:                   envOr("PRIMARY_TEMPLATE_IMAGE", "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"),
-		PrimarySpeachesImage:                   envOr("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f"),
-		PrimaryInfinityImage:                   envOr("PRIMARY_INFINITY_IMAGE", "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"),
-		PrimaryDCGMImage:                       envOr("PRIMARY_DCGM_IMAGE", "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"),
-		PrimaryQwenWeightsKey:                  envOr("PRIMARY_QWEN_WEIGHTS_KEY", "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"),
-		PrimaryQwenWeightsSHA256:               envOr("PRIMARY_QWEN_WEIGHTS_SHA256", "a7cbd3ecc0e3f9b333edee61ae66bc87ed713c5d49587a8355814722ed329e0f"),
+		PrimaryTemplateImage:     envOr("PRIMARY_TEMPLATE_IMAGE", "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"),
+		PrimarySpeachesImage:     envOr("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f"),
+		PrimaryInfinityImage:     envOr("PRIMARY_INFINITY_IMAGE", "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"),
+		PrimaryDCGMImage:         envOr("PRIMARY_DCGM_IMAGE", "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"),
+		PrimaryQwenWeightsKey:    envOr("PRIMARY_QWEN_WEIGHTS_KEY", "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"),
+		PrimaryQwenWeightsSHA256: envOr("PRIMARY_QWEN_WEIGHTS_SHA256", "a7cbd3ecc0e3f9b333edee61ae66bc87ed713c5d49587a8355814722ed329e0f"),
 		// default empty per WAVE0-GATES Decision 3 — B1 GGUF-embedded Jinja LOCKED; --jinja flag alone extracts PEG-native parser from Qwen3.6 GGUF chat_template; override via env if B2 MinIO fallback needed.
-		PrimaryQwenJinjaKey:                    envOr("PRIMARY_QWEN_JINJA_KEY", ""),
-		PrimaryQwenJinjaSHA256:                 envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
-		PrimaryLlamaArgs:                       csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
-		PrimaryWhisperWeightsKey:               envOr("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-large-v3/v1.0.0/model.tar.gz"),
+		PrimaryQwenJinjaKey:      envOr("PRIMARY_QWEN_JINJA_KEY", ""),
+		PrimaryQwenJinjaSHA256:   envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
+		PrimaryLlamaArgs:         csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
+		PrimaryWhisperWeightsKey: envOr("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-large-v3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — Plan 06.6-04 buildPrimaryCreateRequest REJECTS empty value at build time with ErrMissingWhisperSHA. No envOr default; empty passthrough.
-		PrimaryWhisperWeightsSHA256:            os.Getenv("PRIMARY_WHISPER_WEIGHTS_SHA256"),
-		PrimaryBGEM3WeightsKey:                 envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
+		PrimaryWhisperWeightsSHA256: os.Getenv("PRIMARY_WHISPER_WEIGHTS_SHA256"),
+		PrimaryBGEM3WeightsKey:      envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above.
 		PrimaryBGEM3WeightsSHA256:              os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
 		PrimaryVastPriceCapDPH:                 floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 0.40),
@@ -352,7 +352,7 @@ func Load() (Config, error) {
 		PrimaryPodScheduleDays:                 csvOr(os.Getenv("PRIMARY_POD_SCHEDULE_DAYS"), []string{"mon", "tue", "wed", "thu", "fri"}),
 		PrimaryPodScheduleGraceRampDownSeconds: atoiOr(os.Getenv("PRIMARY_POD_SCHEDULE_GRACE_RAMP_DOWN_SECONDS"), 300),
 		// default true per WAVE0-GATES Decision 5 soak gate — operator manual flip to false after Plan 06.6-11 Live UAT GREEN.
-		PrimaryPodScheduleDisabled:             boolOr(os.Getenv("PRIMARY_POD_SCHEDULE_DISABLED"), true),
+		PrimaryPodScheduleDisabled: boolOr(os.Getenv("PRIMARY_POD_SCHEDULE_DISABLED"), true),
 		// default 1800 (30min pre-warm offset) per reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality.
 		PrimaryPodScheduleProvisionLeadSeconds: atoiOr(os.Getenv("PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS"), 1800),
 
