@@ -18,6 +18,9 @@ import (
 //   - Phase 7: 0020 (audit_log.event_kind additive nullable column),
 //     0021 (audit_log idx on (ts, tenant_id, route) — CR-02),
 //     0022 (audit_log.reason additive nullable column — CR-03)
+//   - Phase 6.6: 0023 (primary_lifecycles audit table; sequence number computed
+//     at execution time per reviews consensus action #10 — 2026-05-17 was hardcoded
+//     before, causing churn risk when concurrent migrations land)
 //
 // When adding migrations, append the filename to the want slice; the test
 // fails if a migration is missing, out of order, or unexpected.
@@ -56,6 +59,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0020_audit_log_event_kind.sql",
 		"0021_audit_log_ts_index.sql",
 		"0022_audit_log_reason.sql",
+		"0023_primary_lifecycles.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)

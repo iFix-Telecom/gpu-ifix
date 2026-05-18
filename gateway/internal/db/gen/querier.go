@@ -17,6 +17,11 @@ type Querier interface {
 	// which releases the partial unique index slot, allowing a future lifecycle to
 	// be inserted. Records final shutdown_reason + total_cost_brl + appends event.
 	CloseEmergencyLifecycle(ctx context.Context, arg CloseEmergencyLifecycleParams) error
+	// Called when lifecycle terminates (any shutdown_reason). Sets ended_at = NOW()
+	// which releases the partial unique index slot, allowing a future lifecycle to
+	// be inserted. Records final shutdown_reason + total_cost_brl + appends event.
+	// Guarded by `ended_at IS NULL` to make this idempotent for retry storms.
+	ClosePrimaryLifecycle(ctx context.Context, arg ClosePrimaryLifecycleParams) error
 	// Used by boot-time bootstrap: if 0, generate and INSERT a random admin key.
 	CountActiveAdminKeys(ctx context.Context) (int64, error)
 	// Boot-time defensive check (D-C1 path 3). The CHECK constraint should make
@@ -45,6 +50,11 @@ type Querier interface {
 	// not enforced here — date_trunc uses session timezone; gateway sets UTC).
 	// Only counts ended lifecycles so the alert reflects realised spend.
 	GetMonthlyCostBRL(ctx context.Context) (pgtype.Numeric, error)
+	// NEW per reviews consensus action #4 — restart recovery for
+	// primary.Reconciler.recoverOpenLifecycle (Plan 06.6-06a).
+	// Returns the single open lifecycle row (ended_at IS NULL) or pgx.ErrNoRows.
+	// Bounded LIMIT 1 because primary_live_singleton unique index guarantees at most 1.
+	GetOpenPrimaryLifecycle(ctx context.Context) (AiGatewayPrimaryLifecycle, error)
 	GetTenantBySlug(ctx context.Context, slug string) (GetTenantBySlugRow, error)
 	// Hot-path: single PK lookup of full tenant config including Phase 4 + Phase 5 columns.
 	GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantConfigRow, error)
@@ -87,6 +97,12 @@ type Querier interface {
 	// Inserts a new active price row. Combined with ExpireActivePrice in one txn,
 	// this performs an atomic price swap. Returns the new row's id.
 	InsertPrice(ctx context.Context, arg InsertPriceParams) (InsertPriceRow, error)
+	// Creates a new primary lifecycle row with started_at = NOW(). Returns the
+	// BIGSERIAL id + started_at so the caller can attach Vast IDs later via
+	// UpdatePrimaryLifecycleVastIDs and compute durations.
+	// The partial unique index `primary_live_singleton` guarantees that only one
+	// row may exist with ended_at IS NULL at any time.
+	InsertPrimaryLifecycle(ctx context.Context, arg InsertPrimaryLifecycleParams) (InsertPrimaryLifecycleRow, error)
 	// Legacy / diagnostic path. RETAINED for: (a) admin-tooling listing all keys;
 	// (b) backfill / repair migration that recomputes key_lookup_hash if it ever
 	// gets corrupted. MUST NOT be called on the request hot path — 02-03 Verify
@@ -134,6 +150,15 @@ type Querier interface {
 	// (used by D-D4 cost calculation: hours_active = ended_at - first_health_pass_at).
 	// Appends an event to the JSONB timeline.
 	MarkEmergencyLifecycleHealthy(ctx context.Context, arg MarkEmergencyLifecycleHealthyParams) error
+	// NEW vs emerg (Phase 6.6): records when reconciler entered drain ramp-down
+	// window (PRIMARY_POD_SCHEDULE_GRACE_RAMP_DOWN_SECONDS gate). The row stays
+	// open (ended_at IS NULL) until grace expires + destroy succeeds → then
+	// ClosePrimaryLifecycle finalises.
+	MarkPrimaryLifecycleDraining(ctx context.Context, arg MarkPrimaryLifecycleDrainingParams) error
+	// Called when pod /health first returns healthy. Sets first_health_pass_at
+	// (used by cost calculation: hours_active = ended_at - first_health_pass_at).
+	// Appends an event to the JSONB timeline.
+	MarkPrimaryLifecycleHealthy(ctx context.Context, arg MarkPrimaryLifecycleHealthyParams) error
 	// Used by `gatewayctl billing reconcile --apply`: rewrites today's counter row
 	// from the SUM(billing_events). Idempotent; safe to call repeatedly.
 	ResetUsageCountersForReconcile(ctx context.Context, arg ResetUsageCountersForReconcileParams) error
@@ -174,6 +199,10 @@ type Querier interface {
 	// offer_id, instance_id, and accepted dph price; appends an event to the JSONB
 	// timeline. event_json is a single object {ts, from_state, to_state, reason, payload}.
 	UpdateEmergencyLifecycleVastIDs(ctx context.Context, arg UpdateEmergencyLifecycleVastIDsParams) error
+	// Called immediately after vast.create_instance succeeds. Records the Vast
+	// offer_id, instance_id, and accepted dph price; appends an event to the JSONB
+	// timeline. event_json is a single object {ts, from_state, to_state, reason, payload}.
+	UpdatePrimaryLifecycleVastIDs(ctx context.Context, arg UpdatePrimaryLifecycleVastIDsParams) error
 	// Used by `gatewayctl tenant set-mode`. CHECK constraint chk_sensitive_no_peak
 	// rejects sensitive+peak at the DB layer (D-C1 path 2). The CLI also rejects
 	// pre-DB (path 1) for a clearer error message.

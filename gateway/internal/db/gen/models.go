@@ -139,6 +139,25 @@ type AiGatewayPrice struct {
 	CreatedAt   time.Time          `json:"created_at"`
 }
 
+// Audit trail for Vast.ai primary pod lifecycles (Phase 6.6). One row per provision attempt; events JSONB captures full timeline.
+type AiGatewayPrimaryLifecycle struct {
+	ID        int64     `json:"id"`
+	StartedAt time.Time `json:"started_at"`
+	// Timestamp when pod /health first returned healthy. Used as start of cost calc: hours_active = ended_at - first_health_pass_at.
+	FirstHealthPassAt pgtype.Timestamptz `json:"first_health_pass_at"`
+	// Timestamp when reconciler entered drain ramp-down window (Phase 6.6 D-08). NEW vs emerg.
+	DrainStartedAt pgtype.Timestamptz `json:"drain_started_at"`
+	EndedAt        pgtype.Timestamptz `json:"ended_at"`
+	TriggerReason  string             `json:"trigger_reason"`
+	VastOfferID    pgtype.Int8        `json:"vast_offer_id"`
+	VastInstanceID pgtype.Int8        `json:"vast_instance_id"`
+	AcceptedDph    pgtype.Numeric     `json:"accepted_dph"`
+	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
+	ShutdownReason pgtype.Text        `json:"shutdown_reason"`
+	Events         []byte             `json:"events"`
+	LeaderReplica  pgtype.Text        `json:"leader_replica"`
+}
+
 type AiGatewayTenant struct {
 	ID                       uuid.UUID   `json:"id"`
 	Slug                     string      `json:"slug"`
