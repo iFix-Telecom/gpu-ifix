@@ -59,12 +59,6 @@ type Deps struct {
 	HealthCheck func(ctx context.Context, url string) bool
 }
 
-// ScheduleRule is a forward-declared placeholder for the schedule.Rule
-// produced by Plan 06.6-05. Kept as a typed nominal alias on the
-// Reconciler struct so this plan compiles cleanly; Plan 06.6-06a replaces
-// the placeholder with the real schedule.Rule import.
-type ScheduleRule struct{}
-
 // Reconciler drives the primary pod's 5-state FSM (Asleep | Provisioning
 // | Ready | Draining | Destroying). Plan 06.6-04 only declares the struct
 // + constructor + buildCreateRequest; Plan 06.6-06a extends it with
