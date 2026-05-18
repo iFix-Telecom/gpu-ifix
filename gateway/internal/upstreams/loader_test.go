@@ -145,27 +145,32 @@ func TestResolveWithOverride_OnlyTier0(t *testing.T) {
 }
 
 // TestOverrideTier0_NonExistentRole — overriding a role not in the
-// override map (only "llm" in v1 per D-E3) is a silent no-op. Resolve
-// continues to return the snapshot row untouched.
+// override map is a silent no-op. Resolve continues to return the
+// snapshot row untouched.
+//
+// Phase 6.6 — the v1 override map was LLM-only; Phase 6.6 extended it
+// to {llm, stt, embed} for primary pod routing. Use a truly non-existent
+// role (e.g. "vision") to assert the silent no-op semantics survive.
 func TestOverrideTier0_NonExistentRole(t *testing.T) {
 	l := newOverrideFixture()
 
-	// "stt" is not in the v1 override map; OverrideTier0 must be no-op.
-	l.OverrideTier0("stt", "http://emergency.stt:8000")
+	// "vision" is not in the v6.6 override map; OverrideTier0 must be no-op.
+	l.OverrideTier0("vision", "http://emergency.vision:8000")
 
+	// Sanity: stt (which IS in the v6.6 map) still untouched.
 	got, ok := l.Resolve("stt", 0)
 	if !ok {
 		t.Fatalf("Resolve(stt,0) not found")
 	}
 	if got.URL != "http://stt:8000" {
-		t.Errorf("non-LLM override leaked: URL = %q, want http://stt:8000", got.URL)
+		t.Errorf("non-existent role override leaked into stt: URL = %q, want http://stt:8000", got.URL)
 	}
 	if got.IsEmergency {
-		t.Errorf("non-LLM override leaked: IsEmergency = true, want false")
+		t.Errorf("non-existent role override leaked into stt: IsEmergency = true, want false")
 	}
 
 	// Restore is also no-op for unknown role.
-	l.RestoreTier0("stt") // must not panic.
+	l.RestoreTier0("vision") // must not panic.
 }
 
 // TestRestoreTier0_Idempotent — calling RestoreTier0 when no override is
@@ -298,5 +303,100 @@ func TestNewLoaderInMemory_IncludesOverrideMap(t *testing.T) {
 	got, _ := l.Resolve("llm", 0)
 	if got.URL != "http://check:8000" {
 		t.Fatalf("NewLoaderInMemory does not init override map; URL = %q", got.URL)
+	}
+}
+
+// TestNewTier0OverrideMap_Has3Roles — Phase 6.6 — the canonical override
+// map exposes 3 role keys (llm + stt + embed), enabling primary pod
+// routing for all 3 services. Defensive against a future refactor that
+// silently shrinks the map back to LLM-only.
+func TestNewTier0OverrideMap_Has3Roles(t *testing.T) {
+	m := newTier0OverrideMap()
+	if len(m) != 3 {
+		t.Fatalf("expected 3 roles in override map, got %d", len(m))
+	}
+	for _, role := range []string{"llm", "stt", "embed"} {
+		p, ok := m[role]
+		if !ok {
+			t.Errorf("expected role %q in override map", role)
+		}
+		if p == nil {
+			t.Errorf("role %q has nil atomic.Pointer", role)
+		}
+		// Each pointer starts empty (no override active).
+		if v := p.Load(); v != nil {
+			t.Errorf("role %q expected empty pointer, got %v", role, v)
+		}
+	}
+}
+
+// TestOverrideTier0_RestoreTier0_AllRoles — Phase 6.6 — OverrideTier0
+// and RestoreTier0 are role-agnostic: same code path works for llm, stt,
+// embed. Iterate all 3 roles, override each with a distinct URL, assert
+// each lookup returns the set value, then RestoreTier0 each and assert
+// the pointer is cleared.
+//
+// Fixture must include tier-0 rows for all 3 roles so Resolve has a base
+// row to overlay the override URL on top of (mirrors the production
+// upstreams table schema for Phase 6.6 primary pod).
+func TestOverrideTier0_RestoreTier0_AllRoles(t *testing.T) {
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary-llm:8000", Enabled: true},
+		UpstreamConfig{Name: "local-stt", Role: "stt", Tier: 0, URL: "http://primary-stt:8000", Enabled: true},
+		UpstreamConfig{Name: "local-embed", Role: "embed", Tier: 0, URL: "http://primary-embed:8000", Enabled: true},
+	)
+
+	cases := []struct {
+		role, overrideURL, baseURL string
+	}{
+		{"llm", "http://primary-pod:11434", "http://primary-llm:8000"},
+		{"stt", "http://primary-pod:9000", "http://primary-stt:8000"},
+		{"embed", "http://primary-pod:8080", "http://primary-embed:8000"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			// Pre-condition: Resolve returns the base tier-0 URL.
+			got, ok := l.Resolve(tc.role, 0)
+			if !ok {
+				t.Fatalf("pre: Resolve(%q,0) not found", tc.role)
+			}
+			if got.URL != tc.baseURL {
+				t.Fatalf("pre: Resolve URL = %q, want %q", got.URL, tc.baseURL)
+			}
+			if got.IsEmergency {
+				t.Fatalf("pre: IsEmergency must be false before override")
+			}
+
+			// Activate override.
+			l.OverrideTier0(tc.role, tc.overrideURL)
+
+			got, ok = l.Resolve(tc.role, 0)
+			if !ok {
+				t.Fatalf("post-override: Resolve(%q,0) not found", tc.role)
+			}
+			if got.URL != tc.overrideURL {
+				t.Errorf("post-override: URL = %q, want %q", got.URL, tc.overrideURL)
+			}
+			if got.Name != "emergency_pod_"+tc.role {
+				t.Errorf("post-override: Name = %q, want emergency_pod_%s", got.Name, tc.role)
+			}
+			if !got.IsEmergency {
+				t.Errorf("post-override: IsEmergency = false, want true")
+			}
+
+			// Restore.
+			l.RestoreTier0(tc.role)
+			got, ok = l.Resolve(tc.role, 0)
+			if !ok {
+				t.Fatalf("post-restore: Resolve(%q,0) not found", tc.role)
+			}
+			if got.URL != tc.baseURL {
+				t.Errorf("post-restore: URL = %q, want %q (base)", got.URL, tc.baseURL)
+			}
+			if got.IsEmergency {
+				t.Errorf("post-restore: IsEmergency = true, want false")
+			}
+		})
 	}
 }

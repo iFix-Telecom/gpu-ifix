@@ -78,9 +78,17 @@ func NewLoader(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (*Load
 // this map enables runtime override for those roles too. The map keys are
 // fixed at construction time (no runtime ADD/DEL); only the atomic.Pointer
 // values are mutated.
+//
+// Phase 6.6 — primary pod overrides 3 roles (was LLM-only in Phase 6).
+// OverrideTier0/RestoreTier0 são role-agnostic; só o map precisa crescer.
+// See gateway/internal/primary/reconciler.go markReady (Plan 06.6-06a),
+// which routes "stt" + "embed" to the primary pod once it transitions
+// to StatePrimaryReady alongside "llm".
 func newTier0OverrideMap() map[string]*atomic.Pointer[string] {
 	return map[string]*atomic.Pointer[string]{
-		"llm": new(atomic.Pointer[string]),
+		"llm":   new(atomic.Pointer[string]),
+		"stt":   new(atomic.Pointer[string]),
+		"embed": new(atomic.Pointer[string]),
 	}
 }
 
