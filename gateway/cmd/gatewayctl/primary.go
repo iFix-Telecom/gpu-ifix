@@ -60,6 +60,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
@@ -395,10 +396,10 @@ func scheduleDayTokens(days map[time.Weekday]bool) []string {
 
 // runPrimaryLifecycles validates flags BEFORE opening any DB
 // connection so usage errors surface quickly without a Postgres
-// round-trip. Mirrors runEmergLifecycles — DB access path is
-// intentionally NOT split into a *_WithPool helper because the
-// straightforward query is exercised by an integration test (deferred
-// to Plan 06.6-10 per the t.Skip pointer in primary_test.go).
+// round-trip. The DB-fetch path is delegated to
+// runPrimaryLifecyclesWithPool so an integration test can drive the
+// query path with a testcontainers-backed pool (Plan 06.6-10 Task 3
+// closes BLOCKER 3 coverage gap).
 func runPrimaryLifecycles(ctx context.Context, args []string, log *slog.Logger) int {
 	fs := flag.NewFlagSet("primary lifecycles", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -427,17 +428,24 @@ func runPrimaryLifecycles(ctx context.Context, args []string, log *slog.Logger) 
 		return 1
 	}
 	defer pool.Close()
+	return runPrimaryLifecyclesWithPool(ctx, pool, dur, *limit, *format)
+}
+
+// runPrimaryLifecyclesWithPool is the testable inner body. Takes a live
+// pgxpool.Pool + already-parsed parameters and renders the query result
+// as table or JSON to os.Stdout. Returns the desired exit code.
+func runPrimaryLifecyclesWithPool(ctx context.Context, pool *pgxpool.Pool, dur time.Duration, limit int, format string) int {
 	q := gen.New(pool)
 	startedAt := time.Now().Add(-dur)
 	rows, err := q.ListPrimaryLifecycles(ctx, gen.ListPrimaryLifecyclesParams{
 		StartedAt: startedAt,
-		Limit:     int32(*limit),
+		Limit:     int32(limit),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "query lifecycles: %v\n", err)
 		return 1
 	}
-	switch *format {
+	switch format {
 	case "json":
 		out, err := json.MarshalIndent(rows, "", "  ")
 		if err != nil {
