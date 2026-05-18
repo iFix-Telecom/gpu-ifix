@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -136,16 +137,40 @@ func TestPgNumericFromFloat(t *testing.T) {
 // fakeVastDestroyer captures the instanceID DestroyInstance was called
 // with and optionally returns an error. Used to drive BestEffortDestroy
 // coverage without touching the real Vast.ai client.
+//
+// errSequence (optional) returns scripted errors in order — once drained,
+// subsequent calls fall back to .err. Used to model "429 N times then
+// nil" patterns for the 429-retry tests.
 type fakeVastDestroyer struct {
-	calledID int64
-	calls    int
-	err      error
+	calledID    int64
+	calls       int
+	err         error
+	errSequence []error
 }
 
 func (f *fakeVastDestroyer) DestroyInstance(_ context.Context, id int64) error {
 	f.calledID = id
 	f.calls++
+	if len(f.errSequence) > 0 {
+		e := f.errSequence[0]
+		f.errSequence = f.errSequence[1:]
+		return e
+	}
 	return f.err
+}
+
+// shrinkBackoff sets the BestEffortDestroy backoff knobs to near-zero
+// for the duration of the test so retry tests finish in microseconds
+// instead of 15s. Restores originals via t.Cleanup.
+func shrinkBackoff(t *testing.T) {
+	t.Helper()
+	origInit, origMax := destroyInitialBackoff, destroyMaxBackoff
+	destroyInitialBackoff = 1 * time.Microsecond
+	destroyMaxBackoff = 1 * time.Microsecond
+	t.Cleanup(func() {
+		destroyInitialBackoff = origInit
+		destroyMaxBackoff = origMax
+	})
 }
 
 // TestBestEffortDestroy_CallsDestroyInstance — happy path: the helper
@@ -192,6 +217,48 @@ func TestBestEffortDestroy_NoOpOnNilClient(t *testing.T) {
 	require.NotPanics(t, func() {
 		BestEffortDestroy(context.Background(), nil, log, 42)
 	})
+}
+
+// TestBestEffortDestroy_Retries429_ThenSucceeds — Phase 6.6 UAT
+// 2026-05-18 regression: a transient HTTP 429 must trigger exponential
+// backoff retries, not an immediate orphan. Fake returns 429 twice then
+// nil; helper must call DestroyInstance 3 times.
+func TestBestEffortDestroy_Retries429_ThenSucceeds(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{
+		errSequence: []error{vast.ErrRateLimited, vast.ErrRateLimited, nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	BestEffortDestroy(context.Background(), fake, log, 7777)
+	require.Equal(t, int64(7777), fake.calledID)
+	require.Equal(t, 3, fake.calls, "expected 2 retries after initial 429s")
+}
+
+// TestBestEffortDestroy_Retries429_AllExhausted — persistent 429 (Vast
+// in deep rate-limit) must exhaust destroyMaxAttempts and emit the
+// orphan-alert breadcrumb. Verifies the retry cap behaviour so a
+// runaway Vast API can never wedge the shutdown path indefinitely.
+func TestBestEffortDestroy_Retries429_AllExhausted(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{err: vast.ErrRateLimited}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	BestEffortDestroy(context.Background(), fake, log, 8888)
+	require.Equal(t, destroyMaxAttempts, fake.calls,
+		"expected exactly destroyMaxAttempts before giving up")
+}
+
+// TestBestEffortDestroy_Non429_NoRetry — non-rate-limit errors (5xx,
+// transport, unauthorized) must short-circuit on the FIRST attempt;
+// retrying them wastes the shutdown budget and offers no upside.
+func TestBestEffortDestroy_Non429_NoRetry(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{err: errors.New("vast 500 boom")}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	BestEffortDestroy(context.Background(), fake, log, 9999)
+	require.Equal(t, 1, fake.calls, "non-429 must NOT retry")
 }
 
 // TestCaptureBreadcrumb_NoOp_WhenNoSentryHub — Sentry is not initialized

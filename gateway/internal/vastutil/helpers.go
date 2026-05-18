@@ -31,6 +31,7 @@ package vastutil
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math/big"
 	"time"
@@ -46,6 +47,18 @@ import (
 // `emerg` (which would create a primary→emerg import cycle once Wave
 // 2 plans land).
 const destroyShutdownBudget = 30 * time.Second
+
+// destroyMaxAttempts caps how many times BestEffortDestroy retries the
+// Vast.ai DELETE on HTTP 429. Phase 6.6 UAT 2026-05-18 caught an orphan
+// pod (instance 37028480) that ran ~3h30 burning ~$2.17 because the
+// FIRST 429 aborted destroy with no retry. Backoff schedule 1s+2s+4s+8s
+// totals 15s of sleep across 5 attempts — fits within the 30s shutdown
+// budget with margin for the actual HTTP RTT.
+var (
+	destroyMaxAttempts    = 5
+	destroyInitialBackoff = 1 * time.Second
+	destroyMaxBackoff     = 8 * time.Second
+)
 
 // VastDestroyer is the minimum contract BestEffortDestroy needs from
 // the Vast.ai client. emerg.VastAPI already exposes
@@ -158,9 +171,19 @@ func CaptureBreadcrumb(category string, data map[string]any) {
 }
 
 // BestEffortDestroy issues DestroyInstance with a fresh background context
-// + 30s budget. Errors are logged and swallowed — caller is already on a
-// failure path and the orphan cleanup goroutine (Plan 07) will reconcile
-// any leaks.
+// + 30s budget. Non-rate-limit errors are logged and swallowed — caller is
+// already on a failure path and the orphan cleanup goroutine (Plan 07)
+// will reconcile any leaks.
+//
+// HTTP 429 (ErrRateLimited) is retried with exponential backoff up to
+// destroyMaxAttempts inside the 30s shutdown budget. Phase 6.6 UAT
+// 2026-05-18 attempt 9 caught the no-retry bug: lifecycle 37028480 hit a
+// transient 429, BestEffortDestroy gave up on the first try, the pod ran
+// orphan ~3h30 burning ~$2.17 until manual operator cleanup via Vast UI.
+// Retry contract: 1s → 2s → 4s → 8s sleeps between attempts, capped at
+// destroyMaxBackoff; budget exhaustion or final-attempt 429 emits an
+// Error-level log + Sentry breadcrumb so the operator gets paged before
+// the orphan accumulates real cost.
 //
 // `instanceID == 0` and `vastClient == nil` are tolerated as no-ops so
 // callers can invoke this from a deferred / early-failure branch without
@@ -178,10 +201,59 @@ func BestEffortDestroy(ctx context.Context, vastClient VastDestroyer, log *slog.
 	_ = ctx
 	destroyCtx, cancel := context.WithTimeout(context.Background(), destroyShutdownBudget)
 	defer cancel()
-	if err := vastClient.DestroyInstance(destroyCtx, instanceID); err != nil {
+
+	backoff := destroyInitialBackoff
+	var lastErr error
+	for attempt := 1; attempt <= destroyMaxAttempts; attempt++ {
+		err := vastClient.DestroyInstance(destroyCtx, instanceID)
+		if err == nil {
+			if attempt > 1 && log != nil {
+				log.Info("BestEffortDestroy succeeded after 429 retry",
+					"instance_id", instanceID, "attempt", attempt)
+			}
+			return
+		}
+		lastErr = err
+		if !errors.Is(err, vast.ErrRateLimited) {
+			if log != nil {
+				log.Warn("BestEffortDestroy failed; orphan recovery will reconcile",
+					"instance_id", instanceID, "err", err, "attempt", attempt)
+			}
+			return
+		}
+		if attempt == destroyMaxAttempts {
+			break
+		}
 		if log != nil {
-			log.Warn("BestEffortDestroy failed; orphan recovery will reconcile",
-				"instance_id", instanceID, "err", err)
+			log.Warn("BestEffortDestroy got HTTP 429; backing off",
+				"instance_id", instanceID, "attempt", attempt, "backoff", backoff)
+		}
+		select {
+		case <-time.After(backoff):
+		case <-destroyCtx.Done():
+			if log != nil {
+				log.Error("BestEffortDestroy budget exhausted during 429 backoff; pod is orphan",
+					"instance_id", instanceID, "attempt", attempt, "err", destroyCtx.Err())
+			}
+			CaptureBreadcrumb("vastutil.destroy.orphan", map[string]any{
+				"instance_id": instanceID,
+				"reason":      "budget_exhausted_during_429_backoff",
+				"attempts":    attempt,
+			})
+			return
+		}
+		backoff *= 2
+		if backoff > destroyMaxBackoff {
+			backoff = destroyMaxBackoff
 		}
 	}
+	if log != nil {
+		log.Error("BestEffortDestroy exhausted 429 retries; pod is orphan",
+			"instance_id", instanceID, "attempts", destroyMaxAttempts, "err", lastErr)
+	}
+	CaptureBreadcrumb("vastutil.destroy.orphan", map[string]any{
+		"instance_id": instanceID,
+		"reason":      "rate_limit_exhausted",
+		"attempts":    destroyMaxAttempts,
+	})
 }
