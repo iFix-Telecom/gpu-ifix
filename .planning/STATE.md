@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-18T09:50:22.037Z"
+last_updated: "2026-05-19T17:55:00Z"
 progress:
   total_phases: 12
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 91
-  completed_plans: 77
-  percent: 67
+  completed_plans: 90
+  percent: 99
 ---
 
 # STATE: ifix-ai-gateway
@@ -27,9 +27,9 @@ progress:
 
 ## Current Position
 
-Phase: 06.6 (primary-pod-refactor-strategy-b-full-stack-upstream-images-i) — PARTIAL (UAT 17 = S3 full pipeline VERIFIED in speaches logs — silero v5 vendor + faster-whisper 1.1.1 pin + CPU STT all working; curl 180s timeout because whisper-large-v3 on CPU = ~28x realtime; S6 deferred)
-Plan: 11 of 13 (Task 3 Live UAT: S1+S2+S4+S5 PASS, S3 transcription pipeline reaches "Detected language" success milestone but CPU large-v3 too slow for sub-30s response, S6 emerg coexist deferred — handler already proven via integration test commit 5985765)
-Next autonomous-eligible work: Phase 6.6 — pick lighter STT model (`faster-whisper-medium` ~1.5 GB GPU OR `faster-whisper-tiny` CPU realtime), S6 dedicated round, write 06.6-VERIFICATION.md, Phase 07.
+Phase: 07 (observability-dashboard-alerting) — NOT STARTED (Phase 6.6 closed 2026-05-19 UAT 18: 6/6 scenarios PASS, 13/13 plans GREEN, .planning/phases/06.6-*/06.6-VERIFICATION.md status=passed)
+Plan: 13 of 13 (06.6-VERIFICATION.md written 2026-05-19; Plan 12 cleanup is the only remaining Phase 6.6 task — purely scaffolding cleanup, not blocking Phase 07).
+Next autonomous-eligible work: Phase 07 (Observability Dashboard + Alerting) — discuss + plan + execute. First wave should fix tech debt #4 (chat_completions proxy 503 override-wiring) since the dashboard's tier-0 routing display depends on it.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
   - Phase 1: smoke.yml Vast.ai HUMAN-UAT pending
@@ -115,11 +115,18 @@ Next autonomous-eligible work: Phase 6.6 — pick lighter STT model (`faster-whi
   - **Patches committed this session:** `1a14ea4 fix(06.6-04): UAT 17 — force speaches STT to CPU to fit VRAM budget` + `50901d2 fix(06.6-04): UAT 17 — pin faster-whisper==1.1.1`.
   - **Next session:** (a) pick STT model size policy (likely faster-whisper-medium GPU); (b) Vast driver-version filter (tech debt #8); (c) S6 dedicated round; (d) 06.6-11-SUMMARY.md + 06.6-VERIFICATION.md; (e) Plan 12 cleanup; (f) Phase 07.
 
+  - **Session 2026-05-19 (UAT 18 closeout — 5090 + STT GPU + S3/S6 full PASS, develop tip d7786e6):** STT model policy decided in commit 9e1aca0 — bump 4090→5090 32 GB so whisper-large-v3 can stay on GPU (D-UAT17 reverted). PRIMARY_VAST_PRICE_CAP_DPH default raised 0.40→2.20 + MONTHLY_PRIMARY_BUDGET_BRL default raised 200→800; vps-ifix-vm `.env` set BUDGET=2400 + CAP=2.20 explicitly. Force-up returned `primary: no offers below cap` despite EU 5090 inventory existing → bisected Vast `cuda_max_good gte 12.6` filter regression specific to 5090 queries (RTX 4090 queries unaffected). Bump filter 12.6→12.8 in `d7786e6 fix(06.6-vast): UAT 18 — bump cuda_max_good 12.6→12.8 for RTX 5090 search`. After fix, single force-up succeeded: lifecycle 26, Vast 37094533, **5090 host 12140 Spain ES at $0.7657/h** (cheapest EU 5090 yet seen, below previously-assumed $2.00/h floor), driver 580.105.08, cuda 13.0, inet 7.4 Gbps. Cold-start 9 min (17:10:41 force-up → 17:19:54 Ready). DCGM: idle 20.5 GB used (3 models loaded), full-load post-whisper-install 24.7 GB used / 7.4 GB free / temp 53°C / power 33W idle. **S3 PASS**: espeak WAV 226KB → POST /v1/audio/transcriptions cold 17.5s (whisper-large-v3 GPU load) / warm 0.76s (well below 5s budget); accurate text. **S6 PASS via manual primary_ready republish technique**: emerg force-provision @17:22:30 (lifecycle 40, Vast 37095236, 4090 Iceland $0.37/h, 28m 42s cold-start to EmergencyActive @17:51:12 — longer than primary because Iceland host bandwidth lower) → Redis PUBLISH `gw:primary:events {type:primary_ready,lifecycle_id:26,replica_id:manual-uat18}` @17:51:50 (subscriber count=2 confirms emerg replica reception) → Pitfall #11 fires in <1s: cancelActiveLifecycle (D-C3) + destroyAndCloseLifecycle (Vast DELETE 37095236) + RestoreTier0 + FSM EmergencyActive→Cooldown reason=primary_took_over. Final state: 1 Vast instance (primary only). Force-down primary @17:52:56 → drain complete in 1s under DISABLED gate (S5 fix 9720097 re-verified) → asleep @17:55. UAT 18 total spend: primary 45min × $0.77 + emerg 29min × $0.37 ≈ **$0.75**. Cumulative Phase 6.6 UAT 1–18 spend: ~$6.
+  - **Tech debt remaining (carries to Phase 07):**
+    4. (carry-over) Gateway `chat_completions` proxy returns 503 `Upstream proxy not registered` despite `loader.OverrideTier0` succeeding. UAT 18 used direct-probe to pod IP throughout. **Phase 07 first-wave priority** since dashboard's tier-0 routing display depends on it.
+    5. (carry-over) `gatewayctl key list` missing — low priority.
+    9. **NEW UAT 18**: Pitfall #11 destroyAndCloseLifecycle's RestoreTier0 clears the emerg's tier-0 override slot, which transitively clears whatever primary had previously written into that slot. Primary reconciler doesn't auto-restore on Ready-tick. Workaround: cycle primary force-down + force-up to re-establish. Real fix: primary reconciler should re-call OverrideTier0 on each Ready-tick when override slot is empty (or republish primary_ready edge so the upstream module re-runs its activation path).
+  - **Phase 6.6 STATUS: COMPLETE** — `.planning/phases/06.6-*/06.6-VERIFICATION.md` status=passed, 6/6 scenarios PASS, 13/13 plans GREEN. Plan 12 cleanup (scaffolding-only) still pending but not blocking Phase 07.
+
 - **Phase 6.5 (ex-Phase 6):** 10/11 plans executed (06.5-01..06.5-10 GREEN + summaries — renomeados de 06-* em 2026-05-16). 06.5-11 is `autonomous: false` HUMAN-UAT — Tasks 1+2 done (06.5-HUMAN-UAT.md + docs/RUNBOOK-EMERGENCY-POD.md created, commit 2b539fc); Task 3 is a **blocking** human-verify checkpoint (6 LIVE Vast.ai UAT scenarios, ~R$10-15) — **UNBLOCKED 2026-05-17** by Phase 6 close (runtype=args end-to-end validated). No 06.5-11-SUMMARY.md, no 06.5-VERIFICATION.md yet.
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
-- **Phases 7–10:** Not started (no phase directories).
-- **Status:** Executing Phase 06.6
+- **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
+- **Status:** Phase 6.6 COMPLETE 2026-05-19; ready to start Phase 07 (Observability Dashboard + Alerting).
 
 ## Performance Metrics
 
