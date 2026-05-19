@@ -190,7 +190,15 @@ type SearchFilter map[string]any
 
 // DefaultSearchFilter returns the canonical Phase 6 filter per CONTEXT.md
 // D-A2: RTX 4090, ≥0.99 reliability, ≤cap dph_total, ≥500 Mbps inet_down,
-// ≥12.4 cuda_max_good, ordered by dph_total ascending limit 20.
+// ≥12.6 cuda_max_good, driver ≥570, ordered by dph_total ascending limit 20.
+//
+// Driver version gate (UAT 17 2026-05-19): the llama.cpp:server-cuda-b9191
+// image bundles CUDA 12.8 runtime libraries which require host driver
+// ≥570 (NVIDIA driver/CUDA compatibility matrix). Host 79.160.189.79
+// (driver 565.57.01) silently fell back llama-server + speaches to CPU
+// — 0.49 tok/s vs 50 tok/s GPU baseline. Vast `driver_vers` is encoded
+// as MAJOR*1000000 + MINOR*1000 + PATCH (e.g. 570.86.16 → 570086016);
+// `gte: 570000000` excludes any driver below 570.0.0.
 //
 // `primaryHostID` excludes the primary's host when known (>0); pass 0 to
 // disable the host_id filter when the primary host is unknown (D-A2).
@@ -201,7 +209,8 @@ func DefaultSearchFilter(maxDPH float64, primaryHostID int64) SearchFilter {
 		"reliability":   map[string]any{"gte": 0.99},
 		"dph_total":     map[string]any{"lte": maxDPH},
 		"inet_down":     map[string]any{"gte": 500},
-		"cuda_max_good": map[string]any{"gte": 12.4},
+		"cuda_max_good": map[string]any{"gte": 12.6},
+		"driver_vers":   map[string]any{"gte": 570000000},
 		"rentable":      map[string]any{"eq": true},
 		"verified":      map[string]any{"eq": true},
 		"order":         []any{[]any{"dph_total", "asc"}},
