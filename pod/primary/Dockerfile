@@ -52,6 +52,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (was ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3) and Infinity
 # 0.0.77 (was michaelf34/infinity:0.0.77). Base image is Ubuntu 24.04 Noble
 # so python3 resolves to python3.12 (both wheels support 3.10+).
+#
+# Pin notes (UAT 2026-05-18 attempt 11 root causes):
+#  - onnx-asr<0.10 — speaches 0.9.0rc3 imports `NemoConformerTdt` from
+#    `onnx_asr.models`, removed in onnx-asr 0.10+ (attempt 10).
+#  - optimum<2.0 — infinity-emb 0.0.77 imports `optimum.bettertransformer`
+#    which was REMOVED in optimum 2.0+. The previous form
+#    `optimum[bettertransformer]` was a no-op because that extras key does
+#    not exist; pip silently fell back to plain optimum at the latest
+#    version (2.1.0 today) and Infinity crash-looped on import (attempt 11).
 RUN python3 -m venv /opt/speaches-venv \
     && /opt/speaches-venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/speaches-venv/bin/pip install --no-cache-dir \
@@ -62,10 +71,34 @@ RUN python3 -m venv /opt/speaches-venv \
     && /opt/infinity-venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/infinity-venv/bin/pip install --no-cache-dir "infinity-emb[all]==0.0.77" \
     && /opt/infinity-venv/bin/pip install --no-cache-dir \
-         "optimum[bettertransformer]"
+         "optimum<2.0"
 
-# Copy dcgm-exporter from stage 1.
+# Pre-create the realtime-console stub directory speaches 0.9.0rc3 mounts
+# at /v1/realtime via StaticFiles(directory="realtime-console/dist",
+# html=True). The path is RELATIVE to the process working directory, so
+# supervisord [program:speaches] is launched with `directory=/opt/speaches-data`
+# (see supervisord.conf). Without this dir + an index.html the speaches
+# app errors at boot with `RuntimeError: Directory 'realtime-console/dist'
+# does not exist` (UAT 2026-05-18 attempt 11 speaches crash-loop root cause).
+# The stub satisfies the StaticFiles invariant; we do NOT expose the
+# realtime console — gateway routes only /v1/audio/transcriptions to STT.
+RUN mkdir -p /opt/speaches-data/realtime-console/dist \
+    && echo '<!DOCTYPE html><html><body>realtime-console stub (not served)</body></html>' \
+       > /opt/speaches-data/realtime-console/dist/index.html
+
+# Copy dcgm-exporter binary AND the libdcgm.so.4 family + metric configs
+# from stage 1. The distroless dcgm-exporter image bundles libdcgm under
+# /usr/lib/x86_64-linux-gnu/. Copying only the binary leaves it unable to
+# resolve libdcgm.so.4 at runtime — fails with `the libdcgm.so.4 library
+# was not found. Install Data Center GPU Manager (DCGM).` and supervisord
+# crash-loops it (UAT 2026-05-18 attempt 11 dcgm root cause).
 COPY --from=dcgm-stage /usr/bin/dcgm-exporter /usr/bin/dcgm-exporter
+COPY --from=dcgm-stage /usr/lib/x86_64-linux-gnu/libdcgm.so.4 /usr/lib/x86_64-linux-gnu/
+COPY --from=dcgm-stage /usr/lib/x86_64-linux-gnu/libdcgm.so.4.5.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=dcgm-stage /usr/lib/x86_64-linux-gnu/libdcgmmodule*.so.4 /usr/lib/x86_64-linux-gnu/
+COPY --from=dcgm-stage /usr/lib/x86_64-linux-gnu/libdcgmmodule*.so.4.5.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=dcgm-stage /etc/dcgm-exporter /etc/dcgm-exporter
+RUN ldconfig
 
 # Bake supervisord config into the image. Onstart bash does NOT regenerate
 # this file at runtime (Strategy α LOCKED — runtime override deferred to
