@@ -228,7 +228,7 @@ Plans:
 
 **Requirements**: refactor + extension only — extends POD-* (primary pod composition) + GW-* (gateway upstream routing). New TTS upstream rows + /v1/audio/speech proxy. Tracked via D-01..D-13 decisions in 06.7-CONTEXT.md.
 **Depends on:** Phase 06.6 (primary pod Strategy B image + supervisord + reconciler tier-0 override mechanism + DCGM)
-**Plans:** 2/9 plans executed
+**Plans:** 3/9 plans executed
 
 Plans:
 
@@ -239,7 +239,7 @@ Plans:
 
 **Wave 1** *(parallel — file-independent)*
 
-- [ ] 06.7-03-PLAN.md — gateway tier-0 routing core: loader map (+tts,−embed)+Tier0OverrideURL getter, types, tts probe, RouteClassTTS (D-11,D-12)
+- [x] 06.7-03-PLAN.md — gateway tier-0 routing core: loader map (+tts,−embed)+Tier0OverrideURL getter, types, tts probe, RouteClassTTS (D-11,D-12)
 - [ ] 06.7-04-PLAN.md — DB: migration 0024 (relax CHECK + seed tts rows) + 0025 (voices catalog) + tenant-scoped sqlc CRUD (D-09,D-10,D-11,D-12)
 - [ ] 06.7-05-PLAN.md — pod: chatterbox_server.py /v1/audio/speech (zero-shot, 24kHz, language_id=pt) + Dockerfile /opt/chatterbox-venv (torch 2.6 cu124) + supervisord chatterbox:8003 (remove infinity) (D-05,D-06,D-08)
 - [ ] 06.7-06-PLAN.md — embed 24/7 CPU: Infinity multilingual-e5-large Compose on GATE-4 host + static UPSTREAM_EMBED_URL wiring (D-01,D-02,D-03)
