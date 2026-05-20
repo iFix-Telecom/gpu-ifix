@@ -222,7 +222,7 @@ Plans:
 
 **Why:** Primary pod is schedule-driven (peak-only, ~308h/mo). Embedding on the primary pod means RAG breaks every off-peak window — unacceptable for 24/7 client RAG. Embed must move to a 24/7 host. Freed VRAM (bge-m3 ~2 GB) plus headroom on the 5090 (32 GB) accommodates a GPU TTS engine for higher-quality, voice-cloned audio during peak hours.
 
-**Engine decision (research 2026-05-19):** Kani-TTS-2-pt (`nineninesix/kani-tts-2-pt`) — Apache 2.0 (commercial OK), native PT-BR, zero-shot voice cloning via speaker embedding, 3 GB VRAM, RTF 0.2 (10s audio in ~2s). Rejected: OpenVoice v2 (no PT-BR), XTTS-v2 (CPML non-commercial grey area post-Coqui-shutdown), F5-TTS (CC-BY-NC), Fish Speech 1.5 (12 GB VRAM min — too heavy).
+**Engine decision (research 2026-05-19; SWAPPED at Wave 0 GATE 1, 2026-05-20):** Original lock Kani-TTS-2-pt FAILED the Wave 0 PT-BR quality gate (immature checkpoint, unacceptable accent — see 06.7-WAVE0-GATES.md). **Engine reverted to Chatterbox Multilingual (`ResembleAI/chatterbox`, MIT — commercial OK), zero-shot voice cloning from a reference WAV (no `.pt` embedding), ~4 GB VRAM peak, 24 kHz output, RTF ~1.0, `language_id="pt"`.** Qwen3-TTS 0.6B (Apache 2.0) recorded as runner-up. Earlier rejects (OpenVoice v2 / XTTS-v2 / F5-TTS / Fish Speech 1.5) unchanged.
 
 **Embed reality (CORRECTED 2026-05-19 — supersedes the prior bge-m3 paragraph):** The existing converseai RAG corpus is embedded with **OpenAI `text-embedding-3-small` (1536-dim)**, called directly (not via gateway) — bge-m3 is NOT the corpus model (validated against converseai-v4/agents/src/rag). Therefore 06.7 only picks the model to **serve** on the 24/7 CPU host: **`intfloat/multilingual-e5-large` (1024-dim) via Infinity** (D-02 self-host; mistral-embed API-only + jina-v3 CC-BY-NC disqualified). The actual corpus re-embed + OpenAI→gateway cutover + `pgvector vector(1536)→new dim` migration are **deferred to Phase 8 (INT-01)** (D-04) and now a hard requirement Phase 8's original plan did not scope — flag at Phase 8 planning.
 
@@ -234,22 +234,22 @@ Plans:
 
 **Wave 0** *(blocking gates + test scaffolding)*
 - [ ] 06.7-01-PLAN.md — BLOCKING gates: Kani PT-BR quality spike + sign-off, CUDA/image spike, Piper fallback format, embed host+model lock (D-01,D-02,D-05,D-07)
-- [ ] 06.7-02-PLAN.md — Nyquist test stubs (tts probe/map/getter/quota/re-assert + tts proxy + voices isolation + kani shim) (D-05,D-06,D-08,D-10,D-11,D-12,D-13)
+- [ ] 06.7-02-PLAN.md — Nyquist test stubs (tts probe/map/getter/quota/re-assert + tts proxy + voices isolation + Chatterbox shim: 24kHz + zero-shot S3 refetch) (D-05,D-06,D-08,D-10,D-11,D-12,D-13)
 
 **Wave 1** *(parallel — file-independent)*
 - [ ] 06.7-03-PLAN.md — gateway tier-0 routing core: loader map (+tts,−embed)+Tier0OverrideURL getter, types, tts probe, RouteClassTTS (D-11,D-12)
 - [ ] 06.7-04-PLAN.md — DB: migration 0024 (relax CHECK + seed tts rows) + 0025 (voices catalog) + tenant-scoped sqlc CRUD (D-09,D-10,D-11,D-12)
-- [ ] 06.7-05-PLAN.md — pod: kani_shim.py /v1/audio/speech + Dockerfile Kani venv stage + supervisord kani:8003 (remove infinity) (D-05,D-06,D-08)
+- [ ] 06.7-05-PLAN.md — pod: chatterbox_server.py /v1/audio/speech (zero-shot, 24kHz, language_id=pt) + Dockerfile /opt/chatterbox-venv (torch 2.6 cu124) + supervisord chatterbox:8003 (remove infinity) (D-05,D-06,D-08)
 - [ ] 06.7-06-PLAN.md — embed 24/7 CPU: Infinity multilingual-e5-large Compose on GATE-4 host + static UPSTREAM_EMBED_URL wiring (D-01,D-02,D-03)
 
 **Wave 2** *(gateway pipeline + reconciler)*
-- [ ] 06.7-07-PLAN.md — gateway TTS pipeline: tts.go JSON→binary proxy + voices.go CRUD (MinIO+sqlc, tenant-isolated) + main.go mounts (D-06,D-08,D-09,D-10,D-12)
+- [ ] 06.7-07-PLAN.md — gateway TTS pipeline: tts.go JSON→binary proxy + GATE-3 Option A Piper adapter + voices.go CRUD (WAV-only, MinIO+sqlc, tenant-isolated) + main.go mounts (D-06,D-08,D-09,D-10,D-12)
 - [ ] 06.7-08-PLAN.md — primary reconciler: markReady tts (not embed) + Pitfall #11 Ready-tick re-assert + lifecycle port 8002→8003 (D-03,D-11,D-13)
 
 **Wave 3** *(phase gate)*
-- [ ] 06.7-09-PLAN.md — Live Vast 5090 UAT (VRAM fit, voice-clone, Piper off-peak, 24/7 embed, Pitfall #11) + RUNBOOK-PRIMARY-POD-TTS.md (D-05,D-06,D-07,D-08,D-10,D-11,D-13,D-03)
+- [ ] 06.7-09-PLAN.md — Live Vast 5090 UAT (Chatterbox ~4GB VRAM fit, zero-shot voice-clone 24kHz, S3-refetch survival, Piper Option A off-peak, 24/7 embed, Pitfall #11) + RUNBOOK-PRIMARY-POD-TTS.md (D-05,D-06,D-07,D-08,D-10,D-11,D-13,D-03)
 
-Resolved at discuss/plan (former open questions): embed host = n8n-ia-vm (GATE 4 may escalate to dedicated VM); TTS server = own thin FastAPI shim (D-05); voice cloning = managed voices via /v1/audio/voices + S3 (D-08); tier-0 role tts added, embed becomes static (D-03/D-11).
+Resolved at discuss/plan (former open questions): embed host = n8n-ia-vm (GATE 4 may escalate to dedicated VM); TTS server = Chatterbox Multilingual on the pod (adapt devnen server OR thin FastAPI shim, D-05 revised); voice cloning = managed voices via /v1/audio/voices + S3 (D-08); tier-0 role tts added, embed becomes static (D-03/D-11).
 
 ### Phase 6.5: Auto-provisioning Emergency Pod (Vast.ai)
 
