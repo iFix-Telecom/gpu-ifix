@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-last_updated: "2026-05-20T02:07:07.513Z"
+status: executing
+last_updated: "2026-05-20T02:38:40.062Z"
 progress:
   total_phases: 13
   completed_phases: 8
-  total_plans: 91
+  total_plans: 100
   completed_plans: 88
   percent: 62
 ---
@@ -126,7 +126,7 @@ Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questi
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Phase 6.6 COMPLETE 2026-05-19; ready to start Phase 07 (Observability Dashboard + Alerting).
+- **Status:** Ready to execute
 
 ## Performance Metrics
 
