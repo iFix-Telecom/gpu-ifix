@@ -46,6 +46,16 @@ type Config struct {
 	UpstreamEmbedURL        string // UPSTREAM_EMBED_URL (required)
 	UpstreamHealthBridgeURL string // UPSTREAM_HEALTH_BRIDGE_URL (optional — Phase 3 D-D4: health-bridge is a pod-internal debug surface, not required for gateway operation)
 
+	// Phase 06.7 — TTS (POST /v1/audio/speech) + voice-clone surface (Plan 07,
+	// REVIEWS action #6 — explicit enumerated env). UpstreamTTSURL is a tier-0
+	// placeholder overwritten by the reconciler's dynamic override (D-11);
+	// UpstreamTTSPiperURL is the tier-1 Piper fallback target (GATE 3 Option A).
+	UpstreamTTSURL      string // UPSTREAM_TTS_URL (tier-0 placeholder; reconciler override target for the pod Chatterbox server)
+	UpstreamTTSPiperURL string // UPSTREAM_TTS_PIPER_URL (tier-1 Piper fallback per GATE 3 Option A — ulaw 8kHz -> WAV 16kHz adapter)
+	TTSMaxInputChars    int    // TTS_MAX_INPUT_CHARS (synth-text DoS cap; default 4000)
+	VoiceMaxUploadBytes int64  // VOICE_MAX_UPLOAD_BYTES (reference-WAV upload DoS cap; default 10485760 = 10 MiB)
+	S3VoicePrefix       string // S3_VOICE_PREFIX (S3 key prefix for reference WAVs; default "voices"; MUST match the pod server CHATTERBOX_S3_VOICE_PREFIX, Plan 05)
+
 	// Phase 3 — External fallback upstreams (optional at boot; warn-log if a
 	// row in ai_gateway.upstreams is enabled but the env it points to is missing)
 	UpstreamOpenRouterChatURL        string   // UPSTREAM_LLM_OPENROUTER_URL
@@ -255,6 +265,13 @@ func Load() (Config, error) {
 		UpstreamEmbedURL:        os.Getenv("UPSTREAM_EMBED_URL"),
 		UpstreamHealthBridgeURL: os.Getenv("UPSTREAM_HEALTH_BRIDGE_URL"),
 
+		// Phase 06.7 — TTS + voice-clone surface (Plan 07).
+		UpstreamTTSURL:      os.Getenv("UPSTREAM_TTS_URL"),
+		UpstreamTTSPiperURL: os.Getenv("UPSTREAM_TTS_PIPER_URL"),
+		TTSMaxInputChars:    atoiOr(os.Getenv("TTS_MAX_INPUT_CHARS"), 4000),
+		VoiceMaxUploadBytes: atoi64Or(os.Getenv("VOICE_MAX_UPLOAD_BYTES"), 10485760),
+		S3VoicePrefix:       strOr(os.Getenv("S3_VOICE_PREFIX"), "voices"),
+
 		// Phase 3 external upstreams (optional at boot)
 		UpstreamOpenRouterChatURL:        os.Getenv("UPSTREAM_LLM_OPENROUTER_URL"),
 		UpstreamOpenRouterChatAuthBearer: os.Getenv("UPSTREAM_LLM_OPENROUTER_AUTH_BEARER"),
@@ -437,6 +454,29 @@ func atoiOr(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// atoi64Or parses an int64 from s; empty string or parse error returns def.
+// Used for byte-size caps (VOICE_MAX_UPLOAD_BYTES) where int64 matches
+// http.MaxBytesReader's signature without a lossy cast.
+func atoi64Or(s string, def int64) int64 {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// strOr returns s unless it is empty/blank, in which case def is returned.
+// Used for string env vars that carry a non-empty default (S3_VOICE_PREFIX).
+func strOr(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
 }
 
 // csvOr parses a comma-separated string into []string, trimming whitespace
