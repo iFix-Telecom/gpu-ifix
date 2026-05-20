@@ -117,15 +117,19 @@ func TestBuildPrimaryCreateRequest_Supervisord(t *testing.T) {
 }
 
 // TestBuildPrimaryCreateRequest_Has4PortMappings — Pitfall #8 (4
-// port forwards on the pod: 8000 LLM + 8001 STT + 8002 embed + 9400 DCGM).
+// port forwards on the pod: 8000 LLM + 8001 STT + 8003 TTS + 9400 DCGM).
+// Phase 06.7 (D-11): the embed:8002 forward was replaced by the
+// Chatterbox tts:8003 forward; 8002 must NOT be present.
 func TestBuildPrimaryCreateRequest_Has4PortMappings(t *testing.T) {
 	r := newReconcilerWith(cfgWithDefaults())
 	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
 	require.NoError(t, err)
 
-	for _, key := range []string{"-p 8000:8000", "-p 8001:8001", "-p 8002:8002", "-p 9400:9400"} {
+	for _, key := range []string{"-p 8000:8000", "-p 8001:8001", "-p 8003:8003", "-p 9400:9400"} {
 		require.Equal(t, "1", req.Env[key], "port mapping %s must be present with value \"1\"", key)
 	}
+	_, has8002 := req.Env["-p 8002:8002"]
+	require.False(t, has8002, "embed port 8002 must NOT be forwarded (embed left the pod, D-03)")
 }
 
 // TestBuildPrimaryCreateRequest_MinIOCredentialsNotEmpty — all 4 MinIO

@@ -29,19 +29,24 @@ type VastAPI interface {
 }
 
 // LoaderAdapter is the surface the primary reconciler consumes from the
-// upstreams.Loader. Plan 06.6-06b's job is to satisfy this interface on
-// the real *upstreams.Loader (extending OverrideTier0/RestoreTier0 to
-// handle the 3 primary roles: "llm", "stt", "embed").
+// upstreams.Loader. Plan 06.6-06b satisfied this interface on the real
+// *upstreams.Loader for OverrideTier0/RestoreTier0; Phase 06.7 Plan 03
+// added Tier0OverrideURL (the Pitfall #11 re-assert getter) and swapped the
+// dynamic primary roster to "llm", "stt", "tts" ("embed" left the pod per
+// D-03 and is now a static tier-0 row).
 //
 // The OverrideTier0 / RestoreTier0 signatures are deliberately void
 // (no error return) to match the existing upstreams.Loader.OverrideTier0
 // + RestoreTier0 contract — the real implementation never fails; misroute
 // is logged at warn level inside the Loader. Refresh keeps its error
 // return because reloading enabled-upstreams from Postgres can legitimately
-// fail (DB connectivity loss).
+// fail (DB connectivity loss). Tier0OverrideURL reports the active override
+// URL for a role (or set=false when the slot is empty) so evaluateReady can
+// re-assert a slot cleared by an emerg cutback (Pitfall #11 / D-13).
 type LoaderAdapter interface {
 	OverrideTier0(role, url string)
 	RestoreTier0(role string)
+	Tier0OverrideURL(role string) (string, bool)
 	Refresh(ctx context.Context) error
 }
 
@@ -87,14 +92,19 @@ var (
 // child) exposed by the running pod on Vast.ai. Populated by the
 // reconciler in Plan 06.6-06a once GetInstance reports a running state
 // and the public_ipaddr + ports map are populated; consumed by the
-// upstream loader (LLM/STT/embed tier-0 overrides) and the DCGM scraper
-// (SetURL). LLM/STT/Embed use the public IP + host-port mapping for
-// 8000/8001/8002; DCGM uses the host-port mapping for 9400.
+// upstream loader (LLM/STT/TTS tier-0 overrides) and the DCGM scraper
+// (SetURL). LLM/STT/TTS use the public IP + host-port mapping for
+// 8000/8001/8003; DCGM uses the host-port mapping for 9400.
+//
+// Phase 06.7 (D-03/D-11): embed left the pod (relocated to a 24/7 CPU
+// host, static tier-0 row), and Chatterbox TTS took its container slot on
+// port 8003. The dynamic tier-0 roster the reconciler drives is now
+// {llm,stt,tts}.
 type primaryPodURLs struct {
-	LLM   string
-	STT   string
-	Embed string
-	DCGM  string
+	LLM  string
+	STT  string
+	TTS  string
+	DCGM string
 }
 
 // Deps is the full wiring for the primary Reconciler after Plan 06.6-06a.
@@ -312,7 +322,7 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// to `docker run -p ...` at instance create time.
 		"-p 8000:8000": "1", // LLM (llama-server)
 		"-p 8001:8001": "1", // STT (speaches)
-		"-p 8002:8002": "1", // embeddings (infinity)
+		"-p 8003:8003": "1", // TTS (chatterbox) — Phase 06.7 D-11 (was embed:8002)
 		"-p 9400:9400": "1", // GPU metrics (dcgm-exporter)
 
 		// MinIO 4 credentials — must all be non-empty per the in-pod
@@ -412,16 +422,35 @@ func (r *Reconciler) podSTTURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "8001", "/health")
 }
 
-// podEmbedURL extracts the public embed endpoint (8002/tcp -> /health) from
-// a running Vast.ai instance.
-func (r *Reconciler) podEmbedURL(inst vast.Instance) string {
-	return r.podPortURL(inst, "8002", "/health")
+// podTTSURL extracts the public TTS endpoint (8003/tcp -> /health) from a
+// running Vast.ai instance. Phase 06.7 (D-11) — Chatterbox replaced the
+// Infinity embed child on the pod; the container port moved 8002 -> 8003.
+func (r *Reconciler) podTTSURL(inst vast.Instance) string {
+	return r.podPortURL(inst, "8003", "/health")
 }
 
 // podDCGMURL extracts the public DCGM endpoint (9400/tcp -> /metrics) from
 // a running Vast.ai instance.
 func (r *Reconciler) podDCGMURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "9400", "/metrics")
+}
+
+// roleURL maps a dynamic primary role ("llm"/"stt"/"tts") to its raw
+// per-service URL (with readiness suffix) from a primaryPodURLs snapshot.
+// Used by the evaluateReady Pitfall #11 re-assert loop (D-13) to recover
+// the pod URL for a tier-0 slot an emerg cutback cleared. "embed" is NOT a
+// dynamic primary role post-Phase-06.7 (D-03) and returns "".
+func roleURL(urls primaryPodURLs, role string) string {
+	switch role {
+	case "llm":
+		return urls.LLM
+	case "stt":
+		return urls.STT
+	case "tts":
+		return urls.TTS
+	default:
+		return ""
+	}
 }
 
 // stripPrimaryReadinessSuffix removes the readiness-probe suffix from a
