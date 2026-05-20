@@ -81,14 +81,19 @@ func NewLoader(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (*Load
 //
 // Phase 6.6 — primary pod overrides 3 roles (was LLM-only in Phase 6).
 // OverrideTier0/RestoreTier0 são role-agnostic; só o map precisa crescer.
-// See gateway/internal/primary/reconciler.go markReady (Plan 06.6-06a),
-// which routes "stt" + "embed" to the primary pod once it transitions
-// to StatePrimaryReady alongside "llm".
+// See gateway/internal/primary/reconciler.go markReady (Plan 06.6-06a).
+//
+// Phase 06.7 (D-03/D-11) — the TTS engine moved onto the primary pod and
+// embed moved OFF it (relocated to n8n-ia-vm CPU as a STATIC tier-0 upstream
+// via UPSTREAM_EMBED_URL). So the dynamic-override roster is now
+// {llm, stt, tts}: "tts" is a first-class dynamic-override role and "embed"
+// is removed (Resolve("embed",0) still serves the static row unchanged
+// because there is no override slot to consult).
 func newTier0OverrideMap() map[string]*atomic.Pointer[string] {
 	return map[string]*atomic.Pointer[string]{
-		"llm":   new(atomic.Pointer[string]),
-		"stt":   new(atomic.Pointer[string]),
-		"embed": new(atomic.Pointer[string]),
+		"llm": new(atomic.Pointer[string]),
+		"stt": new(atomic.Pointer[string]),
+		"tts": new(atomic.Pointer[string]),
 	}
 }
 
@@ -272,6 +277,27 @@ func (l *Loader) RestoreTier0(role string) {
 		l.log.Info("tier-0 override cleared (cutback)", "role", role)
 	}
 	p.Store(nil)
+}
+
+// Tier0OverrideURL reports the active tier-0 override URL for a role.
+// Returns (url, true) when an override is currently set for the role, or
+// ("", false) when the role has no override slot (e.g. "embed", which is a
+// static tier-0 upstream post-Phase-06.7) or the slot is present but unset.
+//
+// Phase 06.7 (D-13) — the primary reconciler's Pitfall #11 re-assert path
+// (Plan 06.7-08) reads this to decide whether the dynamic tier-0 slot for a
+// role was cleared (e.g. by a pod replacement) and must be re-overridden.
+// Mirrors the lockless atomic.Pointer read used by Resolve's hot path.
+func (l *Loader) Tier0OverrideURL(role string) (string, bool) {
+	p, ok := l.tier0Override[role]
+	if !ok {
+		return "", false
+	}
+	overridePtr := p.Load()
+	if overridePtr == nil || *overridePtr == "" {
+		return "", false
+	}
+	return *overridePtr, true
 }
 
 // All returns all upstreams ordered by (role, tier). Used by /v1/health/upstreams

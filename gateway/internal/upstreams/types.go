@@ -24,7 +24,7 @@ import (
 type UpstreamConfig struct {
 	ID            uuid.UUID     `json:"id"`
 	Name          string        `json:"name"`
-	Role          string        `json:"role"` // "llm" | "stt" | "embed"
+	Role          string        `json:"role"` // "llm" | "stt" | "embed" | "tts"
 	Tier          int           `json:"tier"` // 0 = primary, 1 = fallback
 	URL           string        `json:"url"`
 	AuthBearer    string        `json:"-"` // resolved; NEVER log/serialize

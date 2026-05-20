@@ -306,16 +306,17 @@ func TestNewLoaderInMemory_IncludesOverrideMap(t *testing.T) {
 	}
 }
 
-// TestNewTier0OverrideMap_Has3Roles — Phase 6.6 — the canonical override
-// map exposes 3 role keys (llm + stt + embed), enabling primary pod
-// routing for all 3 services. Defensive against a future refactor that
-// silently shrinks the map back to LLM-only.
+// TestNewTier0OverrideMap_Has3Roles — Phase 6.6 → Phase 06.7 — the canonical
+// override map exposes 3 dynamic-override role keys. In Phase 06.7 (D-03/D-11)
+// the roster changed from {llm,stt,embed} to {llm,stt,tts}: tts moved onto the
+// primary pod and embed relocated to a STATIC tier-0 upstream (n8n-ia-vm CPU).
+// Defensive against a future refactor that silently shrinks the map.
 func TestNewTier0OverrideMap_Has3Roles(t *testing.T) {
 	m := newTier0OverrideMap()
 	if len(m) != 3 {
 		t.Fatalf("expected 3 roles in override map, got %d", len(m))
 	}
-	for _, role := range []string{"llm", "stt", "embed"} {
+	for _, role := range []string{"llm", "stt", "tts"} {
 		p, ok := m[role]
 		if !ok {
 			t.Errorf("expected role %q in override map", role)
@@ -328,22 +329,27 @@ func TestNewTier0OverrideMap_Has3Roles(t *testing.T) {
 			t.Errorf("role %q expected empty pointer, got %v", role, v)
 		}
 	}
+	// embed must NOT have a dynamic-override slot post-06.7 (it is static).
+	if _, ok := m["embed"]; ok {
+		t.Errorf("embed must not be in the dynamic-override map post-06.7 (D-03)")
+	}
 }
 
-// TestOverrideTier0_RestoreTier0_AllRoles — Phase 6.6 — OverrideTier0
-// and RestoreTier0 are role-agnostic: same code path works for llm, stt,
-// embed. Iterate all 3 roles, override each with a distinct URL, assert
-// each lookup returns the set value, then RestoreTier0 each and assert
-// the pointer is cleared.
+// TestOverrideTier0_RestoreTier0_AllRoles — Phase 6.6 → Phase 06.7 —
+// OverrideTier0 and RestoreTier0 are role-agnostic: same code path works
+// for llm, stt, tts. Iterate all 3 dynamic-override roles, override each
+// with a distinct URL, assert each lookup returns the set value, then
+// RestoreTier0 each and assert the pointer is cleared.
 //
-// Fixture must include tier-0 rows for all 3 roles so Resolve has a base
-// row to overlay the override URL on top of (mirrors the production
-// upstreams table schema for Phase 6.6 primary pod).
+// Phase 06.7 (D-03/D-11) — the third dynamic role is now "tts" (was
+// "embed"); embed relocated to a static tier-0 upstream so it no longer has
+// a dynamic-override slot. Fixture includes tier-0 rows for all 3 roles so
+// Resolve has a base row to overlay the override URL on top of.
 func TestOverrideTier0_RestoreTier0_AllRoles(t *testing.T) {
 	l := NewLoaderForTest(
 		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary-llm:8000", Enabled: true},
 		UpstreamConfig{Name: "local-stt", Role: "stt", Tier: 0, URL: "http://primary-stt:8000", Enabled: true},
-		UpstreamConfig{Name: "local-embed", Role: "embed", Tier: 0, URL: "http://primary-embed:8000", Enabled: true},
+		UpstreamConfig{Name: "local-tts", Role: "tts", Tier: 0, URL: "http://primary-tts:8003", Enabled: true},
 	)
 
 	cases := []struct {
@@ -351,7 +357,7 @@ func TestOverrideTier0_RestoreTier0_AllRoles(t *testing.T) {
 	}{
 		{"llm", "http://primary-pod:11434", "http://primary-llm:8000"},
 		{"stt", "http://primary-pod:9000", "http://primary-stt:8000"},
-		{"embed", "http://primary-pod:8080", "http://primary-embed:8000"},
+		{"tts", "http://primary-pod:8003", "http://primary-tts:8003"},
 	}
 
 	for _, tc := range cases {
@@ -422,7 +428,46 @@ func TestOverrideTier0_RestoreTier0_AllRoles(t *testing.T) {
 //
 // OWNER: Plan 06.7-03 — unskip + assert real map keys before COMPLETE.
 func TestTier0_TTSKeyPresentEmbedAbsent(t *testing.T) {
-	t.Skip("OWNER Plan 06.7-03 — newTier0OverrideMap must contain \"tts\", lack \"embed\" (D-11); assert OverrideTier0(\"tts\") routes + OverrideTier0(\"embed\") no-ops")
+	// Map shape: tts present, embed absent.
+	m := newTier0OverrideMap()
+	if _, ok := m["tts"]; !ok {
+		t.Errorf("newTier0OverrideMap missing \"tts\" key (D-11)")
+	}
+	if _, ok := m["embed"]; ok {
+		t.Errorf("newTier0OverrideMap must not contain \"embed\" (D-03 — embed is static)")
+	}
+
+	// OverrideTier0("tts") routes; OverrideTier0("embed") is a no-op because
+	// embed has no dynamic slot and resolves the static tier-0 row unchanged.
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "primary-tts", Role: "tts", Tier: 0, URL: "http://primary-tts:8003", Enabled: true},
+		UpstreamConfig{Name: "static-embed", Role: "embed", Tier: 0, URL: "http://n8n-ia:7997", Enabled: true},
+	)
+
+	l.OverrideTier0("tts", "http://primary-pod:8003")
+	got, ok := l.Resolve("tts", 0)
+	if !ok {
+		t.Fatalf("Resolve(tts,0) not found after override")
+	}
+	if got.URL != "http://primary-pod:8003" {
+		t.Errorf("tts override URL = %q, want http://primary-pod:8003", got.URL)
+	}
+	if got.Name != "emergency_pod_tts" || !got.IsEmergency {
+		t.Errorf("tts override Name/IsEmergency = %q/%v, want emergency_pod_tts/true", got.Name, got.IsEmergency)
+	}
+
+	// embed override is a no-op: the static row is served unchanged.
+	l.OverrideTier0("embed", "http://should-be-ignored:8000")
+	gotE, ok := l.Resolve("embed", 0)
+	if !ok {
+		t.Fatalf("Resolve(embed,0) not found")
+	}
+	if gotE.URL != "http://n8n-ia:7997" {
+		t.Errorf("embed override leaked: URL = %q, want static http://n8n-ia:7997", gotE.URL)
+	}
+	if gotE.IsEmergency {
+		t.Errorf("embed must never be IsEmergency (no dynamic slot)")
+	}
 }
 
 // TestTier0OverrideURL_Getter asserts the new Loader.Tier0OverrideURL(role)
@@ -433,5 +478,26 @@ func TestTier0_TTSKeyPresentEmbedAbsent(t *testing.T) {
 //
 // OWNER: Plan 06.7-03 — implement Tier0OverrideURL + unskip before COMPLETE.
 func TestTier0OverrideURL_Getter(t *testing.T) {
-	t.Skip("OWNER Plan 06.7-03 — implement Loader.Tier0OverrideURL(role) (string,bool); assert active->(url,true), absent->(\"\",false)")
+	l := newOverrideFixture()
+
+	// Before any override: known role with empty slot -> ("", false).
+	if url, ok := l.Tier0OverrideURL("llm"); ok || url != "" {
+		t.Errorf("pre-override Tier0OverrideURL(llm) = (%q,%v), want (\"\",false)", url, ok)
+	}
+	// Unknown role (no slot) -> ("", false).
+	if url, ok := l.Tier0OverrideURL("embed"); ok || url != "" {
+		t.Errorf("Tier0OverrideURL(embed) = (%q,%v), want (\"\",false) (no slot)", url, ok)
+	}
+
+	// After override: (url, true).
+	l.OverrideTier0("llm", "http://emergency.pod:8000")
+	if url, ok := l.Tier0OverrideURL("llm"); !ok || url != "http://emergency.pod:8000" {
+		t.Errorf("post-override Tier0OverrideURL(llm) = (%q,%v), want (http://emergency.pod:8000,true)", url, ok)
+	}
+
+	// After restore: back to ("", false).
+	l.RestoreTier0("llm")
+	if url, ok := l.Tier0OverrideURL("llm"); ok || url != "" {
+		t.Errorf("post-restore Tier0OverrideURL(llm) = (%q,%v), want (\"\",false)", url, ok)
+	}
 }
