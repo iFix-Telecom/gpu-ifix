@@ -16,7 +16,7 @@
 //     loop fires evaluateAsleep → spawnProvisioning at the first tick.
 //
 // The Wave 0 supervisord-4-services invariant is mechanically proven by
-// asserting (a) the reconciler probes all 4 derived URLs (LLM/STT/Embed/
+// asserting (a) the reconciler probes all 4 derived URLs (LLM/STT/TTS/
 // DCGM via Ports map), (b) Loader.OverrideTier0 fires 3x with the
 // correctly-stripped base URLs, (c) DCGMScraper.SetURL receives the
 // /metrics URL verbatim, (d) DB row carries first_health_pass_at != NULL,
@@ -114,24 +114,26 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 		"LLM /v1/models endpoint must be probed")
 	require.True(t, probed["http://203.0.113.7:33001/health"],
 		"STT /health endpoint must be probed")
-	require.True(t, probed["http://203.0.113.7:33002/health"],
-		"Embed /health endpoint must be probed")
+	require.True(t, probed["http://203.0.113.7:33003/health"],
+		"TTS /health endpoint must be probed (Phase 06.7 — was embed:8002)")
 	require.True(t, probed["http://203.0.113.7:33400/metrics"],
 		"DCGM /metrics endpoint must be probed")
 
-	// (b) 3-role tier-0 override assertion — Plan 06.6-06b contract.
+	// (b) 3-role tier-0 override assertion — Phase 06.7 roster {llm,stt,tts}.
 	require.Eventually(t, func() bool {
 		snap := loader.Snapshot()
 		return len(snap) == 3
 	}, 2*time.Second, 50*time.Millisecond,
-		"Loader.OverrideTier0 must be called 3x (llm/stt/embed); got %v", loader.Snapshot())
+		"Loader.OverrideTier0 must be called 3x (llm/stt/tts); got %v", loader.Snapshot())
 	snap := loader.Snapshot()
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
 		"/v1/models suffix stripped for LLM (parity emerg stripHealthSuffix)")
 	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
 		"/health suffix stripped for STT")
-	require.Equal(t, "http://203.0.113.7:33002", snap["embed"],
-		"/health suffix stripped for embed")
+	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
+		"/health suffix stripped for TTS")
+	_, embedSet := snap["embed"]
+	require.False(t, embedSet, "embed must NOT be a dynamic primary role (D-03)")
 
 	// (c) DCGMScraper.SetURL contract — Plan 06.6-06b.
 	require.Equal(t, "http://203.0.113.7:33400/metrics", dcgm.Last(),

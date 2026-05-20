@@ -9,13 +9,13 @@
 //     real *vast.Client). Per-test scriptable closures for SearchOffers /
 //     CreateInstance / GetInstance / DestroyInstance.
 //   - fakePrimaryLoader: records OverrideTier0 / RestoreTier0 calls for
-//     the 3 primary roles (llm / stt / embed).
+//     the 3 primary roles (llm / stt / tts — embed left the pod, D-03).
 //   - fakePrimaryDCGM: records the most-recent SetURL value.
 //   - fakePrimaryInflight: scriptable per-upstream inflight counter.
 //   - alwaysInPeakRule / neverInPeakRule: ScheduleRule fixtures for tests
 //     that need deterministic IsInPeak / ShouldBeProvisioned behaviour.
 //   - runningPrimaryInstance: vast.Instance with all 4 host port mappings
-//     populated (8000/8001/8002/9400 → 33000/33001/33002/33400).
+//     populated (8000/8001/8003/9400 → 33000/33001/33003/33400).
 //
 // Wave 0 orthogonality: every helper is at the orchestration-layer
 // boundary; the supervisord 4-service single-container model is exposed
@@ -170,6 +170,19 @@ func (f *fakePrimaryLoader) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// Tier0OverrideURL mirrors the real Loader.Tier0OverrideURL — returns
+// (url, true) when the role has a non-empty override, else ("", false).
+// Added Phase 06.7 (D-13) for the evaluateReady re-assert loop.
+func (f *fakePrimaryLoader) Tier0OverrideURL(role string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	url, ok := f.overrides[role]
+	if !ok || url == "" {
+		return "", false
+	}
+	return url, true
+}
+
 func (f *fakePrimaryLoader) Snapshot() map[string]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -270,7 +283,7 @@ func runningPrimaryInstance(id int64) vast.Instance {
 		Ports: map[string][]vast.PortBinding{
 			"8000/tcp": {{HostIP: "0.0.0.0", HostPort: "33000"}},
 			"8001/tcp": {{HostIP: "0.0.0.0", HostPort: "33001"}},
-			"8002/tcp": {{HostIP: "0.0.0.0", HostPort: "33002"}},
+			"8003/tcp": {{HostIP: "0.0.0.0", HostPort: "33003"}},
 			"9400/tcp": {{HostIP: "0.0.0.0", HostPort: "33400"}},
 		},
 	}

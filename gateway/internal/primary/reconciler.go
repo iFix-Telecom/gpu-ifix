@@ -392,6 +392,25 @@ func (r *Reconciler) cooldownElapsed(now time.Time) bool {
 // preserve operator intent — only operator force-down should drain a
 // force-up pod under DISABLED.
 func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog.Logger) {
+	// Pitfall #11 / D-13 re-assert (tech debt #9, UAT 18): an emerg cutback
+	// (emerg/reconciler.go RestoreTier0) shares the SAME tier0Override map
+	// and unilaterally clears the slot the primary wrote in markReady. The
+	// primary only writes the slot once (markReady/recoverOpenLifecycle), so
+	// a cutback leaves llm/stt/tts routing to the stale static row until the
+	// next pod cycle. Re-assert any cleared dynamic slot here at 1Hz — the
+	// inconsistency window is <=1s. embed is EXCLUDED (D-03 — static off-pod
+	// row, immune to this vector). This runs regardless of DISABLED because
+	// an operator force-up pod is Ready under DISABLED and is just as
+	// vulnerable to an emerg cutback clearing its slot.
+	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
+		for _, role := range []string{"llm", "stt", "tts"} {
+			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
+				r.deps.Loader.OverrideTier0(role, stripPrimaryReadinessSuffix(roleURL(*urls, role)))
+				log.Warn("primary re-asserted tier-0 override (emerg cleared it)", "role", role)
+			}
+		}
+	}
+
 	if r.cfg.PrimaryPodScheduleDisabled {
 		return
 	}
@@ -498,13 +517,13 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 		}
 	}
 
-	// RestoreTier0 for all 3 roles BEFORE the FSM transition. New requests
-	// land on the fallback chain immediately; in-flight ones drain over the
-	// grace window.
+	// RestoreTier0 for all 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
+	// BEFORE the FSM transition. New requests land on the fallback chain
+	// immediately; in-flight ones drain over the grace window.
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
-		r.deps.Loader.RestoreTier0("embed")
+		r.deps.Loader.RestoreTier0("tts")
 	}
 
 	_ = r.deps.FSM.Transition(StateReady, StateDraining, now, reason)
@@ -532,7 +551,7 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 			"lifecycle_id": lifecycleID,
 			"llm_url":      urls.LLM,
 			"stt_url":      urls.STT,
-			"embed_url":    urls.Embed,
+			"tts_url":      urls.TTS,
 			"dcgm_url":     urls.DCGM,
 			"dph":          acceptedDPH,
 		})
@@ -545,13 +564,14 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	}
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
-		// Plan 06.6-06b extends OverrideTier0 to honor the 3 primary roles
-		// — llm/stt/embed. We strip the readiness suffix here so the
-		// dispatcher's ReverseProxy target is the BASE URL (parity emerg
-		// markHealthy / stripHealthSuffix).
+		// Phase 06.7 (D-03/D-11): the dynamic primary roster is llm/stt/tts
+		// — NOT embed (embed relocated to a 24/7 CPU host as a static tier-0
+		// row). We strip the readiness suffix here so the dispatcher's
+		// ReverseProxy target is the BASE URL (parity emerg markHealthy /
+		// stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
 		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
-		r.deps.Loader.OverrideTier0("embed", stripPrimaryReadinessSuffix(urls.Embed))
+		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
 		// is atomic and Live; Refresh would re-scan the DB which is
 		// orthogonal to this transition. Refresh remains available for
@@ -617,7 +637,7 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
-		r.deps.Loader.RestoreTier0("embed")
+		r.deps.Loader.RestoreTier0("tts")
 	}
 	if r.deps.DCGMScraper != nil {
 		r.deps.DCGMScraper.SetURL("")
@@ -880,12 +900,13 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.STT == "" || urls.Embed == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Ports not fully mapped yet — keep polling. W6 fix parity.
 				continue
 			}
 			// 4-endpoint health check inside ONE container's namespace
-			// (Wave 0 supervisord 4-services). All 4 must pass.
+			// (Wave 0 supervisord 4-services: llm/stt/tts/dcgm — embed left
+			// the pod per D-03). All 4 must pass.
 			if r.deps.HealthCheck == nil {
 				continue
 			}
@@ -895,7 +916,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			if !r.deps.HealthCheck(ctx, urls.STT) {
 				continue
 			}
-			if !r.deps.HealthCheck(ctx, urls.Embed) {
+			if !r.deps.HealthCheck(ctx, urls.TTS) {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.DCGM) {
@@ -916,10 +937,10 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 // fields without nil-checking.
 func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 	return primaryPodURLs{
-		LLM:   r.podLLMURL(inst),
-		STT:   r.podSTTURL(inst),
-		Embed: r.podEmbedURL(inst),
-		DCGM:  r.podDCGMURL(inst),
+		LLM:  r.podLLMURL(inst),
+		STT:  r.podSTTURL(inst),
+		TTS:  r.podTTSURL(inst),
+		DCGM: r.podDCGMURL(inst),
 	}
 }
 
@@ -978,7 +999,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		return nil
 	}
 	urls := r.buildPodURLs(inst)
-	if urls.LLM == "" || urls.STT == "" || urls.Embed == "" || urls.DCGM == "" {
+	if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 		r.deps.Log.Warn("primary recover: pod ports not fully mapped; closing as unhealthy orphan",
 			"lifecycle_id", open.ID)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
@@ -992,7 +1013,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if r.deps.HealthCheck == nil ||
 		!r.deps.HealthCheck(ctx, urls.LLM) ||
 		!r.deps.HealthCheck(ctx, urls.STT) ||
-		!r.deps.HealthCheck(ctx, urls.Embed) ||
+		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
 		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
@@ -1012,7 +1033,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if r.deps.Loader != nil {
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
 		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
-		r.deps.Loader.OverrideTier0("embed", stripPrimaryReadinessSuffix(urls.Embed))
+		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 	}
 	if r.deps.DCGMScraper != nil {
 		r.deps.DCGMScraper.SetURL(urls.DCGM)

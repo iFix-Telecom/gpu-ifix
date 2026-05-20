@@ -146,6 +146,20 @@ func (f *fakeLoader) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// Tier0OverrideURL mirrors the real Loader.Tier0OverrideURL: returns
+// (url, true) when the role currently has a non-empty override, else
+// ("", false). Used by the Pitfall #11 re-assert loop to detect a slot
+// cleared by an emerg cutback.
+func (f *fakeLoader) Tier0OverrideURL(role string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	url, ok := f.overrides[role]
+	if !ok || url == "" {
+		return "", false
+	}
+	return url, true
+}
+
 func (f *fakeLoader) snapshot() map[string]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -390,7 +404,7 @@ func runningInstanceWithAllPorts(id int64) vast.Instance {
 		Ports: map[string][]vast.PortBinding{
 			"8000/tcp": {{HostIP: "0.0.0.0", HostPort: "33000"}},
 			"8001/tcp": {{HostIP: "0.0.0.0", HostPort: "33001"}},
-			"8002/tcp": {{HostIP: "0.0.0.0", HostPort: "33002"}},
+			"8003/tcp": {{HostIP: "0.0.0.0", HostPort: "33003"}},
 			"9400/tcp": {{HostIP: "0.0.0.0", HostPort: "33400"}},
 		},
 	}
@@ -597,7 +611,7 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 	snap := loader.snapshot()
 	require.Contains(t, snap, "llm", "OverrideTier0('llm', URL) must fire")
 	require.Contains(t, snap, "stt", "OverrideTier0('stt', URL) must fire")
-	require.Contains(t, snap, "embed", "OverrideTier0('embed', URL) must fire")
+	require.Contains(t, snap, "tts", "OverrideTier0('tts', URL) must fire")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the 9400 host mapping")
 }
@@ -619,8 +633,9 @@ func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) 
 		Rule:        alwaysInPeakRule(),
 		HealthCheck: func(_ context.Context, url string) bool {
 			probeCalls.Add(1)
-			// LLM/STT/Embed healthy; DCGM (9400) unhealthy.
-			return !contains(url, ":33002") // embed broken
+			// LLM/STT/TTS healthy except the tts (8003) endpoint, which
+			// is broken — provisioning must NOT promote to Ready.
+			return !contains(url, ":33003") // tts broken
 		},
 		Vast: &fakeVast{
 			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
@@ -634,7 +649,7 @@ func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 50*time.Millisecond)
-	require.Error(t, err, "cold-start budget exhausted because embed always unhealthy")
+	require.Error(t, err, "cold-start budget exhausted because tts always unhealthy")
 	require.NotEqual(t, StateReady, r.deps.FSM.State(),
 		"one-endpoint-unhealthy must NOT promote to Ready")
 	require.Empty(t, loader.snapshot(),
@@ -662,7 +677,7 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("embed", "http://pod:8002")
+	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -678,7 +693,7 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 		"evaluateReady with !IsInPeak must transition Ready→Draining")
 	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated")
 	roles := loader.restoredRoles()
-	require.Equal(t, []string{"llm", "stt", "embed"}, roles,
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
 		"startDrain must RestoreTier0 for all 3 primary roles in order")
 }
 
@@ -792,10 +807,10 @@ func TestMarkReady_OverridesTier0_3Roles(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 
 	urls := primaryPodURLs{
-		LLM:   "http://1.2.3.4:33000/v1/models",
-		STT:   "http://1.2.3.4:33001/health",
-		Embed: "http://1.2.3.4:33002/health",
-		DCGM:  "http://1.2.3.4:33400/metrics",
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	err := r.markReady(context.Background(), 5, urls, 0.30, testLogger())
 	require.NoError(t, err)
@@ -803,7 +818,7 @@ func TestMarkReady_OverridesTier0_3Roles(t *testing.T) {
 	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (one per role)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
-	require.Equal(t, "http://1.2.3.4:33002", snap["embed"], "/health suffix stripped for embed")
+	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
 	require.Equal(t, urls.DCGM, dcgm.Last(), "DCGM URL passed verbatim to scraper")
 	require.Equal(t, StateReady, r.deps.FSM.State())
 }
@@ -822,10 +837,10 @@ func TestMarkReady_SetsDCGMScraperURL(t *testing.T) {
 	})
 	r.SetQueriesForTest(gen.New(dbtx))
 	urls := primaryPodURLs{
-		LLM:   "http://1.2.3.4:33000/v1/models",
-		STT:   "http://1.2.3.4:33001/health",
-		Embed: "http://1.2.3.4:33002/health",
-		DCGM:  "http://1.2.3.4:33400/metrics",
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
 	require.Equal(t, urls.DCGM, dcgm.Last())
@@ -838,7 +853,7 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
 	loader.OverrideTier0("stt", "http://x")
-	loader.OverrideTier0("embed", "http://x")
+	loader.OverrideTier0("tts", "http://x")
 	infl := newFakeInflight() // all zero → immediate destroy
 	fakeV := &fakeVast{}
 	r := buildReconciler(t, Deps{
@@ -970,7 +985,7 @@ func TestHandleForceDownRequest_TransitionsReadyToDraining(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
 	loader.OverrideTier0("stt", "http://x")
-	loader.OverrideTier0("embed", "http://x")
+	loader.OverrideTier0("tts", "http://x")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1441,7 +1456,7 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.STT == "" || urls.Embed == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				continue
 			}
 			if r.deps.HealthCheck == nil {
@@ -1449,7 +1464,7 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 			}
 			if !r.deps.HealthCheck(ctx, urls.LLM) ||
 				!r.deps.HealthCheck(ctx, urls.STT) ||
-				!r.deps.HealthCheck(ctx, urls.Embed) ||
+				!r.deps.HealthCheck(ctx, urls.TTS) ||
 				!r.deps.HealthCheck(ctx, urls.DCGM) {
 				continue
 			}
@@ -1490,7 +1505,46 @@ var _ = strconv.Atoi
 // Tier0OverrideURL, re-Override llm/stt/tts when empty), unskip, and assert
 // re-assert fires for llm/stt/tts but never embed before COMPLETE.
 func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
-	t.Skip("OWNER Plan 06.7-08 — Pitfall #11/D-13: on Ready-tick re-OverrideTier0(llm/stt/tts) when slot empty; never re-assert embed")
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true // keep evaluateReady from auto-draining; re-assert loop still runs
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	// Primary had previously written all 3 dynamic roles; an emerg cutback
+	// then cleared the tts slot (RestoreTier0 transitively wiped it).
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	// tts intentionally NOT set → the cleared-slot vector.
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	// activePodURLs must be populated for the re-assert loop to know the URLs.
+	urls := primaryPodURLs{
+		LLM:  "http://203.0.113.7:33000/v1/models",
+		STT:  "http://203.0.113.7:33001/health",
+		TTS:  "http://203.0.113.7:33003/health",
+		DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+
+	r.evaluateReady(context.Background(), time.Now(), testLogger())
+
+	snap := loader.snapshot()
+	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
+		"evaluateReady must re-assert the cleared tts slot (stripped /health)")
+	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
+		"llm slot stays set")
+	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
+		"stt slot stays set")
+	_, embedSet := snap["embed"]
+	require.False(t, embedSet, "embed must NEVER be re-asserted by the primary reconciler (D-03)")
 }
 
 // TestMarkReady_OverridesTTSNotEmbed asserts that when the primary pod
@@ -1502,5 +1556,35 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 // OWNER: Plan 06.7-08 — update markReady role set to {llm,stt,tts}, unskip,
 // and assert OverrideTier0 fired for tts + NOT for embed before COMPLETE.
 func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
-	t.Skip("OWNER Plan 06.7-08 — markReady must OverrideTier0(llm/stt/tts), NOT embed; assert tts overridden + embed untouched")
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	urls := primaryPodURLs{
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
+	}
+	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
+
+	snap := loader.snapshot()
+	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm/stt/tts)")
+	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
+	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
+	_, embedSet := snap["embed"]
+	require.False(t, embedSet, "markReady must NOT override embed (D-03 — embed is static off-pod)")
+	require.Equal(t, StateReady, r.deps.FSM.State())
 }

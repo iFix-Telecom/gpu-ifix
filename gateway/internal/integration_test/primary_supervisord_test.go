@@ -6,13 +6,13 @@
 // Per 06.6-SPIKE-dind-privileged.md: DinD on Vast.ai is REJECTED
 // (overlayfs mount fails in nested namespace under
 // `--privileged + iptables=false + bridge=none`). Strategy B-revised
-// adopts supervisord as PID 1 with 4 child processes (LLM + STT + embed
+// adopts supervisord as PID 1 with 4 child processes (LLM + STT + TTS
 // + DCGM) sharing ONE container's network namespace, GPU device, and
 // filesystem.
 //
 // From the reconciler's perspective the orchestration mechanism is
 // opaque — it polls 4 HTTP endpoints on Vast-exposed host ports
-// (8000/8001/8002/9400 → 33000/33001/33002/33400). The Wave 0 invariant
+// (8000/8001/8003/9400 → 33000/33001/33003/33400). The Wave 0 invariant
 // proved here is: ALL 4 ENDPOINTS MUST RESPOND HEALTHY BEFORE markReady
 // fires. The supervisord 4-services contract is mechanically enforced by
 // the 4-endpoint health gate.
@@ -25,13 +25,13 @@
 //     single-container 4-services model.
 //
 //   - TestSupervisord_OneEndpointDown_DoesNotPromoteToReady: 3 of 4
-//     endpoints healthy (Embed fails). The reconciler keeps polling
+//     endpoints healthy (TTS fails). The reconciler keeps polling
 //     until the cold-start budget expires; markReady is NEVER called;
 //     FSM stays Provisioning until the lifecycle is closed with
 //     shutdown_reason='health_timeout'.
 //
 //   - TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure:
-//     simulates a supervisord-driven autorestart of one child (Embed
+//     simulates a supervisord-driven autorestart of one child (TTS
 //     fails on first probe, succeeds on subsequent). markReady fires
 //     after autorestart completes. This proves the polling loop is
 //     retry-on-fail rather than fail-fast.
@@ -60,7 +60,7 @@ import (
 // TestSupervisord_4ServicesReachableOnLocalhost — Wave 0 happy path. All
 // 4 supervisord child endpoints respond healthy from inside ONE
 // container's network namespace. The reconciler routes traffic via the
-// Vast-exposed host ports (33000/33001/33002/33400). markReady fires
+// Vast-exposed host ports (33000/33001/33003/33400). markReady fires
 // once all 4 pass.
 func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 	rootCtx, rootCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -88,10 +88,10 @@ func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 	// Wave 0 mock HealthCheck — 4 supervisord children are all healthy.
 	// Per-URL routing emulates the host-port → container-port mapping.
 	healthChecker := func(_ context.Context, url string) bool {
-		// All 4 URLs healthy: 33000/33001/33002 + 33400.
+		// All 4 URLs healthy: 33000/33001/33003 + 33400.
 		return strings.Contains(url, ":33000") ||
 			strings.Contains(url, ":33001") ||
-			strings.Contains(url, ":33002") ||
+			strings.Contains(url, ":33003") ||
 			strings.Contains(url, ":33400")
 	}
 
@@ -129,13 +129,13 @@ func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(loader.Snapshot()) == 3
 	}, 2*time.Second, 50*time.Millisecond,
-		"3 OverrideTier0 calls (llm/stt/embed) required for supervisord 4-services pod")
+		"3 OverrideTier0 calls (llm/stt/tts) required for supervisord 4-services pod")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGM URL must point at the 9400 supervisord child's host port")
 }
 
 // TestSupervisord_OneEndpointDown_DoesNotPromoteToReady — Wave 0 partial
-// failure. The Embed supervisord child is unhealthy; the other 3
+// failure. The TTS supervisord child is unhealthy; the other 3
 // children pass /health. The 4-endpoint health gate requires ALL 4 to
 // pass so markReady NEVER fires. After the cold-start budget elapses
 // the lifecycle is closed with shutdown_reason='health_timeout'.
@@ -164,10 +164,10 @@ func TestSupervisord_OneEndpointDown_DoesNotPromoteToReady(t *testing.T) {
 		},
 	}
 
-	// 3 of 4 endpoints healthy. Embed (8002 → 33002) is the broken child.
+	// 3 of 4 endpoints healthy. TTS (8003 → 33003) is the broken child.
 	healthChecker := func(_ context.Context, url string) bool {
-		if strings.Contains(url, ":33002") {
-			return false // Embed supervisord child unhealthy
+		if strings.Contains(url, ":33003") {
+			return false // TTS supervisord child unhealthy
 		}
 		return true
 	}
@@ -192,7 +192,7 @@ func TestSupervisord_OneEndpointDown_DoesNotPromoteToReady(t *testing.T) {
 	r.Start(ctx)
 
 	// FSM must enter Provisioning (schedule loop fires spawnProvisioning)
-	// but MUST NEVER reach Ready while the Embed endpoint stays unhealthy.
+	// but MUST NEVER reach Ready while the TTS endpoint stays unhealthy.
 	require.Eventually(t, func() bool {
 		return fsm.State() == primary.StateProvisioning
 	}, 5*time.Second, 100*time.Millisecond,
@@ -218,7 +218,7 @@ func TestSupervisord_OneEndpointDown_DoesNotPromoteToReady(t *testing.T) {
 }
 
 // TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure —
-// supervisord's autorestart kicks the failed Embed child back up. The
+// supervisord's autorestart kicks the failed TTS child back up. The
 // reconciler's polling loop retries on each tick; the second probe pass
 // finds all 4 healthy and markReady fires.
 func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testing.T) {
@@ -244,18 +244,18 @@ func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testi
 		},
 	}
 
-	// supervisord autorestart sim: the Embed child fails initial probes,
-	// then recovers after `embedRecoverAfter` probes.
-	const embedRecoverAfter = 2
-	var embedProbeCount atomic.Int32
+	// supervisord autorestart sim: the TTS child fails initial probes,
+	// then recovers after `ttsRecoverAfter` probes.
+	const ttsRecoverAfter = 2
+	var ttsProbeCount atomic.Int32
 	var mu sync.Mutex
 	healthChecker := func(_ context.Context, url string) bool {
-		if strings.Contains(url, ":33002") {
-			// Embed — fails until autorestart simulated.
-			count := embedProbeCount.Add(1)
+		if strings.Contains(url, ":33003") {
+			// TTS — fails until autorestart simulated.
+			count := ttsProbeCount.Add(1)
 			mu.Lock()
 			defer mu.Unlock()
-			return count > embedRecoverAfter
+			return count > ttsRecoverAfter
 		}
 		return true // LLM/STT/DCGM always healthy
 	}
@@ -284,12 +284,12 @@ func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testi
 	require.Eventually(t, func() bool {
 		return fsm.State() == primary.StateReady
 	}, 25*time.Second, 100*time.Millisecond,
-		"FSM must reach Ready after Embed autorestart completes; got %s", fsm.State())
+		"FSM must reach Ready after TTS autorestart completes; got %s", fsm.State())
 
-	// Embed was probed at least embedRecoverAfter+1 times (the recovery
+	// TTS was probed at least ttsRecoverAfter+1 times (the recovery
 	// probe + earlier failed ones).
-	require.GreaterOrEqual(t, embedProbeCount.Load(), int32(embedRecoverAfter+1),
-		"Embed health probe must be retried at least %d times to observe autorestart", embedRecoverAfter+1)
+	require.GreaterOrEqual(t, ttsProbeCount.Load(), int32(ttsRecoverAfter+1),
+		"TTS health probe must be retried at least %d times to observe autorestart", ttsRecoverAfter+1)
 
 	// 3-role tier-0 override + DCGM URL set — same contract as the
 	// happy-path test, post-recovery.

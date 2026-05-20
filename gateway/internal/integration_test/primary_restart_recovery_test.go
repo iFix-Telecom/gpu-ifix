@@ -100,7 +100,7 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(loader.Snapshot()) == 3
 	}, 2*time.Second, 50*time.Millisecond,
-		"OverrideTier0 must fire 3x (llm/stt/embed) on recovery")
+		"OverrideTier0 must fire 3x (llm/stt/tts) on recovery")
 	require.Equal(t, "http://203.0.113.7:33400/metrics", dcgm.Last(),
 		"DCGM URL must point at the recovered pod's :9400 mapping")
 
