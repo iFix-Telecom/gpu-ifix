@@ -78,6 +78,9 @@ type proxies struct {
 	chat            http.Handler
 	embed           http.Handler
 	audio           http.Handler
+	tts             http.Handler // Phase 06.7 — POST /v1/audio/speech (tts dispatcher: tier-0 pod Chatterbox -> tier-1 Piper adapter)
+	voices          *proxy.VoiceHandlers // Phase 06.7 — /v1/audio/voices CRUD (nil disables the routes in the scaffold variant)
+	voicesMaxBytes  int64                // Phase 06.7 — VOICE_MAX_UPLOAD_BYTES cap applied to the upload route
 	auditWriter     *audit.Writer
 	resolver        *models.Resolver
 	upstreamsHealth http.Handler
@@ -561,6 +564,21 @@ func main() {
 		log.Error("build audio proxy", "err", err)
 		os.Exit(2)
 	}
+	// Phase 06.7 — tier-0 TTS proxy (POST /v1/audio/speech). UpstreamTTSURL is
+	// a placeholder the primary-pod reconciler overrides at runtime (D-11), so
+	// it may be empty at boot. The constructor needs a syntactically valid URL;
+	// fall back to a dead-localhost placeholder when unset so boot never
+	// crashes — the breaker handles the unreachable tier-0 until the reconciler
+	// writes the live override.
+	ttsTier0URL := cfg.UpstreamTTSURL
+	if ttsTier0URL == "" {
+		ttsTier0URL = "http://127.0.0.1:1"
+	}
+	ttsRP, err := proxy.NewTTSProxy(ttsTier0URL, log)
+	if err != nil {
+		log.Error("build tts proxy", "err", err)
+		os.Exit(2)
+	}
 
 	// Phase 4 — admin verifier + quota checker. The admin verifier uses
 	// the SAME Redis client as the auth verifier (gw:admin:<hash> vs
@@ -630,6 +648,21 @@ func main() {
 			log.Warn("build openai-whisper proxy", "err", perr)
 		} else {
 			sttRoleProxies["openai-whisper"] = oaWhisperProxy
+		}
+	}
+	// Phase 06.7 — tts role proxies. tier-0 (local-tts) = the JSON->binary
+	// reverse proxy whose upstream the reconciler overrides; tier-1
+	// (voice-api-piper) = the GATE-3 Option A adapter against UpstreamTTSPiperURL.
+	// The tier-1 adapter is OPTIONAL: if UPSTREAM_TTS_PIPER_URL is unset the
+	// fallback is dropped from the map and the dispatcher returns 503 when
+	// tier-0 is OPEN (mirrors the openrouter/openai fallback semantics).
+	ttsRoleProxies := map[string]http.Handler{"local-tts": ttsRP}
+	if cfg.UpstreamTTSPiperURL != "" {
+		piperAdapter, perr := proxy.NewPiperTTSAdapter(cfg.UpstreamTTSPiperURL, log)
+		if perr != nil {
+			log.Warn("build piper-tts adapter", "err", perr)
+		} else {
+			ttsRoleProxies["voice-api-piper"] = piperAdapter
 		}
 	}
 
@@ -931,6 +964,19 @@ func main() {
 		Proxies:      sttRoleProxies,
 		Log:          log,
 	})
+	// Phase 06.7 — tts dispatcher. Same tier-0->tier-1 breaker fallback wrap as
+	// chat/audio (NOT the raw single-upstream proxy): tier-0 = pod Chatterbox
+	// (dynamic override), tier-1 = the GATE-3 Option A Piper adapter. TTS skips
+	// token-cap enforcement (the body is synth text, not chat tokens).
+	ttsDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
+		Role:         "tts",
+		Loader:       loader,
+		Breaker:      breakerSet,
+		TokenCounter: nil,
+		ContextCap:   0,
+		Proxies:      ttsRoleProxies,
+		Log:          log,
+	})
 
 	// Per-route WriteTimeout (Phase 4 folded TODO — integer-second env
 	// vars preferred over the legacy time.Duration fields). wrapWithTimeout
@@ -940,6 +986,31 @@ func main() {
 	chatHandler := wrapWithTimeout(chatDispatcher, cfg.WriteTimeoutChatS)
 	embedHandler := wrapWithTimeout(embedDispatcher, cfg.WriteTimeoutEmbedS)
 	audioHandler := wrapWithTimeout(audioDispatcher, cfg.WriteTimeoutAudioS)
+	// Phase 06.7 — TTS speech shares the audio write-timeout budget (long synth).
+	ttsHandler := wrapWithTimeout(ttsDispatcher, cfg.WriteTimeoutAudioS)
+
+	// Phase 06.7 — voice-clone CRUD handlers. The MinIO S3 client is built from
+	// config.Minio* creds; if those are unset (scaffold/dev without MinIO) the
+	// voices routes are disabled (nil handler -> buildRouter skips the mounts)
+	// rather than crashing boot.
+	var voiceHandlers *proxy.VoiceHandlers
+	if cfg.MinioEndpoint != "" && cfg.MinioAccessKey != "" && cfg.MinioSecretKey != "" {
+		objStore, oerr := proxy.NewMinioObjectStore(
+			cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket)
+		if oerr != nil {
+			log.Warn("voices disabled: minio client build failed", "err", oerr)
+		} else {
+			voiceHandlers = &proxy.VoiceHandlers{
+				Store:          gen.New(pool),
+				Objects:        objStore,
+				S3VoicePrefix:  cfg.S3VoicePrefix,
+				MaxUploadBytes: cfg.VoiceMaxUploadBytes,
+				Log:            log,
+			}
+		}
+	} else {
+		log.Warn("voices disabled: MinIO creds not configured (MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY)")
+	}
 
 	// Phase 4 — admin usage handler. Mounted under /admin by buildRouter;
 	// the admin.Middleware (X-Admin-Key bcrypt) gates all /admin/* routes
@@ -960,6 +1031,9 @@ func main() {
 		chat:                chatHandler,
 		embed:               embedHandler,
 		audio:               audioHandler,
+		tts:                 ttsHandler,
+		voices:              voiceHandlers,
+		voicesMaxBytes:      cfg.VoiceMaxUploadBytes,
 		auditWriter:         auditWriter,
 		resolver:            resolver,
 		upstreamsHealth:     upstreams.NewHealthHandler(loader, breakerSet, log),
@@ -1136,6 +1210,27 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		mount(http.MethodPost, "/v1/chat/completions", chatHandler)
 		mount(http.MethodPost, "/v1/embeddings", embedHandler)
 		mount(http.MethodPost, "/v1/audio/transcriptions", px.audio)
+		// Phase 06.7 — TTS speech (tier-0 pod Chatterbox -> tier-1 Piper adapter
+		// dispatcher) + voice-clone CRUD. All mount on the SAME authed /v1/*
+		// group so auth.MustFromContext is populated in the voice handlers
+		// (D-10 tenant isolation). The upload route is wrapped with
+		// http.MaxBytesHandler (VOICE_MAX_UPLOAD_BYTES) for the T-06.7-15 DoS cap.
+		mount(http.MethodPost, "/v1/audio/speech", px.tts)
+		if px.voices != nil {
+			maxBytes := px.voicesMaxBytes
+			if maxBytes <= 0 {
+				maxBytes = 10485760
+			}
+			pg.Method(http.MethodPost, "/v1/audio/voices",
+				http.MaxBytesHandler(http.HandlerFunc(px.voices.Create), maxBytes))
+			pg.Method(http.MethodGet, "/v1/audio/voices", http.HandlerFunc(px.voices.List))
+			pg.Method(http.MethodDelete, "/v1/audio/voices/{id}", http.HandlerFunc(px.voices.Delete))
+		} else {
+			pg.MethodFunc(http.MethodPost, "/v1/audio/voices", scaffoldNotImplemented)
+			pg.MethodFunc(http.MethodGet, "/v1/audio/voices", scaffoldNotImplemented)
+			pg.MethodFunc(http.MethodDelete, "/v1/audio/voices/{id}", scaffoldNotImplemented)
+		}
+		pg.MethodFunc(http.MethodGet, "/v1/audio/speech", scaffoldNotImplemented)
 		if px.upstreamsHealth != nil {
 			pg.Method(http.MethodGet, "/v1/health/upstreams", px.upstreamsHealth)
 		} else {
