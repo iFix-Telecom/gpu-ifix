@@ -617,6 +617,14 @@ func main() {
 	// no-failover policy by calling proxy.ServeHTTP exactly once).
 	llmRoleProxies := map[string]http.Handler{
 		"local-llm": proxy.ToolCallTerminalGuard(chatRP, toolCallInterceptor, "local-llm", "/v1/chat/completions"),
+		// Dynamic primary/emergency pod override (loader.Resolve → "emergency_pod_llm").
+		// SSE flush + chat interceptors, wrapped in the same tool-call guard as local-llm.
+		"emergency_pod_llm": proxy.ToolCallTerminalGuard(
+			proxy.NewDynamicOverrideProxy("llm",
+				func() (string, bool) { return loader.Tier0OverrideURL("llm") },
+				-1, &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 10, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 30 * time.Second},
+				log, auditInterceptor, toolCallInterceptor, usageInterceptor),
+			toolCallInterceptor, "emergency_pod_llm", "/v1/chat/completions"),
 	}
 	if u, ok := loader.Get("openrouter-chat"); ok && u.URL != "" {
 		// Phase 4: OpenRouter chat also gets the usageInterceptor so
@@ -641,7 +649,15 @@ func main() {
 			embedRoleProxies["openai-embed"] = oaEmbedProxy
 		}
 	}
-	sttRoleProxies := map[string]http.Handler{"local-stt": audioRP}
+	sttRoleProxies := map[string]http.Handler{
+		"local-stt": audioRP,
+		// Dynamic primary/emergency pod override (loader.Resolve → "emergency_pod_stt").
+		// Buffered (transcription is a single JSON body); no interceptors (parity with audioRP).
+		"emergency_pod_stt": proxy.NewDynamicOverrideProxy("stt",
+			func() (string, bool) { return loader.Tier0OverrideURL("stt") },
+			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
+			log),
+	}
 	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
 		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log)
 		if perr != nil {

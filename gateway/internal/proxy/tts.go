@@ -87,27 +87,14 @@ func NewTTSProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyResp
 // (no pod / override cleared) the Director leaves the request host empty so the
 // transport fails fast and ErrorHandler emits an OpenAI-shaped 502.
 func NewDynamicTTSProxy(overrideURL func() (string, bool), log *slog.Logger, interceptors ...ProxyResponseInterceptor) http.Handler {
-	return &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			target, ok := overrideURL()
-			if !ok || target == "" {
-				return // empty host → transport error → ErrorHandler 502
-			}
-			u, perr := url.Parse(target)
-			if perr != nil || u.Scheme == "" || u.Host == "" {
-				return
-			}
-			BuildDirector(u)(r)
-		},
-		Transport: &http.Transport{
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-		},
-		ErrorHandler:   ErrorHandler("tts", log),
-		ModifyResponse: ComposeInterceptors(interceptors...),
-	}
+	// Buffered (FlushInterval 0) — the speech response is a single binary WAV
+	// body, not SSE; 60s ResponseHeaderTimeout for synthesis (RESEARCH §Pattern 3).
+	return NewDynamicOverrideProxy("tts", overrideURL, 0, &http.Transport{
+		MaxIdleConns:          20,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}, log, interceptors...)
 }
 
 // ttsSpeechRequest is the subset of the OpenAI POST /v1/audio/speech body the
