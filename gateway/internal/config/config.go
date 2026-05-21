@@ -192,6 +192,7 @@ type Config struct {
 	PrimaryBGEM3WeightsKey                 string   // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
 	PrimaryBGEM3WeightsSHA256              string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above)
 	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 2.20; RTX 5090 EU cap — UAT 17 2026-05-19 picked 5090 32 GB to fit Qwen 27B + bge-m3 + KV cache + whisper-large-v3 GPU (~26 GB workload; 4090 24 GB hit CUDA OOM UAT 16); EU 5090 inventory cheapest ~$2.00/h Spain ES; epsilon comparison cap+0.0001 per Pitfall 5)
+	PrimaryVastMachineBlocklist            []int64  // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
 	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (default "RTX 5090"; primary pod GPU model — large headroom for full 4-service GPU offload including whisper-large-v3 STT)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
@@ -363,6 +364,7 @@ func Load() (Config, error) {
 		// FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above.
 		PrimaryBGEM3WeightsSHA256:              os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
 		PrimaryVastPriceCapDPH:                 floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 2.20),
+		PrimaryVastMachineBlocklist:            parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
 		PrimaryGPUName:                         envOr("PRIMARY_GPU_NAME", "RTX 5090"),
 		PrimaryProvisionColdStartBudgetSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS"), 2400),
 		PrimaryProvisionFailureCooldownSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS"), 300),
@@ -468,6 +470,27 @@ func atoi64Or(s string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// parseInt64CSV parses a comma-separated list of int64s (e.g. a Vast machine_id
+// blocklist). Blank entries and unparseable tokens are skipped; empty input
+// returns nil. Whitespace around tokens is tolerated.
+func parseInt64CSV(s string) []int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []int64
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if n, err := strconv.ParseInt(tok, 10, 64); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // strOr returns s unless it is empty/blank, in which case def is returned.

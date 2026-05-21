@@ -766,7 +766,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_vast_client", 0)
 		return errors.New("primary: no Vast.ai client wired")
 	}
-	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID, r.cfg.PrimaryGPUName)
+	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID, r.cfg.PrimaryGPUName, r.cfg.PrimaryVastMachineBlocklist...)
 	// No geolocation restriction (operator decision 2026-05-21): the EU-only
 	// allowlist (added UAT 2026-05-18 to keep MinIO/Hetzner-DE weight transfer
 	// in-continent) left the cheapest qualifying 5090s (e.g. CA/CZ/US at ~$0.32/h
@@ -784,6 +784,15 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		return errors.New("primary: no offers below cap")
 	}
 	offer := pickable[0]
+	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
+	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the
+	// later terminal/CDI error (logged with instance_id) back to the host.
+	log.Info("primary offer picked",
+		"offer_id", offer.ID,
+		"machine_id", offer.MachineID,
+		"host_id", offer.HostID,
+		"dph", offer.DphTotal,
+		"geo", offer.Geolocation)
 	req, err := r.buildCreateRequest(offer, lifecycleID)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "build_create_request_failed:"+err.Error(), 0)
@@ -800,6 +809,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		eventJSON := vastutil.MustEventJSON("offer_accepted", map[string]any{
 			"offer_id":    offer.ID,
 			"instance_id": instance.ID,
+			"machine_id":  offer.MachineID,
+			"host_id":     offer.HostID,
 			"dph":         offer.DphTotal,
 		})
 		if err := q.UpdatePrimaryLifecycleVastIDs(ctx, gen.UpdatePrimaryLifecycleVastIDsParams{

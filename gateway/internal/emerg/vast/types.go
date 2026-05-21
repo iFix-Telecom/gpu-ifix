@@ -218,7 +218,12 @@ type SearchFilter map[string]any
 //
 // `primaryHostID` excludes the primary's host when known (>0); pass 0 to
 // disable the host_id filter when the primary host is unknown (D-A2).
-func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string) SearchFilter {
+// machineBlocklist (optional, variadic): machine_ids excluded from the search
+// via `machine_id: {notin: [...]}`. Use to catalog and skip hosts that fail to
+// boot the pod (e.g. multi-GPU machines with broken CDI on non-zero GPU slots,
+// which crash container create with "unresolvable CDI devices gpu=N"). Existing
+// callers (emerg, tests) pass nothing and are unaffected.
+func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string, machineBlocklist ...int64) SearchFilter {
 	f := SearchFilter{
 		"gpu_name":      map[string]any{"eq": gpuName},
 		"num_gpus":      map[string]any{"eq": 1},
@@ -233,6 +238,13 @@ func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string) Se
 	}
 	if primaryHostID > 0 {
 		f["host_id"] = map[string]any{"neq": primaryHostID}
+	}
+	if len(machineBlocklist) > 0 {
+		ids := make([]any, len(machineBlocklist))
+		for i, id := range machineBlocklist {
+			ids[i] = id
+		}
+		f["machine_id"] = map[string]any{"notin": ids}
 	}
 	return f
 }
