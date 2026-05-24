@@ -85,6 +85,38 @@ Plataforma central de IA da Ifix Telecom: um gateway HTTP que serve LLM, transcr
 - **Guardrails operacionais**: cap preço/hora Vast.ai = $0.60/h (Phase 06.8 final, 2×3090 EU inventory), máximo 1 pod emergencial ativo simultâneo, alerta diário de uso acumulado, host blocklist via PRIMARY_VAST_MACHINE_BLOCKLIST
 - **Auto-shutdown**: pod emergencial desliga sozinho após primário ficar saudável 5 min + 5 min de grace period
 
+## Phase 06.9: Tier-1 Stack Final
+
+Per-upstream model targets (post-Phase-06.9, schema-driven via `ai_gateway.model_aliases` composite PK `(alias, upstream_name)`):
+
+| Upstream (name) | Role | Tier | Provider | Model slug | Notes |
+|-----------------|------|------|----------|------------|-------|
+| `local-llm` | llm | 0 | own pod (llama.cpp) | `qwen` (passthrough alias) | tier-0 proxies pass body byte-identical; resolver not consulted |
+| `openrouter-chat` | llm | 1 | OpenRouter | `qwen/qwen3.5-27b` (canonical `qwen/qwen3.5-27b-20260224`) | provider order Novita preferred (DeepInfra fallback); minor drift vs primary Qwen 3.6 — same family |
+| `local-stt` | stt | 0 | own pod (Speaches) | `whisper` (passthrough alias) | tier-0 pass-through |
+| `openai-whisper` | stt | 1 | OpenAI | `whisper-1` | multipart/form-data; director rewrites `model` part value byte-identical to audio file part |
+| `local-embed` | embed | 0 | Infinity (n8n-ia-vm CPU 24/7 off-pod) | `bge-m3` (passthrough alias) | tier-0 pass-through |
+| `openai-embed` | embed | 1 | OpenAI | `text-embedding-3-small` + `dimensions=1024` (BGE-M3 parity invariant) | director injects `dimensions` |
+
+**URL convention** (D-07): `UPSTREAM_LLM_OPENROUTER_URL` base ends at `/api` (NOT `/api/v1`). The gateway's `BuildDirector` preserves `r.URL.Path=/v1/chat/completions` from the inbound request, so the env var MUST NOT include `/v1` — concat would otherwise produce `/v1/v1`. Phase 06.9 added boot-time fail-fast validation: an `UPSTREAM_*_URL` value ending in `/v1` rejects config load with an explicit error message.
+
+**Resolver lookup**: schema-driven via `ai_gateway.model_aliases` composite PK `(alias, upstream_name)`. Schema is the default for all instances (DB row → resolver in-memory map → director consults at every request).
+
+**Operator override paths — BOTH supported coequally per D-06** (env-override-wins is NOT deprecated):
+
+1. **Schema row (multi-instance):** `gatewayctl model-alias set --alias=<X> --upstream=<Y> --target=<Z>` (added by Plan 04). Persists to Postgres; all gateway instances pick it up on next resolver Refresh (≤1s via NOTIFY).
+2. **Env var (per-instance):** `export UPSTREAM_<UPPER_UPSTREAM>_MODEL=<slug>` + restart container. Single-instance escape hatch — `UPSTREAM_LLM_OPENROUTER_MODEL`, `UPSTREAM_STT_OPENAI_MODEL`, `UPSTREAM_EMBED_OPENAI_MODEL` are the curated env-var keys per `upstreamEnvVarMap`.
+
+**BLOCKER-1 / D-06 env-override-wins precedence**: per D-06, `UPSTREAM_<UPPER_UPSTREAM>_MODEL` env vars take PRECEDENCE over the schema row at resolver-lookup time. The env var is the per-instance operator escape hatch; the schema row is the multi-instance-consistent default. Both are supported permanently — env is NOT deprecated. Empty-string env values are treated as unset (schema wins). The precedence chain is:
+
+1. Env override via `upstreamEnvVarMap` — env wins when non-empty.
+2. Schema row in `model_aliases` keyed on `(alias, upstream_name)`.
+3. Passthrough — alias returned unchanged (safety net for new upstreams not yet seeded).
+
+**Operator breaker control**: `gatewayctl breaker force-open --upstream=<X> --ttl=<Yms>` writes Redis key `gw:breaker:force:{name}` with mandatory TTL (≤300s enforced at CLI). Write is audit-logged. Breaker FSM honors the force-override over observation-driven state; expiry restores observation. Plan 06 HUMAN-UAT uses this lever to drive failover scenarios deterministically.
+
+**Phase 06.9 closure (2026-05-24)**: Phase 06.9 closed the per-upstream model rewrite gap end-to-end; SC-1 cascade closes Phase 02/03/05 deferrals. Integration test suite hardened with body-capturing mocks + selective-reject mocks (R13) + R6 Whisper edge-case coverage + R4 local-tier byte-identical assertions + D-06 env-override-wins end-to-end coverage.
+
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
