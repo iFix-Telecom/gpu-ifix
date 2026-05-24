@@ -29,8 +29,16 @@ type aliasKey struct {
 }
 
 // resolverQueries isolates the sqlc surface we use so tests can stub it.
+//
+// Phase 06.9 (Plan 06.9-01): the regenerated sqlc no longer returns the table
+// struct directly because the queries omit `created_at` and add `upstream_name`
+// — sqlc generates a query-specific `ListModelAliasesRow`. The resolver
+// signature is updated to the new row type so the package compiles. The
+// Refresh body below still maps by `row.Upstream` (role column) — Plan 06.9-02
+// owns the actual per-upstream-name resolution rewire; this plan's only job
+// here is to keep the build green after the sqlc regen.
 type resolverQueries interface {
-	ListModelAliases(ctx context.Context) ([]gen.AiGatewayModelAlias, error)
+	ListModelAliases(ctx context.Context) ([]gen.ListModelAliasesRow, error)
 }
 
 // Resolver holds the current (alias, upstream) → target map in memory.

@@ -9,40 +9,75 @@ import (
 	"context"
 )
 
-const getModelAlias = `-- name: GetModelAlias :one
-SELECT alias, upstream, target, created_at FROM ai_gateway.model_aliases WHERE alias = $1
+const deleteModelAlias = `-- name: DeleteModelAlias :exec
+DELETE FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
 `
 
-func (q *Queries) GetModelAlias(ctx context.Context, alias string) (AiGatewayModelAlias, error) {
-	row := q.db.QueryRow(ctx, getModelAlias, alias)
-	var i AiGatewayModelAlias
+type DeleteModelAliasParams struct {
+	Alias        string `json:"alias"`
+	UpstreamName string `json:"upstream_name"`
+}
+
+// Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
+// Composite PK delete — alias alone is no longer unique post-0026.
+func (q *Queries) DeleteModelAlias(ctx context.Context, arg DeleteModelAliasParams) error {
+	_, err := q.db.Exec(ctx, deleteModelAlias, arg.Alias, arg.UpstreamName)
+	return err
+}
+
+const getModelAlias = `-- name: GetModelAlias :one
+SELECT alias, upstream, target, upstream_name FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
+`
+
+type GetModelAliasParams struct {
+	Alias        string `json:"alias"`
+	UpstreamName string `json:"upstream_name"`
+}
+
+type GetModelAliasRow struct {
+	Alias        string `json:"alias"`
+	Upstream     string `json:"upstream"`
+	Target       string `json:"target"`
+	UpstreamName string `json:"upstream_name"`
+}
+
+func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (GetModelAliasRow, error) {
+	row := q.db.QueryRow(ctx, getModelAlias, arg.Alias, arg.UpstreamName)
+	var i GetModelAliasRow
 	err := row.Scan(
 		&i.Alias,
 		&i.Upstream,
 		&i.Target,
-		&i.CreatedAt,
+		&i.UpstreamName,
 	)
 	return i, err
 }
 
 const listModelAliases = `-- name: ListModelAliases :many
-SELECT alias, upstream, target, created_at FROM ai_gateway.model_aliases ORDER BY alias
+SELECT alias, upstream, target, upstream_name FROM ai_gateway.model_aliases ORDER BY alias, upstream_name
 `
 
-func (q *Queries) ListModelAliases(ctx context.Context) ([]AiGatewayModelAlias, error) {
+type ListModelAliasesRow struct {
+	Alias        string `json:"alias"`
+	Upstream     string `json:"upstream"`
+	Target       string `json:"target"`
+	UpstreamName string `json:"upstream_name"`
+}
+
+func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error) {
 	rows, err := q.db.Query(ctx, listModelAliases)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []AiGatewayModelAlias
+	var items []ListModelAliasesRow
 	for rows.Next() {
-		var i AiGatewayModelAlias
+		var i ListModelAliasesRow
 		if err := rows.Scan(
 			&i.Alias,
 			&i.Upstream,
 			&i.Target,
-			&i.CreatedAt,
+			&i.UpstreamName,
 		); err != nil {
 			return nil, err
 		}
@@ -52,4 +87,30 @@ func (q *Queries) ListModelAliases(ctx context.Context) ([]AiGatewayModelAlias, 
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertModelAlias = `-- name: UpsertModelAlias :exec
+INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (alias, upstream_name) DO UPDATE SET target = EXCLUDED.target
+`
+
+type UpsertModelAliasParams struct {
+	Alias        string `json:"alias"`
+	Upstream     string `json:"upstream"`
+	Target       string `json:"target"`
+	UpstreamName string `json:"upstream_name"`
+}
+
+// Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
+// Keeping the data-access via sqlc (rather than ad-hoc SQL in the CLI) keeps
+// a single source of truth on the composite PK semantic + UPSERT shape.
+func (q *Queries) UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error {
+	_, err := q.db.Exec(ctx, upsertModelAlias,
+		arg.Alias,
+		arg.Upstream,
+		arg.Target,
+		arg.UpstreamName,
+	)
+	return err
 }

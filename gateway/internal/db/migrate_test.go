@@ -21,6 +21,9 @@ import (
 //   - Phase 6.6: 0023 (primary_lifecycles audit table; sequence number computed
 //     at execution time per reviews consensus action #10 — 2026-05-17 was hardcoded
 //     before, causing churn risk when concurrent migrations land)
+//   - Phase 06.7: 0024 (upstreams tts role) + 0025 (voices catalog)
+//   - Phase 06.9: 0026 (evolve model_aliases per-upstream — composite PK,
+//     tier-1 seed, R3 Down guard, R11 column comment)
 //
 // When adding migrations, append the filename to the want slice; the test
 // fails if a migration is missing, out of order, or unexpected.
@@ -62,6 +65,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0023_primary_lifecycles.sql",
 		"0024_upstreams_tts_role.sql",
 		"0025_create_voices.sql",
+		"0026_evolve_model_aliases_per_upstream.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)
