@@ -92,7 +92,7 @@ Per-upstream model targets (post-Phase-06.9, schema-driven via `ai_gateway.model
 | Upstream (name) | Role | Tier | Provider | Model slug | Notes |
 |-----------------|------|------|----------|------------|-------|
 | `local-llm` | llm | 0 | own pod (llama.cpp) | `qwen` (passthrough alias) | tier-0 proxies pass body byte-identical; resolver not consulted |
-| `openrouter-chat` | llm | 1 | OpenRouter | `qwen/qwen3.5-27b` (canonical `qwen/qwen3.5-27b-20260224`) | provider order Novita preferred (DeepInfra fallback); minor drift vs primary Qwen 3.6 — same family |
+| `openrouter-chat` | llm | 1 | OpenRouter | `deepseek/deepseek-v4-flash:nitro` (canonical `deepseek/deepseek-v4-flash-20260423`; updated by migration 0027 — was `qwen/qwen3.5-27b`) | provider chosen by OpenRouter (no pin; was Novita-pinned for Qwen); SiliconFlow observed in initial probe; `:nitro` = OpenRouter high-perf routing variant |
 | `local-stt` | stt | 0 | own pod (Speaches) | `whisper` (passthrough alias) | tier-0 pass-through |
 | `openai-whisper` | stt | 1 | OpenAI | `whisper-1` | multipart/form-data; director rewrites `model` part value byte-identical to audio file part |
 | `local-embed` | embed | 0 | Infinity (n8n-ia-vm CPU 24/7 off-pod) | `bge-m3` (passthrough alias) | tier-0 pass-through |
@@ -116,6 +116,8 @@ Per-upstream model targets (post-Phase-06.9, schema-driven via `ai_gateway.model
 **Operator breaker control**: `gatewayctl breaker force-open --upstream=<X> --ttl=<Yms>` writes Redis key `gw:breaker:force:{name}` with mandatory TTL (≤300s enforced at CLI). Write is audit-logged. Breaker FSM honors the force-override over observation-driven state; expiry restores observation. Plan 06 HUMAN-UAT uses this lever to drive failover scenarios deterministically.
 
 **Phase 06.9 closure (2026-05-24)**: Phase 06.9 closed the per-upstream model rewrite gap end-to-end; SC-1 cascade closes Phase 02/03/05 deferrals. Integration test suite hardened with body-capturing mocks + selective-reject mocks (R13) + R6 Whisper edge-case coverage + R4 local-tier byte-identical assertions + D-06 env-override-wins end-to-end coverage.
+
+**Phase 06.9 follow-up (2026-05-24)** — migration 0027 swaps OpenRouter chat tier-1 target from `qwen/qwen3.5-27b` (Novita-pinned) to `deepseek/deepseek-v4-flash:nitro` (OpenRouter chooses provider — SiliconFlow observed in probe). Decision rationale (operator authorized): alias `qwen` stays (transparent to clients — fallback swap is a deployment concern, not an API contract change); provider pin lifted (Q3 — OpenRouter routes); pricing not migrated (0015 row for `qwen/qwen3.5-27b` historically locked; tier-1 billing not yet wired — separate concern). RUNBOOK-FAILOVER.md retains historical Qwen + Novita references; treat them as historical until a dedicated doc-refresh PR lands.
 
 ## Key Decisions
 

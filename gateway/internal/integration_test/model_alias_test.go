@@ -31,8 +31,10 @@ func TestIntegration_05_ModelAlias(t *testing.T) {
 		{"qwen", "local-llm", "qwen"},
 		{"whisper", "local-stt", "Systran/faster-whisper-large-v3"},
 		{"bge-m3", "local-embed", "BAAI/bge-m3"},
-		// tier-1 (external providers, seeded by migration 0026)
-		{"qwen", "openrouter-chat", "qwen/qwen3.5-27b"},
+		// tier-1 (external providers; OpenRouter target updated to
+		// deepseek/deepseek-v4-flash:nitro by migration 0027 — alias=qwen
+		// stays per Q1 transparency decision).
+		{"qwen", "openrouter-chat", "deepseek/deepseek-v4-flash:nitro"},
 		{"whisper", "openai-whisper", "whisper-1"},
 		{"bge-m3", "openai-embed", "text-embedding-3-small"},
 		// Unknown alias → pass-through (pod decides).

@@ -69,20 +69,25 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 		t.Errorf("PK columns after Up = %q, want %q", pkCols, "alias,upstream_name")
 	}
 
-	// Spot check the qwen tier-1 row landed.
+	// Spot check the qwen tier-1 row landed. After migration 0027 the seeded
+	// tier-1 OpenRouter target is `deepseek/deepseek-v4-flash:nitro`
+	// (migration 0027 UPDATEs the row that 0026 seeded — value is what the
+	// schema currently holds after `freshSchema` applies ALL migrations).
 	var qwenTarget string
 	if err := pool.QueryRow(ctx,
 		`SELECT target FROM ai_gateway.model_aliases WHERE alias='qwen' AND upstream_name='openrouter-chat'`).
 		Scan(&qwenTarget); err != nil {
 		t.Fatalf("read qwen tier-1 row: %v", err)
 	}
-	if qwenTarget != "qwen/qwen3.5-27b" {
-		t.Errorf("qwen tier-1 target = %q, want %q", qwenTarget, "qwen/qwen3.5-27b")
+	const tier1QwenTarget = "deepseek/deepseek-v4-flash:nitro"
+	if qwenTarget != tier1QwenTarget {
+		t.Errorf("qwen tier-1 target = %q, want %q", qwenTarget, tier1QwenTarget)
 	}
 
-	// Down 1 step → undo 0026.
-	if err := db.Down(ctx, pool, 1); err != nil {
-		t.Fatalf("db.Down(1): %v", err)
+	// Down 2 steps → revert 0027 + 0026 (test specifically exercises 0026's
+	// Down behavior; 0027 lives on top and must be reverted first).
+	if err := db.Down(ctx, pool, 2); err != nil {
+		t.Fatalf("db.Down(2): %v", err)
 	}
 
 	// After Down: tier-1 rows removed (3 rows left) AND PK reverted to (alias).
@@ -160,13 +165,15 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	defer cancel()
 	pool, _ := freshSchema(t, ctx)
 
-	// freshSchema applied all migrations including 0026 → 6 rows.
-	// INSERT an operator-created duplicate-alias row that the guard MUST
-	// detect. The seed already has (qwen, llm, qwen, local-llm) and
-	// (qwen, llm, qwen/qwen3.5-27b, openrouter-chat). Step 1 of the Down
-	// deletes the (qwen, openrouter-chat) seeded tier-1 row but leaves
-	// the operator-inserted one. The DO block then finds (qwen) shared
-	// across (local-llm) + (openrouter-experimental) → RAISE EXCEPTION.
+	// freshSchema applied all migrations through 0027 → 6 rows. The seeded
+	// tier-1 (qwen, openrouter-chat) row's target is now
+	// "deepseek/deepseek-v4-flash:nitro" (migration 0027 UPDATEd it from
+	// "qwen/qwen3.5-27b"). INSERT an operator-created duplicate-alias row
+	// that 0026's R3 guard MUST detect when its Down direction runs.
+	// Step 1 of 0026's Down deletes the (qwen, openrouter-chat) seeded
+	// tier-1 row but leaves the operator-inserted (qwen, openrouter-
+	// experimental) row. The DO block then finds duplicate aliases
+	// (qwen) across (local-llm) + (openrouter-experimental) → RAISE.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name)
 		 VALUES ('qwen', 'llm', 'qwen-custom', 'openrouter-experimental')`); err != nil {
@@ -183,10 +190,13 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 		t.Fatalf("count before Down = %d, want 7 (6 seeded + 1 operator-injected)", countBefore)
 	}
 
-	// Attempt Down — MUST fail with the guard's RAISE EXCEPTION message.
-	err := db.Down(ctx, pool, 1)
+	// Attempt Down 2 steps — reverts 0027 (clean) then 0026 (MUST fail with
+	// the guard's RAISE EXCEPTION message). goose runs each step as its own
+	// transaction; the 0027 Down completes first, then 0026's Down fires the
+	// guard. db.Down returns the first failing step's error.
+	err := db.Down(ctx, pool, 2)
 	if err == nil {
-		t.Fatal("db.Down(1) succeeded; expected error from R3 duplicate-alias guard")
+		t.Fatal("db.Down(2) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {

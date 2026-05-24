@@ -133,10 +133,12 @@ func TestIntegration_OpenRouterModelRewrite(t *testing.T) {
 		t.Fatalf("captured body parse: %v; raw=%s", err, string(captured))
 	}
 	gotModel, _ := body["model"].(string)
-	if gotModel != "qwen/qwen3.5-27b" {
+	// Schema target after migration 0027: deepseek/deepseek-v4-flash:nitro.
+	const schemaTarget = "deepseek/deepseek-v4-flash:nitro"
+	if gotModel != schemaTarget {
 		t.Errorf("OR-FIX REGRESSION: forwarded body model = %q, want %q (schema-driven rewrite). "+
 			"The gateway is sending the alias literal to OpenRouter — this is the bug that 404'd in prod. "+
-			"Full body: %s", gotModel, "qwen/qwen3.5-27b", string(captured))
+			"Full body: %s", gotModel, schemaTarget, string(captured))
 	}
 
 	// Defensive: provider.order should still be injected (the director runs the

@@ -5,12 +5,12 @@
 // UPSTREAM_<UPSTREAM>_MODEL env vars per CONTEXT.md D-06:
 //
 //	gatewayctl model-alias set --alias qwen --upstream openrouter-chat \
-//	                           --target qwen/qwen3.5-27b
+//	                           --target deepseek/deepseek-v4-flash:nitro
 //	  Multi-instance-consistent override path. Writes to the schema row;
 //	  every gateway replica picks up on the next 60s resolver refresh
 //	  (models.Resolver.Refresh). Persistent across container restarts.
 //
-//	UPSTREAM_LLM_OPENROUTER_MODEL=qwen/qwen3.5-27b
+//	UPSTREAM_LLM_OPENROUTER_MODEL=deepseek/deepseek-v4-flash:nitro
 //	  Per-instance escape hatch. Resolver consults env first inside
 //	  Resolve() — env wins over schema row when non-empty. Instance-local;
 //	  lost on restart unless the env var is in the stack file. Useful for

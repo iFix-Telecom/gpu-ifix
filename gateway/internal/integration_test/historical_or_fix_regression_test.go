@@ -79,10 +79,12 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 	}
 
 	// --- Phase A: the fix-verified path ---
-	// Selective mock ACCEPTS only "qwen/qwen3.5-27b" (the schema target).
-	// Anything else gets 404 + HTML (real OpenRouter shape).
+	// Selective mock ACCEPTS only "deepseek/deepseek-v4-flash:nitro" (the
+	// schema target after migration 0027). Anything else gets 404 + HTML
+	// (real OpenRouter shape on unknown slug).
 	tier0Fail := newFailMock(t)
-	tier1Selective := newSelectiveMock(t, []string{"qwen/qwen3.5-27b"})
+	const schemaTarget = "deepseek/deepseek-v4-flash:nitro"
+	tier1Selective := newSelectiveMock(t, []string{schemaTarget})
 
 	tier1URL, _ := url.Parse(tier1Selective.server.URL)
 	director := proxy.BuildOpenRouterDirector(
@@ -128,15 +130,15 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 	disp.ServeHTTP(rw, r)
 
 	// The headline assertion: status 200 proves the director rewrote
-	// "qwen" → "qwen/qwen3.5-27b" before forwarding, and the selective
-	// mock accepted. Pre-fix this status would have been 404 + HTML.
+	// "qwen" → schema target before forwarding, and the selective mock
+	// accepted. Pre-fix this status would have been 404 + HTML.
 	if rw.Code != http.StatusOK {
 		t.Fatalf("R13 HISTORICAL-BUG REGRESSION: gateway status = %d, want 200.\n"+
 			"  Pre-Phase-06.9 this would have been 404 because the gateway forwarded\n"+
 			"  the literal alias 'qwen' to OpenRouter. The fix rewrites it to\n"+
-			"  'qwen/qwen3.5-27b' per the schema row before forwarding.\n"+
+			"  %q per the schema row before forwarding.\n"+
 			"  tier-0 hits=%d  tier-1 hits=%d  body=%s",
-			rw.Code, tier0Fail.hits.Load(), tier1Selective.hits.Load(), rw.Body.String())
+			rw.Code, schemaTarget, tier0Fail.hits.Load(), tier1Selective.hits.Load(), rw.Body.String())
 	}
 
 	// Sanity: tier-1 received the request.
@@ -155,11 +157,11 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 		t.Fatalf("captured body parse: %v; raw=%s", err, string(captured))
 	}
 	gotModel, _ := body["model"].(string)
-	if gotModel != "qwen/qwen3.5-27b" {
+	if gotModel != schemaTarget {
 		t.Errorf("R13 HISTORICAL-BUG REGRESSION: forwarded body model = %q, want %q. "+
 			"The schema rewrite did not run before forwarding to OpenRouter — this is the bug "+
 			"that 404'd in prod for months. Full body: %s",
-			gotModel, "qwen/qwen3.5-27b", string(captured))
+			gotModel, schemaTarget, string(captured))
 	}
 
 	// Response body must be JSON (the selective mock returns
@@ -225,11 +227,11 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 	// (e.g. 502 due to a transport-layer error), that's still NOT 200 and
 	// passes the sanity check.
 	if rwReject.Code == http.StatusOK {
-		t.Errorf("R13 REVERSE SANITY: rejectMock should have rejected qwen/qwen3.5-27b "+
+		t.Errorf("R13 REVERSE SANITY: rejectMock should have rejected %q "+
 			"(it only accepts 'qwen-NEVER-MATCHES'), but gateway returned 200. "+
 			"The selective mock may be broken — re-check newSelectiveMock semantics. "+
 			"tier-1 hits=%d  body=%s",
-			rejectMock.hits.Load(), rwReject.Body.String())
+			schemaTarget, rejectMock.hits.Load(), rwReject.Body.String())
 	}
 
 	// Bonus assertion: rejectMock must have received the request (the

@@ -132,17 +132,19 @@ func TestIntegration_EnvOverrideWinsEndToEnd(t *testing.T) {
 		t.Fatalf("captured body parse: %v; raw=%s", err, string(captured))
 	}
 	gotModel, _ := body["model"].(string)
+	// Schema seed after migration 0027: deepseek/deepseek-v4-flash:nitro.
+	const schemaSeed = "deepseek/deepseek-v4-flash:nitro"
 	if gotModel != "qwen/custom-override-from-env" {
 		t.Errorf("D-06 ENV-OVERRIDE-WINS REGRESSION: forwarded body model = %q, want %q (env override should win over schema). "+
 			"Schema value is %q; if got=schema then env override did NOT win. Full body: %s",
-			gotModel, "qwen/custom-override-from-env", "qwen/qwen3.5-27b", string(captured))
+			gotModel, "qwen/custom-override-from-env", schemaSeed, string(captured))
 	}
-	if gotModel == "qwen/qwen3.5-27b" {
+	if gotModel == schemaSeed {
 		t.Errorf("D-06 PRECEDENCE FAILURE: forwarded model = schema value %q; env override was ignored", gotModel)
 	}
 
 	t.Logf("D-06 ENV-OVERRIDE-WINS VERIFIED end-to-end: forwarded model = %q (env), schema (%q) suppressed",
-		gotModel, "qwen/qwen3.5-27b")
+		gotModel, schemaSeed)
 }
 
 // TestIntegration_EnvOverrideEmptyFallsBackToSchema — Plan 02 Test 8:
@@ -211,9 +213,11 @@ func TestIntegration_EnvOverrideEmptyFallsBackToSchema(t *testing.T) {
 		t.Fatalf("captured body parse: %v; raw=%s", err, string(captured))
 	}
 	gotModel, _ := body["model"].(string)
-	if gotModel != "qwen/qwen3.5-27b" {
+	// Schema seed after migration 0027: (qwen, openrouter-chat) → deepseek/deepseek-v4-flash:nitro.
+	const wantSchema = "deepseek/deepseek-v4-flash:nitro"
+	if gotModel != wantSchema {
 		t.Errorf("EMPTY-ENV FALLBACK REGRESSION: forwarded model = %q, want %q (empty env should be treated as unset → schema wins)",
-			gotModel, "qwen/qwen3.5-27b")
+			gotModel, wantSchema)
 	}
 
 	t.Logf("EMPTY-ENV FALLBACK VERIFIED: empty env treated as unset; schema value %q used", gotModel)
