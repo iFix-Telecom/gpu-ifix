@@ -46,6 +46,13 @@ type Set struct {
 	mu         sync.RWMutex
 	cbs        map[string]*gobreaker.CircuitBreaker[*http.Response]
 	remoteOpen map[string]time.Time // state reported by other replicas via Pub/Sub
+
+	// Phase 06.9 Plan 04 Task 2 — operator force-override cache.
+	// In-memory cache of `gw:breaker:force:{name}` Redis state; populated
+	// lazily by Execute via the 1-second freshness debounce. See
+	// breaker/force_override.go for the read-path contract + Plan 06.9-04
+	// SUMMARY for the entry-gate findings (WARNING-4).
+	forceCache *forceCache
 }
 
 // NewSet constructs the initial set of breakers, one per upstream name.
@@ -56,6 +63,11 @@ func NewSet(rdb *redis.Client, log *slog.Logger, opt Options, names []string) *S
 		opt:        opt,
 		cbs:        make(map[string]*gobreaker.CircuitBreaker[*http.Response], len(names)),
 		remoteOpen: make(map[string]time.Time),
+		// Phase 06.9 Plan 04 Task 2 — operator force-override cache. Empty
+		// at construction; CheckForceOverride treats missing entries as
+		// "no override" (the natural cold-start state). The first Execute
+		// per upstream populates the cache via the lazy debounce path.
+		forceCache: newForceCache(),
 	}
 	for _, n := range names {
 		s.cbs[n] = s.newBreaker(n)
@@ -96,11 +108,28 @@ func (s *Set) Get(name string) (*gobreaker.CircuitBreaker[*http.Response], bool)
 	return cb, ok
 }
 
-// Execute wraps gobreaker.Execute with cross-replica awareness. If a
-// remote replica reported OPEN within the last Cooldown window, return
-// ErrBreakerOpen without firing fn (prevents thundering herd on a
-// known-dead upstream).
+// Execute wraps gobreaker.Execute with cross-replica + operator-override
+// awareness. Short-circuits with ErrBreakerOpen WITHOUT firing fn when
+// any of the following is TRUE:
+//
+//	1. The upstream name is unknown (defensive — treats like OPEN).
+//	2. Phase 06.9 Plan 04: a force-override has been written to Redis
+//	   `gw:breaker:force:{name}` (operator drove Plan 06 UAT scenario).
+//	3. A remote replica reported OPEN within the last Cooldown window
+//	   (prevents thundering herd on a known-dead upstream).
+//
+// Force-override (2) is checked BEFORE remote-open (3) because operator
+// intent must take precedence over peer observation. The Redis GET that
+// backs the override read is debounced via the in-memory forceCache with
+// a 1-second freshness window — see breaker/force_override.go — so the
+// per-request hot path stays at ~50ns map-read in the steady state.
 func (s *Set) Execute(name string, fn func() (*http.Response, error)) (*http.Response, error) {
+	// Lazy refresh of the force-override cache: cheap when within the
+	// freshness window (returns early without touching Redis). Done
+	// outside the s.mu RLock so contention on the breaker map is
+	// unaffected — forceCache has its own RWMutex.
+	s.maybeRefreshForceOverride(name)
+
 	s.mu.RLock()
 	cb, ok := s.cbs[name]
 	remoteAt, isRemoteOpen := s.remoteOpen[name]
@@ -108,10 +137,85 @@ func (s *Set) Execute(name string, fn func() (*http.Response, error)) (*http.Res
 	if !ok {
 		return nil, ErrBreakerOpen // unknown upstream behaves like OPEN
 	}
+	// Phase 06.9 Plan 04 — operator force-override takes PRECEDENCE over
+	// observation. Operator wrote `gw:breaker:force:{name}` via
+	// `gatewayctl breaker force-open`; honor it without driving the local
+	// gobreaker counters (the override is orthogonal to the FSM).
+	if s.CheckForceOverride(name) {
+		return nil, ErrBreakerOpen
+	}
 	if isRemoteOpen && time.Since(remoteAt) < s.opt.Cooldown {
 		return nil, ErrBreakerOpen
 	}
 	return cb.Execute(fn)
+}
+
+// CheckForceOverride returns TRUE when an operator-installed force-override
+// is currently in effect for the named upstream. Pure cache read; safe to
+// call on the hot path. Callers that need the latest Redis state (e.g.
+// `gatewayctl breaker list`) should call RefreshForceOverride first.
+//
+// Phase 06.9 Plan 04 Task 2: the cache is populated lazily by Execute via
+// maybeRefreshForceOverride. CheckForceOverride is also called from tests
+// that have pre-warmed the cache via RefreshForceOverride.
+func (s *Set) CheckForceOverride(name string) bool {
+	e, ok := s.forceCache.get(name)
+	if !ok {
+		return false
+	}
+	// Phase 06.9 Plan 04 ships open-only force semantics. State "" (zero
+	// value when set=false) also returns false; the explicit check on
+	// `e.set` is the authoritative gate.
+	return e.set && e.state == "open"
+}
+
+// RefreshForceOverride forces a Redis read for the named upstream and
+// updates the cache. Used by:
+//   - maybeRefreshForceOverride during normal Execute (debounced).
+//   - Tests that need deterministic ordering (no 1s wait).
+//   - `gatewayctl breaker list` (Plan 04 Task 3) when an operator wants
+//     a non-cached view.
+//
+// On Redis error or malformed JSON, the cache is INVALIDATED (set=false)
+// and a WARN log surfaces — the breaker FSM falls back to observation-
+// driven state, matching the existing remote-open fallback policy.
+func (s *Set) RefreshForceOverride(ctx context.Context, name string) {
+	state, _, set, err := ReadForceOverride(ctx, s.rdb, name)
+	if err != nil {
+		s.log.Warn("breaker force-override read failed; falling back to observation",
+			"upstream", name, "err", err)
+		// Invalidate cache so we re-attempt the Redis GET on the next
+		// freshness window expiry, rather than carry a stale "open" view.
+		s.forceCache.set(name, forceCacheEntry{set: false, state: "", lastRefresh: time.Now()})
+		return
+	}
+	s.forceCache.set(name, forceCacheEntry{
+		set:         set,
+		state:       state,
+		lastRefresh: time.Now(),
+	})
+}
+
+// maybeRefreshForceOverride is the lazy-refresh helper called by Execute.
+// Returns immediately when the cached entry is still within
+// forceCacheFreshness; otherwise fires a single Redis GET via
+// RefreshForceOverride. Bounded latency: the Redis GET is best-case
+// ~30-100µs against the colocated Redis we deploy with the gateway —
+// well under the plan's ≤1ms-per-tick budget — and amortized away from
+// the request hot path by the freshness window.
+//
+// Background goroutine NOT used here: forcing a synchronous GET on the
+// first request per freshness window keeps the operator semantic clean
+// (no separate "is the cache primed yet?" tracker) and the latency cost
+// is bounded by the freshness window. Tests use a context.Background()
+// because the Redis call is non-cancellable from the request side and
+// short enough to outlast a typical client timeout.
+func (s *Set) maybeRefreshForceOverride(name string) {
+	e, ok := s.forceCache.get(name)
+	if ok && time.Since(e.lastRefresh) < forceCacheFreshness {
+		return
+	}
+	s.RefreshForceOverride(context.Background(), name)
 }
 
 // Snapshot returns a name→state-string map suitable for /v1/health/upstreams.

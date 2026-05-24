@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -244,6 +245,49 @@ type Config struct {
 // ErrMissingEnv is returned by Load when one or more required env vars are unset.
 var ErrMissingEnv = errors.New("config: required environment variable not set")
 
+// ErrInvalidURLSuffix is returned by Load when a tier-1 external upstream URL
+// env var (UPSTREAM_{LLM_OPENROUTER,STT_OPENAI,EMBED_OPENAI}_URL) ends in
+// `/v1`. Phase 06.9 D-07 fail-fast: the gateway preserves the inbound
+// `/v1/<route>` path on forward (BuildDirector intentionally leaves
+// r.URL.Path = /v1/chat/completions etc. unchanged so pod and gateway routes
+// mirror 1:1), so concatenation with a URL ending in `/v1` produces a
+// double-/v1 path (HTTP 404 on the upstream). This bug silently masked
+// OR-FIX for months; the validation makes the misconfiguration crash boot
+// with an operator-actionable error rather than ship as a runtime 404.
+var ErrInvalidURLSuffix = errors.New("config: external upstream URL must not end with /v1")
+
+// upstreamModelEnvVarMap is the curated Phase 06.9 D-06 env-override
+// observability mapping. Mirrors models.upstreamEnvVarMap in the models
+// package (which owns the runtime resolver precedence) — kept as a local
+// copy here to avoid an import cycle (config is imported by virtually every
+// package, including models). Each entry maps an upstream NAME to the env
+// var operators may set to override that upstream's schema-row target.
+//
+// New tier-1 providers MUST add an entry here AND keep models.upstreamEnvVarMap
+// in sync — otherwise the boot-time observability log silently omits the new
+// provider while the resolver does honor it (or vice versa).
+//
+// Per D-06 / BLOCKER-1: env-overrides are SUPPORTED operator escape hatches
+// (multi-instance: gatewayctl model-alias set; per-instance: this env var).
+// They are NOT deprecated. Phase 06.9 Plan 04 replaces an earlier
+// deprecation-WARN draft with this presence-only INFO observability.
+var upstreamModelEnvVarMap = map[string]string{
+	"openrouter-chat": "UPSTREAM_LLM_OPENROUTER_MODEL",
+	"openai-whisper":  "UPSTREAM_STT_OPENAI_MODEL",
+	"openai-embed":    "UPSTREAM_EMBED_OPENAI_MODEL",
+}
+
+// upstreamURLEnvVarMap is the Phase 06.9 D-07 fail-fast mapping from env
+// var name to its accessor over the *Config that just loaded. Iterating in
+// a fixed slice order keeps error-message ordering deterministic across
+// runs — operators see the same comma-joined list shape each time and
+// tests assert against a stable string. Adding a new tier-1 URL gate MUST
+// register its env-name + accessor here.
+type upstreamURLCheck struct {
+	envName string
+	url     string
+}
+
 // Load reads env vars into a Config. Returns an error listing any missing
 // required variables. Callers should os.Exit(2) after logging the error.
 func Load() (Config, error) {
@@ -441,6 +485,75 @@ func Load() (Config, error) {
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("%w: %s", ErrMissingEnv, strings.Join(missing, ", "))
 	}
+
+	// Phase 06.9 D-07 — fail-fast on tier-1 URL convention. BuildDirector
+	// preserves the client's `/v1/<route>` path on forward (so pod and
+	// gateway routes mirror 1:1). A URL like `https://openrouter.ai/api/v1`
+	// would therefore concatenate to `/api/v1/v1/chat/completions` upstream
+	// and produce HTTP 404 — exactly the silent failure that masked the
+	// OpenRouter fallback bug for months. We reject the misconfiguration at
+	// boot with an operator-actionable error that names every offending var
+	// + suggests the correct shape.
+	urlChecks := []upstreamURLCheck{
+		{"UPSTREAM_LLM_OPENROUTER_URL", cfg.UpstreamOpenRouterChatURL},
+		{"UPSTREAM_STT_OPENAI_URL", cfg.UpstreamOpenAIWhisperURL},
+		{"UPSTREAM_EMBED_OPENAI_URL", cfg.UpstreamOpenAIEmbedURL},
+	}
+	var invalidURLs []string
+	for _, c := range urlChecks {
+		if c.url == "" {
+			// Phase 3 D-D4: external upstreams are OPTIONAL; absence =
+			// tier-1 fallback disabled, not an error.
+			continue
+		}
+		// strings.TrimRight strips trailing slashes so `/api/v1/` and
+		// `/api/v1` both trip the same check. Empty input would have
+		// short-circuited above.
+		trimmed := strings.TrimRight(c.url, "/")
+		if strings.HasSuffix(trimmed, "/v1") {
+			invalidURLs = append(invalidURLs, c.envName+"="+c.url)
+		}
+	}
+	if len(invalidURLs) > 0 {
+		return Config{}, fmt.Errorf(
+			"%w: %s (example for OpenRouter: https://openrouter.ai/api)",
+			ErrInvalidURLSuffix,
+			strings.Join(invalidURLs, ", "),
+		)
+	}
+
+	// Phase 06.9 D-06 / BLOCKER-1 — operator observability for active
+	// per-instance env overrides. Emit one INFO log line per active
+	// UPSTREAM_*_MODEL env var so operators can confirm their per-instance
+	// escape hatch is being honored at boot.
+	//
+	// We log via slog.Default() because config.Load runs BEFORE the
+	// gateway constructs its configured logger (main.go:122). The default
+	// handler is fine here — production main wires the configured slog
+	// handler immediately after; this single INFO line during boot is
+	// captured by whatever default writer is in place (typically stdout/
+	// stderr, which Docker collects).
+	//
+	// Presence-only: the message names the UPSTREAM and the ENV_VAR but
+	// NEVER the env VALUE — operators may have encoded customer info /
+	// internal model names in the override and we treat the value as
+	// sensitive. We deliberately avoid the word "deprecated": per D-06
+	// the env override path is a SUPPORTED operator escape hatch (CLI
+	// = multi-instance consistent; env = per-instance override; both
+	// permanently supported).
+	//
+	// Iteration order over a Go map is randomized; that does NOT matter
+	// for observability (each active override surfaces on its own line)
+	// and matches the analogous boot-log in models.Resolver.Refresh.
+	for upstreamName, envVar := range upstreamModelEnvVarMap {
+		if os.Getenv(envVar) != "" {
+			slog.Info("env override active for upstream",
+				"upstream", upstreamName,
+				"env_var", envVar,
+			)
+		}
+	}
+
 	return cfg, nil
 }
 

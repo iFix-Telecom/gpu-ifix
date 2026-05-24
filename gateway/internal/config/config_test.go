@@ -2,7 +2,9 @@
 package config_test
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -1199,5 +1201,245 @@ func TestConfig_PrimaryPod_JinjaDefaultsEmpty_B1Embedded(t *testing.T) {
 	}
 	if cfg.PrimaryQwenJinjaSHA256 != "" {
 		t.Errorf("PrimaryQwenJinjaSHA256 default = %q, want empty (WAVE0-GATES Decision 3 B1 embedded)", cfg.PrimaryQwenJinjaSHA256)
+	}
+}
+
+// =============================================================================
+// Phase 06.9 Plan 04 — D-07 URL suffix fail-fast + D-06 INFO log on active overrides
+// =============================================================================
+//
+// Tests below exercise the new validation block that rejects
+// UPSTREAM_{LLM_OPENROUTER,STT_OPENAI,EMBED_OPENAI}_URL ending in `/v1` at
+// boot time (D-07) and the D-06 / BLOCKER-1 observability INFO log that
+// surfaces which UPSTREAM_*_MODEL env overrides are currently active. Env
+// vars are SUPPORTED operator escape hatches per D-06 — NOT deprecated.
+
+// phase69Plan04OptionalEnv enumerates the env vars whose presence affects
+// the Phase 06.9 Plan 04 D-06 INFO log + D-07 URL suffix validation.
+// Cleared before each Phase 06.9 Plan 04 test so a stray value from a
+// previous test in the same process does not leak.
+var phase69Plan04OptionalEnv = []string{
+	"UPSTREAM_LLM_OPENROUTER_URL",
+	"UPSTREAM_STT_OPENAI_URL",
+	"UPSTREAM_EMBED_OPENAI_URL",
+	"UPSTREAM_LLM_OPENROUTER_MODEL",
+	"UPSTREAM_STT_OPENAI_MODEL",
+	"UPSTREAM_EMBED_OPENAI_MODEL",
+}
+
+func clearPhase69Plan04(t *testing.T) {
+	t.Helper()
+	for _, v := range phase69Plan04OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// captureDefaultLog swaps the slog default logger for one writing to a
+// returned *bytes.Buffer. Cleanup restores the prior default. Used by the
+// Phase 06.9 Plan 04 D-06 INFO-log tests — config.Load emits the active-
+// override observability lines via slog.Default() because config.Load has
+// no logger arg (the gateway logger is constructed AFTER Load returns).
+func captureDefaultLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prior := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prior) })
+	return &buf
+}
+
+// TestLoad_RejectsOpenRouterURLEndingInV1 — D-07: UPSTREAM_LLM_OPENROUTER_URL
+// ending in `/v1` is rejected at boot with an actionable error message that
+// names the offending env var + suggests the correct value.
+func TestLoad_RejectsOpenRouterURLEndingInV1(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for URL ending in /v1, got nil")
+	}
+	if !errors.Is(err, config.ErrInvalidURLSuffix) {
+		t.Fatalf("expected errors.Is(err, ErrInvalidURLSuffix) true, got err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "UPSTREAM_LLM_OPENROUTER_URL") {
+		t.Errorf("error message must name UPSTREAM_LLM_OPENROUTER_URL, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "https://openrouter.ai/api/v1") {
+		t.Errorf("error message must include the offending URL value, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "https://openrouter.ai/api") {
+		t.Errorf("error message must suggest correct value https://openrouter.ai/api, got %q", err.Error())
+	}
+}
+
+// TestLoad_RejectsURLEndingInV1WithTrailingSlash — D-07: trailing slash
+// (e.g. `/api/v1/`) is also rejected; trim-right strips the slash before
+// the suffix check so this case must trip the same as the no-slash case.
+func TestLoad_RejectsURLEndingInV1WithTrailingSlash(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	t.Setenv("UPSTREAM_STT_OPENAI_URL", "https://api.openai.com/v1/")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for URL ending in /v1/, got nil")
+	}
+	if !errors.Is(err, config.ErrInvalidURLSuffix) {
+		t.Fatalf("expected errors.Is(err, ErrInvalidURLSuffix) true, got err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "UPSTREAM_STT_OPENAI_URL") {
+		t.Errorf("error message must name UPSTREAM_STT_OPENAI_URL, got %q", err.Error())
+	}
+}
+
+// TestLoad_AcceptsURLNotEndingInV1 — D-07: the correct shape per Wave 0
+// Gate A amendment (https://openrouter.ai/api) is accepted; no error
+// returned for this var.
+func TestLoad_AcceptsURLNotEndingInV1(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error for /api URL: %v", err)
+	}
+	if cfg.UpstreamOpenRouterChatURL != "https://openrouter.ai/api" {
+		t.Errorf("UpstreamOpenRouterChatURL = %q, want https://openrouter.ai/api", cfg.UpstreamOpenRouterChatURL)
+	}
+}
+
+// TestLoad_EmptyURLPassesValidation — D-07: the three external upstream URL
+// vars are OPTIONAL (Phase 3 D-D4 — external tier-1 fallback disabled when
+// unset). Absence MUST NOT trip the suffix validation.
+func TestLoad_EmptyURLPassesValidation(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	// All three URLs explicitly unset (clearPhase69Plan04 already does this; assert intent).
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "")
+	t.Setenv("UPSTREAM_STT_OPENAI_URL", "")
+	t.Setenv("UPSTREAM_EMBED_OPENAI_URL", "")
+	_, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected nil error when all three URLs empty, got %v", err)
+	}
+}
+
+// TestLoad_RejectsAllThreeVarsWhenAllEndV1 — D-07: when all three URLs end
+// in /v1, the error message lists all three var names so the operator can
+// fix them in one pass.
+func TestLoad_RejectsAllThreeVarsWhenAllEndV1(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1")
+	t.Setenv("UPSTREAM_STT_OPENAI_URL", "https://api.openai.com/v1")
+	t.Setenv("UPSTREAM_EMBED_OPENAI_URL", "https://api.openai.com/v1")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error when all three URLs end in /v1, got nil")
+	}
+	if !errors.Is(err, config.ErrInvalidURLSuffix) {
+		t.Fatalf("expected errors.Is(err, ErrInvalidURLSuffix), got %v", err)
+	}
+	for _, name := range []string{
+		"UPSTREAM_LLM_OPENROUTER_URL",
+		"UPSTREAM_STT_OPENAI_URL",
+		"UPSTREAM_EMBED_OPENAI_URL",
+	} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error message must mention %s, got %q", name, err.Error())
+		}
+	}
+}
+
+// TestLoad_LogsInfoOnActiveOpenRouterModelEnv — BLOCKER-1 / D-06: when
+// UPSTREAM_LLM_OPENROUTER_MODEL is set, Load() emits an INFO log surfacing
+// the active override per operator observability per D-06. The log line
+// MUST NOT contain the env VALUE (presence-only) and MUST NOT use the word
+// "deprecated" (D-06 keeps env-overrides supported permanently).
+func TestLoad_LogsInfoOnActiveOpenRouterModelEnv(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	buf := captureDefaultLog(t)
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_MODEL", "qwen/qwen3.5-27b")
+	if _, err := config.Load(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "env override active for upstream") {
+		t.Errorf("expected log message 'env override active for upstream', got:\n%s", out)
+	}
+	if !strings.Contains(out, "upstream=openrouter-chat") {
+		t.Errorf("expected log attr upstream=openrouter-chat, got:\n%s", out)
+	}
+	if !strings.Contains(out, "env_var=UPSTREAM_LLM_OPENROUTER_MODEL") {
+		t.Errorf("expected log attr env_var=UPSTREAM_LLM_OPENROUTER_MODEL, got:\n%s", out)
+	}
+	// Presence-only: the log MUST NOT leak the override VALUE.
+	if strings.Contains(out, "qwen/qwen3.5-27b") {
+		t.Errorf("log MUST NOT contain the env VALUE; got:\n%s", out)
+	}
+	// D-06: the word "deprecated" MUST NOT appear in the boot log.
+	if strings.Contains(strings.ToLower(out), "deprecated") {
+		t.Errorf("log MUST NOT use the word 'deprecated' (D-06 keeps env-overrides supported); got:\n%s", out)
+	}
+}
+
+// TestLoad_NoLogWhenAllEnvOverridesUnset — D-06: with no UPSTREAM_*_MODEL
+// vars set, zero `env override active` lines are emitted.
+func TestLoad_NoLogWhenAllEnvOverridesUnset(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	buf := captureDefaultLog(t)
+	if _, err := config.Load(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "env override active for upstream") {
+		t.Errorf("expected ZERO 'env override active' log lines when all model vars unset; got:\n%s", out)
+	}
+}
+
+// TestLoad_LogsOneLinePerActiveOverride — D-06: when 2 of 3 vars are set,
+// exactly 2 `env override active` log lines are emitted, one per active var.
+func TestLoad_LogsOneLinePerActiveOverride(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase69Plan04(t)
+	setAllRequired(t)
+	buf := captureDefaultLog(t)
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_MODEL", "qwen/qwen3.5-27b")
+	t.Setenv("UPSTREAM_EMBED_OPENAI_MODEL", "text-embedding-3-small")
+	if _, err := config.Load(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := buf.String()
+	count := strings.Count(out, "env override active for upstream")
+	if count != 2 {
+		t.Errorf("expected exactly 2 'env override active' log lines, got %d. Log:\n%s", count, out)
+	}
+	// Both active envs surface.
+	if !strings.Contains(out, "env_var=UPSTREAM_LLM_OPENROUTER_MODEL") {
+		t.Errorf("expected UPSTREAM_LLM_OPENROUTER_MODEL surface, got:\n%s", out)
+	}
+	if !strings.Contains(out, "env_var=UPSTREAM_EMBED_OPENAI_MODEL") {
+		t.Errorf("expected UPSTREAM_EMBED_OPENAI_MODEL surface, got:\n%s", out)
+	}
+	// The unset env MUST NOT appear.
+	if strings.Contains(out, "env_var=UPSTREAM_STT_OPENAI_MODEL") {
+		t.Errorf("UPSTREAM_STT_OPENAI_MODEL is unset; it MUST NOT surface in the log; got:\n%s", out)
 	}
 }
