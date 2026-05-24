@@ -125,6 +125,8 @@ type AiGatewayModelAlias struct {
 	Upstream  string    `json:"upstream"`
 	Target    string    `json:"target"`
 	CreatedAt time.Time `json:"created_at"`
+	// Phase 06.9: upstream NAME (not role). Canonical values: local-llm, local-stt, local-embed (tier-0); openrouter-chat, openai-whisper, openai-embed (tier-1). New tier-1 providers add new values as schema rows.
+	UpstreamName string `json:"upstream_name"`
 }
 
 type AiGatewayPrice struct {

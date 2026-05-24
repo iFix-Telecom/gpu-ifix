@@ -37,6 +37,9 @@ type Querier interface {
 	// (Plan 05 zero-shot fetch contract). Generating the id server-side (not via the
 	// DB default) is what guarantees that consistency.
 	CreateVoice(ctx context.Context, arg CreateVoiceParams) (AiGatewayVoice, error)
+	// Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
+	// Composite PK delete — alias alone is no longer unique post-0026.
+	DeleteModelAlias(ctx context.Context, arg DeleteModelAliasParams) error
 	// Delete a voice scoped to the caller's tenant (Plan 07 voicesDelete; the handler also
 	// removes the S3 object). tenant_id in the WHERE prevents cross-tenant deletion.
 	DeleteVoiceForTenant(ctx context.Context, arg DeleteVoiceForTenantParams) error
@@ -56,7 +59,7 @@ type Querier interface {
 	GetAdminKeyByLookupHash(ctx context.Context, keyLookupHash []byte) (AiGatewayAdminKey, error)
 	// Returns the currently-active fx rate for a pair (e.g., 'USD/BRL').
 	GetCurrentFX(ctx context.Context, currencyPair string) (AiGatewayFxRate, error)
-	GetModelAlias(ctx context.Context, alias string) (AiGatewayModelAlias, error)
+	GetModelAlias(ctx context.Context, arg GetModelAliasParams) (GetModelAliasRow, error)
 	// Aggregate query for the budget alert (D-D2). Sums total_cost_brl for all
 	// closed lifecycles started in the current month (America/Sao_Paulo timezone
 	// not enforced here — date_trunc uses session timezone; gateway sets UTC).
@@ -157,7 +160,7 @@ type Querier interface {
 	// index `emergency_live_singleton` guarantees ≤1 row is returned. Returns
 	// enough state for recovery: vast IDs (to GetInstance) + events (to resume FSM).
 	ListLiveEmergencyLifecycles(ctx context.Context) ([]ListLiveEmergencyLifecyclesRow, error)
-	ListModelAliases(ctx context.Context) ([]AiGatewayModelAlias, error)
+	ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error)
 	// Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
 	// Excludes the events JSONB column (callers fetch via id when needed) so the
 	// listing is compact for tabwriter rendering. Mirrors ListEmergencyLifecycles
@@ -251,6 +254,10 @@ type Querier interface {
 	// Trigger 0009_upstreams_notify_trigger.sql does NOT fire on this UPDATE because
 	// the WHEN clause only watches config columns (Pitfall 7).
 	UpdateUpstreamProbe(ctx context.Context, arg UpdateUpstreamProbeParams) error
+	// Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
+	// Keeping the data-access via sqlc (rather than ad-hoc SQL in the CLI) keeps
+	// a single source of truth on the composite PK semantic + UPSERT shape.
+	UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error
 }
 
 var _ Querier = (*Queries)(nil)

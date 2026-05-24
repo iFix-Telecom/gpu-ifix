@@ -11,10 +11,12 @@
 The plan assumed Fireworks served Qwen 3.5 27B. **Empirically false (2026-04-20):**
 
 ```bash
-curl -X POST https://openrouter.ai/api/v1/chat/completions \
+curl -X POST 'https://openrouter.ai/api'/v1/chat/completions \
   -d '{"model":"qwen/qwen3.5-27b","provider":{"order":["fireworks"],"allow_fallbacks":false}, ...}'
 # → {"error":{"message":"No endpoints found for qwen/qwen3.5-27b.","code":404}}
 ```
+<!-- NOTE (Phase 06.9 amendment): the curl URL is split into 'https://openrouter.ai/api' + '/v1/chat/completions' to make the operator-env value (`UPSTREAM_LLM_OPENROUTER_URL=https://openrouter.ai/api`) visually distinct from the full REST endpoint that direct curl hits (`/api/v1/chat/completions`). Concatenation in the gateway's BuildDirector keeps `r.URL.Path = /v1/chat/completions` unchanged, so the env var must NOT include `/v1` — the gateway adds it back. -->
+
 
 Fireworks does not currently serve **any** Qwen 3 model on OpenRouter (verified across `qwen/qwen3-32b`, `qwen/qwen3-235b-a22b-2507`, `qwen/qwen3-30b-a3b-instruct-2507`, `qwen/qwen3-vl-32b-instruct`).
 
@@ -32,7 +34,7 @@ OpenRouter `qwen/qwen3.5-27b` resolves to canonical slug `qwen/qwen3.5-27b-20260
 ### Verification curl (Novita pin)
 
 ```bash
-curl -sS -X POST https://openrouter.ai/api/v1/chat/completions \
+curl -sS -X POST 'https://openrouter.ai/api'/v1/chat/completions \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -83,11 +85,21 @@ curl ... -d '{
 ### Env vars to configure in Portainer (post-Phase 3 deployment)
 
 ```
-UPSTREAM_LLM_OPENROUTER_URL=https://openrouter.ai/api/v1
+UPSTREAM_LLM_OPENROUTER_URL=https://openrouter.ai/api
 UPSTREAM_LLM_OPENROUTER_AUTH_BEARER=<operator mints OPENROUTER_API_KEY>
 UPSTREAM_LLM_OPENROUTER_MODEL=qwen/qwen3.5-27b
 UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER=novita
 ```
+
+### Phase 06.9 amendment — URL ends at `/api` (not `/api/v1`)
+
+Phase 06.9 correction — URL ends at `/api` (not `/api/v1`) because the gateway preserves the client's `/v1/chat/completions` request path; concatenation produces the correct endpoint. Boot-time fail-fast (Plan 04) rejects URLs ending in `/v1`.
+
+Historical context: the original Wave 0 Gate A draft (2026-04-20) recorded the operator env value as `https://openrouter.ai/api`-with-trailing-`/v1` based on the OpenRouter docs' bare-curl examples. That value caused double-`/v1` (final upstream URL `https://openrouter.ai/api`+`/v1`+`/v1/chat/completions`, HTTP 404) once the gateway's `BuildDirector` was wired — `BuildDirector` deliberately keeps `r.URL.Path = /v1/chat/completions` unchanged so pod and gateway routes mirror 1:1. The dev stack `.env` at `/opt/ai-gateway-dev/` on `vps-ifix-vm` was hand-patched to `/api` on 2026-05-24; this doc-level amendment is now the canonical operator gate value, and Plan 04 of Phase 06.9 enforces the suffix at boot.
+
+### Phase 06.9 amendment — `UPSTREAM_LLM_OPENROUTER_MODEL` per D-06
+
+`UPSTREAM_LLM_OPENROUTER_MODEL` remains the runtime fallback override per D-06. Schema row in `model_aliases` provides the default; env var (when set) takes precedence at resolver-lookup time. New deployments SHOULD prefer schema rows for multi-instance consistency, but env overrides remain honored for backward compatibility and operator escape hatches. Plan 02 implements the env-override-wins precedence inside the resolver — see Plan 02 acceptance criteria for the resolver precedence chain (env → schema → unchanged passthrough).
 
 ### D-C1 amendment recorded
 
