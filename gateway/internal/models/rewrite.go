@@ -18,6 +18,13 @@ import (
 // touched. Ordering is inevitably Go-map-nondeterministic on re-encode,
 // but the OpenAI API is order-independent so downstream clients don't
 // notice.
+//
+// Phase 06.9: the `upstream` arg is now the upstream NAME (e.g.
+// "openrouter-chat", "local-llm"), NOT the role tag. Callers within
+// Directors should pass the construction-time-known upstream name. The
+// env-override-wins layer (D-06) lives inside Resolver.Resolve —
+// RewriteJSONModel transparently receives the env-overridden target
+// when applicable; no separate env-read logic is needed here.
 func RewriteJSONModel(body []byte, resolver *Resolver, upstream string) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
@@ -57,6 +64,14 @@ func RewriteJSONModel(body []byte, resolver *Resolver, upstream string) ([]byte,
 // fresh body reader. Intended for /v1/chat/completions and
 // /v1/embeddings. Audio (multipart) route skips this; aliasing for
 // Whisper happens pod-side.
+//
+// Deprecated: use per-upstream resolution inside each tier-1 Director
+// (see proxy/openrouter_director.go for the pattern). This middleware
+// ran at request edge BEFORE dispatcher resolution, which collapses all
+// per-upstream targets onto a single rewrite — incompatible with the
+// Phase 06.9 per-upstream-name resolver. Plan 06.9-03 removes the
+// main.go callers; the function body is preserved here for backward
+// compatibility while downstream wiring is migrated.
 func Handler(resolver *Resolver, upstream string, inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil {
