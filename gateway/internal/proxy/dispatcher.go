@@ -151,7 +151,7 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// envelope (all_chat_upstreams_saturated + Retry-After: 30)
 			// instead of the schedule-derived off-hours envelope.
 			if auditctx.ShedDecisionFromContext(r.Context()) == auditctx.UpstreamShedSaturatedValue {
-				if cb, found := cfg.Breaker.Get(override); found && cb != nil && cb.State() == gobreaker.StateOpen {
+				if cfg.Breaker.EffectiveState(override) == gobreaker.StateOpen {
 					// Re-stamp ctx for audit (D-D4) so the audit row
 					// reads upstream=shed_tier1_unavailable rather
 					// than the openrouter-chat upstream name that
@@ -204,10 +204,11 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				"No primary upstream configured for role.")
 			return
 		}
-		t0State := gobreaker.StateClosed
-		if cb0, found := cfg.Breaker.Get(t0.Name); found && cb0 != nil {
-			t0State = cb0.State()
-		}
+		// Phase 06.9 Plan 04: EffectiveState combines operator force-override
+		// (via gatewayctl breaker force-open) with the observation-driven
+		// gobreaker state. Force-open SHORT-CIRCUITS routing to tier-1 without
+		// requiring the probe loop to first accumulate ConsecutiveFailures.
+		t0State := cfg.Breaker.EffectiveState(t0.Name)
 
 		sensitive := ac.DataClass == auth.DataClassSensitive
 
@@ -260,7 +261,9 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				"Primary upstream unavailable and no fallback configured for role.")
 			return
 		}
-		if cb1, found := cfg.Breaker.Get(t1.Name); found && cb1 != nil && cb1.State() != gobreaker.StateClosed {
+		// Phase 06.9 Plan 04: also honor force-override on tier-1 (operator
+		// may force-open openrouter-chat to test the "all tiers OPEN" path).
+		if cfg.Breaker.EffectiveState(t1.Name) != gobreaker.StateClosed {
 			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 				"service_unavailable", "upstream_unavailable",
 				"All inference upstreams are unavailable.")
@@ -284,8 +287,9 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Request, name string, log *slog.Logger) {
 	// Check the override target's breaker. If CLOSED or HALF_OPEN we
 	// dispatch; if OPEN the tenant is peak-mode off-hours and has no
-	// viable upstream — fail fast with the D-C2 envelope.
-	if cb, found := cfg.Breaker.Get(name); found && cb != nil && cb.State() == gobreaker.StateOpen {
+	// viable upstream — fail fast with the D-C2 envelope. Phase 06.9 Plan 04:
+	// EffectiveState honors operator force-open as well as observed state.
+	if cfg.Breaker.EffectiveState(name) == gobreaker.StateOpen {
 		log.Warn("off-hours external unavailable; fail-fast",
 			"upstream", name,
 			"request_id", httpx.RequestIDFrom(r.Context()),

@@ -218,6 +218,31 @@ func (s *Set) maybeRefreshForceOverride(name string) {
 	s.RefreshForceOverride(context.Background(), name)
 }
 
+// EffectiveState returns the routing-relevant breaker state for the named
+// upstream, combining operator force-override (Phase 06.9 Plan 04) with the
+// observation-driven gobreaker state. When a force-override is in effect,
+// EffectiveState returns gobreaker.StateOpen regardless of the observed
+// state — this is the read-path counterpart to Set.Execute's force-override
+// check, intended for callers (e.g. proxy/dispatcher.go) that decide which
+// tier to dispatch to BEFORE invoking Execute. The freshness of the override
+// matches CheckForceOverride (cached map read; refresh via Execute or a
+// caller-driven RefreshForceOverride). Unknown upstream → StateClosed to
+// match `cb, ok := Get(name)` callers that treat "ok=false" as no-breaker.
+func (s *Set) EffectiveState(name string) gobreaker.State {
+	// Refresh the force-override cache once per freshness window so callers
+	// that exclusively use EffectiveState (and never call Execute) still see
+	// recent Redis state. Cheap when within the freshness window.
+	s.maybeRefreshForceOverride(name)
+	if s.CheckForceOverride(name) {
+		return gobreaker.StateOpen
+	}
+	cb, ok := s.Get(name)
+	if !ok || cb == nil {
+		return gobreaker.StateClosed
+	}
+	return cb.State()
+}
+
 // Snapshot returns a name→state-string map suitable for /v1/health/upstreams.
 // Values are one of "closed", "half-open", "open".
 func (s *Set) Snapshot() map[string]string {
