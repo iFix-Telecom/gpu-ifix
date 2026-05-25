@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
@@ -77,7 +78,12 @@ func BuildOpenRouterDirector(
 		if authBearer != "" {
 			r.Header.Set("Authorization", "Bearer "+authBearer)
 		}
-		if r.URL.Path != "/v1/chat/completions" {
+		// HasSuffix (not equality) so the check survives BuildDirector's
+		// upstream.Path join — for `https://openrouter.ai/api`, the rewritten
+		// path becomes `/api/v1/chat/completions`. The defensive intent is
+		// "only run body rewrite on chat requests"; suffix match preserves
+		// that semantic across upstream prefixes.
+		if !strings.HasSuffix(r.URL.Path, "/v1/chat/completions") {
 			return
 		}
 		if r.Body == nil {
