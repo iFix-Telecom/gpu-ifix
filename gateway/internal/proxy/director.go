@@ -17,7 +17,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
+	"strings"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 )
@@ -41,8 +43,23 @@ func BuildDirector(upstream *url.URL) func(*http.Request) {
 		// Rewrite URL to upstream.
 		r.URL.Scheme = upstream.Scheme
 		r.URL.Host = upstream.Host
-		// r.URL.Path is deliberately left unchanged — pod routes
-		// mirror the gateway's /v1/... paths 1:1.
+		// Join upstream.Path with the inbound request path so upstreams
+		// that live behind a base prefix (e.g. OpenRouter at
+		// `https://openrouter.ai/api`) receive the request at
+		// `<upstream.Path>/v1/chat/completions`. Local pods configure
+		// their URL with an empty path (`http://host:port`), in which
+		// case the inbound `/v1/...` path is preserved 1:1.
+		//
+		// path.Join collapses duplicate slashes; if the inbound was the
+		// root path, preserve an explicit trailing slash to keep
+		// directory-style endpoints addressable.
+		if upstream.Path != "" && upstream.Path != "/" {
+			joined := path.Join(upstream.Path, r.URL.Path)
+			if strings.HasSuffix(r.URL.Path, "/") && !strings.HasSuffix(joined, "/") {
+				joined += "/"
+			}
+			r.URL.Path = joined
+		}
 		r.Host = upstream.Host
 
 		// Strip client auth headers so pod never sees them.
