@@ -23,7 +23,7 @@ Plans:
 **Depends on:** Phase 03 (fallback chain code in tree); Phase 06.8 (live primary FSM available for breaker-OPEN testing)
 **Blocks:** Phase 02 SC-5 step 7 chat E2E; Phase 03 SC-1 live UAT; Phase 05 SC-1 full overflow; Phase 07 dashboard accuracy (tier-1 cost rows currently mislabeled when model never rewrote)
 **Mode:** sequential (not MVP)
-**Plans:** 6/7 plans executed
+**Plans:** 7/7 plans complete
 **Cost:** zero Vast spend (testable via existing /opt/ai-gateway-dev/ + live OpenRouter direct); ~2-3h wall
 
 Plans:
@@ -34,4 +34,4 @@ Plans:
 - [x] 06.9-04-PLAN.md — Wave 2: Config fail-fast on UPSTREAM_*_URL ending in /v1 + INFO log on active D-06 env overrides (NOT deprecation WARN) + gatewayctl breaker {list,force-open,force-close} + gatewayctl model-alias {list,set,get,delete} CLI subcommands (operator surface for live UAT); breaker FSM force-override seam patched on existing eval-tick cadence (≤1ms overhead) per WARNING-4 entry-gate
 - [x] 06.9-05a-PLAN.md — Wave 3a (split): R8 freshSchema gate + body-capturing upstreamMock + newSelectiveMock + 3 model-rewrite integration tests (OR/Whisper/Embed) + 3 R6 Whisper edge-case tests (missing/duplicate/resolver-miss — all PASS, no SKIP per WARNING-3 wiring)
 - [x] 06.9-05b-PLAN.md — Wave 3b (split, depends_on 05a): R4 local-tier byte-identical (chat + embed) + R13 historical-bug regression (selective-reject mock) + R1 breaker force-override TTL restoration + R3 migration 0026 Down-abort guard + Up→Down→Up round-trip + BLOCKER-1/D-06 end-to-end env-override-wins integration tests (3 cases) + PROJECT.md tier-1 stack confirmation + D-06 coequal-paths doc note
-- [ ] 06.9-06-PLAN.md — Wave 5 (autonomous: false): 06.9-HUMAN-UAT.md author with R2 hardened Pre-UAT preconditions + D-06 coequal-paths setup options (S1 schema CLI vs env var) + WARNING-6 dual breaker drivers (S1 force-open + docker-stop fallback; S2/S3 REQUIRE force-open) + operator-driven S1-S6 live UAT on dev stack (~$0.05 spend, no Vast/GPU) + cascade close Phase 02/03/05 VERIFICATION.md (3 small commits, WARNING-5 positive-assertion grep) + write 06.9-VERIFICATION.md
+- [x] 06.9-06-PLAN.md — Wave 5 (autonomous: false): 06.9-HUMAN-UAT.md author with R2 hardened Pre-UAT preconditions + D-06 coequal-paths setup options (S1 schema CLI vs env var) + WARNING-6 dual breaker drivers (S1 force-open + docker-stop fallback; S2/S3 REQUIRE force-open) + operator-driven S1-S6 live UAT on dev stack (~$0.05 spend, no Vast/GPU) + cascade close Phase 02/03/05 VERIFICATION.md (3 small commits, WARNING-5 positive-assertion grep) + write 06.9-VERIFICATION.md

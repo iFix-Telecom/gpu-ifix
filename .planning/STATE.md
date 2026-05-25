@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-05-24T16:56:09.984Z"
+status: completed
+last_updated: "2026-05-25T23:03:03.517Z"
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 12
-  completed_plans: 5
-  percent: 42
+  completed_plans: 12
+  percent: 100
 ---
 
 # STATE: ifix-ai-gateway
@@ -27,8 +27,8 @@ progress:
 
 ## Current Position
 
-Phase: 06.9 (openrouter-model-rewrite-per-upstream) — EXECUTING
-Plan: 1 of 7
+Phase: 06.9
+Plan: Not started
 Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questions in ROADMAP: embed CPU host, TTS server shim vs community wrapper, voice-cloning workflow, tts tier-0 role). Engine decided: Kani-TTS-2-pt (Apache 2.0, PT-BR, 3 GB VRAM, zero-shot voice clone).
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
@@ -127,7 +127,7 @@ Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questi
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Executing Phase 06.9
+- **Status:** Milestone complete
 
 ## Performance Metrics
 

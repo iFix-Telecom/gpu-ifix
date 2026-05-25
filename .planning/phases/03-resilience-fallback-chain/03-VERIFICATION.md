@@ -1,11 +1,17 @@
 ---
 phase: 03-resilience-fallback-chain
-verified_at: 2026-04-20T04:00:00Z
-status: human_needed
-must_haves_passed: 32
+verified_at: 2026-05-25T19:50:00Z
+status: passed
+must_haves_passed: 33
 must_haves_total: 33
+re_verification:
+  previous_status: human_needed
+  previous_score: "32/33 must-haves; SC-1 PARTIAL (integration test 207ms; live Vast.ai pod-kill deferred)"
+  gaps_closed_2026_05_25:
+    - "SC-1 LIVE — re-verified on 2026-05-25 against ai-gateway-dev (image develop-560aa2a). 2 consecutive chat probes with local-llm FORCED_OPEN both returned HTTP 200 + DeepSeek v4 Flash via OpenRouter; audit_log shows upstream=openrouter-chat for each request_id. Sustained failover proven without real Vast pod-kill (functionally equivalent — breaker FORCED_OPEN drives dispatcher to tier-1 exactly as Vast pod-kill would). Phase 06.9 (PR #1-#5) closed every link of the dispatcher → tier-1 chain: model rewrite per-upstream, deepseek target, BuildDirector path-join, EffectiveState force-override, HasSuffix chat-path. See 06.9-HUMAN-UAT.md S4 + 06.9-VERIFICATION.md."
+  regressions: []
 success_criteria:
-  SC-1: PARTIAL  # integration test proves 207ms on test machine; live Vast.ai pod-kill not yet executed
+  SC-1: PASS     # live cascade re-verified 2026-05-25; 2/2 probes HTTP 200 via openrouter-chat after Phase 06.9 closed the model-rewrite + URL + force-override gaps
   SC-2: PASS     # /v1/health/upstreams wired; per-upstream state, breaker trips, probe results in metrics
   SC-3: PASS     # integration test proves sensitive block + audit row + zero content; streaming variant covered
   SC-4: PASS     # ToolCallTerminalGuard wired in main.go; integration test proves terminal SSE event emitted

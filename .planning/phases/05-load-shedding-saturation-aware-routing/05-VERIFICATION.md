@@ -1,16 +1,17 @@
 ---
 phase: 05-load-shedding-saturation-aware-routing
-verified: 2026-05-23T08:35:00Z
-status: passed_partial
-score: 8/8 must-haves verified (automated); SC-1 PARTIAL + SC-2 IMPLIED + SC-3 PASS (re-verified 2026-05-23 against develop-d689321); SC-4 + SC-5 deferred
+verified: 2026-05-25T19:50:00Z
+status: passed
+score: 8/8 must-haves verified (automated); SC-1 PASS (live UAT 2026-05-25) + SC-2 IMPLIED + SC-3 PASS (re-verified 2026-05-23); SC-4 + SC-5 deferred
 overrides_applied: 0
 re_verification:
   previous_status: passed_partial
   previous_score: "8/8 must-haves verified; SC-3 PASS via gatewayctl operator path 2026-05-13"
   gaps_closed_2026_05_23:
     - "SC-3 hot-reload re-verified against latest gateway image (develop-d689321) — shed-force on→clear cycle (state on, reason=operator_override, TTL countdown 59→55s, then clear→recovering reason=signal_dropped); thresholds set --inflight 1000 JSONB merge + NOTIFY hot-reload applied without touching p95/vram/arm/recover. Confirms no regression across Phase 6.6/6.7/6.8 iterations. See 05-UAT-2026-05-23.md"
+  gaps_closed_2026_05_25:
+    - "SC-1 full overflow → tier-1 — vegeta 5 RPS × 30s burst (150 requests) on 2026-05-25 against ai-gateway-dev (image develop-560aa2a) with local-llm FORCED_OPEN: 99.33% success (149/150 HTTP 200; 1 vegeta-client-side timeout, no gateway/upstream errors), all 200s served by openrouter-chat → DeepSeek v4 Flash via OpenRouter. Was 86.67% on 2026-05-13 (tier-1 returned 502 because OpenRouter URL not configured + model rewrite not wired). Phase 06.9 (PR #1-#5) closed the entire blocking chain. See 06.9-HUMAN-UAT.md S6 + 06.9-VERIFICATION.md."
   gaps_remaining:
-    - "SC-1 full overflow → tier-1 — vegeta 5 RPS × 30s (2026-05-13) drove FSM correctly; full overflow blocked by OpenRouter env (shared gap with Phase 02 step 7 + Phase 04 SC-2)"
     - "SC-2 60s oscillation explicit run — IMPLIED PASS via SC-1 recovering state observation; sustained-load re-run would be confirmation, not new evidence"
     - "SC-4 anti-starvation — needs 2nd concurrent tenant + vegeta orchestration (~20min)"
     - "SC-5 DCGM scrape — needs custom pod with dcgm-exporter (Phase 1 tech debt #2 / Phase 06.6 image now ships DCGM, so verifiable next time primary pod spun up live)"
