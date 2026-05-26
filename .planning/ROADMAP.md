@@ -19,7 +19,7 @@ Plans:
 **Requirements:** INT-06, PRD-04 (partial), PRD-07
 <!-- PRD-04 (partial) = RUNBOOK-DEPLOY.md only per D-18; full incident runbook deferred to Phase 11. See REQUIREMENTS.md §Traceability for the partial/full split. -->
 **Depends on:** Phase 9
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 
@@ -35,7 +35,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 10-05-PLAN.md — develop→main promotion + v1.0.0 tag + GHA build verify (cut-release.sh + 10-05-RELEASE-CHECKLIST.md)
+- [x] 10-05-PLAN.md — develop→main promotion + v1.0.0 tag + GHA build verify (cut-release.sh + 10-05-RELEASE-CHECKLIST.md)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
