@@ -1,7 +1,7 @@
 ---
 phase: 10-prod-deploy-ai-gateway
-status: passed_partial
-verified_at: 2026-05-26T16:15:00Z
+status: passed
+verified_at: 2026-05-26T22:15:00Z
 operator: claude (autonomous follow-up session — Pedro authorized smokes + cascade-close)
 session_wall_time_minutes: ~150 (live deploy ~80 + follow-up smokes ~70)
 session_spend_usd: ~0.01 (S1 ~$0.001, S3 STT ~$0.006, S4 ~$0.001, S5 ~$0.002, S7 ~$0.001, S8 150 chats ~$0.005)
@@ -55,9 +55,11 @@ gaps_closed_phase_10_2026_05_26:
 
 # Phase 10: prod-deploy-ai-gateway — Verification
 
-## Status: passed_partial
+## Status: passed
 
 A primeira produção do `ifix-ai-gateway` está LIVE em `https://ai-gateway.converse-ai.app` + `https://ai-dashboard.converse-ai.app`. Dashboard atrás de Better Auth; gateway atendendo `/v1/chat/completions` + `/v1/embeddings` em tier-1 (OpenRouter fallback) + tier-0 (Infinity embed local). Postgres prod databases criados e migrados. Sentry project criado e DSN populado. Edge TLS cert issuado por LE via TLS-ALPN-01 após recovery de Pitfall 3 (route loaded antes de DNS).
+
+**Status flip rationale (passed_partial → passed 2026-05-26T22:15Z):** S1-S8 all PASS, S9 PASS_PARTIAL (5/6 full + 1 latency variance + 2 sensitive via manual probe), S10 PASS (manufactured drill 3s × 2 directions + bug-regression-proves-fix bonus), S11 PARTIAL (synthetic Sentry envelope confirms DSN routing; gateway runtime panic-path = Phase 11 candidate). 4 cascade-close commits landed (Phase 02/03/04/05). Audit-flush UTF8 bug + billing-events partial-capture bug both CLOSED by hotfix (commit 5bd79d1). Bootstrap admin-key rotated. Remaining deferrals (cut-release v1.0.0 GHA retrigger; chat-ifix STT latency variance investigation; S11 canonical panic-path test; CF token rotation pre-prod-cutover) are all non-blocking — Phase 10 GOAL (prod stack reachable + first release-cut workflow exercised) achieved end-to-end with audit + billing observability operational.
 
 **Phase 10 GOAL alcançado:** prod stack reachable + first release-cut workflow exercitado (tag v1.0.0 pushed; GHA image-build deferred por dedup GitHub).
 
