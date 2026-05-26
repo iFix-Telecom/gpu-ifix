@@ -1,0 +1,62 @@
+# Phase 10 — ai-gateway prod ingress (edge Traefik file-provider entry).
+#
+# Mirror pattern: vps-ifix-vm:/home/pedro/projetos/pedro/infra/traefik-dynamic/n8n-ia.yml
+# (4 hostnames → http://10.10.10.20:80, passHostHeader: true). This file extends
+# the same edge Traefik instance with 2 new prod hostnames for Phase 10.
+#
+# Rsync target (operator-side, Plan 10-06 HUMAN-UAT Step 1):
+#   scp .planning/phases/10-prod-deploy-ai-gateway/artifacts/ai-gateway-prod.yml \
+#       vps-ifix-vm:/home/pedro/projetos/pedro/infra/traefik-dynamic/ai-gateway-prod.yml
+# Edge Traefik file-watcher hot-reloads within ~1s; no restart needed.
+#
+# certResolver literal = `letsencrypt` (NO `resolver` suffix). RESEARCH §Pitfall 4.
+#   Source: /home/pedro/projetos/pedro/infra/docker-compose.yml:14 — edge static
+#   config has `--certificatesresolvers.letsencrypt.acme.email=...`. The OLD dev
+#   stack on vps-ifix Hetzner Cloud used a `…resolver`-suffixed name; that name
+#   does NOT exist on the current edge Traefik on vps-ifix-vm. Using the
+#   suffixed name here would make edge log `unknown certificate resolver: …`
+#   and no cert would ever be issued. This file deliberately omits that string
+#   literal so a Pitfall 4 sentinel grep against this file stays green.
+#
+# ACME challenge = TLS-ALPN-01 (`--certificatesresolvers.letsencrypt.acme.tlschallenge=true`
+# in edge static config), NOT DNS-01. First :443 request to either hostname
+# triggers the challenge → cert cached in `acme.json` on vps-ifix-vm:443.
+#
+# RESEARCH §Pitfall 3 — ORDER MATTERS:
+#   1. Operator rsyncs THIS file to vps-ifix-vm FIRST. Edge Traefik hot-reloads
+#      the route; logs `"no certificate for ai-gateway.converse-ai.app"` cleanly
+#      (info-log, not error).
+#   2. ONLY AFTER (1), operator POSTs the Cloudflare A records via
+#      `scripts/deploy/cf-dns-create.sh`. First HTTPS probe then triggers
+#      TLS-ALPN-01 → cert issuance.
+# Flipping DNS before adding the route ends with edge serving its self-signed
+# default cert (browsers reject) and ACME never starts — the router is what
+# triggers cert acquisition.
+#
+# passHostHeader: true — gateway + dashboard read the original `Host:` header
+# so Better Auth cookie scope and audit-log Host context survive the proxy hop.
+
+http:
+  routers:
+    ai-gateway-prod:
+      rule: "Host(`ai-gateway.converse-ai.app`)"
+      service: n8n-ia-prod-internal
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    ai-dashboard-prod:
+      rule: "Host(`ai-dashboard.converse-ai.app`)"
+      service: n8n-ia-prod-internal
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    n8n-ia-prod-internal:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.10.20:80"
+        passHostHeader: true
