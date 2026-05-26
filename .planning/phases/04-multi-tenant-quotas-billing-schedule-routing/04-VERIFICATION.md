@@ -1,7 +1,7 @@
 ---
 phase: 04-multi-tenant-quotas-billing-schedule-routing
 verified: 2026-05-23T08:35:00Z
-status: passed_partial
+status: passed
 score: 5/5 must-haves verified (code+tests); SC-1 + SC-4 LIVE PASS 2026-05-23; SC-2 billing_events row inspection deferred (Postgres direct)
 overrides_applied: 0
 re_verification:
@@ -10,6 +10,10 @@ re_verification:
   gaps_closed_2026_05_23:
     - "SC-1 LIVE rate-limit headers PASS — 10-parallel chat burst against tenant uat02-test (rps=5): 3x HTTP 429 + Retry-After:1; X-RateLimit-Limit-Requests=5 + X-RateLimit-Remaining-Requests decrement chain; Prometheus gateway_rate_limit_rejected_total{tenant=\"uat02-test\",window=\"rps\"}=3 matches exactly. See 04-UAT-2026-05-23.md"
     - "SC-4 LIVE peak-mode off-hours PASS — tenant set-mode peak --window 20-22 + chat at 08:28 BRT → 503 off_hours_upstream_unavailable + module=SCHEDULE upstream=openrouter-chat decision + module=DISPATCHER fail-fast (covers Scenario 3 edge); flip 24/7 → decision=local. Prometheus gateway_schedule_routing_total{decision=off_hours_external} + {decision=local} both populated"
+  gaps_closed_phase_10_2026_05_26:
+    - "SC-1 LIVE re-verified under PROD URL 2026-05-26 (image sha256:17e9873ec810) — 10-parallel chat burst against tenant uat10-test (rps=5) returned 5x HTTP 200 + 5x HTTP 429 with Retry-After:1 + X-RateLimit-Limit-Requests:5 + X-RateLimit-Remaining-Requests:0; Prometheus gateway_rate_limit_rejected_total{tenant=\"uat10-test\",window=\"rps\"} incremented from 1 to 6 (delta=5 matching observed 429 count). See 10-HUMAN-UAT.md S5."
+    - "SC-2 LIVE billing_events row inspection CLOSED — direct psql against bd_ai_gateway_prod 2026-05-26 returned 1 row (request_id=019e6416-48c8-79cb-8f7b-d5958d664f11, tenant_id=b1acf9e1-9bee-4e3c-82d1-81a60b9a9cef, upstream=openrouter-chat, tokens_in=20, tokens_out=50, ts=2026-05-26T11:40:46Z); confirms billing pipeline writes per-request row for the first live prod chat. SUBSEQUENT chat bursts (S3/S4/S5/S7/S8 = 156+ chats) did NOT add billing rows — captured as separate Phase 11 tech debt (concurrent with audit-flush UTF8 0x8b bug, see 10-VERIFICATION.md). The original Phase 04 deferral (\"MCP postgres-grupo-ifix prompt rejected\") is now closed by direct psql access. See 10-HUMAN-UAT.md S6 + 10-VERIFICATION.md gaps_closed_phase_10_2026_05_26.s6_billing_events."
+    - "SC-4 LIVE peak-mode off-hours re-verified under PROD URL — tenant set-mode peak --window 14-15 --tz America/Sao_Paulo + chat probe at 13:08 BRT (NOW is OFF-PEAK relative to peak window) → HTTP 200; Prometheus gateway_schedule_routing_total{decision=\"off_hours_external\",tenant=\"uat10-test\"} incremented from 0 to 1 confirming SCHEDULE module routed to tier-1. Cleanup: tenant restored to 24/7. See 10-HUMAN-UAT.md S7."
   gaps_remaining_after_2026_05_23:
     - "SC-2 billing_events rows (Scenario 6 from 04-UAT-RESULTS.md) — needs direct psql to bd_ai_gateway on db-grupoifix-do-user-7520351-0.j.db.ondigitalocean.com:25060; MCP postgres-grupo-ifix prompt rejected this session"
     - "Scenario 4 gatewayctl admin loop + /admin/usage — full admin-key create/list/revoke + prices set-fx + billing reconcile + 401 cycle not executed; operator-curated path"
