@@ -51,6 +51,12 @@ Thumbs.db
 # Docker
 *.Zone.Identifier
 
+# Phase 11: load-test fixtures (sanitized audit_log JSONL — local-only, gitignored)
+.planning/load-test-fixtures/*.jsonl
+
+# Phase 11: LGPD signed letters (binary PDFs — gitignored; templates in same dir ARE committed)
+.planning/legal/*.pdf
+
 # Local agent + scratch (added 2026-05-26 for Phase 10 cut-release porcelain gate)
 .claude/
 ConverseAI_GPU_Stack_Guide.*
