@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifixtelecom.com.br/schemas/integration-smoke/load-replay-report/1.0.0",
+  "title": "Load Replay Smoke Report",
+  "version": "1.0.0",
+  "description": "PRD-01 load replay report contract (D-04 SLO v1.0 gates). Reports MUST NOT contain raw API keys, Authorization/Cookie headers, request or response bodies, DSN strings, full upstream URLs with embedded credentials, or PII. Forbidden property names anywhere in the document: api_key, authorization, cookie, bearer, prompt_text, response_text, headers, body, dsn, password, secret. Validators MAY enforce this via additional pattern checks; this schema enforces `additionalProperties: false` at every nested object as a structural backstop. Gate names map verbatim to D-04: P95 chat ≤5s + embed ≤1s + STT ≤10s + error <1% non-503 + zero 5xx panic. `zero_5xx_panic` is an EXTERNAL OBSERVATION populated by the operator post-run based on Sentry + gateway-log dual query (see `gates_external_inputs`); the replay engine MUST write null. `all_passed` MUST be null until every gate has a non-null value — never compute true with an unverified panic count.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "started_at",
+    "finished_at",
+    "target",
+    "summary",
+    "errors",
+    "gates",
+    "gates_external_inputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateway_url", "tenant"],
+      "properties": {
+        "gateway_url": { "type": "string", "format": "uri" },
+        "tenant": { "type": "string" }
+      }
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "summary": {
+      "type": "object",
+      "description": "P50/P95/P99 per route + counters. Per-route record has EXACTLY n/p50_ms/p95_ms/p99_ms — no raw latencies, no body sizes, no tenant identifiers (the report aggregates across tenants for privacy).",
+      "additionalProperties": false,
+      "required": ["routes", "total_requests", "error_count"],
+      "properties": {
+        "routes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["n", "p50_ms", "p95_ms", "p99_ms"],
+            "properties": {
+              "n": { "type": "integer", "minimum": 0 },
+              "p50_ms": { "type": "integer", "minimum": 0 },
+              "p95_ms": { "type": "integer", "minimum": 0 },
+              "p99_ms": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "total_requests": { "type": "integer", "minimum": 0 },
+        "error_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "description": "Aggregated error counters by short error_class label. NO raw bodies, NO headers, NO upstream URLs — labels are short pre-vetted enum strings only.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error_class", "count"],
+        "properties": {
+          "error_class": { "type": "string" },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "p95_chat_ms_le_5000",
+        "p95_embed_ms_le_1000",
+        "p95_stt_ms_le_10000",
+        "error_rate_lt_1pct",
+        "zero_5xx_panic",
+        "all_passed"
+      ],
+      "properties": {
+        "p95_chat_ms_le_5000": { "type": "boolean" },
+        "p95_embed_ms_le_1000": { "type": "boolean" },
+        "p95_stt_ms_le_10000": { "type": "boolean" },
+        "error_rate_lt_1pct": { "type": "boolean" },
+        "zero_5xx_panic": {
+          "type": ["boolean", "null"],
+          "description": "EXTERNAL OBSERVATION ONLY. Set by operator post-run based on (1) Sentry query: level=fatal AND service=ifix-ai-gateway over [started_at, finished_at]; AND (2) gateway log grep: 'docker logs ifix-ai-gateway --since <started_at> --until <finished_at> | grep -c \"^panic:\"'. Reports written by load-replay.py MUST set this to null; recoverers do NOT leak panic strings so response-body inference is forbidden. closes reviews LOW #4."
+        },
+        "all_passed": {
+          "type": ["boolean", "null"],
+          "description": "AND of the 5 gates above. MUST be null when any gate is null — never compute true with an unverified zero_5xx_panic."
+        }
+      }
+    },
+    "gates_external_inputs": {
+      "type": "object",
+      "description": "Audit trail for the zero_5xx_panic gate. The replay engine pre-fills sentry_query_url + log_grep_command scoped to [started_at, finished_at]. The operator sets verified_at when flipping the gate.",
+      "additionalProperties": false,
+      "required": ["sentry_query_url", "log_grep_command", "verified_at"],
+      "properties": {
+        "sentry_query_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Sentry URL pre-filled with run-window scope (level=fatal AND service=ifix-ai-gateway)."
+        },
+        "log_grep_command": {
+          "type": "string",
+          "description": "Exact docker-logs grep command for `panic:` count over the run window."
+        },
+        "verified_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 set when operator flips zero_5xx_panic; null until then."
+        }
+      }
+    }
+  }
+}
