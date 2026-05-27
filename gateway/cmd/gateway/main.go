@@ -1299,6 +1299,19 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.adminAuditHandler != nil {
 			adminRouter.Method(http.MethodGet, "/audit", px.adminAuditHandler)
 		}
+		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
+		// used by `gatewayctl debug emit-error` to prove the
+		// httpx.Recoverer + sentry.CurrentHub().Recover + sentry.Flush
+		// path end-to-end in PROD. The route lives INSIDE the admin
+		// sub-router so admin.Middleware (X-Admin-Key) is enforced before
+		// the handler. httpx.Recoverer is applied globally at r.Use above
+		// (line ~1152), so the effective wrap order is
+		// Recoverer(adminMiddleware(DebugPanicHandler)) — Recoverer
+		// outermost. An automated integration test in
+		// gateway/internal/admin/debug_panic_test.go enforces both
+		// invariants (unauth -> 401 AND auth -> 500 sanitized).
+		adminRouter.Method(http.MethodPost, "/debug/panic",
+			admin.DebugPanicHandler(log))
 		r.Mount("/admin", adminRouter)
 	}
 
