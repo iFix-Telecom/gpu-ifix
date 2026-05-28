@@ -58,6 +58,13 @@
 #                            MUST end with @ifixtelecom.com.br or the script
 #                            exits 1 BEFORE any HTTP call (T-11-OPS-05).
 #
+# Optional env:
+#   DASHBOARD_PROVISIONING_PATH — pin a single provisioning route and skip
+#                            OPTIONS auto-detection. Recommended for CI /
+#                            reproducible runs (CR-03 mitigation). Value
+#                            must begin with /api/auth/, e.g.
+#                            /api/auth/sign-up/email.
+#
 # Usage:
 #   DASHBOARD_BASE_URL=https://ai-dashboard.converse-ai.app \
 #   DASHBOARD_ADMIN_EMAILS="alice@ifixtelecom.com.br,bob@ifixtelecom.com.br" \
@@ -166,8 +173,14 @@ log "credentials file: $CREDS_FILE (mode 600 -- DELETE after transfer to passwor
 #
 # Detection algorithm (HTTP-only — NEVER probes the database):
 #   1. GET /api/auth/ok — confirms the Better Auth handler is reachable.
-#   2. Probe candidate POST endpoints with a HEAD-style OPTIONS (or a body-less
-#      POST that we expect to 400/422 if the route exists, 404 if it does not).
+#   2. Probe candidate endpoints with an OPTIONS request (CORS preflight).
+#      Better Auth handlers respond to OPTIONS with 200/204 when the route
+#      exists and 404 when it does not — without performing the write.
+#      This avoids CR-03: a prior version probed with POST {} and any
+#      non-404 response was treated as "exists", risking phantom-user
+#      creation on a future Better Auth release that liberally coerces
+#      the empty body (e.g. `""` → name) or dispatches a side-effect like
+#      a forget-password email to a default address.
 #      Candidates in preference order:
 #        a) /api/auth/admin/create-user  (admin plugin, idempotent)
 #        b) /api/auth/admin/invite       (admin plugin invite flow)
@@ -177,24 +190,33 @@ log "credentials file: $CREDS_FILE (mode 600 -- DELETE after transfer to passwor
 #        d) /api/auth/sign-up/email      (signup fallback — always present)
 #   3. Set $BETTER_AUTH_PATH to the first detected route. NEVER mix paths
 #      across emails in the same run.
+#   4. Operator may override detection entirely by passing
+#      DASHBOARD_PROVISIONING_PATH=/api/auth/<route> in the env (CR-03
+#      mitigation: pin a single path for reproducible runs in CI).
 
 BETTER_AUTH_PATH=""
 
 probe_endpoint() {
-  # Returns 0 if the endpoint exists (any 2xx/4xx response), 1 if 404 / dial fail.
-  # We never look at body — only the status code via -w '%{http_code}'.
+  # CR-03: use OPTIONS (CORS preflight) for endpoint existence detection.
+  # OPTIONS NEVER triggers the write side of a Better Auth handler. A 2xx
+  # / 204 response means the route is mounted; a 404/405 means absent.
+  # 405 (Method Not Allowed) is treated as "exists" — some reverse proxies
+  # respond 405 to OPTIONS on POST-only routes even though the underlying
+  # POST handler is present. Any other status is treated as absent to
+  # avoid false positives.
   local path="$1"
   local code
   code=$(curl -sS -o /dev/null -w '%{http_code}' \
-    -X POST \
-    -H 'Content-Type: application/json' \
-    -d '{}' \
+    -X OPTIONS \
+    -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: Content-Type' \
+    -H 'Origin: https://dashboard-probe.invalid' \
     --max-time 10 \
     "${DASHBOARD_BASE_URL}${path}" 2>/dev/null || echo "000")
-  if [[ "$code" == "000" || "$code" == "404" ]]; then
-    return 1
-  fi
-  return 0
+  case "$code" in
+    2*|405) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 log "probing Better Auth health at ${DASHBOARD_BASE_URL}/api/auth/ok"
@@ -205,21 +227,35 @@ if ! curl -sS -f --max-time 10 -o /dev/null "${DASHBOARD_BASE_URL}/api/auth/ok";
 fi
 log "Better Auth health OK"
 
-# Try candidate endpoints in order. Each candidate is probed ONCE; the first
-# that does NOT return 404 wins. Detection happens BEFORE the per-email loop
-# so the script commits to a single provisioning path per run.
-for candidate in '/api/auth/admin/create-user' '/api/auth/admin/invite' '/api/auth/forget-password' '/api/auth/sign-up/email'; do
-  if probe_endpoint "$candidate"; then
-    BETTER_AUTH_PATH="$candidate"
-    log "detected provisioning path: $BETTER_AUTH_PATH"
-    break
+# Operator override (CR-03 mitigation): if DASHBOARD_PROVISIONING_PATH is
+# set, skip detection entirely and pin that path. This is the recommended
+# mode for CI / reproducible runs. The path must start with /api/auth/.
+if [[ -n "${DASHBOARD_PROVISIONING_PATH:-}" ]]; then
+  if [[ "${DASHBOARD_PROVISIONING_PATH}" != /api/auth/* ]]; then
+    log "FATAL: DASHBOARD_PROVISIONING_PATH must start with /api/auth/ (got '${DASHBOARD_PROVISIONING_PATH}')"
+    exit 1
   fi
-done
+  BETTER_AUTH_PATH="$DASHBOARD_PROVISIONING_PATH"
+  log "operator-pinned provisioning path: $BETTER_AUTH_PATH (DASHBOARD_PROVISIONING_PATH set)"
+else
+  # Try candidate endpoints in order via OPTIONS preflight. Each candidate is
+  # probed ONCE; the first that returns 2xx/204/405 wins. Detection happens
+  # BEFORE the per-email loop so the script commits to a single provisioning
+  # path per run.
+  for candidate in '/api/auth/admin/create-user' '/api/auth/admin/invite' '/api/auth/forget-password' '/api/auth/sign-up/email'; do
+    if probe_endpoint "$candidate"; then
+      BETTER_AUTH_PATH="$candidate"
+      log "detected provisioning path: $BETTER_AUTH_PATH"
+      break
+    fi
+  done
+fi
 
 if [[ -z "$BETTER_AUTH_PATH" ]]; then
   log "FATAL: no Better Auth provisioning endpoint detected on $DASHBOARD_BASE_URL."
   log "  Verify the dashboard is the standalone Better Auth instance and"
   log "  that /api/auth/[...all]/route.ts is mounted (dashboard/src/app/api/auth/[...all]/route.ts)."
+  log "  To bypass auto-detection, set DASHBOARD_PROVISIONING_PATH=/api/auth/<route>."
   exit 1
 fi
 
