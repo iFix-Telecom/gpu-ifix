@@ -245,11 +245,64 @@ func (s *Set) EffectiveState(name string) gobreaker.State {
 
 // Snapshot returns a name→state-string map suitable for /v1/health/upstreams.
 // Values are one of "closed", "half-open", "open".
+//
+// LEGACY: Snapshot reads the raw gobreaker FSM state ONLY and ignores any
+// operator force-override at gw:breaker:force:{name}. Use this ONLY when
+// you explicitly want to inspect the natural FSM (e.g. debugging why a
+// breaker tripped). Callers that decide routing or report operational
+// state to operators/dashboards MUST use EffectiveStateSnapshot instead —
+// see SEED-005 for the contract distinction.
 func (s *Set) Snapshot() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]string, len(s.cbs))
 	for n, cb := range s.cbs {
+		out[n] = cb.State().String()
+	}
+	return out
+}
+
+// EffectiveStateSnapshot returns a name→state-string map with operator
+// force-override honored (Phase 06.9, SEED-005). Values are one of
+// "closed", "half-open", "open", or "forced-open". This is the snapshot
+// counterpart to EffectiveState — use it for any caller that decides
+// routing or reports operational state (dashboard, /v1/health/upstreams,
+// smoke pre-condition gates). The legacy Snapshot() returns raw FSM
+// state only; use it ONLY when you explicitly want to ignore force-
+// override (e.g. debugging the natural FSM).
+//
+// Freshness: each known upstream's force-override cache is refreshed via
+// the same debounced helper Execute uses (maybeRefreshForceOverride),
+// so the per-request cost is amortized over forceCacheFreshness (1s).
+// The refresh pass runs BEFORE acquiring s.mu so we never hold the
+// breaker RLock across a Redis GET — forceCache has its own mutex.
+func (s *Set) EffectiveStateSnapshot() map[string]string {
+	// 1. Snapshot the name set under a brief RLock so we don't hold the
+	//    lock across Redis calls during the refresh pass.
+	s.mu.RLock()
+	names := make([]string, 0, len(s.cbs))
+	for n := range s.cbs {
+		names = append(names, n)
+	}
+	s.mu.RUnlock()
+
+	// 2. Refresh force-override cache for each name (debounced — cheap
+	//    in steady state, one Redis GET per name at most once per
+	//    freshness window).
+	for _, n := range names {
+		s.maybeRefreshForceOverride(n)
+	}
+
+	// 3. Re-acquire RLock for the actual snapshot loop. CheckForceOverride
+	//    is safe under RLock — forceCache has its own mutex.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.cbs))
+	for n, cb := range s.cbs {
+		if s.CheckForceOverride(n) {
+			out[n] = "forced-open"
+			continue
+		}
 		out[n] = cb.State().String()
 	}
 	return out
