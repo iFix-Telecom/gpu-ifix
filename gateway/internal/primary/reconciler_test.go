@@ -656,6 +656,129 @@ func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) 
 		"no OverrideTier0 fires when health check fails")
 }
 
+// TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap asserts the
+// 3-strike confirmation for ErrInstanceNotFound: a single transient
+// {"instances": null} response from Vast (which the upstream client maps to
+// ErrInstanceNotFound) MUST NOT close the lifecycle on its own — the
+// instance may still be alive on the host (Vast state-transition flap /
+// eventual consistency). UAT 2026-05-27 lifecycle 2 captured this: a 4m24s
+// window of successful polls then a single null response silently closed the
+// DB row and left a $0.04 Vast orphan because the close path also missed
+// BestEffortDestroy. The fix mirrors the existing terminalConfirmStrikes=3
+// pattern used for IsTerminal observations: require 3 consecutive
+// ErrInstanceNotFound responses before declaring the instance terminal +
+// firing BestEffortDestroy + closing the lifecycle.
+//
+// Source: .planning/debug/primary-reconciler-silent-hang.md.
+//
+// Two interleaved scenarios in one test (avoid flake of two-test ordering):
+//
+//  1. After 1 ErrInstanceNotFound followed by a healthy "running" response
+//     with 4 endpoints up, the lifecycle promotes to Ready (the single
+//     transient null was tolerated, strike counter reset on the healthy
+//     poll).
+//  2. A separate run where Vast returns ErrInstanceNotFound on EVERY poll:
+//     after the 3rd strike, BestEffortDestroy fires AND closeLifecycle is
+//     called with shutdown_reason="instance_terminal_state_confirmed".
+func TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap(t *testing.T) {
+	t.Run("transient_null_followed_by_running_promotes_to_ready", func(t *testing.T) {
+		cfg := testCfg(t)
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		var callCount atomic.Int32
+		fakeV := &fakeVast{
+			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+				n := callCount.Add(1)
+				if n == 1 {
+					// First poll: transient {"instances": null} flap.
+					return vast.Instance{}, vast.ErrInstanceNotFound
+				}
+				// Subsequent polls: healthy running with all 4 ports.
+				return runningInstanceWithAllPorts(42), nil
+			},
+		}
+		loader := newFakeLoader()
+		dcgm := &fakeDCGMScraper{}
+		dbtx := &fakeDBTX{}
+		r := buildReconciler(t, Deps{
+			Cfg:         cfg,
+			FSM:         fsm,
+			Loader:      loader,
+			DCGMScraper: dcgm,
+			Rule:        alwaysInPeakRule(),
+			HealthCheck: func(_ context.Context, _ string) bool { return true },
+			Vast:        fakeV,
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+		r.activeLifecycleID.Store(99)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 25*time.Millisecond)
+		require.NoError(t, err,
+			"a single transient ErrInstanceNotFound followed by a healthy running response MUST NOT close the lifecycle")
+		require.Equal(t, StateReady, r.deps.FSM.State(),
+			"after the transient flap is tolerated, the lifecycle must promote to Ready")
+		require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+			"BestEffortDestroy must NOT fire when only 1 ErrInstanceNotFound was observed (below 3-strike threshold)")
+	})
+
+	t.Run("three_consecutive_not_found_confirms_terminal_and_destroys", func(t *testing.T) {
+		cfg := testCfg(t)
+		cfg.PrimaryProvisionColdStartBudgetSeconds = 30 // plenty of room for 3 polls
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		var callCount atomic.Int32
+		fakeV := &fakeVast{
+			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+				callCount.Add(1)
+				return vast.Instance{}, vast.ErrInstanceNotFound
+			},
+		}
+		closeReasons := []string{}
+		var closeMu sync.Mutex
+		dbtx := &fakeDBTX{
+			execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+				if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+					if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+						closeMu.Lock()
+						closeReasons = append(closeReasons, reason.String)
+						closeMu.Unlock()
+					}
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}
+		r := buildReconciler(t, Deps{
+			Cfg:  cfg,
+			FSM:  fsm,
+			Rule: alwaysInPeakRule(),
+			Vast: fakeV,
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+		r.activeLifecycleID.Store(99)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 25*time.Millisecond)
+		require.Error(t, err,
+			"3 consecutive ErrInstanceNotFound observations must close the lifecycle as terminal")
+		require.Contains(t, err.Error(), "3-strike confirm via ErrInstanceNotFound",
+			"error must identify the 3-strike ErrInstanceNotFound path (not the generic IsTerminal close)")
+		require.GreaterOrEqual(t, callCount.Load(), int32(3),
+			"must have observed at least 3 ErrInstanceNotFound polls before declaring terminal")
+		require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+			"BestEffortDestroy must fire EXACTLY once after 3-strike confirmation (orphan-prevention contract)")
+
+		closeMu.Lock()
+		defer closeMu.Unlock()
+		require.Contains(t, closeReasons, "instance_terminal_state_confirmed",
+			"closeLifecycle must record shutdown_reason='instance_terminal_state_confirmed' (distinguishes from IsTerminal-driven 'instance_terminal_state')")
+	})
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {
@@ -1416,6 +1539,10 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 		now := time.Now()
 		r.lastProvisionFailureAt.Store(&now)
 	}
+	// Mirror the production 3-strike confirmation for both terminal
+	// signals (IsTerminal status + ErrInstanceNotFound).
+	notFoundStrikes := 0
+	const terminalConfirmStrikes = 3
 	for {
 		select {
 		case <-ctx.Done():
@@ -1429,12 +1556,21 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
 				if errors.Is(err, vast.ErrInstanceNotFound) {
-					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					stampFailure()
-					return errors.New("primary: instance terminal")
+					notFoundStrikes++
+					if notFoundStrikes >= terminalConfirmStrikes {
+						if r.deps.Vast != nil {
+							_ = r.deps.Vast.DestroyInstance(context.Background(), instanceID)
+						}
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
+						stampFailure()
+						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+					}
+					continue
 				}
+				notFoundStrikes = 0
 				continue
 			}
+			notFoundStrikes = 0
 			if msg := inst.StatusMsg; msg != "" {
 				if contains(msg, "Error") || contains(msg, "error") {
 					trunc := msg

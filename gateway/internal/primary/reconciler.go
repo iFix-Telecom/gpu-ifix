@@ -879,6 +879,20 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	terminalStrikes := 0
 	const terminalConfirmStrikes = 3
 
+	// Counter for consecutive ErrInstanceNotFound observations. Same
+	// transient-flap rationale as terminalStrikes but for a different
+	// upstream signal: Vast can return `{"instances": null}` for an
+	// instance that is STILL alive on the host (state-transition glitch /
+	// eventual consistency). UAT 2026-05-27 lifecycle 2 captured this —
+	// 4m24s of successful polls then a single null response silently
+	// closed the DB row + left a $0.04 Vast orphan because the close
+	// path also missed BestEffortDestroy. Apply the same 3-strike
+	// confirmation that already gates IsTerminal(); reset on ANY
+	// non-ErrInstanceNotFound result (success OR different error class)
+	// so unrelated flaps do not accumulate strikes. See
+	// .planning/debug/primary-reconciler-silent-hang.md.
+	notFoundStrikes := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -893,11 +907,30 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
 				if errors.Is(err, vast.ErrInstanceNotFound) {
-					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					return errors.New("primary: instance terminal")
+					notFoundStrikes++
+					log.Warn("primary provisioning: Vast GET returned no_such_instance",
+						"lifecycle_id", lifecycleID,
+						"vast_instance_id", instanceID,
+						"strike_count", notFoundStrikes,
+						"confirm_at", terminalConfirmStrikes,
+						"error_class", "ErrInstanceNotFound")
+					if notFoundStrikes >= terminalConfirmStrikes {
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
+						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+					}
+					continue
 				}
+				// Transient non-not-found GET error — reset the not-found
+				// strike counter so an unrelated flap mode does not
+				// accumulate strikes across error classes.
+				notFoundStrikes = 0
 				continue
 			}
+			// Healthy GET response — reset the not-found strike counter so a
+			// single transient null between healthy polls does not trip the
+			// 3-strike close. Mirrors the terminalStrikes reset below.
+			notFoundStrikes = 0
 			// Reviews #11 — Vast `status_msg` early-abort.
 			if msg := strings.TrimSpace(inst.StatusMsg); msg != "" {
 				if strings.Contains(strings.ToLower(msg), "error") {
