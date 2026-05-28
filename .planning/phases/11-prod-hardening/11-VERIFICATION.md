@@ -72,17 +72,24 @@ carry_forward_tech_debt:
       11-08 chaos probes). Root cause report at
       .planning/debug/audit-pipeline-silent-since-2026-05-25.md.
   - id: audit-blocked-sensitive-upstream-label-missing
-    severity: medium
+    severity: ~~medium~~ resolved
+    resolved_in_session: true
+    resolved_at: 2026-05-28T03:15Z
+    resolved_via: commit 7814678 (gateway/internal/schedule/middleware.go)
     surfaced_by: 11-08-EVIDENCE.md (Segment B re-run with correct DSN)
-    fix_target: gateway/internal/proxy/ sensitive-block path
-    blocks: [11-08 Segment B audit_decision + never_external gates (2/4)]
+    fix_target: gateway/internal/schedule/middleware.go sensitive-peak short-circuit
+    blocks: ~~[11-08 Segment B audit_decision + never_external gates (2/4)]~~ (unblocked post-deploy)
     summary: |
-      Gateway writes upstream='llm' (role default) on RES-08 sensitive 503
-      rows instead of the smoke contract's expected upstream='blocked_sensitive'.
-      RES-08 invariant itself works (sensitive returns 503 + zero content).
-      Single label change in the sensitive-block proxy path. ~3 LOC + 1
-      unit test. After fix, re-run smoke-sensitive-failover.py against
-      bd_ai_gateway_prod → expect 4/4 PASS without source changes to smoke.
+      Phase 3 dispatcher's writeSensitiveBlock at dispatcher.go:365 set the
+      override correctly, but schedule.Middleware short-circuited BEFORE the
+      dispatcher ran (sensitive tenant + peak external override → 503 envelope
+      WITHOUT calling auditctx.WithUpstreamOverride). Result: audit row
+      recorded route-default upstream='llm' instead of 'blocked_sensitive'.
+      Fix: 3 LOC — mirror the dispatcher pattern in schedule/middleware.go
+      before WriteOpenAIError+return. go vet + go build + go test
+      ./internal/schedule/ all clean. Re-run smoke-sensitive-failover.py
+      against bd_ai_gateway_prod after the new image lands on n8n-ia-vm
+      → expect 4/4 PASS without source change to the smoke.
   - id: phase-067-env-drift-n8n-ia-vm
     severity: high
     resolved_in_session: true
