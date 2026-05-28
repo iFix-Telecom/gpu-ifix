@@ -511,36 +511,62 @@ async def orchestrate(cfg: Config, keys: dict[str, str]) -> dict[str, Any]:
     started_dt = datetime.now(tz=timezone.utc)
     started_at = started_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    sem = asyncio.Semaphore(cfg.max_concurrency)
+    # WR-04: bounded queue + fixed consumer pool replaces the previous
+    # task-per-record spawn loop. The prior shape created one
+    # asyncio.Task plus one closure capturing `rec` for EVERY fixture
+    # line; for a 30-min replay at 50 req/s that was 90k+ task handles
+    # and 90k+ result records held in memory the entire run. The new
+    # shape caps in-flight work at cfg.max_concurrency, and the queue
+    # bounds backpressure into the fixture-read loop.
     results: list[dict[str, Any]] = []
-    tasks: list[asyncio.Task[None]] = []
+    queue_max = max(cfg.max_concurrency * 2, 8)
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=queue_max)
 
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(http2=False, timeout=timeout) as client:
-        t_start = time.monotonic()
-        with Path(cfg.fixture_path).open(encoding="utf-8") as f:
-            for line in f:
-                if time.monotonic() - t_start >= cfg.duration_s:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
+        async def consumer() -> None:
+            while True:
+                rec = await queue.get()
                 try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                    if rec is None:
+                        return
+                    await replay_one(client, cfg, rec, keys, results)
+                finally:
+                    queue.task_done()
 
-                delay_s = float(rec.get("_replay_delay_s", 0.0))
-                # Closes reviews LOW #5: --speedup divides the delay.
-                if delay_s > 0.0:
-                    await asyncio.sleep(delay_s / cfg.speedup)
+        consumers: list[asyncio.Task[None]] = [
+            asyncio.create_task(consumer()) for _ in range(cfg.max_concurrency)
+        ]
 
-                async def _go(r: dict[str, Any] = rec) -> None:
-                    async with sem:
-                        await replay_one(client, cfg, r, keys, results)
+        t_start = time.monotonic()
+        try:
+            with Path(cfg.fixture_path).open(encoding="utf-8") as f:
+                for line in f:
+                    if time.monotonic() - t_start >= cfg.duration_s:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                tasks.append(asyncio.create_task(_go()))
-        await asyncio.gather(*tasks, return_exceptions=False)
+                    delay_s = float(rec.get("_replay_delay_s", 0.0))
+                    # Closes reviews LOW #5: --speedup divides the delay.
+                    if delay_s > 0.0:
+                        await asyncio.sleep(delay_s / cfg.speedup)
+
+                    # put() blocks when the queue is full — natural
+                    # backpressure into the fixture-read loop. Tasks
+                    # consume in parallel up to max_concurrency.
+                    await queue.put(rec)
+        finally:
+            # Signal each consumer to exit. queue.join() then waits for
+            # all in-flight work + sentinels to be picked up.
+            for _ in consumers:
+                await queue.put(None)
+            await asyncio.gather(*consumers, return_exceptions=False)
 
     finished_dt = datetime.now(tz=timezone.utc)
     finished_at = finished_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
