@@ -2,8 +2,8 @@
 
 **Planted:** 2026-05-28
 **Discovered during:** Phase 11 audit-pipeline RES-08 fix validation (`smoke-sensitive-failover.py` post-23bbe01 deploy)
-**Status:** seed — not yet promoted to phase
-**Related:** [[audit-blocked-sensitive-override-not-propagated]] debug session; [[SEED-005-health-endpoint-snapshot-ignores-force-override]]
+**Status:** shipped 2026-05-28 — quick `260528-h8z` (commit `2d30a60`), validated against prod 2026-05-28T20:48Z (smoke `audit_decision.audit_log_row_found=True` within poll deadline; 4/4 GREEN)
+**Related:** [[audit-blocked-sensitive-override-not-propagated]] debug session; [[SEED-005-health-endpoint-snapshot-ignores-force-override]]; quick `260528-h8z-smoke-audit-query-retry-loop`
 
 ## Problem
 

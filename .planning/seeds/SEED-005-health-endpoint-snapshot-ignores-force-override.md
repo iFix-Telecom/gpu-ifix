@@ -2,8 +2,8 @@
 
 **Planted:** 2026-05-28
 **Discovered during:** Phase 11 audit-pipeline RES-08 fix validation (`smoke-sensitive-failover.py` post-23bbe01 deploy)
-**Status:** seed — not yet promoted to phase
-**Related:** [[audit-blocked-sensitive-override-not-propagated]] debug session; commit 23bbe01
+**Status:** shipped 2026-05-28 — quick `260528-h12` (commit `7d0b345`), validated against prod 2026-05-28T20:34Z (`state=forced-open` + `status=degraded`) + smoke 4/4 GREEN
+**Related:** [[audit-blocked-sensitive-override-not-propagated]] debug session; commit 23bbe01; quick `260528-h12-breaker-snapshot-honor-force-override`; surfaced sibling bug in `proxy/sensitive.go:58` `SensitiveRetry` fixed via commit `1365b75` (PR #12)
 
 ## Problem
 
