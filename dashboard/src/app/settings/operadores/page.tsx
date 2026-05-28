@@ -23,7 +23,7 @@
  *
  * This is a server component (default Next.js 15 App Router).
  */
-import { count, eq, gt, sql } from "drizzle-orm";
+import { count, sql } from "drizzle-orm";
 import { Bell, RefreshCw } from "lucide-react";
 import { getDb, schema } from "@/lib/db";
 
@@ -82,31 +82,43 @@ async function loadOperators(): Promise<Operator[]> {
     users = list.map((r) => ({ ...r, twoFactorEnabled: false }));
   }
 
-  // For each user, COUNT(*) active sessions (expires_at > NOW()) + latest
-  // sign-in (max(updated_at) of session rows).
-  const operators: Operator[] = [];
-  for (const u of users) {
-    const [openSessionsRow] = await db
-      .select({ n: count() })
-      .from(schema.session)
-      .where(
-        sql`${schema.session.userId} = ${u.id} AND ${schema.session.expiresAt} > NOW()`,
-      );
-    const latest = await db
-      .select({ updatedAt: schema.session.updatedAt })
-      .from(schema.session)
-      .where(eq(schema.session.userId, u.id))
-      .orderBy(sql`${schema.session.updatedAt} DESC`)
-      .limit(1);
-    operators.push({
+  // WR-02 fix: single grouped query for session stats — open-sessions
+  // count + latest sign-in (max updated_at) per user. Previously this
+  // loop issued 2 sequential SELECTs per user (classic N+1). The new
+  // shape is O(1) DB roundtrips regardless of operator count.
+  const sessionStats = await db
+    .select({
+      userId: schema.session.userId,
+      openSessions: count(
+        sql`CASE WHEN ${schema.session.expiresAt} > NOW() THEN 1 END`,
+      ),
+      lastSignIn: sql<Date | null>`MAX(${schema.session.updatedAt})`,
+    })
+    .from(schema.session)
+    .groupBy(schema.session.userId);
+
+  const statsByUser = new Map<
+    string,
+    { openSessions: number; lastSignIn: Date | null }
+  >();
+  for (const s of sessionStats) {
+    statsByUser.set(s.userId, {
+      openSessions: Number(s.openSessions ?? 0),
+      lastSignIn: s.lastSignIn ? new Date(s.lastSignIn as unknown as string) : null,
+    });
+  }
+
+  const operators: Operator[] = users.map((u) => {
+    const stats = statsByUser.get(u.id);
+    return {
       id: u.id,
       name: u.name,
       email: u.email,
       twoFactorEnabled: u.twoFactorEnabled,
-      lastSignIn: latest[0]?.updatedAt ?? null,
-      openSessions: Number(openSessionsRow?.n ?? 0),
-    });
-  }
+      lastSignIn: stats?.lastSignIn ?? null,
+      openSessions: stats?.openSessions ?? 0,
+    };
+  });
   return operators;
 }
 
