@@ -142,3 +142,43 @@ Zero raw API keys, Authorization headers, request bodies, response bodies, DSNs,
 ## Outcome
 
 11-06 BLOCKED until tech debt #1 is fixed. Phase 11 ships with 11-06 as deferred-evidence — gateway live load baseline + per-route per-upstream attribution NOT captured. PRD-01 traceability marks as **partial** (load-test infrastructure shipped via 11-01, scripts/integration-smoke/* + schema + fixture verified; live UAT deferred).
+
+---
+
+## Pre-flight re-attempt — 2026-05-28T20:55Z
+
+**Trigger:** Operator requested live UAT execution after Phase 11 addendum closure (audit-pipeline 5-PR chain landed).
+
+**Stage 1 (11-01 deliverable pre-flight):** ALL 5/5 PASS.
+
+- `scripts/integration-smoke/load-replay-report-schema.json` present.
+- `python3 scripts/integration-smoke/load-replay.py --help` exits 0 + lists all 7 required args.
+- `python3 scripts/integration-smoke/audit-log-export.py --help` exits 0.
+- `scripts/integration-smoke/fixtures/whatsapp-sample.ogg` present + OGG/Opus signature verified.
+- `.planning/load-test-fixtures/.gitignore` present.
+
+**Stage 1 fixture-availability check:** **GATE FAILED.**
+
+`bd_ai_gateway_prod.ai_gateway.audit_log` volume by hour + route (last 7 days):
+
+| Hour (UTC)              | Route                | Rows | Normal |
+|-------------------------|----------------------|------|--------|
+| 2026-05-26 20:00        | /v1/health/upstreams | 29   | 0      |
+| 2026-05-26 20:00        | /v1/embeddings       | 20   | 20     |
+| 2026-05-28 14:00        | /v1/health/upstreams | 16   | 0      |
+| 2026-05-28 14:00        | /v1/chat/completions | 10   | 8      |
+| 2026-05-26 16:00        | gatewayctl_breaker   | 8    | 8      |
+| 2026-05-28 01:00        | /v1/health/upstreams | 7    | 6      |
+| 2026-05-26 16:00        | /v1/chat/completions | 6    | 6      |
+| 2026-05-26 20:00        | /v1/chat/completions | 6    | 4      |
+| 2026-05-28 01:00        | /v1/chat/completions | 6    | 2      |
+| 2026-05-26 19:00        | /v1/chat/completions | 5    | 5      |
+| 2026-05-28 20:00        | /v1/chat/completions | 4    | 0      |
+
+Aggregate replayable (chat + embed) across 7 days: ~57 rows. Plan gate `[reviews LOW #4]` requires **≥1000 rows AND 5 route classes (chat, embed, STT, tool-call, stream)**. Volume short by ~940 rows. STT, tool-call, and streaming route classes absent — zero rows for `/v1/audio/transcriptions`; no captured `tool_calls` in any normal chat row examined.
+
+**Cause:** Prod cutover was 2026-05-26 ~11:18 UTC (~2 days before this re-attempt). Phase 11 PRD-01 assumed prod gateway would have accumulated days/weeks of real tenant traffic before the live UAT. Tenant integration (converseai, chat-ifix, telefonia, cobrancas, campanhas, voice-api) is in early ramp; combined volume insufficient.
+
+**Decision:** Defer 11-06 + 11-07 live UATs to a future session. No Vast spend incurred. Re-export fixture once prod accumulates ≥1000 rows in a 1-hour replay window AND covers all 5 route classes. Rough estimate: 1–2 weeks of natural traffic growth, or operator-triggered synthetic warm-up if business deadline forces earlier execution (would document as `passed_partial` with synthetic-fixture caveat — see Open Question #1 baseline / Pitfall 1).
+
+**Phase 11 closure impact:** Phase 11 status stays `passed_partial` (already so). PRD-01 + PRD-02 stay `passed_partial` (already so). The audit-pipeline label gap (the one substantive Phase 11 reopen this session) closed via the 5-PR chain (#8, #9, #11, #12, #13) — PRD-03 flipped to `passed`. Remaining live UATs are bounded by data accumulation, not by tech-debt or source-code blockers.

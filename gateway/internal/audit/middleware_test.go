@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -179,6 +180,110 @@ func TestMiddleware_SSEStreamSetsFlag(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	if !cw.events[0].Stream {
 		t.Errorf("expected Stream=true on SSE response")
+	}
+}
+
+// TestMiddleware_SSEStreamResponseExtractsLastChunk locks the SEED for
+// the audit-content SSE-as-JSONB rollback bug surfaced 2026-05-28 during
+// the Phase 11 11-06 corpus exerciser run: SSE responses (from OpenRouter
+// streaming + similar) were being stored verbatim into
+// audit_log_content.response, a JSONB column, which postgres rejects with
+// SQLSTATE 22P02 and rolls back the entire flush batch (taking the
+// audit_log envelope rows with it — ~17% audit data loss on chat traffic
+// in the exerciser run). The fix in middleware.go:96 extracts the LAST
+// `data: {...}` chunk before `[DONE]` so the response column holds a
+// JSONB-valid payload (typically the chunk carrying usage + finish_reason
+// when openrouter_director's stream_options.include_usage=true is in
+// effect).
+func TestMiddleware_SSEStreamResponseExtractsLastChunk(t *testing.T) {
+	ac := auth.AuthContext{
+		TenantID:  uuid.New().String(),
+		APIKeyID:  uuid.New().String(),
+		DataClass: auth.DataClassNormal,
+	}
+	// Realistic OpenRouter-shape SSE wire format: PROCESSING preamble,
+	// delta chunks, a final usage+finish_reason chunk, then [DONE].
+	sse := "" +
+		": OPENROUTER PROCESSING\n\n" +
+		"data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n" +
+		"data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}\n\n" +
+		"data: [DONE]\n\n"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(sse))
+	})
+	cw, h := harness(t, ac, handler)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if len(cw.events) != 1 {
+		t.Fatalf("want 1 captured event, got %d", len(cw.events))
+	}
+	e := cw.events[0]
+	if !e.Stream {
+		t.Errorf("want Stream=true on SSE response")
+	}
+	if e.Response == nil {
+		t.Fatalf("want non-nil Response (last SSE chunk), got nil — audit_log_content row would be skipped")
+	}
+	// Postgres-JSONB validity is the load-bearing assertion. json.Valid
+	// is the same check the audit writer would face indirectly via the
+	// driver. If this fails, the next audit flush batch rolls back.
+	if !json.Valid(e.Response) {
+		t.Fatalf("Response is not valid JSON: %q", string(e.Response))
+	}
+	// And the contracted payload — the LAST non-DONE chunk — should
+	// contain the usage totals + finish_reason.
+	respStr := string(e.Response)
+	if !bytes.Contains(e.Response, []byte("\"finish_reason\":\"stop\"")) {
+		t.Errorf("want finish_reason=stop in extracted chunk, got %q", respStr)
+	}
+	if !bytes.Contains(e.Response, []byte("\"completion_tokens\":1")) {
+		t.Errorf("want usage.completion_tokens=1 in extracted chunk, got %q", respStr)
+	}
+}
+
+// TestMiddleware_SSEStreamWithNoParseableChunkReturnsNil locks the
+// fallback path: when the SSE body has no `data: {...}` line that
+// json.Valid accepts (malformed upstream, truncated response, etc.),
+// extractLastSSEChunk returns nil so the audit writer's len-zero
+// short-circuit skips audit_log_content insertion rather than handing
+// invalid bytes to postgres.
+func TestMiddleware_SSEStreamWithNoParseableChunkReturnsNil(t *testing.T) {
+	ac := auth.AuthContext{
+		TenantID:  uuid.New().String(),
+		APIKeyID:  uuid.New().String(),
+		DataClass: auth.DataClassNormal,
+	}
+	// Pure preamble + DONE, no valid data: JSON chunks.
+	sse := ": OPENROUTER PROCESSING\n\ndata: [DONE]\n\n"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(sse))
+	})
+	cw, h := harness(t, ac, handler)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if len(cw.events) != 1 {
+		t.Fatalf("want 1 captured event, got %d", len(cw.events))
+	}
+	if cw.events[0].Response != nil {
+		t.Errorf("want nil Response when SSE body has no JSON chunks, got %q", string(cw.events[0].Response))
 	}
 }
 

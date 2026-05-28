@@ -29,7 +29,7 @@ progress:
 
 Phase: 11 (closed `passed_partial` 2026-05-28T01:42Z; addendum closure 2026-05-28T20:48Z — PRD-03 flipped to `passed` after audit-pipeline 5-PR chain)
 Plan: All 10 plans landed
-Next autonomous-eligible work: 11-06 + 11-07 live UATs (primary reconciler unblocked via quick 260527-wgs); milestone v1 closure decision pending operator review.
+Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
   - Phase 1: smoke.yml Vast.ai HUMAN-UAT pending
