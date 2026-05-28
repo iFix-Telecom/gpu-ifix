@@ -259,3 +259,24 @@ The new `*r = *r.WithContext(...)` block at `gateway/internal/schedule/middlewar
 ## Resolution
 
 **root_cause_found** — handed off to the orchestrator for fix planning. No code edit performed.
+
+---
+
+## Post-fix update — 2026-05-28
+
+Commit `fdc44cf` patched `shed.trackAndPass` (the deepest interposition site) and was deployed via develop merge + `docker compose up -d ifix-ai-gateway` on n8n-ia-vm (image `sha256:bcac84a6d8fe`). Re-running the smoke (`smoke-sensitive-failover.py --induce-failure-via gatewayctl`) STILL recorded `audit_upstream='llm'` on 2/2 sensitive 503s (request_ids `019e6ec6-bdb6` and `019e6ec6-ce0e`, ts ~13:29:38–43 UTC).
+
+Re-analysis of the chain pinpointed a second-order break the original report flagged as "latent": `schedule/middleware.go:115` unconditionally executed `next.ServeHTTP(w, r.WithContext(ctx))`, creating a fresh `*http.Request` between audit's pointer capture and the shed/dispatcher layer — even when no override was applied (Go's `(*Request).WithContext` always allocates a new `*Request`). So the chain was actually:
+
+```
+audit captures r₀ → quota (passes r₀) → quota (passes r₀)
+  → schedule:115 r₁ := r₀.WithContext(ctx) → shed (with r₁)
+    → trackAndPass: *r₁ = *r₁.WithContext(...) → dispatcher (with r₁)
+      → writeSensitiveBlock: *r₁ = *r₁.WithContext(WithUpstreamOverride(...))
+audit reads r₀.Context() → no override → records route default "llm"
+```
+
+The next commit applies the same in-place mutation pattern to:
+- `schedule/middleware.go:115` (the active break)
+- `shed/middleware.go:150` (Branch 04 peak-offhours noop; latent — only fires when schedule peak override is set)
+

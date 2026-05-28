@@ -147,7 +147,13 @@ func Middleware(d MiddlewareDeps, log *slog.Logger) func(http.Handler) http.Hand
 			if auditctx.UpstreamOverrideFromContext(r.Context()) != "" {
 				ctx := auditctx.WithShedDecision(r.Context(), "skipped_peak_offhours")
 				obs.GatewayShedDecisions.WithLabelValues("", "skipped_peak_offhours").Inc()
-				next.ServeHTTP(w, r.WithContext(ctx))
+				// Mutate the request in-place so dispatcher-side context
+				// stamps remain observable by audit.Middleware (which
+				// captured r upstream). Same pattern as trackAndPass +
+				// schedule.Middleware — see HIGH-02 fragility note in
+				// .planning/debug/audit-blocked-sensitive-override-not-propagated.md.
+				*r = *r.WithContext(ctx)
+				next.ServeHTTP(w, r)
 				return
 			}
 

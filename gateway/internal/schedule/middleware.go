@@ -112,7 +112,15 @@ func Middleware(loader *tenants.Loader, log *slog.Logger) func(http.Handler) htt
 			} else {
 				obs.GatewayScheduleRouting.WithLabelValues(cfg.Slug, "local").Inc()
 			}
-			next.ServeHTTP(w, r.WithContext(ctx))
+			// Mutate the request in-place so downstream context stamps
+			// (proxy.dispatcher.writeSensitiveBlock's upstream_override,
+			// shed.trackAndPass's shed_decision) propagate back to the
+			// audit.Middleware r pointer captured upstream. Using
+			// r.WithContext(ctx) here would create a new *http.Request
+			// and silently swallow the downstream mutations — see
+			// .planning/debug/audit-blocked-sensitive-override-not-propagated.md.
+			*r = *r.WithContext(ctx)
+			next.ServeHTTP(w, r)
 		})
 	}
 }
