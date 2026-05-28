@@ -396,6 +396,15 @@ def induce_failure_via_gatewayctl(gatewayctl_path: str) -> dict[str, Any]:
         "--ttl=300s",
     ]
     if GATEWAYCTL_SSH_HOST:
+        # WR-09: subprocess.run with a list argument MUST NOT be changed
+        # to shell=True. GATEWAYCTL_SSH_HOST comes from the environment
+        # and may carry shell metacharacters (e.g. an attacker who can
+        # set environment vars on the orchestrator host could inject
+        # `host; rm -rf /`). With the list form, the full value goes as
+        # a single argv to ssh which rejects unknown hosts safely; with
+        # shell=True the same value would be parsed by /bin/sh and
+        # execute arbitrary commands. The list form is the security
+        # boundary — keep it.
         cmd: list[str] = ["ssh", GATEWAYCTL_SSH_HOST] + docker_exec_cmd
     else:
         cmd = docker_exec_cmd
