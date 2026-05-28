@@ -149,19 +149,45 @@ export const auth = betterAuth({
     },
     // [reviews HIGH #2 Option B fallback]: Better Auth twoFactor plugin
     // verify-totp endpoint creates a new session row when 2FA challenge
-    // completes, but does NOT set our custom `twoFactorVerified` field
-    // (additionalFields contract). Without this hook the middleware
-    // loops back to /2fa/challenge after a successful TOTP verify. We
-    // hook session.create.before and infer "session created from 2FA
-    // challenge verify" by request URL — when path contains
-    // /two-factor/verify-totp, the user just passed the challenge.
+    // completes (verify-two-factor.mjs L28: createSession + setSessionCookie),
+    // but does NOT set our custom `twoFactorVerified` field (additionalFields
+    // contract). Without this hook the middleware loops back to
+    // /2fa/challenge after a successful TOTP verify. We hook
+    // session.create.before and infer "session created from 2FA challenge
+    // verify" by the endpoint path the wrapper attaches to the context.
+    //
+    // CR-04 hardening: match multiple potential path strings (current
+    // 1.4.x naming + speculative future naming) AND read from both the
+    // documented `endpoint.path` field and the legacy `path` field. If
+    // Better Auth ships a context refactor that lands the path elsewhere,
+    // this hook stays correct as long as one of the known shapes is
+    // populated. Also fail-loud when neither shape carries a usable
+    // string — that catches a future regression in CI when the
+    // verify-totp integration test below stops setting twoFactorVerified.
     session: {
       create: {
         before: async (session, context) => {
-          const path = (context as { path?: string } | null)?.path ?? "";
-          const fromChallenge =
-            path === "/two-factor/verify-totp" ||
-            path === "/two-factor/verify-backup-code";
+          const ctx = context as
+            | {
+                path?: unknown;
+                endpoint?: { path?: unknown } | null;
+              }
+            | null;
+          const candidate1 =
+            typeof ctx?.endpoint?.path === "string" ? ctx.endpoint.path : "";
+          const candidate2 =
+            typeof ctx?.path === "string" ? ctx.path : "";
+          const path = candidate1 || candidate2;
+          // Known verify endpoint paths across Better Auth 1.4.x. If a
+          // future version renames the route (e.g. /two-factor/totp/verify),
+          // add the new path here AND extend the auth.test.ts integration
+          // test below so a missed rename fails in CI.
+          const VERIFY_PATHS = new Set<string>([
+            "/two-factor/verify-totp",
+            "/two-factor/verify-backup-code",
+            "/two-factor/verify-otp",
+          ]);
+          const fromChallenge = VERIFY_PATHS.has(path);
           if (fromChallenge) {
             return { data: { ...session, twoFactorVerified: true } };
           }

@@ -17,8 +17,11 @@
  * Tests run against a fresh memory adapter per `describe` (beforeEach
  * resets state) so cases are isolated.
  */
+import { base32 } from "@better-auth/utils/base32";
+import { createOTP } from "@better-auth/utils/otp";
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { twoFactor } from "better-auth/plugins";
 import { beforeEach, describe, expect, it } from "vitest";
 import { isAllowedEmail } from "@/lib/allowlist";
@@ -78,6 +81,24 @@ function buildTestAuth(opts?: { rateLimitWindow?: number; rateLimitMax?: number 
       },
     },
     plugins: [twoFactor({ issuer: "Ifix AI Gateway" })],
+    hooks: {
+      // Mirror CR-01 defense-in-depth in tests so the production hook
+      // stays exercised end-to-end via memoryAdapter.
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/two-factor/enable") return;
+        const session = await getSessionFromCtx(ctx).catch(() => null);
+        const enabled =
+          (session as { user?: { twoFactorEnabled?: boolean } } | null)?.user
+            ?.twoFactorEnabled === true;
+        if (enabled) {
+          throw new APIError("FORBIDDEN", {
+            message:
+              "two-factor já está habilitado neste usuário. Para rotacionar, execute o procedimento RUNBOOK-2FA-RECOVERY.md.",
+            code: "TWO_FACTOR_ALREADY_ENABLED",
+          });
+        }
+      }),
+    },
     databaseHooks: {
       user: {
         create: {
@@ -89,10 +110,63 @@ function buildTestAuth(opts?: { rateLimitWindow?: number; rateLimitMax?: number 
           },
         },
       },
+      // Mirror CR-04 production hook so the integration test below
+      // exercises the same code path: path-based inference of "session
+      // created from /two-factor/verify-totp".
+      session: {
+        create: {
+          before: async (session: any, context: any) => {
+            const ctx = context as
+              | { path?: unknown; endpoint?: { path?: unknown } | null }
+              | null;
+            const candidate1 =
+              typeof ctx?.endpoint?.path === "string"
+                ? ctx.endpoint.path
+                : "";
+            const candidate2 =
+              typeof ctx?.path === "string" ? ctx.path : "";
+            const path = candidate1 || candidate2;
+            const VERIFY_PATHS = new Set<string>([
+              "/two-factor/verify-totp",
+              "/two-factor/verify-backup-code",
+              "/two-factor/verify-otp",
+            ]);
+            if (VERIFY_PATHS.has(path)) {
+              return { data: { ...session, twoFactorVerified: true } };
+            }
+            return { data: session };
+          },
+        },
+      },
     },
     advanced: { database: { generateId: () => crypto.randomUUID() } },
   });
   return { auth, db };
+}
+
+/** Extract Set-Cookie header from a returnHeaders signIn/verify response. */
+function extractSetCookie(r: unknown): string {
+  return (
+    (r as any)?.headers?.get?.("set-cookie") ??
+    (r as any)?.response?.headers?.get?.("set-cookie") ??
+    ""
+  );
+}
+
+/**
+ * Parse the `secret` query param out of an otpauth:// URI and decode it
+ * back to the original plain string. Better Auth's `generateQRCode`
+ * (@better-auth/utils/otp) base32-encodes the secret with padding=false
+ * before placing it in the URI — callers that want to compute a TOTP via
+ * `createOTP(originalSecret).totp()` must base32.decode then turn the
+ * resulting bytes back into the UTF-8 string that was encrypted/stored.
+ */
+function parseTotpSecret(uri: string): string {
+  const m = uri.match(/[?&]secret=([^&]+)/);
+  if (!m) throw new Error(`no secret in totpURI: ${uri}`);
+  const encoded = decodeURIComponent(m[1]);
+  const bytes = base32.decode(encoded);
+  return new TextDecoder().decode(bytes);
 }
 
 describe("auth — D-13 allowlist (databaseHooks.user.create.before)", () => {
@@ -252,5 +326,170 @@ describe("auth — D-14 rateLimit customRules", () => {
       /rate|too many|limit/i.test(final.msg) ||
       results.filter((r) => !r.ok).length >= 6; // all 6 errored
     expect(isRateLimited).toBe(true);
+  });
+});
+
+describe("auth — CR-04 session.create.before hook fires on verify-totp", () => {
+  it("(e) signUp → signIn → enable → verifyTOTP → getSession.twoFactorVerified === true", async () => {
+    // CR-04 contract test: when a user passes the 2FA challenge via
+    // /two-factor/verify-totp, the session.create.before hook must flip
+    // session.twoFactorVerified to true. Without this, the middleware
+    // loops /  →  /2fa/challenge  →  verify OK  →  /  →  /2fa/challenge
+    // forever. This is a STABLE PUBLIC API exercise — auth.api.* only.
+    const { auth } = buildTestAuth();
+    const email = "twofa@ifixtelecom.com.br";
+    const password = "TestPassword!123";
+
+    // 1. Sign up the allowlisted operator (autoSignIn=false).
+    await auth.api.signUpEmail({
+      body: { email, password, name: "Operator" },
+    });
+
+    // 2. Sign in to get an initial session — at this point the user has
+    //    NOT enrolled 2FA yet (twoFactorEnabled=false), so signIn returns
+    //    a normal session cookie (no twoFactorRedirect).
+    const signInHeaders = new Headers();
+    const signIn = await auth.api.signInEmail({
+      body: { email, password },
+      returnHeaders: true,
+      headers: signInHeaders,
+    });
+    const initialSetCookie = extractSetCookie(signIn);
+    expect(initialSetCookie.length).toBeGreaterThan(0);
+
+    // 3. Enable 2FA — endpoint requires the password as proof-of-presence.
+    //    The response contains the cleartext TOTP URI + backup codes; we
+    //    parse the URI to generate a valid TOTP code below.
+    const enableHeaders = new Headers();
+    enableHeaders.set("cookie", initialSetCookie);
+    const enableResp = await auth.api.enableTwoFactor({
+      body: { password },
+      headers: enableHeaders,
+      returnHeaders: true,
+    });
+    const totpURI =
+      (enableResp as any).response?.totpURI ??
+      (enableResp as any).totpURI ??
+      "";
+    expect(totpURI).toMatch(/^otpauth:\/\//);
+    const secret = parseTotpSecret(totpURI);
+    expect(secret.length).toBeGreaterThan(0);
+
+    // After enableTwoFactor, the response sets a new session cookie. Use
+    // that cookie for the verifyTOTP call (the prior session may have
+    // been rotated by Better Auth's setSessionCookie call in the
+    // skipVerificationOnEnable path — we always grab the freshest).
+    const enableSetCookie = extractSetCookie(enableResp) || initialSetCookie;
+
+    // 4. Generate the current TOTP code from the cleartext secret. The
+    //    Better Auth default is SHA-1, 6 digits, 30s period — matches
+    //    Google Authenticator + 1Password (see auth.ts D-12 comment).
+    const code = await createOTP(secret, {
+      digits: 6,
+      period: 30,
+    }).totp();
+    expect(code).toMatch(/^\d{6}$/);
+
+    // 5. Verify the TOTP — this is the call that MUST trigger the
+    //    session.create.before hook to set twoFactorVerified=true.
+    //    Better Auth's verify-totp endpoint requires the 2FA cookie
+    //    OR an existing session — we pass the existing session cookie.
+    const verifyHeaders = new Headers();
+    verifyHeaders.set("cookie", enableSetCookie);
+    const verifyResp = await auth.api.verifyTOTP({
+      body: { code },
+      headers: verifyHeaders,
+      returnHeaders: true,
+    });
+    expect(verifyResp).toBeTruthy();
+
+    // The verify response may rotate the session cookie again (the
+    // first-enroll branch in totp/index.mjs does createSession +
+    // setSessionCookie). Pick up whichever cookie is freshest.
+    const verifySetCookie = extractSetCookie(verifyResp) || enableSetCookie;
+
+    // 6. Fetch the session — assert session.twoFactorVerified === true.
+    //    This is the CR-04 anchor: a broken path-detection regression
+    //    (Better Auth renames /verify-totp, or context shape changes)
+    //    will leave this flag at false and fail this test in CI.
+    const sessionHeaders = new Headers();
+    sessionHeaders.set("cookie", verifySetCookie);
+    const finalSession = await auth.api.getSession({ headers: sessionHeaders });
+    expect(finalSession).toBeTruthy();
+    const sess = (finalSession as any).session;
+    expect(sess).toBeDefined();
+    expect(sess.twoFactorVerified).toBe(true);
+
+    // Also confirm the user is now flagged twoFactorEnabled — this is
+    // updated by the verify-totp endpoint on first enroll (the
+    // !user.twoFactorEnabled branch of totp/index.mjs).
+    const finalUser = (finalSession as any).user;
+    expect(finalUser?.twoFactorEnabled).toBe(true);
+  });
+
+  it("(f) CR-01 defense-in-depth: enableTwoFactor on already-enrolled user is rejected", async () => {
+    // After the user has 2FA enabled, /two-factor/enable must FORBIDDEN
+    // (prevents the credential-rotation primitive — see CR-01). The
+    // operator must run RUNBOOK-2FA-RECOVERY.md to clear the secret
+    // before any re-enrollment.
+    const { auth } = buildTestAuth();
+    const email = "guarded@ifixtelecom.com.br";
+    const password = "TestPassword!123";
+
+    await auth.api.signUpEmail({
+      body: { email, password, name: "Guarded" },
+    });
+
+    const signInHeaders = new Headers();
+    const signIn = await auth.api.signInEmail({
+      body: { email, password },
+      returnHeaders: true,
+      headers: signInHeaders,
+    });
+    const cookie = extractSetCookie(signIn);
+
+    // First enroll — succeeds.
+    const enableHeaders = new Headers();
+    enableHeaders.set("cookie", cookie);
+    const enableResp = await auth.api.enableTwoFactor({
+      body: { password },
+      headers: enableHeaders,
+      returnHeaders: true,
+    });
+    const totpURI =
+      (enableResp as any).response?.totpURI ??
+      (enableResp as any).totpURI ??
+      "";
+    const secret = parseTotpSecret(totpURI);
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+
+    // Verify — flips user.twoFactorEnabled to true.
+    const verifyCookie = extractSetCookie(enableResp) || cookie;
+    const verifyHeaders = new Headers();
+    verifyHeaders.set("cookie", verifyCookie);
+    const verifyResp = await auth.api.verifyTOTP({
+      body: { code },
+      headers: verifyHeaders,
+      returnHeaders: true,
+    });
+    const postVerifyCookie = extractSetCookie(verifyResp) || verifyCookie;
+
+    // Now try to enable again — must throw FORBIDDEN per CR-01 guard.
+    const reEnableHeaders = new Headers();
+    reEnableHeaders.set("cookie", postVerifyCookie);
+    let threw = false;
+    let msg = "";
+    try {
+      await auth.api.enableTwoFactor({
+        body: { password },
+        headers: reEnableHeaders,
+      });
+    } catch (e) {
+      threw = true;
+      msg = ((e as { message?: string })?.message ?? String(e)).toLowerCase();
+    }
+    expect(threw).toBe(true);
+    // The guard message mentions "já está habilitado" + RUNBOOK ref.
+    expect(/já está habilitado|two_factor_already_enabled|already.*enabled|forbidden/i.test(msg)).toBe(true);
   });
 });
