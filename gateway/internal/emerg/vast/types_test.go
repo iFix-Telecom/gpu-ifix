@@ -189,7 +189,7 @@ func TestWithMachineAllowlist(t *testing.T) {
 
 		inet, ok := f["inet_down"].(map[string]any)
 		require.True(t, ok, "inet_down clause must survive composition")
-		require.Equal(t, 500, inet["gte"], "inet_down.gte (Mbps) must be preserved")
+		require.Equal(t, 200, inet["gte"], "inet_down.gte (Mbps) must be preserved (lowered 500→200 on 2026-05-28 — EU 3090 inventory inet ceiling)")
 
 		cuda, ok := f["cuda_max_good"].(map[string]any)
 		require.True(t, ok, "cuda_max_good clause must survive composition")
@@ -221,7 +221,7 @@ func TestWithMachineAllowlist(t *testing.T) {
 		require.Contains(t, s, `"num_gpus":{"eq":2}`)
 		require.Contains(t, s, `"dph_total":{"lte":0.6}`)
 		require.Contains(t, s, `"reliability":{"gte":0.99}`)
-		require.Contains(t, s, `"inet_down":{"gte":500}`)
+		require.Contains(t, s, `"inet_down":{"gte":200}`)
 		require.Contains(t, s, `"cuda_max_good":{"gte":12.8}`)
 		require.Contains(t, s, `"driver_vers":{"gte":570000000}`)
 		require.Contains(t, s, `"rentable":{"eq":true}`)
