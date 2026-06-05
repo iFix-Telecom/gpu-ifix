@@ -762,46 +762,70 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_vast_client", 0)
 		return errors.New("primary: no Vast.ai client wired")
 	}
-	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID, r.cfg.PrimaryGPUName, r.cfg.PrimaryNumGPUs, r.cfg.PrimaryVastMachineBlocklist...)
-	// No geolocation restriction (operator decision 2026-05-21): the EU-only
-	// allowlist (added UAT 2026-05-18 to keep MinIO/Hetzner-DE weight transfer
-	// in-continent) left the cheapest qualifying 5090s (e.g. CA/CZ/US at ~$0.32/h
-	// vs ~$2/h EU) unreachable. The inet_down>=500 Mbps gate in DefaultSearchFilter
-	// still guards transfer bandwidth; cross-continent weight fetch fits inside the
-	// 2400s coldstart budget.
-	//
-	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass. When
-	// set, search the preferred known-good hosts first; broaden to the full
-	// qualified search only when they are unavailable. Vast is a spot marketplace
-	// (no reservation), so a hard allowlist would block provisioning whenever the
-	// host is busy — the broaden-fallback keeps cheap-marketplace economics while
-	// still preferring trusted hosts.
+	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
+	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
+	// $0.30), fallback shape only when the primary cap returns zero
+	// qualified offers (2×3090 @ $0.60; same GPU model, deeper EU pool).
+	filters := vast.DefaultSearchFilters(
+		r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback,
+		r.cfg.PrimaryHostID,
+		r.cfg.PrimaryVastGPUNamePrimary, r.cfg.PrimaryVastGPUNameFallback,
+		r.cfg.PrimaryVastNumGPUsPrimary, r.cfg.PrimaryVastNumGPUsFallback,
+		r.cfg.PrimaryVastMachineBlocklist...,
+	)
+	// shapeCaps mirrors the filter pair so vastutil.FilterBelowCap can
+	// re-apply the per-shape ceiling client-side (epsilon-tolerant; UAT 17
+	// 2026-05-19 Vast inventory race regression).
+	shapeCaps := []float64{r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback}
+
+	// No geolocation restriction (operator decision 2026-05-21).
+	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass on
+	// the PRIMARY shape only — known-good 1×3090 hosts first; broaden to
+	// the full qualified PRIMARY search when allowlisted hosts are busy;
+	// then iterate the FALLBACK shape if PRIMARY is exhausted.
 	var pickable []vast.Offer
+	var pickedShape int
+
 	if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
-		allowFilter := vast.WithMachineAllowlist(filter, r.cfg.PrimaryVastMachineAllowlist)
+		allowFilter := vast.WithMachineAllowlist(filters[0], r.cfg.PrimaryVastMachineAllowlist)
 		offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
 		if err != nil {
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 			return err
 		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
+		pickable = vastutil.FilterBelowCap(offers, shapeCaps[0])
 		if len(pickable) == 0 {
 			log.Info("primary allowlist exhausted; broadening to full qualified search",
-				"allowlist", r.cfg.PrimaryVastMachineAllowlist)
+				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", 0)
 		}
 	}
+
 	if len(pickable) == 0 {
-		offers, err := r.deps.Vast.SearchOffers(ctx, filter)
-		if err != nil {
-			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
-			return err
+		for i, f := range filters {
+			offers, err := r.deps.Vast.SearchOffers(ctx, f)
+			if err != nil {
+				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
+				return err
+			}
+			candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
+			if len(candidates) > 0 {
+				pickable = candidates
+				pickedShape = i
+				log.Info("primary offers found for shape",
+					"shape", i, "offer_count", len(candidates),
+					"cap", shapeCaps[i])
+				break
+			}
+			log.Info("primary shape returned no qualified offers; trying next",
+				"shape", i, "cap", shapeCaps[i])
 		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
 	}
+
 	if len(pickable) == 0 {
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_offers_below_cap", 0)
-		return errors.New("primary: no offers below cap")
+		return errors.New("primary: no offers below cap (both shapes exhausted)")
 	}
+	_ = pickedShape // logged above; reserved for future per-shape metrics.
 	offer := pickable[0]
 	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
 	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the

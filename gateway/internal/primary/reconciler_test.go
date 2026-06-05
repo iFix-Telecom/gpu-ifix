@@ -334,6 +334,13 @@ func testCfg(t *testing.T) config.Config {
 	c.PrimaryPodScheduleGraceRampDownSeconds = 5
 	c.PrimaryPodScheduleProvisionLeadSeconds = 1800
 	c.PrimaryVastPriceCapDPH = 0.40
+	// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00 locked).
+	c.PrimaryVastGPUNamePrimary = "RTX 3090"
+	c.PrimaryVastGPUNameFallback = "RTX 3090"
+	c.PrimaryVastPriceCapPrimary = 0.30
+	c.PrimaryVastPriceCapFallback = 0.60
+	c.PrimaryVastNumGPUsPrimary = 1
+	c.PrimaryVastNumGPUsFallback = 2
 	c.USDToBRLRate = 5.0
 	return c
 }
@@ -777,6 +784,83 @@ func TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap(t *testing.T)
 		require.Contains(t, closeReasons, "instance_terminal_state_confirmed",
 			"closeLifecycle must record shutdown_reason='instance_terminal_state_confirmed' (distinguishes from IsTerminal-driven 'instance_terminal_state')")
 	})
+}
+
+// TestReconcilerVastFallback exercises the Phase 11.1 D-A6 primary+fallback
+// search dispatch (Wave 0 EVIDENCE-00). When the primary 1×3090 @ $0.30
+// filter returns zero offers, the reconciler must iterate to the fallback
+// 2×3090 @ $0.60 filter, pick its offer, and call CreateInstance with the
+// fallback offer's ID (proving the loop break-on-non-empty + fallback shape
+// took effect).
+func TestReconcilerVastFallback(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.PrimaryVastMachineAllowlist = nil // disable the allowlist short-circuit
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var (
+		searchCalls atomic.Int32
+		createdFor  atomic.Int64 // offer_id passed to CreateInstance
+	)
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			n := searchCalls.Add(1)
+			// Inspect num_gpus to identify the shape.
+			ng, _ := filter["num_gpus"].(map[string]any)
+			gpus, _ := ng["eq"].(int)
+			switch n {
+			case 1: // primary shape (1×3090) — empty
+				require.Equal(t, 1, gpus, "first call must use primary shape (1 GPU)")
+				return nil, nil
+			case 2: // fallback shape (2×3090) — one offer
+				require.Equal(t, 2, gpus, "second call must use fallback shape (2 GPUs)")
+				return []vast.Offer{{
+					ID:        7777,
+					MachineID: 43803,
+					HostID:    99001,
+					DphTotal:  0.42,
+				}}, nil
+			default:
+				return nil, errors.New("unexpected extra SearchOffers call")
+			}
+		},
+		createInstanceFn: func(_ context.Context, offerID int64, _ vast.CreateRequest) (vast.Instance, error) {
+			createdFor.Store(offerID)
+			// Return a non-running instance so waitForReadyOrDestroy bails
+			// quickly (cold-start budget 60s in testCfg, but health check
+			// returns false instantly so the budget never triggers — the
+			// goroutine returns via destroy on cancellation).
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+	}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Vast: fakeV,
+		Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool {
+			return false
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	// Drive provisionLifecycle directly (unexported but same package).
+	// waitForReadyOrDestroy will spin until the cold-start budget elapses;
+	// short-circuit via ctx timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	// Assertions: BOTH shape filters consulted; create issued for the
+	// fallback offer.
+	require.GreaterOrEqual(t, searchCalls.Load(), int32(2),
+		"reconciler must call SearchOffers for both [primary, fallback] shapes")
+	require.Equal(t, int64(7777), createdFor.Load(),
+		"CreateInstance must receive the fallback offer's ID (7777)")
 }
 
 func contains(s, substr string) bool {

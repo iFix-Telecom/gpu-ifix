@@ -195,8 +195,19 @@ type Config struct {
 	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 2.20; RTX 5090 EU cap — UAT 17 2026-05-19 picked 5090 32 GB to fit Qwen 27B + bge-m3 + KV cache + whisper-large-v3 GPU (~26 GB workload; 4090 24 GB hit CUDA OOM UAT 16); EU 5090 inventory cheapest ~$2.00/h Spain ES; epsilon comparison cap+0.0001 per Pitfall 5)
 	PrimaryVastMachineBlocklist            []int64  // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
 	PrimaryVastMachineAllowlist            []int64  // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
-	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (default "RTX 5090"; primary pod GPU model — large headroom for full 4-service GPU offload including whisper-large-v3 STT)
-	PrimaryNumGPUs                         int      // PRIMARY_NUM_GPUS (default 1; number of GPUs per primary pod machine. Set 2 for a 2×RTX 3090 single-pod topology — 48GB total, llama.cpp auto-tensor-splits Qwen across both with -ngl 99, no pinning needed; ~60% cheaper than a single 5090 with deeper Vast inventory. Spike 2026-05-21 validated CDI + boot + ~27GB/48GB full stack on machine_id 43803)
+	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (DEPRECATED-alias for PrimaryVastGPUNamePrimary; Phase 11.1 D-A6 — read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	PrimaryNumGPUs                         int      // PRIMARY_NUM_GPUS (DEPRECATED-alias for PrimaryVastNumGPUsFallback; the legacy var historically meant "GPUs per primary pod" which is now the FALLBACK shape per primary-gpu-shape-06.8-final memory. TODO-remove-in-11.2.)
+	// Phase 11.1 D-A6 primary+fallback shape (split per Wave 0 EVIDENCE-00 —
+	// 4090 @ $0.40 returned 0 EU offers, pivoted to 2×3090 @ $0.60 fallback
+	// with 7 EU offers, cheapest $0.42/h). Same GPU model both shapes —
+	// single CDI/driver matrix. Reconciler iterates [primary, fallback]
+	// filters and breaks on the first non-empty offer list.
+	PrimaryVastGPUNamePrimary    string  // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
+	PrimaryVastGPUNameFallback   string  // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
+	PrimaryVastPriceCapPrimary   float64 // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
+	PrimaryVastPriceCapFallback  float64 // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
+	PrimaryVastNumGPUsPrimary    int     // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
+	PrimaryVastNumGPUsFallback   int     // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
 	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
