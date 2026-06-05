@@ -3,6 +3,12 @@
 // Phase 06.9 Plan 05a Task 2 — STT-OAI-FIX end-to-end integration test +
 // 3 R6 Whisper edge cases.
 //
+// Phase 11.1 Plan 02 Task 2 amendment: with migration 0028 deleting the
+// local-stt row, only (whisper, openai-whisper) → whisper-1 remains.
+// The harness now registers a single role=stt upstream (openai-whisper)
+// at tier 0 so the dispatcher resolves to it directly — no driveBreaker
+// call needed, no tier-0 mock to seed.
+//
 // Whisper uses multipart/form-data; the director rewrites the "model"
 // form-field value while preserving the file part's audio bytes
 // byte-identical (Pitfall #6). The duplicate-model abort wired by Plan 03
@@ -49,6 +55,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/proxy"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/upstreams"
 )
 
 // buildWhisperMultipart returns a multipart/form-data body with the given
@@ -140,24 +147,30 @@ func loadIntegrationProbeWAV(t *testing.T) []byte {
 // whisperHarness bundles the per-test setup: resolver, breaker set,
 // tier-1 capturing mock, dispatcher. Centralised here so each R6 test
 // stays focused on the behavior under test.
+//
+// Phase 11.1: tier0 mock dropped — migration 0028 removed the local-stt
+// row, so the dispatcher only registers openai-whisper for role=stt.
 type whisperHarness struct {
-	tier0      *upstreamMock
 	tier1      *upstreamMock
 	bs         *breaker.Set
 	resolver   *models.Resolver
 	dispatcher http.Handler
 }
 
-// newWhisperHarness builds the standard wiring used by all 4 Whisper tests:
+// newWhisperHarness builds the standard wiring used by all 4 Whisper tests.
+//
+// Phase 11.1: only the (whisper, openai-whisper) → whisper-1 alias exists
+// post-migration 0028 (D-A5 preservation). With only one upstream registered
+// for role=stt in the resilienceLoader, the dispatcher routes to tier-1
+// directly — no driveBreaker call needed, no tier-0 mock to maintain.
+//
 //   - freshSchema → real resolver against migrated DB (or fixture-backed if
 //     useFixtureResolver != nil, for the R6 Test C resolver-miss case where
 //     the DB row is absent).
-//   - tier0 = newFailMock (always 500).
 //   - tier1 = newSuccessMockCapturing (captures forwarded multipart body).
 //   - production OpenAIWhisperDirector + httputil.ReverseProxy on tier1.
 //   - WhisperAbortGuard wrapping tier1 proxy (WARNING-3 wired by Plan 03).
 //   - Dispatcher with role=stt, proxies map keyed by upstream name.
-//   - local-stt breaker tripped via driveBreaker so dispatcher routes to tier-1.
 func newWhisperHarness(t *testing.T, ctx context.Context, useFixtureResolver *models.Resolver) *whisperHarness {
 	t.Helper()
 	pool, rdb := freshSchema(t, ctx)
@@ -176,7 +189,6 @@ func newWhisperHarness(t *testing.T, ctx context.Context, useFixtureResolver *mo
 		}
 	}
 
-	tier0 := newFailMock(t)
 	tier1 := newSuccessMockCapturing(t)
 
 	tier1URL, _ := url.Parse(tier1.server.URL)
@@ -194,32 +206,34 @@ func newWhisperHarness(t *testing.T, ctx context.Context, useFixtureResolver *mo
 	// the duplicate-model abort would not land HTTP 400 before forwarding.
 	guardedTier1 := proxy.WhisperAbortGuard(tier1Proxy, resolver, "openai-whisper", discardLogger())
 
-	loader := resilienceLoader("stt",
-		"local-stt", tier0.server.URL,
-		"openai-whisper", tier1.server.URL,
-	)
+	// Phase 11.1: resilienceLoader passes "" for t1URL when caller wants a
+	// single-upstream registry. Here we want exactly one stt upstream
+	// (openai-whisper at tier 0 from the loader's perspective so Resolve(stt,0)
+	// hits it without needing a breaker drive). Build the in-memory loader
+	// directly so we can register openai-whisper as the sole role=stt entry.
+	loader := upstreams.NewLoaderInMemory(upstreams.UpstreamConfig{
+		Name:    "openai-whisper",
+		Role:    "stt",
+		Tier:    0,
+		URL:     tier1.server.URL,
+		Enabled: true,
+	})
 	bs := breaker.NewSet(rdb, discardLogger(),
 		breaker.Options{ConsecutiveFailures: 2, Cooldown: 30 * time.Second},
 		loader.Names(),
 	)
-	t0Proxy := newClassifyingProxy(t, tier0.server.URL, bs, "local-stt")
 
 	disp := proxy.NewDispatcher(proxy.DispatcherConfig{
 		Role:    "stt",
 		Loader:  loader,
 		Breaker: bs,
 		Proxies: map[string]http.Handler{
-			"local-stt":      t0Proxy,
 			"openai-whisper": guardedTier1,
 		},
 		Log: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 
-	// Trip the local-stt breaker so the dispatcher routes to tier-1.
-	driveBreaker(t, bs, "local-stt", 500, 3)
-
 	return &whisperHarness{
-		tier0:      tier0,
 		tier1:      tier1,
 		bs:         bs,
 		resolver:   resolver,

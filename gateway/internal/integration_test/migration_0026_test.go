@@ -45,14 +45,17 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	defer cancel()
 	pool, _ := freshSchema(t, ctx)
 
-	// freshSchema applied all migrations up to 0026 — assert seed state.
+	// freshSchema applied all migrations up to HEAD — assert seed state.
+	// Phase 11.1 migration 0028 DELETEs the (whisper, local-stt) row so the
+	// post-freshSchema count is 5 (2 tier-0 local-llm/local-embed + 3 tier-1)
+	// instead of the historical 6 (3 + 3).
 	var aliasCountAfterUp int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM ai_gateway.model_aliases`).Scan(&aliasCountAfterUp); err != nil {
 		t.Fatalf("count after Up: %v", err)
 	}
-	if aliasCountAfterUp != 6 {
-		t.Errorf("model_aliases count after Up = %d, want 6 (3 tier-0 + 3 tier-1)", aliasCountAfterUp)
+	if aliasCountAfterUp != 5 {
+		t.Errorf("model_aliases count after Up = %d, want 5 (post-0028: 2 tier-0 + 3 tier-1)", aliasCountAfterUp)
 	}
 
 	// Composite PK present.
@@ -84,10 +87,11 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 		t.Errorf("qwen tier-1 target = %q, want %q", qwenTarget, tier1QwenTarget)
 	}
 
-	// Down 2 steps → revert 0027 + 0026 (test specifically exercises 0026's
-	// Down behavior; 0027 lives on top and must be reverted first).
-	if err := db.Down(ctx, pool, 2); err != nil {
-		t.Fatalf("db.Down(2): %v", err)
+	// Down 3 steps → revert 0028 + 0027 + 0026 (test specifically exercises
+	// 0026's Down behavior; 0027 + 0028 live on top and must be reverted first).
+	// Phase 11.1: was Down(2); bumped to Down(3) when 0028 landed on HEAD.
+	if err := db.Down(ctx, pool, 3); err != nil {
+		t.Fatalf("db.Down(3): %v", err)
 	}
 
 	// After Down: tier-1 rows removed (3 rows left) AND PK reverted to (alias).
@@ -149,8 +153,10 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 		`SELECT count(*) FROM ai_gateway.model_aliases`).Scan(&aliasCountAfterReUp); err != nil {
 		t.Fatalf("count after re-Up: %v", err)
 	}
-	if aliasCountAfterReUp != 6 {
-		t.Errorf("model_aliases count after re-Up = %d, want 6 (idempotent re-application)", aliasCountAfterReUp)
+	// Phase 11.1: re-Up applies through 0028 again, so count is 5 (idempotent
+	// across the whole stack — was 6 before 0028).
+	if aliasCountAfterReUp != 5 {
+		t.Errorf("model_aliases count after re-Up = %d, want 5 (idempotent post-0028 re-application)", aliasCountAfterReUp)
 	}
 
 	t.Logf("MIGRATION 0026 ROUND-TRIP VERIFIED: Up→Down→Up clean; composite PK on (alias,upstream_name); column preserved; tier-0 values intact")
@@ -165,15 +171,12 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	defer cancel()
 	pool, _ := freshSchema(t, ctx)
 
-	// freshSchema applied all migrations through 0027 → 6 rows. The seeded
-	// tier-1 (qwen, openrouter-chat) row's target is now
-	// "deepseek/deepseek-v4-flash:nitro" (migration 0027 UPDATEd it from
-	// "qwen/qwen3.5-27b"). INSERT an operator-created duplicate-alias row
-	// that 0026's R3 guard MUST detect when its Down direction runs.
-	// Step 1 of 0026's Down deletes the (qwen, openrouter-chat) seeded
-	// tier-1 row but leaves the operator-inserted (qwen, openrouter-
-	// experimental) row. The DO block then finds duplicate aliases
-	// (qwen) across (local-llm) + (openrouter-experimental) → RAISE.
+	// freshSchema applied all migrations through HEAD (currently 0028) → 5
+	// rows after the Phase 11.1 (whisper, local-stt) DELETE. The seeded
+	// tier-1 (qwen, openrouter-chat) row's target is "deepseek/deepseek-v4-flash:nitro"
+	// (migration 0027 UPDATEd it from "qwen/qwen3.5-27b"). INSERT an
+	// operator-created duplicate-alias row that 0026's R3 guard MUST detect
+	// when its Down direction runs.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name)
 		 VALUES ('qwen', 'llm', 'qwen-custom', 'openrouter-experimental')`); err != nil {
@@ -181,22 +184,29 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	}
 
 	// Count rows BEFORE the attempted Down so we can assert it didn't change.
+	// Phase 11.1: 5 seeded (post-0028) + 1 operator = 6 (was 7 pre-0028).
 	var countBefore int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM ai_gateway.model_aliases`).Scan(&countBefore); err != nil {
 		t.Fatalf("count before Down: %v", err)
 	}
-	if countBefore != 7 { // 6 seeded + 1 operator
-		t.Fatalf("count before Down = %d, want 7 (6 seeded + 1 operator-injected)", countBefore)
+	if countBefore != 6 { // 5 seeded post-0028 + 1 operator
+		t.Fatalf("count before Down = %d, want 6 (5 seeded post-0028 + 1 operator-injected)", countBefore)
 	}
 
-	// Attempt Down 2 steps — reverts 0027 (clean) then 0026 (MUST fail with
-	// the guard's RAISE EXCEPTION message). goose runs each step as its own
-	// transaction; the 0027 Down completes first, then 0026's Down fires the
-	// guard. db.Down returns the first failing step's error.
-	err := db.Down(ctx, pool, 2)
+	// Attempt Down 3 steps — reverts 0028 (clean — restores local-stt rows),
+	// then 0027 (clean), then 0026 (MUST fail with the guard's RAISE EXCEPTION
+	// message). goose runs each step as its own transaction; the 0028+0027
+	// Downs complete first, then 0026's Down fires the guard. db.Down returns
+	// the failing step's error.
+	// Phase 11.1: was Down(2); bumped to Down(3) when 0028 landed on HEAD.
+	//
+	// Side-effect of intermediate 0028 Down: countBefore was 6, but after the
+	// aborted Down(3) the (whisper, local-stt) row is restored (0028's Down
+	// committed before 0026's Down aborted), so the row count rises by 1.
+	err := db.Down(ctx, pool, 3)
 	if err == nil {
-		t.Fatal("db.Down(2) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
+		t.Fatal("db.Down(3) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {
@@ -223,16 +233,22 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 
 	// IMPORTANT — the migration's Step 1 deletes the tier-1 seeded rows
 	// BEFORE the guard runs, but because the guard's RAISE EXCEPTION aborts
-	// the WHOLE Down transaction, the DELETE rolls back too. Final row
-	// count MUST equal the pre-Down count.
+	// the WHOLE 0026 Down transaction, those DELETEs roll back inside 0026's
+	// own txn.
+	//
+	// Phase 11.1: 0028's Down already committed (separate txn) and restored
+	// (whisper, local-stt) before the guard fired in 0026's Down. So the
+	// post-aborted-Down count is countBefore + 1 (one extra row from the
+	// successful 0028 Down before the abort).
 	var countAfter int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM ai_gateway.model_aliases`).Scan(&countAfter); err != nil {
 		t.Fatalf("count after aborted Down: %v", err)
 	}
-	if countAfter != countBefore {
-		t.Errorf("model_aliases count after aborted Down = %d, want %d (R3 guard MUST be transactional — RAISE aborts the whole Down)",
-			countAfter, countBefore)
+	wantCountAfter := countBefore + 1 // 0028 Down restored (whisper, local-stt) before guard fired
+	if countAfter != wantCountAfter {
+		t.Errorf("model_aliases count after aborted Down = %d, want %d (R3 guard MUST be transactional within 0026; 0028 Down already restored (whisper,local-stt))",
+			countAfter, wantCountAfter)
 	}
 
 	// Recovery path: operator DELETEs the offending duplicate row, then

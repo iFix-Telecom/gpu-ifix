@@ -501,3 +501,62 @@ func TestTier0OverrideURL_Getter(t *testing.T) {
 		t.Errorf("post-restore Tier0OverrideURL(llm) = (%q,%v), want (\"\",false)", url, ok)
 	}
 }
+
+// TestPostMigration0028_NoLocalSTTInSnapshot — Phase 11.1 Plan 02 Task 2
+// Mudança 11 regression: with migration 0028 deleting the local-stt upstream
+// row, the Loader's snapshot (which drives the probe loop's per-upstream
+// goroutine registration) MUST NOT contain any entry named "local-stt".
+//
+// Why a loader-level test for the probe loop:
+//   The probe loop in probe.go iterates loader.All() each tick to decide
+//   which upstreams to probe. If a stale local-stt entry survives in the
+//   snapshot, the probe goroutine would attempt to dial it every 10s,
+//   leaking goroutines and driving the (deleted) breaker key. This test
+//   pins the contract at the snapshot boundary — the same contract that
+//   the DB-level migration_0028_test.go asserts at the row level.
+//
+// Seeds an in-memory snapshot matching the post-0028 production shape
+// (5 upstreams: 2 tier-0 local-* + 3 tier-1 externals) and asserts the
+// snapshot's name set is free of local-stt.
+func TestPostMigration0028_NoLocalSTTInSnapshot(t *testing.T) {
+	l := NewLoaderInMemory(
+		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary:8000", Enabled: true},
+		UpstreamConfig{Name: "openrouter-chat", Role: "llm", Tier: 1, URL: "https://openrouter.example/v1", Enabled: true},
+		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, URL: "https://api.openai.com/v1", Enabled: true},
+		UpstreamConfig{Name: "local-embed", Role: "embed", Tier: 0, URL: "http://embed:8002", Enabled: true},
+		UpstreamConfig{Name: "openai-embed", Role: "embed", Tier: 1, URL: "https://api.openai.com/v1", Enabled: true},
+	)
+
+	// All() — the slice the probe loop iterates.
+	for _, u := range l.All() {
+		if u.Name == "local-stt" {
+			t.Errorf("local-stt MUST NOT appear in loader.All() snapshot post-0028 (probe loop would dial it)")
+		}
+	}
+
+	// Names() — what breaker.NewSet registers as breaker keys.
+	for _, n := range l.Names() {
+		if n == "local-stt" {
+			t.Errorf("local-stt MUST NOT appear in loader.Names() post-0028 (breaker key registry)")
+		}
+	}
+
+	// Get("local-stt") — direct lookup MUST fail.
+	if _, ok := l.Get("local-stt"); ok {
+		t.Errorf("loader.Get(local-stt) returned ok=true; expected ok=false post-0028")
+	}
+
+	// Resolve("stt", 0) — tier-0 stt slot MUST be empty post-0028.
+	if u, ok := l.Resolve("stt", 0); ok {
+		t.Errorf("Resolve(stt,0) returned %+v ok=true; expected ok=false post-0028 (local-stt deleted)", u)
+	}
+
+	// Resolve("stt", 1) — tier-1 openai-whisper MUST resolve (D-A5 preservation).
+	if u, ok := l.Resolve("stt", 1); !ok || u.Name != "openai-whisper" {
+		t.Errorf("Resolve(stt,1) = %+v ok=%v; expected openai-whisper (D-A5 preservation contract)", u, ok)
+	}
+
+	if got := len(l.All()); got != 5 {
+		t.Errorf("len(All()) = %d, want 5 (post-0028 shape: 2 tier-0 + 3 tier-1)", got)
+	}
+}
