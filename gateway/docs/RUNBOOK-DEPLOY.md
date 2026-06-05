@@ -520,14 +520,28 @@ Coordinate via WhatsApp with the other admins BEFORE running so nobody is logged
 Run this checklist after EVERY deploy (first-time bring-up, roll-forward, rollback). All items must be green before the deploy is considered complete.
 
 - [ ] `curl -sS https://ai-gateway.converse-ai.app/health | jq` returns `{"status":"ok", ...}` with the expected `build_version`.
-- [ ] `curl -sS https://ai-gateway.converse-ai.app/v1/health/upstreams | jq` shows **6 upstreams** with `local-llm`, `openrouter-chat`, `local-stt`, `openai-whisper`, `local-embed`, `openai-embed` — states match the runtime expectation (CLOSED if upstreams reachable; OPEN with documented cause otherwise — see `RUNBOOK-FAILOVER.md`).
-- [ ] `ssh n8n-ia-vm docker exec ifix-ai-gateway /gatewayctl upstreams list` matches the 6 rows above (same NAMEs, same ROLEs, same TIERs).
+- [ ] `curl -sS https://ai-gateway.converse-ai.app/v1/health/upstreams | jq` shows **5 upstreams** with `local-llm`, `openrouter-chat`, `openai-whisper`, `local-embed`, `openai-embed` — states match the runtime expectation (CLOSED if upstreams reachable; OPEN with documented cause otherwise — see `RUNBOOK-FAILOVER.md`). _Phase 11.1 shrunk STT to tier-1-only; the legacy local STT upstream row was removed in migration 0029._
+- [ ] `ssh n8n-ia-vm docker exec ifix-ai-gateway /gatewayctl upstreams list` matches the 5 rows above (same NAMEs, same ROLEs, same TIERs).
 - [ ] Sentry releases tab (`https://sentry.io/organizations/ifix/releases/`) shows release tagged `v1.0.0` environment `production` (Pitfall 5 — if missing, the build did not propagate `GATEWAY_VERSION`).
 - [ ] `curl -sS -I https://ai-dashboard.converse-ai.app/` returns `HTTP/2 200` with the prod cert in the TLS handshake.
 - [ ] All 4 per-tenant smokes (`smoke-converseai.py`, `smoke-chat-ifix.py`, `smoke-sensitive-failover.py` × 2) exit 0 with `report.summary.passed == report.summary.total`.
 - [ ] Audit log records first prod request: `psql "$AI_GATEWAY_PG_DSN" -c "SELECT count(*) FROM ai_gateway.audit_log WHERE created_at > now() - interval '15 minutes';"` returns > 0.
 
 If any item is red, do NOT proceed to client-app key distribution — escalate via the Rollback section below.
+
+---
+
+### Phase 11.1 post-deploy hygiene (T-11.1-02)
+
+After every `ai-gateway-prod` restart that follows a Phase 11.1+ image roll, scrub the legacy `UPSTREAM_STT_URL` from the prod env (the local STT upstream was removed; leaving the var dangling is an information-disclosure footgun — leaks the internal NAT URL `10.10.10.20:8001` via any future env dump). Steps:
+
+1. `ssh n8n-ia-vm`
+2. Edit `/opt/ai-gateway-prod/.env`; delete the line `UPSTREAM_STT_URL=http://10.10.10.20:8001` (if present).
+3. Audit: `grep -c UPSTREAM_STT_URL /opt/ai-gateway-prod/.env` must return `0`.
+4. Reload: `cd /opt/ai-gateway-prod && docker compose up -d` (no-op if env unchanged; rebinds containers otherwise so the stripped env is the live process env).
+5. Re-run the upstreams verification gate above — expected: 5 upstreams (no `local-stt`).
+
+This task is per-host; run on every gateway replica (dev + prod) after image bump.
 
 ---
 

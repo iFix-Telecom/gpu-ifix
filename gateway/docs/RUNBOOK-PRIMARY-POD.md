@@ -25,9 +25,11 @@ This runbook covers the Phase 6.6 primary-pod schedule-driven auto-provisioning
 subsystem (`gateway/internal/primary/` + `gateway/cmd/gatewayctl/primary.go`).
 Read this when:
 
-- The primary `local-llm` / `local-stt` / `local-embed` upstreams should be
-  served by an Ifix-owned Vast.ai pod during peak hours (default 08:00–22:00
-  BRT mon–fri) but are not.
+- The primary `local-llm` / `local-embed` upstreams should be served by an
+  Ifix-owned Vast.ai pod during peak hours (default 08:00–22:00 BRT mon–fri)
+  but are not. _(Phase 11.1: STT tier-0 removed; primary pod now serves 2
+  local roles — LLM + embed. STT resolves via tier-1 `openai-whisper`
+  regardless of primary state.)_
 - A Sentry alert fires with tag `subsystem:primary` (any of:
   `alert:budget_exceeded`, `shutdown_reason:provision_failure`,
   `shutdown_reason:health_timeout`, `state:draining` stuck >>grace).
@@ -66,7 +68,7 @@ to replace OpenRouter + OpenAI fallback usage for cost optimization.
 | FSM states | 5 (Asleep / Provisioning / Ready / Draining / Destroying) | 7 (Healthy → Degraded → Failed_over → Provisioning → Active → Recovering → Cooldown) |
 | Pod image | **Custom** `ghcr.io/ifixtelecom/converseai-primary-pod:vX@sha256:...` (4 services baked) | Upstream `ghcr.io/ggml-org/llama.cpp:server-cuda-b9128` (1 service) |
 | Onstart shape | Strategy B (`Runtype=args` + `/bin/bash -c <inline>`) | Same |
-| Services served | LLM + STT + Embed (3 roles) | LLM only |
+| Services served | LLM + Embed (2 roles — Phase 11.1 dropped STT tier-0) | LLM only |
 | Cost model | ~14h × 22 days × ~$0.40/h ≈ **$130/mo nominal** | Per-incident; ~$2/incident |
 | Budget env | `MONTHLY_PRIMARY_BUDGET_BRL=800` | `MONTHLY_EMERGENCY_BUDGET_BRL=200` |
 | Drain semantics | Schedule window exit → 5min grace ramp-down | Cutback grace after primary recovers |
