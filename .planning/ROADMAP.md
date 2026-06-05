@@ -87,6 +87,17 @@ Plans:
 - [x] 11.1-05-PLAN.md — Wave 4: pod .env.example + docker-compose.yml + READMEs + runbooks (FAILOVER/DEPLOY/PRIMARY-POD) updated; RUNBOOK-DEPLOY adds operator UPSTREAM_STT_URL removal task (T-11.1-02)
 - [x] 11.1-06-PLAN.md — Wave 5: Vast 3090+4090 fleet survey checkpoint (T-11.1-04) + cold-start UAT on 1×3090 + tier-1 STT live curl prod gateway + memory note primary-gpu-shape-11.1-final superseding 06.8-final
 
+### Phase 11.2: readd-whisper-local-gemini-fallback (INSERTED)
+
+**Goal:** Restore tier-0 local Whisper STT on the primary pod (recover the "free when pod ON" property removed by Phase 11.1) AND swap the tier-1 STT fallback from OpenAI `whisper-1` ($0.36/h) to Google Gemini 2.5 Flash Lite (~$0.05/h audio tokens) — 7× cheaper tier-1 + zero marginal cost when local pod is ON. Requires new `gemini-stt` upstream + multipart→`files.upload`+`generateContent` director adapter (Gemini API differs from OpenAI Whisper schema). Re-adds Speaches venv + whisper weights bootstrap to pod image; restores `role=stt` to primary reconciler trio (back to 3-role llm/stt/tts); migration 0029 re-INSERTs `local-stt` upstream + `(whisper, local-stt)` alias + adds `gemini-stt` upstream + `(whisper, gemini-stt)` alias at tier-1; gateway breaker chain: local-stt (tier-0) → gemini-stt (tier-1) → openai-whisper (tier-1 safety net).
+**Requirements**: (TBD via discuss-phase — D-B1..D-B7 expected)
+**Depends on:** Phase 11.1 (closed passed_partial — provides Config split + DefaultSearchFilters + 2-role reconciler foundation to extend)
+**Plans:** TBD
+
+Plans:
+
+- [ ] 11.2-00-PLAN.md — (to be created via discuss/research/plan workflow)
+
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
 **Goal:** Fix the gateway dispatcher → tier-1 fallback model-name rewriting gap so `POST /v1/chat/completions {"model":"qwen"}` against ai-gateway-dev (with primary pod down) returns a real OpenRouter Qwen 3.5 completion instead of the current HTTP 404 "Not Found" HTML. Wave 0 Gate A (Phase 03, 2026-04-20) defined `UPSTREAM_LLM_OPENROUTER_MODEL=qwen/qwen3.5-27b` as the env var operator must set; Plan 03-06 implementation never wired it. Bug masked through Phase 04-08 because integration tests use a fake upstream that accepts any model name + live UAT was always deferred. Also surfaced same-shape gaps for openai-whisper (`UPSTREAM_STT_OPENAI_MODEL`) and openai-embed (`UPSTREAM_EMBED_OPENAI_MODEL`) — verify and bundle. Reference fix-path = SEED-004 Option B (schema-driven `model_aliases` PK widened to `(alias, upstream_name)`). Per D-06: schema row is the default, env vars remain the per-instance escape hatch (env wins over schema when set) — both supported permanently.
