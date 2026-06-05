@@ -56,14 +56,12 @@ func cfgWithDefaults() config.Config {
 		// PrimaryLlamaArgs empty → primaryLlamaArgsDefault is used.
 		PrimaryLlamaArgs: nil,
 
-		// Whisper + BGE-M3 — empty by default in config (per
-		// WAVE0-GATES + reviews #6 fail-fast policy). Test fixture
-		// provides non-empty placeholders so the precondition gate
-		// passes; the dedicated empty-SHA tests zero them explicitly.
-		PrimaryWhisperWeightsKey:    "whisper-large-v3/v1.0.0/model.tar.gz",
-		PrimaryWhisperWeightsSHA256: "wh1sp3r5h4test256",
-		PrimaryBGEM3WeightsKey:      "bge-m3/v1.0.0/model.tar.gz",
-		PrimaryBGEM3WeightsSHA256:   "bg3m35h4test256",
+		// BGE-M3 — empty by default in config (per reviews #6 fail-fast
+		// policy). Test fixture provides non-empty placeholders so the
+		// precondition gate passes; the dedicated empty-SHA tests zero
+		// them explicitly. (Phase 11.1 D-A4: Whisper fields removed.)
+		PrimaryBGEM3WeightsKey:    "bge-m3/v1.0.0/model.tar.gz",
+		PrimaryBGEM3WeightsSHA256: "bg3m35h4test256",
 
 		// MinIO 4 credentials (test values).
 		MinioEndpoint:  "https://s3.example.com",
@@ -296,8 +294,7 @@ func TestPrimaryOnstart_HasRequiredEnvGuards(t *testing.T) {
 		`: "${MINIO_SECRET_KEY:?required}"`,
 		`: "${PRIMARY_QWEN_WEIGHTS_KEY:?required}"`,
 		`: "${PRIMARY_QWEN_WEIGHTS_SHA256:?required}"`,
-		`: "${PRIMARY_WHISPER_WEIGHTS_KEY:?required}"`,
-		`: "${PRIMARY_WHISPER_WEIGHTS_SHA256:?required}"`,
+		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed.
 		`: "${PRIMARY_BGEM3_WEIGHTS_KEY:?required}"`,
 		`: "${PRIMARY_BGEM3_WEIGHTS_SHA256:?required}"`,
 	} {
@@ -428,18 +425,9 @@ func TestPrimaryOnstart_DCGMPort9400Preserved(t *testing.T) {
 	require.Equal(t, "1", req.Env["-p 9400:9400"])
 }
 
-// TestBuildPrimaryCreateRequest_RejectsEmptyWhisperSHA — reviews #6
-// fail-fast: empty PRIMARY_WHISPER_WEIGHTS_SHA256 must return
-// ErrMissingWhisperSHA and a zero CreateRequest.
-func TestBuildPrimaryCreateRequest_RejectsEmptyWhisperSHA(t *testing.T) {
-	c := cfgWithDefaults()
-	c.PrimaryWhisperWeightsSHA256 = ""
-	r := newReconcilerWith(c)
-	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
-
-	require.ErrorIs(t, err, ErrMissingWhisperSHA)
-	require.Equal(t, vast.CreateRequest{}, req)
-}
+// Phase 11.1 D-A4: TestBuildPrimaryCreateRequest_RejectsEmptyWhisperSHA
+// removed — PRIMARY_WHISPER_WEIGHTS_* fields no longer exist (STT shrunk
+// to tier-1-only).
 
 // TestBuildPrimaryCreateRequest_RejectsEmptyBGEM3SHA — reviews #6
 // fail-fast: empty PRIMARY_BGEM3_WEIGHTS_SHA256 must return
@@ -493,12 +481,13 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
 }
 
-// TestSupervisordConf_4ProgramBlocks — Task 1 structural assertion on
-// pod/primary/supervisord.conf: nodaemon=true + exactly 4 [program:*]
-// blocks (llama, speaches, chatterbox, dcgm) + --jinja flag on llama,
-// no --chat-template-file (B1 embedded LOCKED). Phase 06.7 D-03: infinity
-// embed child removed (relocated to 24/7 CPU host); chatterbox TTS added.
-func TestSupervisordConf_4ProgramBlocks(t *testing.T) {
+// TestSupervisordConf_3ProgramBlocks — Task 1 structural assertion on
+// pod/primary/supervisord.conf: nodaemon=true + exactly 3 [program:*]
+// blocks (llama, chatterbox, dcgm) + --jinja flag on llama, no
+// --chat-template-file (B1 embedded LOCKED). Phase 06.7 D-03: infinity
+// embed child removed; Phase 11.1 D-A4: speaches STT child removed
+// (tier-0 STT shrunk to tier-1-only).
+func TestSupervisordConf_3ProgramBlocks(t *testing.T) {
 	confPath := filepath.Join(repoRoot(t), "pod", "primary", "supervisord.conf")
 	data, err := os.ReadFile(confPath)
 	require.NoError(t, err, "supervisord.conf must exist at %s", confPath)
@@ -506,11 +495,20 @@ func TestSupervisordConf_4ProgramBlocks(t *testing.T) {
 
 	require.Contains(t, src, "[supervisord]", "must declare [supervisord] section")
 	require.Contains(t, src, "nodaemon=true", "PID 1 invariant")
-	require.Contains(t, src, "[program:llama]")
-	require.Contains(t, src, "[program:speaches]")
-	require.Contains(t, src, "[program:chatterbox]", "Phase 06.7 D-05: Chatterbox TTS 5th child (infinity embed removed per D-03)")
-	require.NotContains(t, src, "[program:infinity]", "Phase 06.7 D-03: infinity embed relocated off the pod")
-	require.Contains(t, src, "[program:dcgm]")
+	// Active [program:*] blocks live on lines that start with the literal
+	// `[program:` token (no leading `; ` comment marker). The narrative
+	// header may mention removed programs in prose, so use a line-anchored
+	// regex to count only live config blocks.
+	progRe := regexp.MustCompile(`(?m)^\[program:([a-z0-9_-]+)\]`)
+	activePrograms := map[string]bool{}
+	for _, m := range progRe.FindAllStringSubmatch(src, -1) {
+		activePrograms[m[1]] = true
+	}
+	require.True(t, activePrograms["llama"], "must have [program:llama]")
+	require.False(t, activePrograms["speaches"], "Phase 11.1 D-A4: [program:speaches] STT child must be removed (tier-0 STT shrunk to tier-1-only)")
+	require.True(t, activePrograms["chatterbox"], "Phase 06.7 D-05: must have [program:chatterbox] TTS child")
+	require.False(t, activePrograms["infinity"], "Phase 06.7 D-03: [program:infinity] embed must be removed (relocated off the pod)")
+	require.True(t, activePrograms["dcgm"], "must have [program:dcgm]")
 	require.Contains(t, src, "--jinja", "llama command must include --jinja (B1 embedded LOCKED)")
 	require.NotContains(t, src, "--chat-template-file", "B1 embedded LOCKED: no --chat-template-file flag")
 
@@ -518,14 +516,12 @@ func TestSupervisordConf_4ProgramBlocks(t *testing.T) {
 }
 
 // TestDockerfile_HybridStages — Task 1 structural assertion on
-// pod/primary/Dockerfile (revised post-build empirical fix): exactly 2
-// SHA-pinned FROM stages remain (dcgm-stage + final llama.cpp b9191).
-// Speaches and Infinity are installed via pip in the final stage because
-// (a) speaches has no /app dir + only ships container images (not PyPI),
-// and (b) Python venvs cannot be relocated via multi-stage COPY without
-// breaking absolute paths baked into shebangs + pyvenv.cfg + dist-info
-// RECORD manifests. SHA-pin invariant is preserved for the runtime-
-// critical llama.cpp b9191 (Qwen3.6 SSM tensor support — non-substitutable).
+// pod/primary/Dockerfile: exactly 2 SHA-pinned FROM stages remain
+// (dcgm-stage + final llama.cpp b9191). Phase 11.1 D-A4: Speaches
+// venv removed (tier-0 STT shrunk to tier-1-only); Phase 06.7 D-03:
+// Infinity venv removed (embed relocated off-pod). SHA-pin invariant
+// preserved for runtime-critical llama.cpp b9191 (Qwen3.6 SSM tensor
+// support — non-substitutable).
 func TestDockerfile_HybridStages(t *testing.T) {
 	dockerfilePath := filepath.Join(repoRoot(t), "pod", "primary", "Dockerfile")
 	data, err := os.ReadFile(dockerfilePath)
@@ -541,10 +537,10 @@ func TestDockerfile_HybridStages(t *testing.T) {
 	require.Contains(t, src, "COPY --from=dcgm-stage")
 	require.Regexp(t, regexp.MustCompile(`(?s)apt-get\s+install.*supervisor`), src,
 		"final stage must install supervisor via apt-get")
-	require.Regexp(t, regexp.MustCompile(`(?s)pip\s+install.*speaches`), src,
-		"final stage must install Speaches via pip (git+https github tarball — speaches not on PyPI)")
-	require.Regexp(t, regexp.MustCompile(`(?s)pip\s+install.*infinity-emb`), src,
-		"final stage must install Infinity via pip (PyPI infinity-emb[all]==0.0.77)")
+	require.NotRegexp(t, regexp.MustCompile(`(?s)pip\s+install.*speaches`), src,
+		"Phase 11.1 D-A4: speaches venv must NOT be installed (tier-0 STT shrunk to tier-1-only)")
+	require.NotRegexp(t, regexp.MustCompile(`(?s)pip\s+install.*infinity-emb`), src,
+		"Phase 06.7 D-03 / 11.1: infinity venv must NOT be installed (embed off-pod)")
 }
 
 // TestPrimaryLlamaArgsDefault_NoChatTemplateFile — Wave 0 Decision 3

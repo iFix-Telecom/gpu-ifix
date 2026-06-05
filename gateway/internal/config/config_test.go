@@ -810,8 +810,7 @@ var phase6_6OptionalEnv = []string{
 	"PRIMARY_QWEN_JINJA_KEY",
 	"PRIMARY_QWEN_JINJA_SHA256",
 	"PRIMARY_LLAMA_ARGS",
-	"PRIMARY_WHISPER_WEIGHTS_KEY",
-	"PRIMARY_WHISPER_WEIGHTS_SHA256",
+	// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed.
 	"PRIMARY_BGEM3_WEIGHTS_KEY",
 	"PRIMARY_BGEM3_WEIGHTS_SHA256",
 	"PRIMARY_VAST_PRICE_CAP_DPH",
@@ -890,12 +889,10 @@ func TestConfig_PrimaryPod_DefaultsLoaded(t *testing.T) {
 		t.Errorf("PrimaryProvisionColdStartBudgetSeconds = %d, want 2400 (WAVE0-GATES Decision 6 40min budget)", cfg.PrimaryProvisionColdStartBudgetSeconds)
 	}
 
-	// FAIL-FAST policy per reviews consensus action #6 — Whisper/BGE SHA
-	// have NO envOr default; empty passthrough so Plan 06.6-04
-	// buildPrimaryCreateRequest rejects at build time.
-	if cfg.PrimaryWhisperWeightsSHA256 != "" {
-		t.Errorf("PrimaryWhisperWeightsSHA256 default = %q, want empty (reviews #6 fail-fast policy)", cfg.PrimaryWhisperWeightsSHA256)
-	}
+	// FAIL-FAST policy per reviews consensus action #6 — BGE-M3 SHA has
+	// NO envOr default; empty passthrough so Plan 06.6-04
+	// buildPrimaryCreateRequest rejects at build time. (Phase 11.1 D-A4:
+	// PrimaryWhisperWeightsSHA256 removed — STT shrunk to tier-1-only.)
 	if cfg.PrimaryBGEM3WeightsSHA256 != "" {
 		t.Errorf("PrimaryBGEM3WeightsSHA256 default = %q, want empty (reviews #6 fail-fast policy)", cfg.PrimaryBGEM3WeightsSHA256)
 	}
@@ -918,9 +915,7 @@ func TestConfig_PrimaryPod_DefaultsLoaded(t *testing.T) {
 	if cfg.PrimaryLlamaArgs != nil {
 		t.Errorf("PrimaryLlamaArgs default = %v, want nil (empty CSV → lifecycle.go uses const)", cfg.PrimaryLlamaArgs)
 	}
-	if cfg.PrimaryWhisperWeightsKey != "whisper-large-v3/v1.0.0/model.tar.gz" {
-		t.Errorf("PrimaryWhisperWeightsKey = %q, want whisper-large-v3/v1.0.0/model.tar.gz", cfg.PrimaryWhisperWeightsKey)
-	}
+	// Phase 11.1 D-A4: PrimaryWhisperWeightsKey removed.
 	if cfg.PrimaryBGEM3WeightsKey != "bge-m3/v1.0.0/model.tar.gz" {
 		t.Errorf("PrimaryBGEM3WeightsKey = %q, want bge-m3/v1.0.0/model.tar.gz", cfg.PrimaryBGEM3WeightsKey)
 	}
@@ -985,27 +980,13 @@ func TestConfig_PrimaryPod_DaysCSVParse(t *testing.T) {
 	}
 }
 
-// TestConfig_PrimaryPod_WhisperSHANoDefault enforces reviews consensus
-// action #6 — fail-fast SHA policy. Operator MUST set the env explicitly;
-// Plan 06.6-04 buildPrimaryCreateRequest rejects empty values.
-func TestConfig_PrimaryPod_WhisperSHANoDefault(t *testing.T) {
-	clearAll(t)
-	clearPhase3(t)
-	clearPhase4(t)
-	clearPhase6(t)
-	clearPhase6_6(t)
-	setAllRequired(t)
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if cfg.PrimaryWhisperWeightsSHA256 != "" {
-		t.Errorf("PrimaryWhisperWeightsSHA256 = %q, want empty (reviews #6 fail-fast — operator must set explicitly)", cfg.PrimaryWhisperWeightsSHA256)
-	}
-}
+// Phase 11.1 D-A4: TestConfig_PrimaryPod_WhisperSHANoDefault removed —
+// PRIMARY_WHISPER_WEIGHTS_* fields no longer exist (STT shrunk to
+// tier-1-only).
 
-// TestConfig_PrimaryPod_BGEM3SHANoDefault — same fail-fast policy as
-// TestConfig_PrimaryPod_WhisperSHANoDefault for BGE-M3 embedding weights.
+// TestConfig_PrimaryPod_BGEM3SHANoDefault — fail-fast policy per reviews
+// consensus action #6 for BGE-M3 embedding weights: operator MUST set the
+// env explicitly; Plan 06.6-04 buildPrimaryCreateRequest rejects empty values.
 func TestConfig_PrimaryPod_BGEM3SHANoDefault(t *testing.T) {
 	clearAll(t)
 	clearPhase3(t)

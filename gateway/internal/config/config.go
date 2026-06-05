@@ -187,10 +187,9 @@ type Config struct {
 	PrimaryQwenJinjaKey                    string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
 	PrimaryQwenJinjaSHA256                 string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
 	PrimaryLlamaArgs                       []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
-	PrimaryWhisperWeightsKey               string   // PRIMARY_WHISPER_WEIGHTS_KEY (MinIO; default whisper-large-v3/v1.0.0/model.tar.gz)
-	PrimaryWhisperWeightsSHA256            string   // PRIMARY_WHISPER_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — Plan 06.6-04 buildPrimaryCreateRequest REJECTS empty value at build time with ErrMissingWhisperSHA; operator MUST set this env before deploy)
+	// Phase 11.1 D-A4: PrimaryWhisperWeightsKey/SHA256 removed — tier-0 STT shrunk to tier-1-only.
 	PrimaryBGEM3WeightsKey                 string   // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
-	PrimaryBGEM3WeightsSHA256              string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above)
+	PrimaryBGEM3WeightsSHA256              string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
 	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 2.20; RTX 5090 EU cap — UAT 17 2026-05-19 picked 5090 32 GB to fit Qwen 27B + bge-m3 + KV cache + whisper-large-v3 GPU (~26 GB workload; 4090 24 GB hit CUDA OOM UAT 16); EU 5090 inventory cheapest ~$2.00/h Spain ES; epsilon comparison cap+0.0001 per Pitfall 5)
 	PrimaryVastMachineBlocklist            []int64  // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
 	PrimaryVastMachineAllowlist            []int64  // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
@@ -226,8 +225,7 @@ type Config struct {
 	MinioSecretKey       string // MINIO_SECRET_KEY
 	WeightsQwenKey       string // WEIGHTS_QWEN_KEY     (MinIO object path)
 	WeightsQwenSHA256    string // WEIGHTS_QWEN_SHA256
-	WeightsWhisperKey    string // WEIGHTS_WHISPER_KEY
-	WeightsWhisperSHA256 string // WEIGHTS_WHISPER_SHA256
+	// Phase 11.1 D-A4: WeightsWhisper* removed — STT shrunk to tier-1-only.
 	WeightsBGEM3Key      string // WEIGHTS_BGE_M3_KEY
 	WeightsBGEM3SHA256   string // WEIGHTS_BGE_M3_SHA256
 
@@ -412,11 +410,9 @@ func Load() (Config, error) {
 		PrimaryQwenJinjaKey:      envOr("PRIMARY_QWEN_JINJA_KEY", ""),
 		PrimaryQwenJinjaSHA256:   envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
 		PrimaryLlamaArgs:         csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
-		PrimaryWhisperWeightsKey: envOr("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-large-v3/v1.0.0/model.tar.gz"),
-		// FAIL-FAST policy per reviews consensus action #6 — Plan 06.6-04 buildPrimaryCreateRequest REJECTS empty value at build time with ErrMissingWhisperSHA. No envOr default; empty passthrough.
-		PrimaryWhisperWeightsSHA256: os.Getenv("PRIMARY_WHISPER_WEIGHTS_SHA256"),
+		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
 		PrimaryBGEM3WeightsKey:      envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
-		// FAIL-FAST policy per reviews consensus action #6 — same as Whisper SHA above.
+		// FAIL-FAST policy per reviews consensus action #6 — no envOr default; empty passthrough so buildPrimaryCreateRequest rejects at build time.
 		PrimaryBGEM3WeightsSHA256:              os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
 		PrimaryVastPriceCapDPH:                 floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 2.20),
 		PrimaryVastMachineBlocklist:            parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
@@ -450,8 +446,7 @@ func Load() (Config, error) {
 		MinioSecretKey:       os.Getenv("MINIO_SECRET_KEY"),
 		WeightsQwenKey:       envOr("WEIGHTS_QWEN_KEY", "qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf"),
 		WeightsQwenSHA256:    os.Getenv("WEIGHTS_QWEN_SHA256"),
-		WeightsWhisperKey:    envOr("WEIGHTS_WHISPER_KEY", "whisper-large-v3/v1.0.0/model.tar.gz"),
-		WeightsWhisperSHA256: os.Getenv("WEIGHTS_WHISPER_SHA256"),
+		// Phase 11.1 D-A4: WEIGHTS_WHISPER_* removed (STT shrunk to tier-1-only).
 		WeightsBGEM3Key:      envOr("WEIGHTS_BGE_M3_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		WeightsBGEM3SHA256:   os.Getenv("WEIGHTS_BGE_M3_SHA256"),
 

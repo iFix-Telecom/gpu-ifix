@@ -83,9 +83,7 @@ var (
 	ErrMissingQwenSHA = errors.New(
 		"primary: PRIMARY_QWEN_WEIGHTS_SHA256 is empty — refusing to build pod request",
 	)
-	ErrMissingWhisperSHA = errors.New(
-		"primary: PRIMARY_WHISPER_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
-	)
+	// Phase 11.1 D-A4: ErrMissingWhisperSHA removed (STT shrunk to tier-1-only).
 	ErrMissingBGEM3SHA = errors.New(
 		"primary: PRIMARY_BGEM3_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
@@ -299,9 +297,7 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	if cfg.PrimaryQwenWeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingQwenSHA
 	}
-	if cfg.PrimaryWhisperWeightsSHA256 == "" {
-		return vast.CreateRequest{}, ErrMissingWhisperSHA
-	}
+	// Phase 11.1 D-A4: whisper SHA gate removed.
 	if cfg.PrimaryBGEM3WeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingBGEM3SHA
 	}
@@ -340,12 +336,11 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// sha256s drive in-pod sha256sum -c verify (T-06.6-02
 		// mitigation). All 3 SHA256s are guaranteed non-empty here
 		// because the precondition gate above bails out otherwise.
-		"PRIMARY_QWEN_WEIGHTS_KEY":       cfg.PrimaryQwenWeightsKey,
-		"PRIMARY_QWEN_WEIGHTS_SHA256":    cfg.PrimaryQwenWeightsSHA256,
-		"PRIMARY_WHISPER_WEIGHTS_KEY":    cfg.PrimaryWhisperWeightsKey,
-		"PRIMARY_WHISPER_WEIGHTS_SHA256": cfg.PrimaryWhisperWeightsSHA256,
-		"PRIMARY_BGEM3_WEIGHTS_KEY":      cfg.PrimaryBGEM3WeightsKey,
-		"PRIMARY_BGEM3_WEIGHTS_SHA256":   cfg.PrimaryBGEM3WeightsSHA256,
+		"PRIMARY_QWEN_WEIGHTS_KEY":     cfg.PrimaryQwenWeightsKey,
+		"PRIMARY_QWEN_WEIGHTS_SHA256":  cfg.PrimaryQwenWeightsSHA256,
+		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
+		"PRIMARY_BGEM3_WEIGHTS_KEY":    cfg.PrimaryBGEM3WeightsKey,
+		"PRIMARY_BGEM3_WEIGHTS_SHA256": cfg.PrimaryBGEM3WeightsSHA256,
 	}
 
 	if cfg.PrimaryQwenJinjaKey != "" {
