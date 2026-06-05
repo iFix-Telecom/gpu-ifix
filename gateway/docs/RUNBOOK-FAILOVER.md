@@ -16,12 +16,12 @@ the diagnose → mitigate → verify cycle below.
 
 ## Mental Model (30 seconds)
 
-The gateway has 6 upstreams, one tier-0 + one tier-1 per inference role:
+The gateway has 5 upstreams (Phase 11.1 shrunk STT to tier-1 only):
 
 | Role  | tier-0 (primary) | tier-1 (fallback) | Model contract                      |
 |-------|------------------|-------------------|-------------------------------------|
 | LLM   | `local-llm`      | `openrouter-chat` | Qwen 3.5 27B (local llama.cpp ↔ OpenRouter via Novita) |
-| STT   | `local-stt`      | `openai-whisper`  | local Speaches ↔ OpenAI `whisper-1`                    |
+| STT   | _(none)_         | `openai-whisper`  | OpenAI `whisper-1` (no local fallback — STT tier-0 removed in Phase 11.1) |
 | EMBED | `local-embed`    | `openai-embed`    | local Infinity (BGE-M3) ↔ OpenAI `text-embedding-3-small` (`dimensions=1024`) |
 
 Each upstream has an in-process circuit breaker (`sony/gobreaker/v2`):
@@ -212,8 +212,11 @@ spend cap.
 
 ### Symptom 3 — Sensitive tenant reports 503s during normal load
 
-**Likely cause:** `local-llm` (or `local-stt` / `local-embed`) breaker is
-OPEN and the sensitive 4s retry budget exhausted (D-B1).
+**Likely cause:** `local-llm` (or `local-embed`) breaker is
+OPEN and the sensitive 4s retry budget exhausted (D-B1). (Phase 11.1
+note: STT no longer has a tier-0 — `openai-whisper` tier-1 is the only
+STT upstream, and sensitive tenants never route to OpenAI per RES-08, so
+STT sensitive requests fail-fast at the gateway regardless of breaker state.)
 
 **Verify:**
 
@@ -237,7 +240,7 @@ sensitive content even on failure.
   MUST NOT cross our trust boundary into OpenAI/OpenRouter, even during
   primary outages. There is no override.
 - Recover the relevant tier-0 (Symptom 1 runbook for `local-llm`; the
-  same shape applies to `local-stt` and `local-embed`).
+  same shape applies to `local-embed`).
 - After recovery, `Retry-After: 30` means client apps can replay the
   same request safely (the gateway honors idempotency keys per Phase 2
   D-C contract).
@@ -393,8 +396,8 @@ gateway container (referenced by row entries in
 | Var                                         | Required | Purpose                                                                                  |
 |---------------------------------------------|----------|------------------------------------------------------------------------------------------|
 | `UPSTREAM_LLM_URL`                          | yes      | Local llama-server `:8000` URL (tier-0 LLM)                                              |
-| `UPSTREAM_STT_URL`                          | yes      | Local Speaches `:8001` URL (tier-0 STT)                                                  |
 | `UPSTREAM_EMBED_URL`                        | yes      | Local Infinity `:8002` URL (tier-0 EMBED)                                                |
+| ~~`UPSTREAM_STT_URL`~~                      | _removed_ | _Phase 11.1: local STT removed; speech-to-text now resolves only via `UPSTREAM_STT_OPENAI_*`._ |
 | `UPSTREAM_LLM_OPENROUTER_URL`               | for chat fallback | `https://openrouter.ai/api/v1`                                                  |
 | `UPSTREAM_LLM_OPENROUTER_AUTH_BEARER`       | for chat fallback | OpenRouter API key                                                              |
 | `UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER`    | no       | CSV; default **`novita`** (D-C1' amendment per `03-WAVE0-GATES.md` — Fireworks does NOT serve Qwen 3 family on OpenRouter as of 2026-04-20) |

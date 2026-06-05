@@ -1,6 +1,8 @@
 # Weights — MinIO Mirror
 
-Os weights do pod (~22 GB) NÃO vivem na imagem Docker (D-01). Eles são baixados na primeira boot de cada pod Vast.ai a partir de um bucket MinIO dedicado (D-02).
+Os weights do pod (~19 GB pós Phase 11.1) NÃO vivem na imagem Docker (D-01). Eles são baixados na primeira boot de cada pod Vast.ai a partir de um bucket MinIO dedicado (D-02).
+
+**Phase 11.1 (2026-06-04):** STT model removido (~3 GB economia + ~5 GB cold-start delta com cache). STT roda off-pod via tier-1 OpenAI (gateway fallback). Ver SEED-010 + phase 11.1 docs.
 
 ## Layout no bucket
 
@@ -9,8 +11,6 @@ Bucket: `ifix-ai-weights` (padrão — configurável via `MINIO_BUCKET`).
 ```
 qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf         (~17 GB)
 qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf.sha256  (sidecar — opcional)
-whisper-large-v3/v1.0.0/model.tar.gz         (~3 GB)
-whisper-large-v3/v1.0.0/model.tar.gz.sha256
 bge-m3/v1.0.0/model.tar.gz                   (~2 GB)
 bge-m3/v1.0.0/model.tar.gz.sha256
 ```
@@ -28,7 +28,7 @@ O segmento `v1.0.0` permite rollback de weights sem alterar a imagem Docker:
 SHA-256 de cada weight é verificado por `pod/scripts/download-weights.sh` (chamado pelo `pod/onstart.sh` a cada boot de pod).
 
 Os valores vivem em dois lugares:
-1. **GitHub Secrets** (`WEIGHTS_QWEN_SHA256`, `WEIGHTS_WHISPER_SHA256`, `WEIGHTS_BGE_M3_SHA256`) — fonte de verdade para smoke.yml
+1. **GitHub Secrets** (`WEIGHTS_QWEN_SHA256`, `WEIGHTS_BGE_M3_SHA256`) — fonte de verdade para smoke.yml
 2. **Sidecar `*.sha256`** no bucket — operator-side backup para conferência manual
 
 **Drift:** Se alguém subir um arquivo com o mesmo key path mas conteúdo diferente, o onstart.sh aborta com exit 3 (`download-weights.sh:3`). O pod nunca entra em rotação com weights tampered.
