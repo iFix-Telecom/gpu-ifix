@@ -26,10 +26,15 @@ func TestIntegration_05_ModelAlias(t *testing.T) {
 	// upstream NAME ('local-llm', 'openrouter-chat', ...), not the role tag
 	// ('llm','stt','embed'). Seeded rows after migration 0026: 3 tier-0
 	// (local-*) + 3 tier-1 (openrouter-chat / openai-whisper / openai-embed).
+	//
+	// Phase 11.1 (migration 0028): (whisper, local-stt) DELETEd — the tier-0
+	// Speaches/Whisper STT path leaves the pod (D-A4/D-A5). The
+	// (whisper, openai-whisper) → whisper-1 tier-1 row is PRESERVED so
+	// /v1/audio/transcriptions continues resolving via OpenAI directly.
+	// Remaining shape: 5 rows (2 tier-0 local-* + 3 tier-1).
 	cases := []struct{ alias, upstreamName, want string }{
-		// tier-0 (local pods)
+		// tier-0 (local pods) — STT removed in 11.1
 		{"qwen", "local-llm", "qwen"},
-		{"whisper", "local-stt", "Systran/faster-whisper-large-v3"},
 		{"bge-m3", "local-embed", "BAAI/bge-m3"},
 		// tier-1 (external providers; OpenRouter target updated to
 		// deepseek/deepseek-v4-flash:nitro by migration 0027 — alias=qwen
