@@ -50,7 +50,9 @@ func primaryTestCfg(t *testing.T) config.Config {
 	// Wave 0 LOCKED image digests + weights (parity lifecycle_test.go
 	// cfgWithDefaults).
 	cfg.PrimaryTemplateImage = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"
-	cfg.PrimarySpeachesImage = "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f"
+	// Phase 11.1 Plan 01: PrimarySpeachesImage struct field removed (Speaches
+	// binary leaving pod in 11.1-03+). Plan 01 forgot to update this helper —
+	// fixed inline per Rule 3 (build dependency for migration_0028_test.go).
 	cfg.PrimaryInfinityImage = "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"
 	cfg.PrimaryDCGMImage = "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"
 	cfg.PrimaryQwenWeightsKey = "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"

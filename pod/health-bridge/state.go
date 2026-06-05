@@ -22,7 +22,6 @@ const (
 // Upstream names as used in /health/{upstream} paths and state map keys.
 const (
 	UpstreamLLM   = "llm"
-	UpstreamSTT   = "stt"
 	UpstreamEmbed = "embed"
 )
 
@@ -55,14 +54,14 @@ type State struct {
 	startedAt time.Time
 }
 
-// NewState returns an initialized State with all three upstreams seeded at
-// StatusUnknown so /health responses include a deterministic shape even
-// before the first probe tick.
+// NewState returns an initialized State with all surviving upstreams seeded
+// at StatusUnknown so /health responses include a deterministic shape even
+// before the first probe tick. STT was removed in Phase 11.1 (SEED-010
+// Mudança 7) along with the :8001 Speaches listener.
 func NewState() *State {
 	return &State{
 		results: map[string]ProbeResult{
 			UpstreamLLM:   {Status: StatusUnknown},
-			UpstreamSTT:   {Status: StatusUnknown},
 			UpstreamEmbed: {Status: StatusUnknown},
 		},
 		startedAt: time.Now(),

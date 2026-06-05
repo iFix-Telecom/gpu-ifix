@@ -566,11 +566,17 @@ func main() {
 		log.Error("build embeddings proxy", "err", err)
 		os.Exit(2)
 	}
-	// Phase 06.9 R4: local-tier proxies pass-through — see comment above.
-	audioRP, err := proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
-	if err != nil {
-		log.Error("build audio proxy", "err", err)
-		os.Exit(2)
+	// Phase 11.1: local-stt tier-0 was removed (D-A4). audioRP is now built
+	// only when UPSTREAM_STT_URL is still set (transitional compat for stale
+	// .env files); otherwise the local-stt entry in sttRoleProxies is omitted
+	// and STT routes exclusively through the openai-whisper tier-1 fallback.
+	var audioRP http.Handler
+	if cfg.UpstreamSTTURL != "" {
+		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
+		if err != nil {
+			log.Error("build audio proxy", "err", err)
+			os.Exit(2)
+		}
 	}
 	// Phase 06.7 — tier-0 TTS proxy (POST /v1/audio/speech). UpstreamTTSURL is
 	// a placeholder the primary-pod reconciler overrides at runtime (D-11), so
@@ -658,13 +664,18 @@ func main() {
 		}
 	}
 	sttRoleProxies := map[string]http.Handler{
-		"local-stt": audioRP,
 		// Dynamic primary/emergency pod override (loader.Resolve → "emergency_pod_stt").
 		// Buffered (transcription is a single JSON body); no interceptors (parity with audioRP).
 		"emergency_pod_stt": proxy.NewDynamicOverrideProxy("stt",
 			func() (string, bool) { return loader.Tier0OverrideURL("stt") },
 			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
 			log),
+	}
+	// Phase 11.1: local-stt is registered ONLY if UPSTREAM_STT_URL still set
+	// (transitional compat). New deployments leave it unset and STT routes via
+	// the openai-whisper tier-1 fallback below.
+	if audioRP != nil {
+		sttRoleProxies["local-stt"] = audioRP
 	}
 	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
 		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log, resolver)

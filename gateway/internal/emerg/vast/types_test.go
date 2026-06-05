@@ -107,6 +107,55 @@ func TestDefaultSearchFilter_NumGPUs(t *testing.T) {
 	})
 }
 
+// TestDefaultSearchFilters covers the Phase 11.1 D-A6 primary+fallback
+// dispatch pair: DefaultSearchFilters returns a length-2 slice with the
+// primary filter at index 0 and the fallback filter at index 1; each
+// filter mirrors what DefaultSearchFilter would build for its own shape
+// (1×3090 @ $0.30 primary; 2×3090 @ $0.60 fallback), and both filters
+// carry the same blocklist verbatim.
+func TestDefaultSearchFilters(t *testing.T) {
+	const (
+		primaryCap     = 0.30
+		fallbackCap    = 0.60
+		primaryHost    = int64(99)
+		primaryGPU     = "RTX 3090"
+		fallbackGPU    = "RTX 3090"
+		primaryNumGPUs = 1
+		fallbackNumGPU = 2
+	)
+	blocklist := []int64{111, 222}
+	filters := DefaultSearchFilters(primaryCap, fallbackCap, primaryHost,
+		primaryGPU, fallbackGPU, primaryNumGPUs, fallbackNumGPU, blocklist...)
+
+	require.Len(t, filters, 2, "must return [primary, fallback]")
+
+	// Shape #0 (primary): 1×3090 @ $0.30 + epsilon (cap+0.0001 logic
+	// preserved by underlying DefaultSearchFilter).
+	primary := filters[0]
+	require.Equal(t, map[string]any{"eq": primaryGPU}, primary["gpu_name"])
+	require.Equal(t, map[string]any{"eq": primaryNumGPUs}, primary["num_gpus"])
+	require.Equal(t, map[string]any{"lte": primaryCap}, primary["dph_total"])
+
+	// Shape #1 (fallback): 2×3090 @ $0.60.
+	fallback := filters[1]
+	require.Equal(t, map[string]any{"eq": fallbackGPU}, fallback["gpu_name"])
+	require.Equal(t, map[string]any{"eq": fallbackNumGPU}, fallback["num_gpus"])
+	require.Equal(t, map[string]any{"lte": fallbackCap}, fallback["dph_total"])
+
+	// Both filters carry the same blocklist verbatim (regression: blocklist
+	// must propagate to every shape so a broken-CDI host blocked for the
+	// primary shape stays blocked for the fallback retry too).
+	for i, f := range filters {
+		mid, ok := f["machine_id"].(map[string]any)
+		require.True(t, ok, "shape %d must carry machine_id blocklist", i)
+		require.ElementsMatch(t, []any{int64(111), int64(222)}, mid["notin"],
+			"shape %d blocklist must include all blocked machine_ids", i)
+		hid, ok := f["host_id"].(map[string]any)
+		require.True(t, ok, "shape %d must carry primaryHostID exclusion", i)
+		require.Equal(t, primaryHost, hid["neq"])
+	}
+}
+
 // TestWithMachineAllowlist covers the PRIMARY_VAST_MACHINE_ALLOWLIST preference
 // pass: a non-empty allowlist sets machine_id:{in:[...]} (overwriting any
 // blocklist notin clause), an empty allowlist is a no-op, and the original

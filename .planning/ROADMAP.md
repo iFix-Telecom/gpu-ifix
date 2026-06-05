@@ -71,6 +71,22 @@ Plans:
 
 ---
 
+### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
+
+**Goal:** Shrink the primary pod by removing the Speaches/faster-whisper-large-v3 tier-0 STT service (workflow batch volume insufficient to justify GPU residency — tier-1 OpenAI whisper-1 absorbs all STT via existing fallback chain). Bundles Phase 06.7 D-03 Infinity venv dead-code rollback. Refactors PRIMARY_GPU_SHAPE to 1×RTX 3090 primary (cap $0.30/h) + 1×RTX 4090 fallback (cap $0.40/h), unlocking -50% Vast cost, -5GB cold-start weight download, -3-5GB VRAM, and 1-GPU footprint vs current 2×3090.
+**Requirements**: D-A1, D-A2, D-A3, D-A4, D-A5, D-A6, D-A7 (see 11.1-CONTEXT.md)
+**Depends on:** Phase 11 (closed passed_partial; D-A7 confirms deferred UATs do NOT block)
+**Plans:** 7/7 plans complete
+
+Plans:
+
+- [x] 11.1-01-PLAN.md — Wave 1: reconciler/lifecycle drop role=stt + Vast DefaultSearchFilters primary+fallback + config field rename + gatewayctl upstreamNameRole cleanup
+- [x] 11.1-02-PLAN.md — Wave 2: migration 0028 DELETE upstreams.local-stt + model_aliases (whisper, local-stt); restorative Down; integration test fixtures simplified
+- [x] 11.1-03-PLAN.md — Wave 3: pod Dockerfile drop speaches+Infinity venv stages + supervisord drop [program:speaches]+[program:infinity] + onstart.sh drop whisper tarball download
+- [x] 11.1-04-PLAN.md — Wave 3: pod health-bridge drop probeSTT/:8001 + scripts/integration-smoke prune tier-0 STT references
+- [x] 11.1-05-PLAN.md — Wave 4: pod .env.example + docker-compose.yml + READMEs + runbooks (FAILOVER/DEPLOY/PRIMARY-POD) updated; RUNBOOK-DEPLOY adds operator UPSTREAM_STT_URL removal task (T-11.1-02)
+- [x] 11.1-06-PLAN.md — Wave 5: Vast 3090+4090 fleet survey checkpoint (T-11.1-04) + cold-start UAT on 1×3090 + tier-1 STT live curl prod gateway + memory note primary-gpu-shape-11.1-final superseding 06.8-final
+
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
 **Goal:** Fix the gateway dispatcher → tier-1 fallback model-name rewriting gap so `POST /v1/chat/completions {"model":"qwen"}` against ai-gateway-dev (with primary pod down) returns a real OpenRouter Qwen 3.5 completion instead of the current HTTP 404 "Not Found" HTML. Wave 0 Gate A (Phase 03, 2026-04-20) defined `UPSTREAM_LLM_OPENROUTER_MODEL=qwen/qwen3.5-27b` as the env var operator must set; Plan 03-06 implementation never wired it. Bug masked through Phase 04-08 because integration tests use a fake upstream that accepts any model name + live UAT was always deferred. Also surfaced same-shape gaps for openai-whisper (`UPSTREAM_STT_OPENAI_MODEL`) and openai-embed (`UPSTREAM_EMBED_OPENAI_MODEL`) — verify and bundle. Reference fix-path = SEED-004 Option B (schema-driven `model_aliases` PK widened to `(alias, upstream_name)`). Per D-06: schema row is the default, env vars remain the per-instance escape hatch (env wins over schema when set) — both supported permanently.

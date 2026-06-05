@@ -24,12 +24,15 @@ import (
 // subsequent loader tests, which then see fewer rows than expected.
 func resetUpstreamsTable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
+	// Phase 11.1 (migration 0028): local-stt row DELETEd — only 5 upstreams
+	// remain (local-llm, openrouter-chat, openai-whisper, local-embed,
+	// openai-embed). The CASE arm for local-stt is harmless (no row matches)
+	// but documented as historical for clarity.
 	if _, err := pool.Exec(ctx, `UPDATE ai_gateway.upstreams
         SET enabled = TRUE,
             tier = CASE name
                 WHEN 'local-llm' THEN 0
                 WHEN 'openrouter-chat' THEN 1
-                WHEN 'local-stt' THEN 0
                 WHEN 'openai-whisper' THEN 1
                 WHEN 'local-embed' THEN 0
                 WHEN 'openai-embed' THEN 1
@@ -77,7 +80,12 @@ func clearUpstreamEnvs(t *testing.T) {
 	}
 }
 
-func TestIntegration_UpstreamsLoader_RefreshLoadsSixUpstreams(t *testing.T) {
+// Phase 11.1: was RefreshLoadsSixUpstreams — migration 0028 removed the
+// local-stt tier-0 row, leaving 5 upstreams. UPSTREAM_STT_URL setenv kept
+// for parity with operator .env shape (env var still exists in dev/prod
+// for the to-be-removed Speaches container; loader ignores unmatched env
+// vars). STT tier-0 Resolve assertion deleted — no row to find.
+func TestIntegration_UpstreamsLoader_RefreshLoadsFiveUpstreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	pool, _ := freshSchema(t, ctx)
@@ -85,7 +93,6 @@ func TestIntegration_UpstreamsLoader_RefreshLoadsSixUpstreams(t *testing.T) {
 
 	clearUpstreamEnvs(t)
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1")
 	t.Setenv("UPSTREAM_LLM_OPENROUTER_AUTH_BEARER", "or-test")
@@ -99,8 +106,8 @@ func TestIntegration_UpstreamsLoader_RefreshLoadsSixUpstreams(t *testing.T) {
 		t.Fatalf("NewLoader: %v", err)
 	}
 
-	if got := len(loader.All()); got != 6 {
-		t.Fatalf("All() = %d, want 6", got)
+	if got := len(loader.All()); got != 5 {
+		t.Fatalf("All() = %d, want 5 (post-0028: local-stt deleted)", got)
 	}
 
 	if u, ok := loader.Resolve("llm", 0); !ok {
@@ -125,8 +132,10 @@ func TestIntegration_UpstreamsLoader_RefreshLoadsSixUpstreams(t *testing.T) {
 		t.Errorf("Resolve(llm,1).AuthBearerEnv = %q, want UPSTREAM_LLM_OPENROUTER_AUTH_BEARER", u.AuthBearerEnv)
 	}
 
-	if u, ok := loader.Resolve("stt", 0); !ok || u.Name != "local-stt" {
-		t.Errorf("Resolve(stt,0) = %+v ok=%v", u, ok)
+	// Phase 11.1: Resolve(stt,0) intentionally NOT asserted — migration 0028
+	// removed the local-stt row. Resolve(stt,0) MUST return ok=false now.
+	if _, ok := loader.Resolve("stt", 0); ok {
+		t.Errorf("Resolve(stt,0) should return ok=false after migration 0028 (local-stt removed)")
 	}
 	if u, ok := loader.Resolve("stt", 1); !ok || u.Name != "openai-whisper" || u.AuthBearer != "oa-test" {
 		t.Errorf("Resolve(stt,1) = %+v ok=%v", u, ok)
@@ -148,8 +157,8 @@ func TestIntegration_UpstreamsLoader_RefreshLoadsSixUpstreams(t *testing.T) {
 
 	// Names returns sorted list
 	names := loader.Names()
-	if len(names) != 6 {
-		t.Errorf("Names() len = %d, want 6", len(names))
+	if len(names) != 5 {
+		t.Errorf("Names() len = %d, want 5 (post-0028)", len(names))
 	}
 	// Check sort order
 	for i := 1; i < len(names); i++ {
@@ -185,9 +194,10 @@ func TestIntegration_UpstreamsLoader_MissingURLEnvSkipsRow(t *testing.T) {
 	resetUpstreamsTable(t, ctx, pool)
 
 	clearUpstreamEnvs(t)
-	// Only set the three local URLs; externals MUST be skipped.
+	// Phase 11.1: only 2 local URLs seeded (local-llm + local-embed —
+	// local-stt row deleted by migration 0028). 3 tier-1 externals MUST be
+	// skipped due to missing url_env.
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 
 	loader, err := upstreams.NewLoader(ctx, pool, discardLogger())
@@ -195,8 +205,8 @@ func TestIntegration_UpstreamsLoader_MissingURLEnvSkipsRow(t *testing.T) {
 		t.Fatalf("NewLoader: %v", err)
 	}
 
-	if got := len(loader.All()); got != 3 {
-		t.Fatalf("All() = %d, want 3 (3 externals skipped due to missing url_env)", got)
+	if got := len(loader.All()); got != 2 {
+		t.Fatalf("All() = %d, want 2 (post-0028: local-llm + local-embed; 3 externals skipped)", got)
 	}
 
 	// Externals must NOT resolve.
@@ -228,8 +238,9 @@ func TestIntegration_UpstreamsLoader_MissingAuthBearerEnvKeepsRow(t *testing.T) 
 	resetUpstreamsTable(t, ctx, pool)
 
 	clearUpstreamEnvs(t)
+	// Phase 11.1: UPSTREAM_STT_URL setenv removed — local-stt row deleted
+	// by migration 0028. Total upstreams after seed: 5.
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1")
 	// NOT setting UPSTREAM_LLM_OPENROUTER_AUTH_BEARER — should warn but keep row.
@@ -243,8 +254,8 @@ func TestIntegration_UpstreamsLoader_MissingAuthBearerEnvKeepsRow(t *testing.T) 
 		t.Fatalf("NewLoader: %v", err)
 	}
 
-	if got := len(loader.All()); got != 6 {
-		t.Fatalf("All() = %d, want 6 (auth-bearer-missing row must be retained)", got)
+	if got := len(loader.All()); got != 5 {
+		t.Fatalf("All() = %d, want 5 (post-0028; auth-bearer-missing openrouter-chat row must be retained)", got)
 	}
 
 	u, ok := loader.Resolve("llm", 1)
@@ -271,8 +282,8 @@ func TestIntegration_UpstreamsLoader_AtomicSwapNoRace(t *testing.T) {
 	resetUpstreamsTable(t, ctx, pool)
 
 	clearUpstreamEnvs(t)
+	// Phase 11.1: UPSTREAM_STT_URL removed (local-stt deleted by 0028).
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 
 	loader, err := upstreams.NewLoader(ctx, pool, discardLogger())

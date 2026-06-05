@@ -263,6 +263,30 @@ func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string, nu
 	return f
 }
 
+// DefaultSearchFilters builds a [primary, fallback] SearchFilter pair per
+// Phase 11.1 D-A6. The reconciler iterates the pair and breaks on the
+// first non-empty offer list — primary shape preferred, fallback only when
+// the primary cap returns zero qualified offers.
+//
+// Defaults: primary = 1×RTX 3090 @ $0.30; fallback = 2×RTX 3090 @ $0.60
+// (same GPU model both shapes, single CDI/driver matrix; Wave 0
+// EVIDENCE-00 found 7 EU offers within the fallback cap).
+//
+// primaryNumGPUs / fallbackNumGPUs are SPLIT so the fallback shape can ask
+// for a different GPU-per-machine count than the primary (e.g. 1 primary →
+// 2 fallback). Both filters carry the same primaryHostID exclusion +
+// machineBlocklist, so the variadic blocklist parses identically.
+func DefaultSearchFilters(primaryCap, fallbackCap float64,
+	primaryHostID int64,
+	primaryGPU, fallbackGPU string,
+	primaryNumGPUs, fallbackNumGPUs int,
+	blocklist ...int64) []SearchFilter {
+	return []SearchFilter{
+		DefaultSearchFilter(primaryCap, primaryHostID, primaryGPU, primaryNumGPUs, blocklist...),
+		DefaultSearchFilter(fallbackCap, primaryHostID, fallbackGPU, fallbackNumGPUs, blocklist...),
+	}
+}
+
 // WithMachineAllowlist returns a shallow copy of f with the machine_id clause
 // REPLACED by `{in: allowlist}` — restricting the search to the preferred
 // machine_ids only. Used by the primary reconciler's allowlist-first pass
