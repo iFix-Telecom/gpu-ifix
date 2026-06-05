@@ -114,10 +114,13 @@ COPY pod/primary/supervisord.conf /etc/supervisor/conf.d/services.conf
 COPY pod/primary/chatterbox_server.py /opt/chatterbox-data/chatterbox_server.py
 
 # Pre-create runtime directories referenced by supervisord.conf + onstart.
-# /weights/* are mount-targets for aria2c-downloaded GGUF/tarball artifacts;
+# /weights/qwen is the mount-target for the aria2c-downloaded GGUF artifact;
 # /app/templates is the optional B2 Jinja fallback mount target (default
-# empty per WAVE0-GATES Decision 3 B1 embedded).
-RUN mkdir -p /var/log /weights/qwen /weights/bge-m3 /app/templates \
+# empty per WAVE0-GATES Decision 3 B1 embedded). Phase 11.1: /weights/bge-m3
+# pre-create removed — BGE-M3 embed is off-pod (Phase 06.7 D-03) and the
+# pod's onstart `mkdir -p` recreates the directory at runtime if a future
+# config re-enables on-pod BGE-M3 downloads.
+RUN mkdir -p /var/log /weights/qwen /app/templates \
         /opt/chatterbox-data/models /opt/chatterbox-data/voices
 
 # Disable inherited HEALTHCHECK from llama.cpp base (which curls :8080/health,
