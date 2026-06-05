@@ -12,13 +12,13 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 )
 
-// allRequired are the five env vars Load() insists on (Phase 3 MED-06:
-// UPSTREAM_HEALTH_BRIDGE_URL was demoted to optional — see config.go).
+// allRequired are the env vars Load() insists on (Phase 3 MED-06:
+// UPSTREAM_HEALTH_BRIDGE_URL was demoted to optional; Phase 11.1 D-A4:
+// UPSTREAM_STT_URL demoted to optional — tier-0 STT removed).
 var allRequired = []string{
 	"AI_GATEWAY_PG_DSN",
 	"AI_GATEWAY_REDIS_ADDR",
 	"UPSTREAM_LLM_URL",
-	"UPSTREAM_STT_URL",
 	"UPSTREAM_EMBED_URL",
 }
 
@@ -70,13 +70,13 @@ func TestLoad_MissingRequired(t *testing.T) {
 func TestLoad_MissingSingleVarNamedInError(t *testing.T) {
 	clearAll(t)
 	setAllRequired(t)
-	t.Setenv("UPSTREAM_STT_URL", "")
+	t.Setenv("UPSTREAM_LLM_URL", "")
 	_, err := config.Load()
 	if err == nil {
-		t.Fatalf("expected error when UPSTREAM_STT_URL unset")
+		t.Fatalf("expected error when UPSTREAM_LLM_URL unset")
 	}
-	if !strings.Contains(err.Error(), "UPSTREAM_STT_URL") {
-		t.Fatalf("expected error to mention UPSTREAM_STT_URL, got %q", err.Error())
+	if !strings.Contains(err.Error(), "UPSTREAM_LLM_URL") {
+		t.Fatalf("expected error to mention UPSTREAM_LLM_URL, got %q", err.Error())
 	}
 }
 
@@ -88,7 +88,7 @@ func TestLoad_AllRequiredPresent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.PGDSN == "" || cfg.RedisAddr == "" || cfg.UpstreamLLMURL == "" ||
-		cfg.UpstreamSTTURL == "" || cfg.UpstreamEmbedURL == "" {
+		cfg.UpstreamEmbedURL == "" {
 		t.Fatalf("expected populated required fields, got %+v", cfg)
 	}
 	// UpstreamHealthBridgeURL is optional since Phase 3 MED-06; not checked here.

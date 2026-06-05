@@ -43,7 +43,7 @@ type Config struct {
 
 	// Upstreams
 	UpstreamLLMURL          string // UPSTREAM_LLM_URL (required)
-	UpstreamSTTURL          string // UPSTREAM_STT_URL (required)
+	UpstreamSTTURL          string // UPSTREAM_STT_URL (Phase 11.1: optional/deprecated — tier-0 STT removed; kept transitionally for old .env compat, no longer wired in main.go when empty)
 	UpstreamEmbedURL        string // UPSTREAM_EMBED_URL (required)
 	UpstreamHealthBridgeURL string // UPSTREAM_HEALTH_BRIDGE_URL (optional — Phase 3 D-D4: health-bridge is a pod-internal debug surface, not required for gateway operation)
 
@@ -478,16 +478,18 @@ func Load() (Config, error) {
 		"AI_GATEWAY_PG_DSN",
 		"AI_GATEWAY_REDIS_ADDR",
 		"UPSTREAM_LLM_URL",
-		"UPSTREAM_STT_URL",
 		"UPSTREAM_EMBED_URL",
 	}
 	required := map[string]string{
 		"AI_GATEWAY_PG_DSN":     cfg.PGDSN,
 		"AI_GATEWAY_REDIS_ADDR": cfg.RedisAddr,
 		"UPSTREAM_LLM_URL":      cfg.UpstreamLLMURL,
-		"UPSTREAM_STT_URL":      cfg.UpstreamSTTURL,
 		"UPSTREAM_EMBED_URL":    cfg.UpstreamEmbedURL,
 	}
+	// Phase 11.1: UPSTREAM_STT_URL is no longer required — tier-0 STT was
+	// removed (D-A4). The struct field is preserved transitionally for
+	// operators with stale .env files; main.go skips wiring the local-stt
+	// proxy when the value is empty.
 	// UPSTREAM_HEALTH_BRIDGE_URL is now optional (Phase 3 D-D4 MED-06):
 	// the health-bridge is a pod-internal debug surface only; gateway
 	// routing uses upstreams.Loader + breaker.Set as the authority.
