@@ -125,11 +125,11 @@ func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 	urls := r.ActivePodURLs()
 	require.NotNil(t, urls, "ActivePodURLs() must be populated after markReady")
 
-	// 3-role OverrideTier0 + DCGM SetURL — Plan 06.6-06b contract.
+	// Phase 11.1: 2-role OverrideTier0 (llm/tts) — stt dropped, embed off-pod (D-03).
 	require.Eventually(t, func() bool {
-		return len(loader.Snapshot()) == 3
+		return len(loader.Snapshot()) == 2
 	}, 2*time.Second, 50*time.Millisecond,
-		"3 OverrideTier0 calls (llm/stt/tts) required for supervisord 4-services pod")
+		"2 OverrideTier0 calls (llm/tts) required post-shrink supervisord")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGM URL must point at the 9400 supervisord child's host port")
 }
@@ -291,10 +291,10 @@ func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testi
 	require.GreaterOrEqual(t, ttsProbeCount.Load(), int32(ttsRecoverAfter+1),
 		"TTS health probe must be retried at least %d times to observe autorestart", ttsRecoverAfter+1)
 
-	// 3-role tier-0 override + DCGM URL set — same contract as the
+	// Phase 11.1: 2-role tier-0 override (llm/tts) — same contract as the
 	// happy-path test, post-recovery.
 	require.Eventually(t, func() bool {
-		return len(loader.Snapshot()) == 3
+		return len(loader.Snapshot()) == 2
 	}, 2*time.Second, 50*time.Millisecond)
 	require.Contains(t, dcgm.Last(), ":33400/metrics")
 }

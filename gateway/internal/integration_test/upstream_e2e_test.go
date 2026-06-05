@@ -67,8 +67,9 @@ func TestIntegration_07_UpstreamHealth(t *testing.T) {
 		t.Errorf("baseline status = %v, want ok", env["status"])
 	}
 	ups, _ := env["upstreams"].(map[string]any)
-	if got := len(ups); got != 6 {
-		t.Errorf("upstreams count = %d, want 6", got)
+	// Phase 11.1: local-stt upstream removed by migration 0028 — 6 → 5.
+	if got := len(ups); got != 5 {
+		t.Errorf("upstreams count = %d, want 5", got)
 	}
 
 	// Trip the local-llm breaker. Per the cache TTL (2s), the next GET

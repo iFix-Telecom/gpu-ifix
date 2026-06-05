@@ -96,11 +96,11 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond,
 		"recoverOpenLifecycle must SetState(Ready, 'restart_recovery') for a healthy instance")
 
-	// 3-role OverrideTier0 fires.
+	// Phase 11.1: 2-role OverrideTier0 (llm/tts) — stt dropped, embed off-pod (D-03).
 	require.Eventually(t, func() bool {
-		return len(loader.Snapshot()) == 3
+		return len(loader.Snapshot()) == 2
 	}, 2*time.Second, 50*time.Millisecond,
-		"OverrideTier0 must fire 3x (llm/stt/tts) on recovery")
+		"OverrideTier0 must fire 2x (llm/tts) on recovery")
 	require.Equal(t, "http://203.0.113.7:33400/metrics", dcgm.Last(),
 		"DCGM URL must point at the recovered pod's :9400 mapping")
 
