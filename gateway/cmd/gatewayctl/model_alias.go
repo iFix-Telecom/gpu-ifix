@@ -80,13 +80,14 @@ const (
 // Why hardcoded: the role↔name mapping is part of the gateway's contract
 // with the runtime dispatcher (loader.go). Reading it from the upstreams
 // table at write time would add a second DB query per `set` call AND a
-// runtime dependency between two related-but-orthogonal tables. The
-// canonical 6 upstreams are stable; new entries are reviewed code
-// changes anyway.
+// runtime dependency between two related-but-orthogonal tables.
+//
+// Post-Phase-11.1: 5 canonical upstreams (local-stt removed — Whisper
+// deleted from the pod, `stt` role now served by tier-1 OpenAI-Whisper
+// static row only).
 var upstreamNameRole = map[string]string{
 	"local-llm":       "llm",
 	"openrouter-chat": "llm",
-	"local-stt":       "stt",
 	"openai-whisper":  "stt",
 	"local-embed":     "embed",
 	"openai-embed":    "embed",

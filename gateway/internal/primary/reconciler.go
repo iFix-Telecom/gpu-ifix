@@ -396,14 +396,16 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// (emerg/reconciler.go RestoreTier0) shares the SAME tier0Override map
 	// and unilaterally clears the slot the primary wrote in markReady. The
 	// primary only writes the slot once (markReady/recoverOpenLifecycle), so
-	// a cutback leaves llm/stt/tts routing to the stale static row until the
+	// a cutback leaves llm/tts routing to the stale static row until the
 	// next pod cycle. Re-assert any cleared dynamic slot here at 1Hz — the
 	// inconsistency window is <=1s. embed is EXCLUDED (D-03 — static off-pod
-	// row, immune to this vector). This runs regardless of DISABLED because
-	// an operator force-up pod is Ready under DISABLED and is just as
-	// vulnerable to an emerg cutback clearing its slot.
+	// row, immune to this vector); stt is EXCLUDED (Phase 11.1 D-A4 —
+	// Whisper deleted, stt is now tier-1 static OpenAI-Whisper only). This
+	// runs regardless of DISABLED because an operator force-up pod is Ready
+	// under DISABLED and is just as vulnerable to an emerg cutback clearing
+	// its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
-		for _, role := range []string{"llm", "stt", "tts"} {
+		for _, role := range []string{"llm", "tts"} {
 			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
 				r.deps.Loader.OverrideTier0(role, stripPrimaryReadinessSuffix(roleURL(*urls, role)))
 				log.Warn("primary re-asserted tier-0 override (emerg cleared it)", "role", role)
@@ -445,7 +447,6 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 	inflight := int64(0)
 	if r.deps.Inflight != nil {
 		inflight = r.deps.Inflight.Count("local-llm") +
-			r.deps.Inflight.Count("local-stt") +
 			r.deps.Inflight.Count("local-embed")
 	}
 
@@ -517,12 +518,12 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 		}
 	}
 
-	// RestoreTier0 for all 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
-	// BEFORE the FSM transition. New requests land on the fallback chain
-	// immediately; in-flight ones drain over the grace window.
+	// RestoreTier0 for the 2 dynamic roles (llm/tts — NOT embed, D-03;
+	// NOT stt post-Phase 11.1 D-A4) BEFORE the FSM transition. New requests
+	// land on the fallback chain immediately; in-flight ones drain over the
+	// grace window.
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
-		r.deps.Loader.RestoreTier0("stt")
 		r.deps.Loader.RestoreTier0("tts")
 	}
 
@@ -538,19 +539,14 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 }
 
 // markReady is the success exit of the provisioning poll loop. Marks the
-// DB row healthy, stores activePodURLs, overrides tier-0 for 3 roles,
-// points DCGM scraper at :9400/metrics, publishes primary_ready, and
-// transitions Provisioning→Ready.
-//
-// Plan 06.6-06b's 3-role OverrideTier0 extension is consumed here — when
-// the Plan 06.6-06b PR lands, this method continues to call OverrideTier0
-// for "llm" / "stt" / "embed" unchanged.
+// DB row healthy, stores activePodURLs, overrides tier-0 for 2 roles
+// (llm+tts post-Phase 11.1 D-A4), points DCGM scraper at :9400/metrics,
+// publishes primary_ready, and transitions Provisioning→Ready.
 func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls primaryPodURLs, acceptedDPH float64, log *slog.Logger) error {
 	if q := r.queries(); q != nil {
 		eventJSON := vastutil.MustEventJSON("health_pass", map[string]any{
 			"lifecycle_id": lifecycleID,
 			"llm_url":      urls.LLM,
-			"stt_url":      urls.STT,
 			"tts_url":      urls.TTS,
 			"dcgm_url":     urls.DCGM,
 			"dph":          acceptedDPH,
@@ -564,13 +560,14 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	}
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
-		// Phase 06.7 (D-03/D-11): the dynamic primary roster is llm/stt/tts
-		// — NOT embed (embed relocated to a 24/7 CPU host as a static tier-0
-		// row). We strip the readiness suffix here so the dispatcher's
+		// Phase 11.1 (D-A4): the dynamic primary roster is llm/tts — NOT
+		// embed (D-03, embed relocated to a 24/7 CPU host as a static tier-0
+		// row), NOT stt (D-A4, Whisper deleted from pod; /v1/audio/
+		// transcriptions routes to tier-1 OpenAI-Whisper static row only).
+		// We strip the readiness suffix here so the dispatcher's
 		// ReverseProxy target is the BASE URL (parity emerg markHealthy /
 		// stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
 		// is atomic and Live; Refresh would re-scan the DB which is
@@ -636,7 +633,6 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 	}
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
-		r.deps.Loader.RestoreTier0("stt")
 		r.deps.Loader.RestoreTier0("tts")
 	}
 	if r.deps.DCGMScraper != nil {
@@ -766,46 +762,70 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_vast_client", 0)
 		return errors.New("primary: no Vast.ai client wired")
 	}
-	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID, r.cfg.PrimaryGPUName, r.cfg.PrimaryNumGPUs, r.cfg.PrimaryVastMachineBlocklist...)
-	// No geolocation restriction (operator decision 2026-05-21): the EU-only
-	// allowlist (added UAT 2026-05-18 to keep MinIO/Hetzner-DE weight transfer
-	// in-continent) left the cheapest qualifying 5090s (e.g. CA/CZ/US at ~$0.32/h
-	// vs ~$2/h EU) unreachable. The inet_down>=500 Mbps gate in DefaultSearchFilter
-	// still guards transfer bandwidth; cross-continent weight fetch fits inside the
-	// 2400s coldstart budget.
-	//
-	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass. When
-	// set, search the preferred known-good hosts first; broaden to the full
-	// qualified search only when they are unavailable. Vast is a spot marketplace
-	// (no reservation), so a hard allowlist would block provisioning whenever the
-	// host is busy — the broaden-fallback keeps cheap-marketplace economics while
-	// still preferring trusted hosts.
+	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
+	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
+	// $0.30), fallback shape only when the primary cap returns zero
+	// qualified offers (2×3090 @ $0.60; same GPU model, deeper EU pool).
+	filters := vast.DefaultSearchFilters(
+		r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback,
+		r.cfg.PrimaryHostID,
+		r.cfg.PrimaryVastGPUNamePrimary, r.cfg.PrimaryVastGPUNameFallback,
+		r.cfg.PrimaryVastNumGPUsPrimary, r.cfg.PrimaryVastNumGPUsFallback,
+		r.cfg.PrimaryVastMachineBlocklist...,
+	)
+	// shapeCaps mirrors the filter pair so vastutil.FilterBelowCap can
+	// re-apply the per-shape ceiling client-side (epsilon-tolerant; UAT 17
+	// 2026-05-19 Vast inventory race regression).
+	shapeCaps := []float64{r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback}
+
+	// No geolocation restriction (operator decision 2026-05-21).
+	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass on
+	// the PRIMARY shape only — known-good 1×3090 hosts first; broaden to
+	// the full qualified PRIMARY search when allowlisted hosts are busy;
+	// then iterate the FALLBACK shape if PRIMARY is exhausted.
 	var pickable []vast.Offer
+	var pickedShape int
+
 	if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
-		allowFilter := vast.WithMachineAllowlist(filter, r.cfg.PrimaryVastMachineAllowlist)
+		allowFilter := vast.WithMachineAllowlist(filters[0], r.cfg.PrimaryVastMachineAllowlist)
 		offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
 		if err != nil {
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 			return err
 		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
+		pickable = vastutil.FilterBelowCap(offers, shapeCaps[0])
 		if len(pickable) == 0 {
 			log.Info("primary allowlist exhausted; broadening to full qualified search",
-				"allowlist", r.cfg.PrimaryVastMachineAllowlist)
+				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", 0)
 		}
 	}
+
 	if len(pickable) == 0 {
-		offers, err := r.deps.Vast.SearchOffers(ctx, filter)
-		if err != nil {
-			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
-			return err
+		for i, f := range filters {
+			offers, err := r.deps.Vast.SearchOffers(ctx, f)
+			if err != nil {
+				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
+				return err
+			}
+			candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
+			if len(candidates) > 0 {
+				pickable = candidates
+				pickedShape = i
+				log.Info("primary offers found for shape",
+					"shape", i, "offer_count", len(candidates),
+					"cap", shapeCaps[i])
+				break
+			}
+			log.Info("primary shape returned no qualified offers; trying next",
+				"shape", i, "cap", shapeCaps[i])
 		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
 	}
+
 	if len(pickable) == 0 {
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_offers_below_cap", 0)
-		return errors.New("primary: no offers below cap")
+		return errors.New("primary: no offers below cap (both shapes exhausted)")
 	}
+	_ = pickedShape // logged above; reserved for future per-shape metrics.
 	offer := pickable[0]
 	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
 	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the
@@ -966,20 +986,18 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Ports not fully mapped yet — keep polling. W6 fix parity.
 				continue
 			}
-			// 4-endpoint health check inside ONE container's namespace
-			// (Wave 0 supervisord 4-services: llm/stt/tts/dcgm — embed left
-			// the pod per D-03). All 4 must pass.
+			// 3-endpoint health check inside ONE container's namespace
+			// (Phase 11.1 supervisord 3-services: llm/tts/dcgm — embed
+			// left the pod per D-03; stt left the pod per Phase 11.1 D-A4
+			// Whisper delete). All 3 must pass.
 			if r.deps.HealthCheck == nil {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.LLM) {
-				continue
-			}
-			if !r.deps.HealthCheck(ctx, urls.STT) {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.TTS) {
@@ -1004,7 +1022,6 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 	return primaryPodURLs{
 		LLM:  r.podLLMURL(inst),
-		STT:  r.podSTTURL(inst),
 		TTS:  r.podTTSURL(inst),
 		DCGM: r.podDCGMURL(inst),
 	}
@@ -1065,7 +1082,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		return nil
 	}
 	urls := r.buildPodURLs(inst)
-	if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
+	if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
 		r.deps.Log.Warn("primary recover: pod ports not fully mapped; closing as unhealthy orphan",
 			"lifecycle_id", open.ID)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
@@ -1078,10 +1095,9 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	}
 	if r.deps.HealthCheck == nil ||
 		!r.deps.HealthCheck(ctx, urls.LLM) ||
-		!r.deps.HealthCheck(ctx, urls.STT) ||
 		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
-		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
+		r.deps.Log.Warn("primary recover: 3-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
@@ -1098,7 +1114,6 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 	}
 	if r.deps.DCGMScraper != nil {

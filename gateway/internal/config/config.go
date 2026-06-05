@@ -180,7 +180,6 @@ type Config struct {
 	// image (Plan 06.6-04 pod/primary/Dockerfile + supervisord.conf —
 	// implementation detail, not user-facing env).
 	PrimaryTemplateImage                   string   // PRIMARY_TEMPLATE_IMAGE (default llama.cpp:server-cuda-b9191 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage FROM base)
-	PrimarySpeachesImage                   string   // PRIMARY_SPEACHES_IMAGE (default speaches:0.9.0-rc.3-cuda-12.6.3 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
 	PrimaryInfinityImage                   string   // PRIMARY_INFINITY_IMAGE (default infinity:0.0.77 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
 	PrimaryDCGMImage                       string   // PRIMARY_DCGM_IMAGE (default dcgm-exporter:4.5.3-4.8.2-distroless SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
 	PrimaryQwenWeightsKey                  string   // PRIMARY_QWEN_WEIGHTS_KEY (MinIO object key; default qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf — CONTEXT.md D-04)
@@ -195,8 +194,19 @@ type Config struct {
 	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (default 2.20; RTX 5090 EU cap — UAT 17 2026-05-19 picked 5090 32 GB to fit Qwen 27B + bge-m3 + KV cache + whisper-large-v3 GPU (~26 GB workload; 4090 24 GB hit CUDA OOM UAT 16); EU 5090 inventory cheapest ~$2.00/h Spain ES; epsilon comparison cap+0.0001 per Pitfall 5)
 	PrimaryVastMachineBlocklist            []int64  // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
 	PrimaryVastMachineAllowlist            []int64  // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
-	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (default "RTX 5090"; primary pod GPU model — large headroom for full 4-service GPU offload including whisper-large-v3 STT)
-	PrimaryNumGPUs                         int      // PRIMARY_NUM_GPUS (default 1; number of GPUs per primary pod machine. Set 2 for a 2×RTX 3090 single-pod topology — 48GB total, llama.cpp auto-tensor-splits Qwen across both with -ngl 99, no pinning needed; ~60% cheaper than a single 5090 with deeper Vast inventory. Spike 2026-05-21 validated CDI + boot + ~27GB/48GB full stack on machine_id 43803)
+	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (DEPRECATED-alias for PrimaryVastGPUNamePrimary; Phase 11.1 D-A6 — read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	PrimaryNumGPUs                         int      // PRIMARY_NUM_GPUS (DEPRECATED-alias for PrimaryVastNumGPUsFallback; the legacy var historically meant "GPUs per primary pod" which is now the FALLBACK shape per primary-gpu-shape-06.8-final memory. TODO-remove-in-11.2.)
+	// Phase 11.1 D-A6 primary+fallback shape (split per Wave 0 EVIDENCE-00 —
+	// 4090 @ $0.40 returned 0 EU offers, pivoted to 2×3090 @ $0.60 fallback
+	// with 7 EU offers, cheapest $0.42/h). Same GPU model both shapes —
+	// single CDI/driver matrix. Reconciler iterates [primary, fallback]
+	// filters and breaks on the first non-empty offer list.
+	PrimaryVastGPUNamePrimary    string  // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
+	PrimaryVastGPUNameFallback   string  // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
+	PrimaryVastPriceCapPrimary   float64 // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
+	PrimaryVastPriceCapFallback  float64 // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
+	PrimaryVastNumGPUsPrimary    int     // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
+	PrimaryVastNumGPUsFallback   int     // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
 	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
@@ -394,7 +404,6 @@ func Load() (Config, error) {
 		// rationale. NO DinD env vars added — Wave 0 REJECTED DinD;
 		// supervisord lives inside Plan 06.6-04 custom multi-stage image.
 		PrimaryTemplateImage:     envOr("PRIMARY_TEMPLATE_IMAGE", "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"),
-		PrimarySpeachesImage:     envOr("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f"),
 		PrimaryInfinityImage:     envOr("PRIMARY_INFINITY_IMAGE", "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"),
 		PrimaryDCGMImage:         envOr("PRIMARY_DCGM_IMAGE", "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"),
 		PrimaryQwenWeightsKey:    envOr("PRIMARY_QWEN_WEIGHTS_KEY", "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"),
@@ -414,6 +423,14 @@ func Load() (Config, error) {
 		PrimaryVastMachineAllowlist:            parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
 		PrimaryGPUName:                         envOr("PRIMARY_GPU_NAME", "RTX 5090"),
 		PrimaryNumGPUs:                         atoiOr(os.Getenv("PRIMARY_NUM_GPUS"), 1),
+		// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00).
+		// Defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
+		PrimaryVastGPUNamePrimary:   envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
+		PrimaryVastGPUNameFallback:  envOr("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090"),
+		PrimaryVastPriceCapPrimary:  floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY"), 0.30),
+		PrimaryVastPriceCapFallback: floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
+		PrimaryVastNumGPUsPrimary:   atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
+		PrimaryVastNumGPUsFallback:  atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
 		PrimaryProvisionColdStartBudgetSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS"), 2400),
 		PrimaryProvisionFailureCooldownSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS"), 300),
 		MonthlyPrimaryBudgetBRL:                floatOr(os.Getenv("MONTHLY_PRIMARY_BUDGET_BRL"), 800.0),
@@ -551,6 +568,42 @@ func Load() (Config, error) {
 				"upstream", upstreamName,
 				"env_var", envVar,
 			)
+		}
+	}
+
+	// Phase 11.1 D-A6 deprecated-alias resolution. When the caller sets ONLY
+	// the legacy env var without its _PRIMARY/_FALLBACK counterpart, copy the
+	// legacy value into the new slot and emit a slog.Warn so operators see
+	// the rename. The new env var always wins when set non-empty.
+	//
+	// Mapping (legacy → new slot):
+	//   - PRIMARY_GPU_NAME            → PrimaryVastGPUNamePrimary
+	//   - PRIMARY_VAST_PRICE_CAP_DPH  → PrimaryVastPriceCapPrimary
+	//   - PRIMARY_NUM_GPUS            → PrimaryVastNumGPUsFallback (legacy
+	//     variable historically meant "GPUs per primary pod", which is now
+	//     the FALLBACK shape per primary-gpu-shape-06.8-final memory.)
+	// Note: "set-but-empty" env (e.g. t.Setenv to "") counts as unset for
+	// alias purposes — operators clear vars by setting them blank in
+	// Portainer, not by unsetting the entry entirely.
+	if legacy := os.Getenv("PRIMARY_GPU_NAME"); legacy != "" {
+		if os.Getenv("PRIMARY_VAST_GPU_NAME_PRIMARY") == "" {
+			slog.Warn("config: PRIMARY_GPU_NAME is deprecated; use PRIMARY_VAST_GPU_NAME_PRIMARY",
+				"legacy_value", legacy)
+			cfg.PrimaryVastGPUNamePrimary = legacy
+		}
+	}
+	if legacy := os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"); legacy != "" {
+		if os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY") == "" {
+			slog.Warn("config: PRIMARY_VAST_PRICE_CAP_DPH is deprecated; use PRIMARY_VAST_PRICE_CAP_PRIMARY",
+				"legacy_value", legacy)
+			cfg.PrimaryVastPriceCapPrimary = floatOr(legacy, cfg.PrimaryVastPriceCapPrimary)
+		}
+	}
+	if legacy := os.Getenv("PRIMARY_NUM_GPUS"); legacy != "" {
+		if os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK") == "" {
+			slog.Warn("config: PRIMARY_NUM_GPUS is deprecated; use PRIMARY_VAST_NUM_GPUS_FALLBACK (legacy var historically meant 'GPUs per primary pod', which is now the FALLBACK shape per Phase 11.1 D-A6)",
+				"legacy_value", legacy)
+			cfg.PrimaryVastNumGPUsFallback = atoiOr(legacy, cfg.PrimaryVastNumGPUsFallback)
 		}
 	}
 

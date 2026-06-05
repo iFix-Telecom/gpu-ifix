@@ -169,9 +169,10 @@ func (r *InflightRegistry) GlobalInflight(upstream string) int64 {
 //
 // Thin delegation over GlobalInflight kept for API clarity at the
 // drain-polling call site (primary.Reconciler.evaluateDraining in
-// Plan 06.6-06a, which polls Count("local-llm"/"local-stt"/"local-embed")
-// to decide when the primary pod has fully drained and can transition
-// StateDraining → StateAsleep).
+// Plan 06.6-06a / Phase 11.1 D-A4, which polls Count("local-llm"/
+// "local-embed") to decide when the primary pod has fully drained and
+// can transition StateDraining → StateAsleep. (local-stt removed in
+// Phase 11.1 — Whisper deleted from pod and upstreams row.)
 //
 // Phase 6.6 — Decisions Resolved #10.
 func (r *InflightRegistry) Count(upstream string) int64 {

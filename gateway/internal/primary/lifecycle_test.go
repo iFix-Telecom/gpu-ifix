@@ -29,7 +29,6 @@ import (
 // silent supply-chain change at runtime.
 const (
 	wave0LlamaImage    = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"
-	wave0SpeachesImage = "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f"
 	wave0InfinityImage = "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"
 	wave0DCGMImage     = "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"
 )
@@ -42,7 +41,6 @@ const (
 func cfgWithDefaults() config.Config {
 	return config.Config{
 		PrimaryTemplateImage: wave0LlamaImage,
-		PrimarySpeachesImage: wave0SpeachesImage,
 		PrimaryInfinityImage: wave0InfinityImage,
 		PrimaryDCGMImage:     wave0DCGMImage,
 
@@ -478,7 +476,7 @@ func TestBuildPrimaryCreateRequest_NoSidecarImageEnv(t *testing.T) {
 	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
 	require.NoError(t, err)
 
-	for _, key := range []string{"PRIMARY_SPEACHES_IMAGE", "PRIMARY_INFINITY_IMAGE", "PRIMARY_DCGM_IMAGE"} {
+	for _, key := range []string{"PRIMARY_INFINITY_IMAGE", "PRIMARY_DCGM_IMAGE"} {
 		_, present := req.Env[key]
 		require.False(t, present, "sidecar image env %s must NOT be passed at runtime (build-time-only)", key)
 	}
