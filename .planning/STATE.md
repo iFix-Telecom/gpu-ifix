@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-last_updated: "2026-06-04T23:43:18.354Z"
+last_updated: "2026-06-05T02:30:00.000Z"
 progress:
-  total_phases: 5
-  completed_phases: 3
-  total_plans: 28
-  completed_plans: 25
-  percent: 60
+  total_phases: 6
+  completed_phases: 4
+  total_plans: 35
+  completed_plans: 31
+  percent: 88
 ---
 
 # STATE: ifix-ai-gateway
@@ -27,7 +27,7 @@ progress:
 
 ## Current Position
 
-Phase: 11 (closed `passed_partial` 2026-05-28T01:42Z; addendum closure 2026-05-28T20:48Z — PRD-03 flipped to `passed` after audit-pipeline 5-PR chain)
+Phase: 11.1 (closed `passed_partial` 2026-06-05T02:30Z — 6/7 plans complete + Wave 5 live UAT deferred + code-review found 3 critical + 6 warning auto-fixed in 7 commits). Phase 11 (closed `passed_partial` 2026-05-28T01:42Z; addendum closure 2026-05-28T20:48Z — PRD-03 flipped to `passed` after audit-pipeline 5-PR chain)
 Plan: All 10 plans landed
 Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 

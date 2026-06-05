@@ -76,7 +76,7 @@ Plans:
 **Goal:** Shrink the primary pod by removing the Speaches/faster-whisper-large-v3 tier-0 STT service (workflow batch volume insufficient to justify GPU residency — tier-1 OpenAI whisper-1 absorbs all STT via existing fallback chain). Bundles Phase 06.7 D-03 Infinity venv dead-code rollback. Refactors PRIMARY_GPU_SHAPE to 1×RTX 3090 primary (cap $0.30/h) + 1×RTX 4090 fallback (cap $0.40/h), unlocking -50% Vast cost, -5GB cold-start weight download, -3-5GB VRAM, and 1-GPU footprint vs current 2×3090.
 **Requirements**: D-A1, D-A2, D-A3, D-A4, D-A5, D-A6, D-A7 (see 11.1-CONTEXT.md)
 **Depends on:** Phase 11 (closed passed_partial; D-A7 confirms deferred UATs do NOT block)
-**Plans:** 6/7 plans executed
+**Plans:** 7/7 plans complete
 
 Plans:
 
@@ -85,7 +85,7 @@ Plans:
 - [x] 11.1-03-PLAN.md — Wave 3: pod Dockerfile drop speaches+Infinity venv stages + supervisord drop [program:speaches]+[program:infinity] + onstart.sh drop whisper tarball download
 - [x] 11.1-04-PLAN.md — Wave 3: pod health-bridge drop probeSTT/:8001 + scripts/integration-smoke prune tier-0 STT references
 - [x] 11.1-05-PLAN.md — Wave 4: pod .env.example + docker-compose.yml + READMEs + runbooks (FAILOVER/DEPLOY/PRIMARY-POD) updated; RUNBOOK-DEPLOY adds operator UPSTREAM_STT_URL removal task (T-11.1-02)
-- [ ] 11.1-06-PLAN.md — Wave 5: Vast 3090+4090 fleet survey checkpoint (T-11.1-04) + cold-start UAT on 1×3090 + tier-1 STT live curl prod gateway + memory note primary-gpu-shape-11.1-final superseding 06.8-final
+- [x] 11.1-06-PLAN.md — Wave 5: Vast 3090+4090 fleet survey checkpoint (T-11.1-04) + cold-start UAT on 1×3090 + tier-1 STT live curl prod gateway + memory note primary-gpu-shape-11.1-final superseding 06.8-final
 
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
