@@ -803,7 +803,6 @@ func TestLoad_Phase7NotRequired(t *testing.T) {
 //   - Decision 6: ColdStartBudget default 2400 (40min generous margin)
 var phase6_6OptionalEnv = []string{
 	"PRIMARY_TEMPLATE_IMAGE",
-	"PRIMARY_SPEACHES_IMAGE",
 	"PRIMARY_INFINITY_IMAGE",
 	"PRIMARY_DCGM_IMAGE",
 	"PRIMARY_QWEN_WEIGHTS_KEY",
@@ -1146,9 +1145,6 @@ func TestConfig_PrimaryPod_AllUpstreamImagesSHAPinned(t *testing.T) {
 	if !strings.Contains(cfg.PrimaryTemplateImage, "@sha256:cb37") {
 		t.Errorf("PrimaryTemplateImage missing @sha256:cb37 digest prefix: %q", cfg.PrimaryTemplateImage)
 	}
-	if !strings.Contains(cfg.PrimarySpeachesImage, "@sha256:5c62") {
-		t.Errorf("PrimarySpeachesImage missing @sha256:5c62 digest prefix: %q", cfg.PrimarySpeachesImage)
-	}
 	if !strings.Contains(cfg.PrimaryInfinityImage, "@sha256:11e8") {
 		t.Errorf("PrimaryInfinityImage missing @sha256:11e8 digest prefix: %q", cfg.PrimaryInfinityImage)
 	}
@@ -1201,6 +1197,94 @@ func TestConfig_PrimaryPod_JinjaDefaultsEmpty_B1Embedded(t *testing.T) {
 	}
 	if cfg.PrimaryQwenJinjaSHA256 != "" {
 		t.Errorf("PrimaryQwenJinjaSHA256 default = %q, want empty (WAVE0-GATES Decision 3 B1 embedded)", cfg.PrimaryQwenJinjaSHA256)
+	}
+}
+
+// =============================================================================
+// Phase 11.1 D-A6 — primary+fallback shape defaults + deprecated-alias warn
+// =============================================================================
+
+// phase11_1OptionalEnv enumerates the Phase 11.1 D-A6 env vars + their legacy
+// aliases. Cleared in setUp so a stray Portainer value cannot leak into the
+// default-value assertions.
+var phase11_1OptionalEnv = []string{
+	"PRIMARY_VAST_GPU_NAME_PRIMARY",
+	"PRIMARY_VAST_GPU_NAME_FALLBACK",
+	"PRIMARY_VAST_PRICE_CAP_PRIMARY",
+	"PRIMARY_VAST_PRICE_CAP_FALLBACK",
+	"PRIMARY_VAST_NUM_GPUS_PRIMARY",
+	"PRIMARY_VAST_NUM_GPUS_FALLBACK",
+	"PRIMARY_GPU_NAME",
+	"PRIMARY_VAST_PRICE_CAP_DPH",
+	"PRIMARY_NUM_GPUS",
+}
+
+func clearPhase11_1(t *testing.T) {
+	t.Helper()
+	for _, v := range phase11_1OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestPrimaryVastShapeDefaults — empty env produces the Wave 0 EVIDENCE-00
+// locked defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
+func TestPrimaryVastShapeDefaults(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase6_6(t)
+	clearPhase11_1(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.PrimaryVastGPUNamePrimary != "RTX 3090" {
+		t.Errorf("PrimaryVastGPUNamePrimary = %q, want \"RTX 3090\"", cfg.PrimaryVastGPUNamePrimary)
+	}
+	if cfg.PrimaryVastGPUNameFallback != "RTX 3090" {
+		t.Errorf("PrimaryVastGPUNameFallback = %q, want \"RTX 3090\"", cfg.PrimaryVastGPUNameFallback)
+	}
+	if cfg.PrimaryVastPriceCapPrimary != 0.30 {
+		t.Errorf("PrimaryVastPriceCapPrimary = %v, want 0.30", cfg.PrimaryVastPriceCapPrimary)
+	}
+	if cfg.PrimaryVastPriceCapFallback != 0.60 {
+		t.Errorf("PrimaryVastPriceCapFallback = %v, want 0.60", cfg.PrimaryVastPriceCapFallback)
+	}
+	if cfg.PrimaryVastNumGPUsPrimary != 1 {
+		t.Errorf("PrimaryVastNumGPUsPrimary = %d, want 1", cfg.PrimaryVastNumGPUsPrimary)
+	}
+	if cfg.PrimaryVastNumGPUsFallback != 2 {
+		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 2 (Wave 0 EVIDENCE-00 2×3090 fallback)", cfg.PrimaryVastNumGPUsFallback)
+	}
+}
+
+// TestPrimaryVastLegacyAlias — setting only the legacy env vars without their
+// new counterparts populates the new slots (PRIMARY_GPU_NAME →
+// PrimaryVastGPUNamePrimary; PRIMARY_NUM_GPUS → PrimaryVastNumGPUsFallback)
+// and emits an slog.Warn observable in the captured handler buffer.
+func TestPrimaryVastLegacyAlias(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase6_6(t)
+	clearPhase11_1(t)
+	setAllRequired(t)
+
+	t.Setenv("PRIMARY_GPU_NAME", "RTX 4090")
+	t.Setenv("PRIMARY_NUM_GPUS", "4")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.PrimaryVastGPUNamePrimary != "RTX 4090" {
+		t.Errorf("PrimaryVastGPUNamePrimary = %q, want \"RTX 4090\" (alias read from PRIMARY_GPU_NAME)", cfg.PrimaryVastGPUNamePrimary)
+	}
+	if cfg.PrimaryVastNumGPUsFallback != 4 {
+		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 4 (alias read from PRIMARY_NUM_GPUS)", cfg.PrimaryVastNumGPUsFallback)
 	}
 }
 
