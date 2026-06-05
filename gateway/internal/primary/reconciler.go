@@ -67,6 +67,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
@@ -754,6 +755,18 @@ func (r *Reconciler) spawnProvisioning(parentCtx context.Context, reason string,
 }
 
 // provisionLifecycle runs SearchOffers → CreateInstance → waitForReady.
+// gpuShapeLabel renders a human-readable "<num>x<name>" label for the
+// shape index used by DefaultSearchFilters / the primary+fallback pair.
+// Phase 11.1 WR-04: surfaced on offer-pick log events so operators can
+// confirm whether the cheap primary or the wider fallback path served
+// the lifecycle without parsing the numeric shape index.
+func gpuShapeLabel(cfg config.Config, shape int) string {
+	if shape == 0 {
+		return fmt.Sprintf("%dx%s", cfg.PrimaryVastNumGPUsPrimary, cfg.PrimaryVastGPUNamePrimary)
+	}
+	return fmt.Sprintf("%dx%s", cfg.PrimaryVastNumGPUsFallback, cfg.PrimaryVastGPUNameFallback)
+}
+
 // Mirrors emerg.provisionLifecycle without the 3-attempt bid race retry
 // (primary pods schedule at known peak hours; a transient bid race can be
 // retried on the next tick after cooldown).
@@ -779,30 +792,22 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	shapeCaps := []float64{r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback}
 
 	// No geolocation restriction (operator decision 2026-05-21).
-	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass on
-	// the PRIMARY shape only — known-good 1×3090 hosts first; broaden to
-	// the full qualified PRIMARY search when allowlisted hosts are busy;
-	// then iterate the FALLBACK shape if PRIMARY is exhausted.
+	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass
+	// applied to BOTH shapes (Phase 11.1 WR-05) — the catalog currently
+	// holds known-good 1×3090 hosts (primary shape) AND 2×3090 hosts
+	// (fallback shape), so restricting the allowlist pass to filters[0]
+	// would silently skip allowlisted fallback hosts. For each shape we
+	// try allowlist-first, then broaden to the full qualified search, and
+	// only iterate the next shape when both passes return no qualified
+	// offers below the per-shape cap.
 	var pickable []vast.Offer
 	var pickedShape int
 
-	if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
-		allowFilter := vast.WithMachineAllowlist(filters[0], r.cfg.PrimaryVastMachineAllowlist)
-		offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
-		if err != nil {
-			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
-			return err
-		}
-		pickable = vastutil.FilterBelowCap(offers, shapeCaps[0])
-		if len(pickable) == 0 {
-			log.Info("primary allowlist exhausted; broadening to full qualified search",
-				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", 0)
-		}
-	}
-
-	if len(pickable) == 0 {
-		for i, f := range filters {
-			offers, err := r.deps.Vast.SearchOffers(ctx, f)
+	for i, f := range filters {
+		// Allowlist preference pass for this shape.
+		if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
+			allowFilter := vast.WithMachineAllowlist(f, r.cfg.PrimaryVastMachineAllowlist)
+			offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
 			if err != nil {
 				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 				return err
@@ -811,31 +816,54 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			if len(candidates) > 0 {
 				pickable = candidates
 				pickedShape = i
-				log.Info("primary offers found for shape",
+				log.Info("primary offers found for shape (allowlist pass)",
 					"shape", i, "offer_count", len(candidates),
-					"cap", shapeCaps[i])
+					"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
 				break
 			}
-			log.Info("primary shape returned no qualified offers; trying next",
-				"shape", i, "cap", shapeCaps[i])
+			log.Info("primary allowlist exhausted for shape; broadening to full qualified search",
+				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", i,
+				"gpu_shape", gpuShapeLabel(r.cfg, i))
 		}
+
+		// Broaden to the full qualified search for this shape.
+		offers, err := r.deps.Vast.SearchOffers(ctx, f)
+		if err != nil {
+			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
+			return err
+		}
+		candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
+		if len(candidates) > 0 {
+			pickable = candidates
+			pickedShape = i
+			log.Info("primary offers found for shape",
+				"shape", i, "offer_count", len(candidates),
+				"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+			break
+		}
+		log.Info("primary shape returned no qualified offers; trying next",
+			"shape", i, "cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
 	}
 
 	if len(pickable) == 0 {
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_offers_below_cap", 0)
 		return errors.New("primary: no offers below cap (both shapes exhausted)")
 	}
-	_ = pickedShape // logged above; reserved for future per-shape metrics.
 	offer := pickable[0]
 	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
 	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the
 	// later terminal/CDI error (logged with instance_id) back to the host.
+	// Phase 11.1 WR-04: propagate pickedShape (+ gpu_shape label) on the
+	// offer-picked event so operators can confirm whether the cheap primary
+	// or the wider fallback path served the lifecycle.
 	log.Info("primary offer picked",
 		"offer_id", offer.ID,
 		"machine_id", offer.MachineID,
 		"host_id", offer.HostID,
 		"dph", offer.DphTotal,
-		"geo", offer.Geolocation)
+		"geo", offer.Geolocation,
+		"shape", pickedShape,
+		"gpu_shape", gpuShapeLabel(r.cfg, pickedShape))
 	req, err := r.buildCreateRequest(offer, lifecycleID)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "build_create_request_failed:"+err.Error(), 0)
@@ -855,6 +883,9 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			"machine_id":  offer.MachineID,
 			"host_id":     offer.HostID,
 			"dph":         offer.DphTotal,
+			// Phase 11.1 WR-04: per-shape attribution in audit trail
+			"shape":     pickedShape,
+			"gpu_shape": gpuShapeLabel(r.cfg, pickedShape),
 		})
 		if err := q.UpdatePrimaryLifecycleVastIDs(ctx, gen.UpdatePrimaryLifecycleVastIDsParams{
 			ID:             lifecycleID,
