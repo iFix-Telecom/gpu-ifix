@@ -43,7 +43,7 @@ func handleLive(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleUpstream returns the per-upstream ProbeResult (D-12
-// /health/{llm,stt,embed}).
+// /health/{llm,embed}). STT route removed in Phase 11.1 (SEED-010 Mudança 7).
 func handleUpstream(state *State, upstream string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		r, ok := state.Get(upstream)
@@ -78,19 +78,19 @@ func handleAggregate(state *State) http.HandlerFunc {
 	}
 }
 
-// mux builds the HTTP router with all 6 endpoints per D-12.
+// mux builds the HTTP router with the surviving D-12 endpoints.
 //
 // Route precedence note: net/http ServeMux uses longest-prefix matching.
-// "/health/live", "/health/ready", "/health/llm", "/health/stt", and
-// "/health/embed" are registered as exact patterns. "/health" is then
-// registered with an explicit path check so that e.g. "/health/nonsense"
-// returns 404 rather than the aggregate response.
+// "/health/live", "/health/ready", "/health/llm", and "/health/embed" are
+// registered as exact patterns. "/health" is then registered with an
+// explicit path check so that e.g. "/health/nonsense" returns 404 rather
+// than the aggregate response. "/health/stt" was removed in Phase 11.1
+// (SEED-010 Mudança 7) along with the :8001 Speaches probe.
 func mux(state *State) http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("/health/live", handleLive)
 	m.HandleFunc("/health/ready", handleAggregate(state))
 	m.HandleFunc("/health/llm", handleUpstream(state, UpstreamLLM))
-	m.HandleFunc("/health/stt", handleUpstream(state, UpstreamSTT))
 	m.HandleFunc("/health/embed", handleUpstream(state, UpstreamEmbed))
 	m.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimRight(r.URL.Path, "/") != "/health" {

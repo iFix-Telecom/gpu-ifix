@@ -103,22 +103,6 @@ func TestProbeEmbed_Malformed(t *testing.T) {
 	}
 }
 
-func TestProbeSTT_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-			t.Errorf("expected multipart, got %s", r.Header.Get("Content-Type"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"text": "silence"})
-	}))
-	defer srv.Close()
-
-	r := probeSTT(context.Background(), newHTTPClient(), srv.URL, discardLogger())
-	if r.Status != StatusHealthy {
-		t.Errorf("got %q want healthy; err=%q", r.Status, r.Error)
-	}
-}
-
 func TestState_ConcurrentSet(t *testing.T) {
 	s := NewState()
 	var wg sync.WaitGroup
@@ -126,14 +110,14 @@ func TestState_ConcurrentSet(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			up := []string{UpstreamLLM, UpstreamSTT, UpstreamEmbed}[i%3]
+			up := []string{UpstreamLLM, UpstreamEmbed}[i%2]
 			s.Set(up, ProbeResult{Status: StatusHealthy, LatencyMs: int64(i)})
 		}(i)
 	}
 	wg.Wait()
 	snap := s.Snapshot()
-	if len(snap) != 3 {
-		t.Errorf("expected 3 entries got %d", len(snap))
+	if len(snap) != 2 {
+		t.Errorf("expected 2 entries got %d", len(snap))
 	}
 }
 
@@ -158,12 +142,11 @@ func TestClassifyLatency_Degraded(t *testing.T) {
 func TestAggregateStatus(t *testing.T) {
 	s := NewState()
 	s.Set(UpstreamLLM, ProbeResult{Status: StatusHealthy})
-	s.Set(UpstreamSTT, ProbeResult{Status: StatusHealthy})
 	s.Set(UpstreamEmbed, ProbeResult{Status: StatusHealthy})
 	if s.AggregateStatus() != StatusHealthy {
 		t.Errorf("all healthy aggregate want healthy")
 	}
-	s.Set(UpstreamSTT, ProbeResult{Status: StatusDegraded})
+	s.Set(UpstreamEmbed, ProbeResult{Status: StatusDegraded})
 	if s.AggregateStatus() != StatusDegraded {
 		t.Errorf("one degraded want degraded")
 	}
