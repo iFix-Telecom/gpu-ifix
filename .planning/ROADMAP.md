@@ -76,12 +76,12 @@ Plans:
 **Goal:** Shrink the primary pod by removing the Speaches/faster-whisper-large-v3 tier-0 STT service (workflow batch volume insufficient to justify GPU residency — tier-1 OpenAI whisper-1 absorbs all STT via existing fallback chain). Bundles Phase 06.7 D-03 Infinity venv dead-code rollback. Refactors PRIMARY_GPU_SHAPE to 1×RTX 3090 primary (cap $0.30/h) + 1×RTX 4090 fallback (cap $0.40/h), unlocking -50% Vast cost, -5GB cold-start weight download, -3-5GB VRAM, and 1-GPU footprint vs current 2×3090.
 **Requirements**: D-A1, D-A2, D-A3, D-A4, D-A5, D-A6, D-A7 (see 11.1-CONTEXT.md)
 **Depends on:** Phase 11 (closed passed_partial; D-A7 confirms deferred UATs do NOT block)
-**Plans:** 2/7 plans executed
+**Plans:** 3/7 plans executed
 
 Plans:
 
 - [x] 11.1-01-PLAN.md — Wave 1: reconciler/lifecycle drop role=stt + Vast DefaultSearchFilters primary+fallback + config field rename + gatewayctl upstreamNameRole cleanup
-- [ ] 11.1-02-PLAN.md — Wave 2: migration 0028 DELETE upstreams.local-stt + model_aliases (whisper, local-stt); restorative Down; integration test fixtures simplified
+- [x] 11.1-02-PLAN.md — Wave 2: migration 0028 DELETE upstreams.local-stt + model_aliases (whisper, local-stt); restorative Down; integration test fixtures simplified
 - [ ] 11.1-03-PLAN.md — Wave 3: pod Dockerfile drop speaches+Infinity venv stages + supervisord drop [program:speaches]+[program:infinity] + onstart.sh drop whisper tarball download
 - [ ] 11.1-04-PLAN.md — Wave 3: pod health-bridge drop probeSTT/:8001 + scripts/integration-smoke prune tier-0 STT references
 - [ ] 11.1-05-PLAN.md — Wave 4: pod .env.example + docker-compose.yml + READMEs + runbooks (FAILOVER/DEPLOY/PRIMARY-POD) updated; RUNBOOK-DEPLOY adds operator UPSTREAM_STT_URL removal task (T-11.1-02)
