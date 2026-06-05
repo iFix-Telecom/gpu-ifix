@@ -58,7 +58,9 @@ import structlog
 
 SCHEMA_VERSION = "1.0.0"
 
-STT_MODEL = "whisper"  # gateway STT alias (resolves to stt/Systran/faster-whisper-large-v3)
+STT_MODEL = "whisper"  # gateway STT alias — Phase 11.1 SEED-010 D-A5: resolves
+# via the (whisper, openai-whisper) -> whisper-1 alias to the OpenAI tier-1
+# Whisper upstream (pod-side STT was removed in this phase).
 
 DEFAULT_FIXTURE = "fixtures/whatsapp-sample.ogg"
 DEFAULT_BASELINE = "fixtures/whatsapp-sample.baseline.json"
