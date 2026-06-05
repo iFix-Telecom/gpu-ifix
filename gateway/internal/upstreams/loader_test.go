@@ -508,12 +508,13 @@ func TestTier0OverrideURL_Getter(t *testing.T) {
 // goroutine registration) MUST NOT contain any entry named "local-stt".
 //
 // Why a loader-level test for the probe loop:
-//   The probe loop in probe.go iterates loader.All() each tick to decide
-//   which upstreams to probe. If a stale local-stt entry survives in the
-//   snapshot, the probe goroutine would attempt to dial it every 10s,
-//   leaking goroutines and driving the (deleted) breaker key. This test
-//   pins the contract at the snapshot boundary — the same contract that
-//   the DB-level migration_0028_test.go asserts at the row level.
+//
+//	The probe loop in probe.go iterates loader.All() each tick to decide
+//	which upstreams to probe. If a stale local-stt entry survives in the
+//	snapshot, the probe goroutine would attempt to dial it every 10s,
+//	leaking goroutines and driving the (deleted) breaker key. This test
+//	pins the contract at the snapshot boundary — the same contract that
+//	the DB-level migration_0028_test.go asserts at the row level.
 //
 // Seeds an in-memory snapshot matching the post-0028 production shape
 // (5 upstreams: 2 tier-0 local-* + 3 tier-1 externals) and asserts the

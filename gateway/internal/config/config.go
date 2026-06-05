@@ -179,33 +179,33 @@ type Config struct {
 	// orchestration; supervisord is PID 1 inside the custom multi-stage
 	// image (Plan 06.6-04 pod/primary/Dockerfile + supervisord.conf —
 	// implementation detail, not user-facing env).
-	PrimaryTemplateImage                   string   // PRIMARY_TEMPLATE_IMAGE (default llama.cpp:server-cuda-b9191 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage FROM base)
-	PrimaryInfinityImage                   string   // PRIMARY_INFINITY_IMAGE (default infinity:0.0.77 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
-	PrimaryDCGMImage                       string   // PRIMARY_DCGM_IMAGE (default dcgm-exporter:4.5.3-4.8.2-distroless SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
-	PrimaryQwenWeightsKey                  string   // PRIMARY_QWEN_WEIGHTS_KEY (MinIO object key; default qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf — CONTEXT.md D-04)
-	PrimaryQwenWeightsSHA256               string   // PRIMARY_QWEN_WEIGHTS_SHA256 (Qwen3.6 sha256; default Wave 0 verified digest a7cbd3ec...; sha256 is public-grade integrity check, safe to log)
-	PrimaryQwenJinjaKey                    string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
-	PrimaryQwenJinjaSHA256                 string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
-	PrimaryLlamaArgs                       []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
+	PrimaryTemplateImage     string   // PRIMARY_TEMPLATE_IMAGE (default llama.cpp:server-cuda-b9191 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage FROM base)
+	PrimaryInfinityImage     string   // PRIMARY_INFINITY_IMAGE (default infinity:0.0.77 SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
+	PrimaryDCGMImage         string   // PRIMARY_DCGM_IMAGE (default dcgm-exporter:4.5.3-4.8.2-distroless SHA-pinned; WAVE0-GATES Decision 1; Plan 06.6-04 multi-stage source)
+	PrimaryQwenWeightsKey    string   // PRIMARY_QWEN_WEIGHTS_KEY (MinIO object key; default qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf — CONTEXT.md D-04)
+	PrimaryQwenWeightsSHA256 string   // PRIMARY_QWEN_WEIGHTS_SHA256 (Qwen3.6 sha256; default Wave 0 verified digest a7cbd3ec...; sha256 is public-grade integrity check, safe to log)
+	PrimaryQwenJinjaKey      string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
+	PrimaryQwenJinjaSHA256   string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
+	PrimaryLlamaArgs         []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
 	// Phase 11.1 D-A4: PrimaryWhisperWeightsKey/SHA256 removed — tier-0 STT shrunk to tier-1-only.
-	PrimaryBGEM3WeightsKey                 string   // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
-	PrimaryBGEM3WeightsSHA256              string   // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
-	PrimaryVastPriceCapDPH                 float64  // PRIMARY_VAST_PRICE_CAP_DPH (DEPRECATED — historical default 2.20 sized for RTX 5090 EU running Qwen 27B + bge-m3 + KV cache + whisper-large-v3 on-pod; Phase 11.1 D-A4 dropped STT and Phase 11.1 D-A6 split caps into PRIMARY_VAST_PRICE_CAP_PRIMARY (0.30 / 1×3090) and PRIMARY_VAST_PRICE_CAP_FALLBACK (0.60 / 2×3090). Read-with-warn for backwards compat. TODO-remove-in-11.2.)
-	PrimaryVastMachineBlocklist            []int64  // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
-	PrimaryVastMachineAllowlist            []int64  // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
-	PrimaryGPUName                         string   // PRIMARY_GPU_NAME (DEPRECATED-alias for PrimaryVastGPUNamePrimary; Phase 11.1 D-A6 split shape into primary "RTX 3090" + fallback "RTX 3090" — leaving legacy "RTX 5090" in .env would silently overshoot the new $0.30 primary cap and starve the search. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
-	PrimaryNumGPUs                         int      // PRIMARY_NUM_GPUS (DEPRECATED-alias for PrimaryVastNumGPUsFallback; legacy var historically meant "GPUs per primary pod" which is now the FALLBACK shape (default 2 — 2×3090) per primary-gpu-shape-06.8-final memory. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	PrimaryBGEM3WeightsKey      string  // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
+	PrimaryBGEM3WeightsSHA256   string  // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
+	PrimaryVastPriceCapDPH      float64 // PRIMARY_VAST_PRICE_CAP_DPH (DEPRECATED — historical default 2.20 sized for RTX 5090 EU running Qwen 27B + bge-m3 + KV cache + whisper-large-v3 on-pod; Phase 11.1 D-A4 dropped STT and Phase 11.1 D-A6 split caps into PRIMARY_VAST_PRICE_CAP_PRIMARY (0.30 / 1×3090) and PRIMARY_VAST_PRICE_CAP_FALLBACK (0.60 / 2×3090). Read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	PrimaryVastMachineBlocklist []int64 // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
+	PrimaryVastMachineAllowlist []int64 // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
+	PrimaryGPUName              string  // PRIMARY_GPU_NAME (DEPRECATED-alias for PrimaryVastGPUNamePrimary; Phase 11.1 D-A6 split shape into primary "RTX 3090" + fallback "RTX 3090" — leaving legacy "RTX 5090" in .env would silently overshoot the new $0.30 primary cap and starve the search. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	PrimaryNumGPUs              int     // PRIMARY_NUM_GPUS (DEPRECATED-alias for PrimaryVastNumGPUsFallback; legacy var historically meant "GPUs per primary pod" which is now the FALLBACK shape (default 2 — 2×3090) per primary-gpu-shape-06.8-final memory. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
 	// Phase 11.1 D-A6 primary+fallback shape (split per Wave 0 EVIDENCE-00 —
 	// 4090 @ $0.40 returned 0 EU offers, pivoted to 2×3090 @ $0.60 fallback
 	// with 7 EU offers, cheapest $0.42/h). Same GPU model both shapes —
 	// single CDI/driver matrix. Reconciler iterates [primary, fallback]
 	// filters and breaks on the first non-empty offer list.
-	PrimaryVastGPUNamePrimary    string  // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
-	PrimaryVastGPUNameFallback   string  // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
-	PrimaryVastPriceCapPrimary   float64 // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
-	PrimaryVastPriceCapFallback  float64 // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
-	PrimaryVastNumGPUsPrimary    int     // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
-	PrimaryVastNumGPUsFallback   int     // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
+	PrimaryVastGPUNamePrimary              string   // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
+	PrimaryVastGPUNameFallback             string   // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
+	PrimaryVastPriceCapPrimary             float64  // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
+	PrimaryVastPriceCapFallback            float64  // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
+	PrimaryVastNumGPUsPrimary              int      // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
+	PrimaryVastNumGPUsFallback             int      // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
 	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
@@ -219,15 +219,15 @@ type Config struct {
 
 	// Pod-side secrets forwarded to the Vast.ai emergency pod via CreateRequest.Env.
 	// Mirror Phase 1 smoke.yml — pod onstart aborts without them. Sensitive; never log.
-	MinioEndpoint        string // MINIO_ENDPOINT (e.g. https://s3.ifixtelecom.com.br)
-	MinioBucket          string // MINIO_BUCKET (default "ai-gateway")
-	MinioAccessKey       string // MINIO_ACCESS_KEY
-	MinioSecretKey       string // MINIO_SECRET_KEY
-	WeightsQwenKey       string // WEIGHTS_QWEN_KEY     (MinIO object path)
-	WeightsQwenSHA256    string // WEIGHTS_QWEN_SHA256
+	MinioEndpoint     string // MINIO_ENDPOINT (e.g. https://s3.ifixtelecom.com.br)
+	MinioBucket       string // MINIO_BUCKET (default "ai-gateway")
+	MinioAccessKey    string // MINIO_ACCESS_KEY
+	MinioSecretKey    string // MINIO_SECRET_KEY
+	WeightsQwenKey    string // WEIGHTS_QWEN_KEY     (MinIO object path)
+	WeightsQwenSHA256 string // WEIGHTS_QWEN_SHA256
 	// Phase 11.1 D-A4: WeightsWhisper* removed — STT shrunk to tier-1-only.
-	WeightsBGEM3Key      string // WEIGHTS_BGE_M3_KEY
-	WeightsBGEM3SHA256   string // WEIGHTS_BGE_M3_SHA256
+	WeightsBGEM3Key    string // WEIGHTS_BGE_M3_KEY
+	WeightsBGEM3SHA256 string // WEIGHTS_BGE_M3_SHA256
 
 	// Phase 7 — alerting (all optional; empty = channel disabled with WARN).
 	// Mirrors the SentryDSN precedent: an unset alert var NEVER fails boot.
@@ -407,26 +407,26 @@ func Load() (Config, error) {
 		PrimaryQwenWeightsKey:    envOr("PRIMARY_QWEN_WEIGHTS_KEY", "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"),
 		PrimaryQwenWeightsSHA256: envOr("PRIMARY_QWEN_WEIGHTS_SHA256", "a7cbd3ecc0e3f9b333edee61ae66bc87ed713c5d49587a8355814722ed329e0f"),
 		// default empty per WAVE0-GATES Decision 3 — B1 GGUF-embedded Jinja LOCKED; --jinja flag alone extracts PEG-native parser from Qwen3.6 GGUF chat_template; override via env if B2 MinIO fallback needed.
-		PrimaryQwenJinjaKey:      envOr("PRIMARY_QWEN_JINJA_KEY", ""),
-		PrimaryQwenJinjaSHA256:   envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
-		PrimaryLlamaArgs:         csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
+		PrimaryQwenJinjaKey:    envOr("PRIMARY_QWEN_JINJA_KEY", ""),
+		PrimaryQwenJinjaSHA256: envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
+		PrimaryLlamaArgs:       csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
 		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
-		PrimaryBGEM3WeightsKey:      envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
+		PrimaryBGEM3WeightsKey: envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — no envOr default; empty passthrough so buildPrimaryCreateRequest rejects at build time.
-		PrimaryBGEM3WeightsSHA256:              os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
-		PrimaryVastPriceCapDPH:                 floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 2.20),
-		PrimaryVastMachineBlocklist:            parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
-		PrimaryVastMachineAllowlist:            parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
-		PrimaryGPUName:                         envOr("PRIMARY_GPU_NAME", "RTX 5090"),
-		PrimaryNumGPUs:                         atoiOr(os.Getenv("PRIMARY_NUM_GPUS"), 1),
+		PrimaryBGEM3WeightsSHA256:   os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
+		PrimaryVastPriceCapDPH:      floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 2.20),
+		PrimaryVastMachineBlocklist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
+		PrimaryVastMachineAllowlist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
+		PrimaryGPUName:              envOr("PRIMARY_GPU_NAME", "RTX 5090"),
+		PrimaryNumGPUs:              atoiOr(os.Getenv("PRIMARY_NUM_GPUS"), 1),
 		// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00).
 		// Defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
-		PrimaryVastGPUNamePrimary:   envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
-		PrimaryVastGPUNameFallback:  envOr("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090"),
-		PrimaryVastPriceCapPrimary:  floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY"), 0.30),
-		PrimaryVastPriceCapFallback: floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
-		PrimaryVastNumGPUsPrimary:   atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
-		PrimaryVastNumGPUsFallback:  atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
+		PrimaryVastGPUNamePrimary:              envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
+		PrimaryVastGPUNameFallback:             envOr("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090"),
+		PrimaryVastPriceCapPrimary:             floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY"), 0.30),
+		PrimaryVastPriceCapFallback:            floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
+		PrimaryVastNumGPUsPrimary:              atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
+		PrimaryVastNumGPUsFallback:             atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
 		PrimaryProvisionColdStartBudgetSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS"), 2400),
 		PrimaryProvisionFailureCooldownSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS"), 300),
 		MonthlyPrimaryBudgetBRL:                floatOr(os.Getenv("MONTHLY_PRIMARY_BUDGET_BRL"), 800.0),
@@ -440,15 +440,15 @@ func Load() (Config, error) {
 		// default 1800 (30min pre-warm offset) per reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality.
 		PrimaryPodScheduleProvisionLeadSeconds: atoiOr(os.Getenv("PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS"), 1800),
 
-		MinioEndpoint:        envOr("MINIO_ENDPOINT", "https://s3.ifixtelecom.com.br"),
-		MinioBucket:          envOr("MINIO_BUCKET", "ai-gateway"),
-		MinioAccessKey:       os.Getenv("MINIO_ACCESS_KEY"),
-		MinioSecretKey:       os.Getenv("MINIO_SECRET_KEY"),
-		WeightsQwenKey:       envOr("WEIGHTS_QWEN_KEY", "qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf"),
-		WeightsQwenSHA256:    os.Getenv("WEIGHTS_QWEN_SHA256"),
+		MinioEndpoint:     envOr("MINIO_ENDPOINT", "https://s3.ifixtelecom.com.br"),
+		MinioBucket:       envOr("MINIO_BUCKET", "ai-gateway"),
+		MinioAccessKey:    os.Getenv("MINIO_ACCESS_KEY"),
+		MinioSecretKey:    os.Getenv("MINIO_SECRET_KEY"),
+		WeightsQwenKey:    envOr("WEIGHTS_QWEN_KEY", "qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf"),
+		WeightsQwenSHA256: os.Getenv("WEIGHTS_QWEN_SHA256"),
 		// Phase 11.1 D-A4: WEIGHTS_WHISPER_* removed (STT shrunk to tier-1-only).
-		WeightsBGEM3Key:      envOr("WEIGHTS_BGE_M3_KEY", "bge-m3/v1.0.0/model.tar.gz"),
-		WeightsBGEM3SHA256:   os.Getenv("WEIGHTS_BGE_M3_SHA256"),
+		WeightsBGEM3Key:    envOr("WEIGHTS_BGE_M3_KEY", "bge-m3/v1.0.0/model.tar.gz"),
+		WeightsBGEM3SHA256: os.Getenv("WEIGHTS_BGE_M3_SHA256"),
 
 		// Phase 7 — alerting. All optional; not added to requiredOrder below.
 		ChatwootAPIURL:          os.Getenv("CHATWOOT_API_URL"),

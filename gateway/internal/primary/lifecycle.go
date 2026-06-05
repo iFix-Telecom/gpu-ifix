@@ -336,8 +336,8 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// sha256s drive in-pod sha256sum -c verify (T-06.6-02
 		// mitigation). All 3 SHA256s are guaranteed non-empty here
 		// because the precondition gate above bails out otherwise.
-		"PRIMARY_QWEN_WEIGHTS_KEY":     cfg.PrimaryQwenWeightsKey,
-		"PRIMARY_QWEN_WEIGHTS_SHA256":  cfg.PrimaryQwenWeightsSHA256,
+		"PRIMARY_QWEN_WEIGHTS_KEY":    cfg.PrimaryQwenWeightsKey,
+		"PRIMARY_QWEN_WEIGHTS_SHA256": cfg.PrimaryQwenWeightsSHA256,
 		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
 		"PRIMARY_BGEM3_WEIGHTS_KEY":    cfg.PrimaryBGEM3WeightsKey,
 		"PRIMARY_BGEM3_WEIGHTS_SHA256": cfg.PrimaryBGEM3WeightsSHA256,
