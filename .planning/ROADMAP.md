@@ -90,13 +90,20 @@ Plans:
 ### Phase 11.2: readd-whisper-local-gemini-fallback (INSERTED)
 
 **Goal:** Restore tier-0 local Whisper STT on the primary pod (recover the "free when pod ON" property removed by Phase 11.1) AND swap the tier-1 STT fallback from OpenAI `whisper-1` ($0.36/h) to Google Gemini 2.5 Flash Lite (~$0.05/h audio tokens) — 7× cheaper tier-1 + zero marginal cost when local pod is ON. Requires new `gemini-stt` upstream + multipart→`files.upload`+`generateContent` director adapter (Gemini API differs from OpenAI Whisper schema). Re-adds Speaches venv + whisper weights bootstrap to pod image; restores `role=stt` to primary reconciler trio (back to 3-role llm/stt/tts); migration 0029 re-INSERTs `local-stt` upstream + `(whisper, local-stt)` alias + adds `gemini-stt` upstream + `(whisper, gemini-stt)` alias at tier-1; gateway breaker chain: local-stt (tier-0) → gemini-stt (tier-1) → openai-whisper (tier-1 safety net).
-**Requirements**: (TBD via discuss-phase — D-B1..D-B7 expected)
+**Requirements**: D-B1..D-B7 (operator decisions in 11.2-CONTEXT.md); RES-* identifiers per plan; UAT-CASCADE-LIVE; UAT-COLD-START
 **Depends on:** Phase 11.1 (closed passed_partial — provides Config split + DefaultSearchFilters + 2-role reconciler foundation to extend)
-**Plans:** TBD
+**Plans:** 8 plans
 
 Plans:
 
-- [ ] 11.2-00-PLAN.md — (to be created via discuss/research/plan workflow)
+- [ ] 11.2-01-PLAN.md — Wave 1: Config restore (PrimarySpeachesImage + PrimaryWhisperWeights*) + new UPSTREAM_STT_GEMINI_* env vars + gatewayctl upstreamNameRole (local-stt + gemini-stt back)
+- [ ] 11.2-02-PLAN.md — Wave 2: Migration 0029 (schema additive tier_priority col + re-INSERT local-stt + INSERT gemini-stt + UPDATE openai-whisper.tier_priority=20) + Loader.ResolveAllTier1 + resolver gemini-stt mapping + integration fixture cascade 5→7 upstreams
+- [ ] 11.2-03-PLAN.md — Wave 3a (gateway): Restore role=stt to primary reconciler trio (3-role llm/stt/tts) + lifecycle env injection PRIMARY_WHISPER_WEIGHTS_* + PRIMARY_SPEACHES_IMAGE
+- [ ] 11.2-04-PLAN.md — Wave 3b (pod, parallel): Restore Speaches venv stage in Dockerfile + [program:speaches] in supervisord + WHISPER preflight in onstart + whisper branch in download-weights.sh + .env.example/compose entries; checkpoint para rebuild+push+promote image
+- [ ] 11.2-05-PLAN.md — Wave 4: Health-bridge restore (probeSTT + /health/stt route + UpstreamSTT const) — revert 11.1-04 Plan
+- [ ] 11.2-06-PLAN.md — Wave 5: NEW component — Gemini STT director adapter (multipart→generateContent JSON inline_data + flatten response) + dispatcher multi-tier-1 chain (iterate ResolveAllTier1 + breaker CLOSED) + main.go wireup + GeminiSizeGuard (18MB cap + MIME allowlist)
+- [ ] 11.2-07-PLAN.md — Wave 6: Docs/env hygiene revert (smoke comment + RUNBOOK migration target) + NEW "Gemini STT Operations" section in RUNBOOK-OPS (key minting/rotation/quota/cooldown/Pitfalls) + .env.example + PROJECT.md tech-stack update
+- [ ] 11.2-08-PLAN.md — Wave 7: Live UAT (Wave 0 operator gate retroactive confirm + S1-S5 cascade scenarios: cold-start + tier-0 hit + tier-1 gemini + tier-1 safety net + T-11.2-01 quota burst) + VERIFICATION.md authoring
 
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
