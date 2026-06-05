@@ -520,7 +520,7 @@ Coordinate via WhatsApp with the other admins BEFORE running so nobody is logged
 Run this checklist after EVERY deploy (first-time bring-up, roll-forward, rollback). All items must be green before the deploy is considered complete.
 
 - [ ] `curl -sS https://ai-gateway.converse-ai.app/health | jq` returns `{"status":"ok", ...}` with the expected `build_version`.
-- [ ] `curl -sS https://ai-gateway.converse-ai.app/v1/health/upstreams | jq` shows **5 upstreams** with `local-llm`, `openrouter-chat`, `openai-whisper`, `local-embed`, `openai-embed` — states match the runtime expectation (CLOSED if upstreams reachable; OPEN with documented cause otherwise — see `RUNBOOK-FAILOVER.md`). _Phase 11.1 shrunk STT to tier-1-only; the legacy local STT upstream row was removed in migration 0029._
+- [ ] `curl -sS https://ai-gateway.converse-ai.app/v1/health/upstreams | jq` shows **5 upstreams** with `local-llm`, `openrouter-chat`, `openai-whisper`, `local-embed`, `openai-embed` — states match the runtime expectation (CLOSED if upstreams reachable; OPEN with documented cause otherwise — see `RUNBOOK-FAILOVER.md`). _Phase 11.1 shrunk STT to tier-1-only; the legacy local STT upstream row was removed in migration 0028._
 - [ ] `ssh n8n-ia-vm docker exec ifix-ai-gateway /gatewayctl upstreams list` matches the 5 rows above (same NAMEs, same ROLEs, same TIERs).
 - [ ] Sentry releases tab (`https://sentry.io/organizations/ifix/releases/`) shows release tagged `v1.0.0` environment `production` (Pitfall 5 — if missing, the build did not propagate `GATEWAY_VERSION`).
 - [ ] `curl -sS -I https://ai-dashboard.converse-ai.app/` returns `HTTP/2 200` with the prod cert in the TLS handshake.
