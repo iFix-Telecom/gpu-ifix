@@ -219,78 +219,21 @@ jobs:
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
   deploy-dev:
-    name: Deploy to Portainer (dev)
-    # Self-hosted runner registered on vps-ifix-vm (label `gpu-ifix-vps`).
-    # Mirrors converseai-v4-dev pattern (deploy-dev.yml): sync compose into
-    # Portainer volume + run `docker compose pull && up -d` against the
-    # Portainer-maintained stack.env (no flaky webhook that only diffs images).
-    #
-    # Pre-req: register a 6th self-hosted runner for IfixTelecom/gpu-ifix using
-    # the script template at /tmp/setup-runner-4.sh (see CLAUDE.md). Required
-    # repo secrets:
-    #   - GHCR_PAT          (PAT with packages:read scope)
-    #   - PORTAINER_STACK_ID_DEV_GATEWAY  (the numeric stack ID from Portainer UI)
-    runs-on: [self-hosted, gpu-ifix-vps, dev]
+    name: Trigger Portainer redeploy (dev)
+    runs-on: ubuntu-latest
     needs: [build-gateway, compute-tags]
     if: github.ref == 'refs/heads/develop' && needs.build-gateway.result == 'success'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Sync compose into Portainer volume
+      - name: Trigger Portainer webhook (dev)
         env:
-          STACK_ID: ${{ secrets.PORTAINER_STACK_ID_DEV_GATEWAY }}
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL_DEV_GATEWAY }}
         run: |
-          set -eu
-          if [[ -z "${STACK_ID}" ]]; then
-            echo "::error::PORTAINER_STACK_ID_DEV_GATEWAY not set — register the stack in Portainer first"
-            exit 1
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL_DEV_GATEWAY not set — skipping dev deploy"
+            exit 0
           fi
-          docker run --rm \
-            -v infra_portainer_data:/data \
-            -v "$GITHUB_WORKSPACE:/src:ro" \
-            alpine:3.20 \
-            sh -c "cp /src/gateway/docker-compose.yml /data/compose/${STACK_ID}/docker-compose.yml"
-          echo "Synced gateway/docker-compose.yml into /data/compose/${STACK_ID}/"
-
-      - name: Pull images + recreate changed containers
-        env:
-          STACK_PROJECT: ai-gateway-dev
-          STACK_ID: ${{ secrets.PORTAINER_STACK_ID_DEV_GATEWAY }}
-          GHCR_TOKEN: ${{ secrets.GHCR_PAT }}
-          GHCR_USER: IfixTelecom
-        run: |
-          set -eu
-          # Clean orphaned stack containers from interrupted recreates.
-          docker ps -a --format '{{.Names}}' | grep -E '^[a-f0-9]+_ai-gateway-dev' \
-            | xargs -r docker rm -f
-          docker run --rm \
-            -e GHCR_TOKEN -e GHCR_USER -e STACK_PROJECT \
-            -v infra_portainer_data:/data \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -w "/data/compose/${STACK_ID}" \
-            docker:27-cli \
-            sh -c 'echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null && \
-              docker compose --project-name "$STACK_PROJECT" --env-file stack.env pull --quiet && \
-              docker compose --project-name "$STACK_PROJECT" --env-file stack.env up -d --remove-orphans'
-
-      - name: Verify deploy
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          deadline=$(( $(date +%s) + 180 ))
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            if docker exec ai-gateway-dev wget -qO- http://127.0.0.1:8080/health 2>/dev/null \
-                 | grep -q '"status":"ok"'; then
-              echo "✓ ai-gateway-dev healthy at $(date -Iseconds)"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::warning::/health did not return ok within 180s — investigate"
-          docker logs ai-gateway-dev --tail 50 2>&1 | head -80 || true
-          exit 1
+          curl -X POST "${WEBHOOK}" --fail --silent --show-error
+          echo "Portainer dev webhook triggered — ai-gateway-dev will re-fetch repo + recreate"
 
   deploy-prod:
     name: Trigger Portainer redeploy (prod)
