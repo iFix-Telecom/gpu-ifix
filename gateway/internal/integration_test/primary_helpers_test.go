@@ -50,12 +50,16 @@ func primaryTestCfg(t *testing.T) config.Config {
 	// Wave 0 LOCKED image digests + weights (parity lifecycle_test.go
 	// cfgWithDefaults).
 	cfg.PrimaryTemplateImage = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3"
-	// Phase 11.1 D-A1: PrimarySpeachesImage removed — tier-0 STT shrunk to tier-1-only.
+	// Phase 11.2 D-B5′: PrimarySpeachesImage restored (revert 11.1 D-A1 —
+	// tier-0 STT re-added by migration 0029).
 	cfg.PrimaryInfinityImage = "michaelf34/infinity:0.0.77@sha256:11e8b3921b9f1a58965afaad4a844c435c9807cbc82c51e47cb147b7d977fc88"
 	cfg.PrimaryDCGMImage = "nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"
 	cfg.PrimaryQwenWeightsKey = "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf"
 	cfg.PrimaryQwenWeightsSHA256 = "a7cbd3ecc0e3f9b333edee61ae66bc87ed713c5d49587a8355814722ed329e0f"
-	// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed — STT shrunk to tier-1-only.
+	// Phase 11.2 D-B5′: PRIMARY_WHISPER_WEIGHTS_* restored (revert 11.1 D-A4 —
+	// `buildCreateRequest` fail-fast gate is back so SHA must be non-empty).
+	cfg.PrimaryWhisperWeightsKey = "whisper-large-v3/v1.0.0/model.tar.gz"
+	cfg.PrimaryWhisperWeightsSHA256 = "wh1sp3rsh4test256"
 	cfg.PrimaryBGEM3WeightsKey = "bge-m3/v1.0.0/model.tar.gz"
 	cfg.PrimaryBGEM3WeightsSHA256 = "bg3m35h4test256"
 	cfg.MinioEndpoint = "https://s3.example.com"
