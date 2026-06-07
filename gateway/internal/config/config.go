@@ -68,6 +68,19 @@ type Config struct {
 	UpstreamOpenAIEmbedURL           string   // UPSTREAM_EMBED_OPENAI_URL
 	UpstreamOpenAIEmbedAuthBearer    string   // UPSTREAM_EMBED_OPENAI_AUTH_BEARER
 
+	// Phase 11.2 — STT tier-1 cascade slots (D-B7 + D-B8). Slot-named so the
+	// operator can swap provider without renaming envs. Current assignment:
+	//   slot 1 = Gemini 2.5 Flash Lite (https://generativelanguage.googleapis.com/v1beta)
+	//   slot 2 = Groq Whisper-large-v3 (https://api.groq.com/openai/v1, OpenAI-compat)
+	// AuthBearer fields tagged `json:"-"` per T-11.2-CFG (Information Disclosure
+	// mitigation; PATTERNS Shared Pattern §Secret Hygiene).
+	UpstreamSTTFallback1URL        string `json:"upstream_stt_fallback_1_url"`         // UPSTREAM_STT_FALLBACK_1_URL  (default Gemini v1beta)
+	UpstreamSTTFallback1AuthBearer string `json:"-"`                                   // UPSTREAM_STT_FALLBACK_1_AUTH_BEARER (Gemini API key; never log)
+	UpstreamSTTFallback1Model      string `json:"upstream_stt_fallback_1_model"`       // UPSTREAM_STT_FALLBACK_1_MODEL (default gemini-2.5-flash-lite)
+	UpstreamSTTFallback2URL        string `json:"upstream_stt_fallback_2_url"`         // UPSTREAM_STT_FALLBACK_2_URL  (default Groq /openai/v1)
+	UpstreamSTTFallback2AuthBearer string `json:"-"`                                   // UPSTREAM_STT_FALLBACK_2_AUTH_BEARER (Groq API key; never log)
+	UpstreamSTTFallback2Model      string `json:"upstream_stt_fallback_2_model"`       // UPSTREAM_STT_FALLBACK_2_MODEL (default whisper-large-v3)
+
 	// Phase 3 — Probe + breaker tuning (CONTEXT.md D-A2 + D-A3)
 	ProbeIntervalSeconds       int // PROBE_INTERVAL_SECONDS (default 10)
 	ProbeBudgetSeconds         int // PROBE_BUDGET_SECONDS (default 5)
@@ -187,7 +200,14 @@ type Config struct {
 	PrimaryQwenJinjaKey      string   // PRIMARY_QWEN_JINJA_KEY (default empty; WAVE0-GATES Decision 3 B1 GGUF-embedded LOCKED — `--jinja` flag alone extracts PEG-native parser; override allowed for future B2 MinIO fallback)
 	PrimaryQwenJinjaSHA256   string   // PRIMARY_QWEN_JINJA_SHA256 (default empty; WAVE0-GATES Decision 3 B1 embedded LOCKED)
 	PrimaryLlamaArgs         []string // PRIMARY_LLAMA_ARGS (CSV; empty → nil → lifecycle.go uses hardcoded primaryLlamaArgsDefault const; default args MUST NOT include --chat-template-file per B1 embedded LOCKED)
-	// Phase 11.1 D-A4: PrimaryWhisperWeightsKey/SHA256 removed — tier-0 STT shrunk to tier-1-only.
+	// Phase 11.2 D-B7 — Whisper weights RESTORED after 11.1 D-A4 revert.
+	// FAIL-FAST: PrimaryWhisperWeightsSHA256 has no envOr default; empty
+	// passthrough so buildPrimaryCreateRequest rejects at build time with
+	// ErrMissingWhisperSHA. Operator MUST set this env before deploy.
+	PrimaryWhisperWeightsKey    string // PRIMARY_WHISPER_WEIGHTS_KEY (MinIO; default whisper-large-v3/v1.0.0/model.tar.gz)
+	PrimaryWhisperWeightsSHA256 string // PRIMARY_WHISPER_WEIGHTS_SHA256 (FAIL-FAST; reviews consensus action #6)
+	// Phase 11.2 D-B1 LOCKED — speaches image pin (Phase 06.7/06.8 UAT-validated, HF_HUB_CACHE workaround known).
+	PrimarySpeachesImage        string  // PRIMARY_SPEACHES_IMAGE (default ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3)
 	PrimaryBGEM3WeightsKey      string  // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
 	PrimaryBGEM3WeightsSHA256   string  // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
 	PrimaryVastPriceCapDPH      float64 // PRIMARY_VAST_PRICE_CAP_DPH (DEPRECATED — historical default 2.20 sized for RTX 5090 EU running Qwen 27B + bge-m3 + KV cache + whisper-large-v3 on-pod; Phase 11.1 D-A4 dropped STT and Phase 11.1 D-A6 split caps into PRIMARY_VAST_PRICE_CAP_PRIMARY (0.30 / 1×3090) and PRIMARY_VAST_PRICE_CAP_FALLBACK (0.60 / 2×3090). Read-with-warn for backwards compat. TODO-remove-in-11.2.)
@@ -337,6 +357,17 @@ func Load() (Config, error) {
 		UpstreamOpenAIEmbedURL:           os.Getenv("UPSTREAM_EMBED_OPENAI_URL"),
 		UpstreamOpenAIEmbedAuthBearer:    os.Getenv("UPSTREAM_EMBED_OPENAI_AUTH_BEARER"),
 
+		// Phase 11.2 D-B7 + D-B8 — STT tier-1 cascade slots (slot 1 = Gemini,
+		// slot 2 = Groq Whisper). Bearer fields read straight from env (no
+		// envOr) so empty stays empty — resolver.upstreamEnvVarMap and the
+		// dispatcher honor empty as "slot disabled" without logging the value.
+		UpstreamSTTFallback1URL:        envOr("UPSTREAM_STT_FALLBACK_1_URL", "https://generativelanguage.googleapis.com/v1beta"),
+		UpstreamSTTFallback1AuthBearer: os.Getenv("UPSTREAM_STT_FALLBACK_1_AUTH_BEARER"),
+		UpstreamSTTFallback1Model:      envOr("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash-lite"),
+		UpstreamSTTFallback2URL:        envOr("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai/v1"),
+		UpstreamSTTFallback2AuthBearer: os.Getenv("UPSTREAM_STT_FALLBACK_2_AUTH_BEARER"),
+		UpstreamSTTFallback2Model:      envOr("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3"),
+
 		ProbeIntervalSeconds:       atoiOr(os.Getenv("PROBE_INTERVAL_SECONDS"), 10),
 		ProbeBudgetSeconds:         atoiOr(os.Getenv("PROBE_BUDGET_SECONDS"), 5),
 		BreakerConsecutiveFailures: atoiOr(os.Getenv("BREAKER_CONSECUTIVE_FAILURES"), 3),
@@ -410,7 +441,13 @@ func Load() (Config, error) {
 		PrimaryQwenJinjaKey:    envOr("PRIMARY_QWEN_JINJA_KEY", ""),
 		PrimaryQwenJinjaSHA256: envOr("PRIMARY_QWEN_JINJA_SHA256", ""),
 		PrimaryLlamaArgs:       csvOr(os.Getenv("PRIMARY_LLAMA_ARGS"), nil),
-		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
+		// Phase 11.2 D-B7 — Whisper weights restored. FAIL-FAST SHA per reviews
+		// consensus action #6: no envOr default; empty passthrough so
+		// buildPrimaryCreateRequest rejects at build time with ErrMissingWhisperSHA.
+		PrimaryWhisperWeightsKey:    envOr("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-large-v3/v1.0.0/model.tar.gz"),
+		PrimaryWhisperWeightsSHA256: os.Getenv("PRIMARY_WHISPER_WEIGHTS_SHA256"),
+		// Phase 11.2 D-B1 LOCKED — speaches image pin.
+		PrimarySpeachesImage:   envOr("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3"),
 		PrimaryBGEM3WeightsKey: envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — no envOr default; empty passthrough so buildPrimaryCreateRequest rejects at build time.
 		PrimaryBGEM3WeightsSHA256:   os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
