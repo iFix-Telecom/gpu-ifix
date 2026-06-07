@@ -57,6 +57,12 @@ var upstreamEnvVarMap = map[string]string{
 	"openrouter-chat": "UPSTREAM_LLM_OPENROUTER_MODEL",
 	"openai-whisper":  "UPSTREAM_STT_OPENAI_MODEL",
 	"openai-embed":    "UPSTREAM_EMBED_OPENAI_MODEL",
+	// Phase 11.2 — STT tier-1 cascade (D-B7, D-B8).
+	// Slot 1 = Gemini 2.5 Flash Lite (gemini-stt director adapter).
+	// Slot 2 = Groq Whisper (groq-whisper REUSES BuildOpenAIWhisperDirector
+	//           via canonicalAliasForUpstream extension).
+	"gemini-stt":   "UPSTREAM_STT_FALLBACK_1_MODEL",
+	"groq-whisper": "UPSTREAM_STT_FALLBACK_2_MODEL",
 }
 
 // Resolver holds the current (alias, upstream_name) → target map in memory.

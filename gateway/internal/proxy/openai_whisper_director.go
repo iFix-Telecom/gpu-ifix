@@ -65,6 +65,12 @@ const whisperDuplicateModelMessage = `{"error":{"message":"duplicate 'model' fie
 // AND their entry in models.upstreamEnvVarMap.
 var canonicalAliasForUpstream = map[string]string{
 	"openai-whisper": "whisper",
+	// Phase 11.2 D-B8 — Groq STT endpoint is OpenAI-compatible
+	// (`https://api.groq.com/openai/v1/audio/transcriptions`). It REUSES
+	// BuildOpenAIWhisperDirector verbatim — only URL + bearer + model
+	// differ. The canonical alias mapping is the gate that lets the
+	// shared director resolve groq-whisper's target via the resolver.
+	"groq-whisper": "whisper",
 }
 
 // BuildOpenAIWhisperDirector returns a Director for the openai-whisper
