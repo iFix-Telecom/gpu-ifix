@@ -6,10 +6,11 @@
 # compose startup; block until health-bridge reports readiness (D-04 target
 # cold-start ≤5 min).
 #
-# Phase 11.1 (2026-06-04): STT off-pod; chatterbox TTS + llama LLM only.
-# Tier-0 local STT was removed per SEED-010 Mudança 3 + D-A2 (Infinity bundle).
-# The STT weight download/extract step is gone; tier-1 OpenAI absorbs
-# /v1/audio/transcriptions via the gateway fallback chain.
+# Phase 11.2 (2026-06-07): STT tier-0 RESTORED — speaches + faster-whisper
+# back on the pod. The Phase 11.1 STT-off-pod removal was reverted because
+# the tier-1 OpenAI-only fallback proved too costly ($0.36/h). WHISPER weight
+# download/extract is back; tier-1 cascade (gemini-stt → groq-whisper →
+# openai-whisper) only fires when the pod is OFF (Phase 11.2 Plan 03 dispatcher).
 #
 # Env vars: see pod/.env.example. Injected by Vast.ai pod creation (plan 08
 # smoke.yml sets them via the Vast.ai REST API).
@@ -49,6 +50,8 @@ log "READINESS_TIMEOUT_SECONDS = ${READINESS_TIMEOUT_SECONDS}"
 : "${MINIO_BUCKET:?missing MINIO_BUCKET}"
 : "${WEIGHTS_QWEN_KEY:?missing WEIGHTS_QWEN_KEY}"
 : "${WEIGHTS_QWEN_SHA256:?missing WEIGHTS_QWEN_SHA256}"
+: "${WEIGHTS_WHISPER_KEY:?missing WEIGHTS_WHISPER_KEY}"
+: "${WEIGHTS_WHISPER_SHA256:?missing WEIGHTS_WHISPER_SHA256}"
 : "${WEIGHTS_BGE_M3_KEY:?missing WEIGHTS_BGE_M3_KEY}"
 : "${WEIGHTS_BGE_M3_SHA256:?missing WEIGHTS_BGE_M3_SHA256}"
 
@@ -129,6 +132,7 @@ fi
 section "onstart complete (t=${SECONDS}s total)"
 log "pod is serving on:"
 log "  - llama LLM:       0.0.0.0:8000 (OpenAI-compat)"
+log "  - speaches STT:    0.0.0.0:8001 (OpenAI-compat /v1/audio/transcriptions)"
 log "  - chatterbox TTS:  0.0.0.0:8003 (OpenAI-compat /v1/audio/speech)"
 log "  - health-bridge:   0.0.0.0:9100 (internal probes)"
 log "  - dcgm-exporter:   0.0.0.0:9400 (Prometheus metrics)"

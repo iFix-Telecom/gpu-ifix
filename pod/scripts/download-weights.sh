@@ -7,9 +7,10 @@
 #
 # Env vars required:
 #   MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET
-#   WEIGHTS_QWEN_KEY,   WEIGHTS_QWEN_SHA256
+#   WEIGHTS_QWEN_KEY,    WEIGHTS_QWEN_SHA256
+#   WEIGHTS_WHISPER_KEY, WEIGHTS_WHISPER_SHA256
 #   WEIGHTS_BGE_M3_KEY,  WEIGHTS_BGE_M3_SHA256
-# (Phase 11.1: WEIGHTS_WHISPER_* removed — STT shrunk to tier-1-only.)
+# (Phase 11.2 restored WEIGHTS_WHISPER_* after Phase 11.1 stripped it.)
 #
 # Exit codes:
 #   0 — all weights downloaded, verified, extracted
@@ -24,6 +25,7 @@ set -euo pipefail
 WEIGHTS_DIR="${1:-/weights}"
 : "${MINIO_ENDPOINT:?missing}" "${MINIO_ACCESS_KEY:?missing}" "${MINIO_SECRET_KEY:?missing}" "${MINIO_BUCKET:?missing}"
 : "${WEIGHTS_QWEN_KEY:?missing}" "${WEIGHTS_QWEN_SHA256:?missing}"
+: "${WEIGHTS_WHISPER_KEY:?missing}" "${WEIGHTS_WHISPER_SHA256:?missing}"
 : "${WEIGHTS_BGE_M3_KEY:?missing}" "${WEIGHTS_BGE_M3_SHA256:?missing}"
 
 # --- logging helper -------------------------------------------------------
@@ -40,7 +42,7 @@ ensure_mc() {
 ensure_mc
 mc alias set ifix "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
 
-mkdir -p "${WEIGHTS_DIR}/qwen" "${WEIGHTS_DIR}/bge-m3" "${WEIGHTS_DIR}/.tmp"
+mkdir -p "${WEIGHTS_DIR}/qwen" "${WEIGHTS_DIR}/whisper" "${WEIGHTS_DIR}/bge-m3" "${WEIGHTS_DIR}/.tmp"
 
 # --- download one object from MinIO, check sha256 -------------------------
 # $1 = s3 key (relative to bucket)
@@ -70,16 +72,19 @@ download_and_verify() {
 log "starting parallel downloads (D-03)"
 
 QWEN_DEST="${WEIGHTS_DIR}/qwen/model.gguf"
+WHISPER_DEST="${WEIGHTS_DIR}/.tmp/whisper.tar.gz"
 BGE_DEST="${WEIGHTS_DIR}/.tmp/bge-m3.tar.gz"
 
 download_and_verify "${WEIGHTS_QWEN_KEY}"    "${QWEN_DEST}"    "${WEIGHTS_QWEN_SHA256}"    &
 PID_QWEN=$!
+download_and_verify "${WEIGHTS_WHISPER_KEY}" "${WHISPER_DEST}" "${WEIGHTS_WHISPER_SHA256}" &
+PID_WHISPER=$!
 download_and_verify "${WEIGHTS_BGE_M3_KEY}"  "${BGE_DEST}"     "${WEIGHTS_BGE_M3_SHA256}"  &
 PID_BGE=$!
 
-# wait for both — fail on any non-zero
+# wait for all 3 — fail on any non-zero
 FAIL=0
-for pid in "$PID_QWEN" "$PID_BGE"; do
+for pid in "$PID_QWEN" "$PID_WHISPER" "$PID_BGE"; do
   if ! wait "$pid"; then
     log "download/verify failed for pid $pid"
     FAIL=1
@@ -90,7 +95,14 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 3
 fi
 
-# --- extract tarballs (BGE-M3) --------------------------------------------
+# --- extract tarballs (Whisper + BGE-M3) ----------------------------------
+# Phase 06.8 fix-iii / Pitfall 4: extract target MUST be /weights/whisper
+# so it aligns with HF_HUB_CACHE in pod/primary/supervisord.conf
+# [program:speaches] environment. The tarball is pre-shaped HF cache
+# (models--Systran--faster-whisper-large-v3/{refs,snapshots/<hash>/}).
+log "extracting whisper tarball"
+tar -xzf "${WHISPER_DEST}" -C "${WEIGHTS_DIR}/whisper" || exit 4
+
 log "extracting bge-m3 tarball"
 tar -xzf "${BGE_DEST}" -C "${WEIGHTS_DIR}/bge-m3" || exit 4
 
@@ -99,4 +111,4 @@ rm -rf "${WEIGHTS_DIR}/.tmp"
 
 log "all weights present and verified in ${WEIGHTS_DIR}"
 log "inventory:"
-ls -lh "${WEIGHTS_DIR}/qwen/" "${WEIGHTS_DIR}/bge-m3/" 2>&1 | sed 's/^/  /'
+ls -lh "${WEIGHTS_DIR}/qwen/" "${WEIGHTS_DIR}/whisper/" "${WEIGHTS_DIR}/bge-m3/" 2>&1 | sed 's/^/  /'
