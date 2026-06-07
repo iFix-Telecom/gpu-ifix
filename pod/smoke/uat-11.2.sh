@@ -6,10 +6,8 @@
 #
 # Targets:
 #   Gateway URL: https://ai-gateway-dev.ifixtelecom.com.br
-#   Normal-class API key (converseai tenant):
-#     ifix_sk_ysohb3l6xgq3wxeac4ftkabz6ubnkfwv
-#   Sensitive-class API key (telefonia tenant — RES-08 hard-block):
-#     ifix_sk_hu6h3ggws6sfqwqgsfhbyonkq72jzbnj
+#   API keys: provided via NORMAL_KEY + SENSITIVE_KEY env vars.
+#   Operator: see CLAUDE.md "API Keys" section for current tenant keys.
 #
 # Usage:
 #   ./uat-11.2.sh --all                       # run all 6 scenarios
@@ -27,8 +25,10 @@
 set -euo pipefail
 
 readonly GATEWAY_URL="${GATEWAY_URL:-https://ai-gateway-dev.ifixtelecom.com.br}"
-readonly NORMAL_KEY="${NORMAL_KEY:-ifix_sk_ysohb3l6xgq3wxeac4ftkabz6ubnkfwv}"
-readonly SENSITIVE_KEY="${SENSITIVE_KEY:-ifix_sk_hu6h3ggws6sfqwqgsfhbyonkq72jzbnj}"
+# Tenant API keys MUST be provided via env (never hardcoded — public repo).
+# Operator: export NORMAL_KEY=ifix_sk_... + SENSITIVE_KEY=ifix_sk_... before invoking.
+readonly NORMAL_KEY="${NORMAL_KEY:?NORMAL_KEY env var required (converseai tenant key — see CLAUDE.md API Keys section)}"
+readonly SENSITIVE_KEY="${SENSITIVE_KEY:?SENSITIVE_KEY env var required (telefonia tenant key — RES-08 sensitive)}"
 
 readonly SCENARIOS=(
   pod-on-local-stt
