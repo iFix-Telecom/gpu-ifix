@@ -54,8 +54,8 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 		`SELECT count(*) FROM ai_gateway.model_aliases`).Scan(&aliasCountAfterUp); err != nil {
 		t.Fatalf("count after Up: %v", err)
 	}
-	if aliasCountAfterUp != 5 {
-		t.Errorf("model_aliases count after Up = %d, want 5 (post-0028: 2 tier-0 + 3 tier-1)", aliasCountAfterUp)
+	if aliasCountAfterUp != 8 {
+		t.Errorf("model_aliases count after Up = %d, want 8 (post-0029: 2 tier-0 + 6 tier-1 incl gemini-stt/groq-whisper/local-stt re-added)", aliasCountAfterUp)
 	}
 
 	// Composite PK present.
@@ -155,8 +155,8 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	}
 	// Phase 11.1: re-Up applies through 0028 again, so count is 5 (idempotent
 	// across the whole stack — was 6 before 0028).
-	if aliasCountAfterReUp != 5 {
-		t.Errorf("model_aliases count after re-Up = %d, want 5 (idempotent post-0028 re-application)", aliasCountAfterReUp)
+	if aliasCountAfterReUp != 8 {
+		t.Errorf("model_aliases count after re-Up = %d, want 8 (idempotent post-0029 re-application)", aliasCountAfterReUp)
 	}
 
 	t.Logf("MIGRATION 0026 ROUND-TRIP VERIFIED: Up→Down→Up clean; composite PK on (alias,upstream_name); column preserved; tier-0 values intact")

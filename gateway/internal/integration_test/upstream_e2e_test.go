@@ -67,9 +67,13 @@ func TestIntegration_07_UpstreamHealth(t *testing.T) {
 		t.Errorf("baseline status = %v, want ok", env["status"])
 	}
 	ups, _ := env["upstreams"].(map[string]any)
-	// Phase 11.1: local-stt upstream removed by migration 0028 — 6 → 5.
-	if got := len(ups); got != 5 {
-		t.Errorf("upstreams count = %d, want 5", got)
+	// Phase 11.1: migration 0028 removed local-stt — 6 → 5.
+	// Phase 11.2: migration 0029 re-added local-stt (+gemini-stt + groq-whisper),
+	// but gemini-stt/groq-whisper rows have url_env_var = UPSTREAM_STT_FALLBACK_{1,2}_URL
+	// which is unset in CI integration → loader skips them. local-stt uses
+	// UPSTREAM_STT_URL (set by fixture) so it loads → 5 + 1 = 6.
+	if got := len(ups); got != 6 {
+		t.Errorf("upstreams count = %d, want 6", got)
 	}
 
 	// Trip the local-llm breaker. Per the cache TTL (2s), the next GET
