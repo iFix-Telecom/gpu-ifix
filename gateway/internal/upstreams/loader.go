@@ -258,7 +258,7 @@ func (l *Loader) Resolve(role string, tier int) (UpstreamConfig, bool) {
 // — STT cascade dispatcher iterates this slice on pod-OFF, dispatching
 // to the first CLOSED-breaker upstream:
 //
-//   ResolveAllTier1("stt") → [gemini-stt(10), groq-whisper(15), openai-whisper(20)]
+//	ResolveAllTier1("stt") → [gemini-stt(10), groq-whisper(15), openai-whisper(20)]
 //
 // Backward-compat: roles with a single tier-1 row (llm/embed/tts) return
 // a slice of length 1, so existing single-tier-1 callers can be rewritten

@@ -74,12 +74,12 @@ type Config struct {
 	//   slot 2 = Groq Whisper-large-v3 (https://api.groq.com/openai/v1, OpenAI-compat)
 	// AuthBearer fields tagged `json:"-"` per T-11.2-CFG (Information Disclosure
 	// mitigation; PATTERNS Shared Pattern §Secret Hygiene).
-	UpstreamSTTFallback1URL        string `json:"upstream_stt_fallback_1_url"`         // UPSTREAM_STT_FALLBACK_1_URL  (default Gemini v1beta)
-	UpstreamSTTFallback1AuthBearer string `json:"-"`                                   // UPSTREAM_STT_FALLBACK_1_AUTH_BEARER (Gemini API key; never log)
-	UpstreamSTTFallback1Model      string `json:"upstream_stt_fallback_1_model"`       // UPSTREAM_STT_FALLBACK_1_MODEL (default gemini-2.5-flash-lite)
-	UpstreamSTTFallback2URL        string `json:"upstream_stt_fallback_2_url"`         // UPSTREAM_STT_FALLBACK_2_URL  (default Groq /openai/v1)
-	UpstreamSTTFallback2AuthBearer string `json:"-"`                                   // UPSTREAM_STT_FALLBACK_2_AUTH_BEARER (Groq API key; never log)
-	UpstreamSTTFallback2Model      string `json:"upstream_stt_fallback_2_model"`       // UPSTREAM_STT_FALLBACK_2_MODEL (default whisper-large-v3)
+	UpstreamSTTFallback1URL        string `json:"upstream_stt_fallback_1_url"`   // UPSTREAM_STT_FALLBACK_1_URL  (default Gemini v1beta)
+	UpstreamSTTFallback1AuthBearer string `json:"-"`                             // UPSTREAM_STT_FALLBACK_1_AUTH_BEARER (Gemini API key; never log)
+	UpstreamSTTFallback1Model      string `json:"upstream_stt_fallback_1_model"` // UPSTREAM_STT_FALLBACK_1_MODEL (default gemini-2.5-flash-lite)
+	UpstreamSTTFallback2URL        string `json:"upstream_stt_fallback_2_url"`   // UPSTREAM_STT_FALLBACK_2_URL  (default Groq /openai/v1)
+	UpstreamSTTFallback2AuthBearer string `json:"-"`                             // UPSTREAM_STT_FALLBACK_2_AUTH_BEARER (Groq API key; never log)
+	UpstreamSTTFallback2Model      string `json:"upstream_stt_fallback_2_model"` // UPSTREAM_STT_FALLBACK_2_MODEL (default whisper-large-v3)
 
 	// Phase 3 — Probe + breaker tuning (CONTEXT.md D-A2 + D-A3)
 	ProbeIntervalSeconds       int // PROBE_INTERVAL_SECONDS (default 10)
