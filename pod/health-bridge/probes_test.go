@@ -17,6 +17,17 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// TestProbeSTT_Success — Phase 11.2 Wave 0 Plan 01 RED stub.
+// OWNER Plan 05 — restores probeSTT() + UpstreamSTT constant verbatim from
+// `git show 39bec50^:pod/health-bridge/probes.go`. Test asserts multipart
+// POST + healthy parse of {"text":"silence"} response.
+// Cannot reference probeSTT/UpstreamSTT yet (symbols absent until Plan 05),
+// so stub is a t.Skip — Plan 05 unskips and pastes verbatim body from
+// `git show 39bec50^:pod/health-bridge/probes_test.go` TestProbeSTT_Success.
+func TestProbeSTT_Success(t *testing.T) {
+	t.Skip("OWNER: Plan 05 — restores probeSTT + UpstreamSTT; unskip + paste verbatim body from 39bec50^:pod/health-bridge/probes_test.go")
+}
+
 func TestProbeLLM_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
