@@ -20,6 +20,7 @@ import (
 type Config struct {
 	Port          int
 	LlamaURL      string
+	SpeachesURL   string
 	InfinityURL   string
 	ProbeInterval time.Duration
 	LogLevel      string
@@ -30,6 +31,7 @@ func loadConfig() Config {
 	return Config{
 		Port:          atoiOr(os.Getenv("HEALTH_BRIDGE_PORT"), 9100),
 		LlamaURL:      envOr("LLAMA_URL", "http://llama:8000"),
+		SpeachesURL:   envOr("SPEACHES_URL", "http://speaches:8000"),
 		InfinityURL:   envOr("INFINITY_URL", "http://infinity:8002"),
 		ProbeInterval: time.Duration(atoiOr(os.Getenv("PROBE_INTERVAL_SECONDS"), 10)) * time.Second,
 		LogLevel:      envOr("LOG_LEVEL", "info"),
@@ -95,6 +97,7 @@ func main() {
 	log.Info("starting health-bridge",
 		"port", cfg.Port,
 		"llama", cfg.LlamaURL,
+		"speaches", cfg.SpeachesURL,
 		"infinity", cfg.InfinityURL,
 		"probe_interval_s", cfg.ProbeInterval.Seconds(),
 		"env", cfg.Env,
@@ -124,6 +127,7 @@ func main() {
 	}
 	probes := []probeDef{
 		{UpstreamLLM, cfg.LlamaURL, probeLLM},
+		{UpstreamSTT, cfg.SpeachesURL, probeSTT},
 		{UpstreamEmbed, cfg.InfinityURL, probeEmbed},
 	}
 	for _, p := range probes {
