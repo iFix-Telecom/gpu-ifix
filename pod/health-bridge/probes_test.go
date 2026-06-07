@@ -17,15 +17,24 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// TestProbeSTT_Success — Phase 11.2 Wave 0 Plan 01 RED stub.
-// OWNER Plan 05 — restores probeSTT() + UpstreamSTT constant verbatim from
-// `git show 39bec50^:pod/health-bridge/probes.go`. Test asserts multipart
-// POST + healthy parse of {"text":"silence"} response.
-// Cannot reference probeSTT/UpstreamSTT yet (symbols absent until Plan 05),
-// so stub is a t.Skip — Plan 05 unskips and pastes verbatim body from
-// `git show 39bec50^:pod/health-bridge/probes_test.go` TestProbeSTT_Success.
+// TestProbeSTT_Success — Phase 11.2 Plan 05: verbatim restore from
+// 39bec50^:pod/health-bridge/probes_test.go. Asserts probeSTT POSTs
+// multipart/form-data to /v1/audio/transcriptions and parses 200 +
+// {"text":"silence"} as StatusHealthy.
 func TestProbeSTT_Success(t *testing.T) {
-	t.Skip("OWNER: Plan 05 — restores probeSTT + UpstreamSTT; unskip + paste verbatim body from 39bec50^:pod/health-bridge/probes_test.go")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("expected multipart, got %s", r.Header.Get("Content-Type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"text": "silence"})
+	}))
+	defer srv.Close()
+
+	r := probeSTT(context.Background(), newHTTPClient(), srv.URL, discardLogger())
+	if r.Status != StatusHealthy {
+		t.Errorf("got %q want healthy; err=%q", r.Status, r.Error)
+	}
 }
 
 func TestProbeLLM_Success(t *testing.T) {
@@ -121,14 +130,14 @@ func TestState_ConcurrentSet(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			up := []string{UpstreamLLM, UpstreamEmbed}[i%2]
+			up := []string{UpstreamLLM, UpstreamSTT, UpstreamEmbed}[i%3]
 			s.Set(up, ProbeResult{Status: StatusHealthy, LatencyMs: int64(i)})
 		}(i)
 	}
 	wg.Wait()
 	snap := s.Snapshot()
-	if len(snap) != 2 {
-		t.Errorf("expected 2 entries got %d", len(snap))
+	if len(snap) != 3 {
+		t.Errorf("expected 3 entries got %d", len(snap))
 	}
 }
 
@@ -153,11 +162,12 @@ func TestClassifyLatency_Degraded(t *testing.T) {
 func TestAggregateStatus(t *testing.T) {
 	s := NewState()
 	s.Set(UpstreamLLM, ProbeResult{Status: StatusHealthy})
+	s.Set(UpstreamSTT, ProbeResult{Status: StatusHealthy})
 	s.Set(UpstreamEmbed, ProbeResult{Status: StatusHealthy})
 	if s.AggregateStatus() != StatusHealthy {
 		t.Errorf("all healthy aggregate want healthy")
 	}
-	s.Set(UpstreamEmbed, ProbeResult{Status: StatusDegraded})
+	s.Set(UpstreamSTT, ProbeResult{Status: StatusDegraded})
 	if s.AggregateStatus() != StatusDegraded {
 		t.Errorf("one degraded want degraded")
 	}

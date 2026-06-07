@@ -73,6 +73,7 @@ func TestHandleUpstream_Failed_503(t *testing.T) {
 func TestHandleAggregate_AllHealthy_200(t *testing.T) {
 	state := NewState()
 	state.Set(UpstreamLLM, ProbeResult{Status: StatusHealthy})
+	state.Set(UpstreamSTT, ProbeResult{Status: StatusHealthy})
 	state.Set(UpstreamEmbed, ProbeResult{Status: StatusHealthy})
 	srv := httptest.NewServer(mux(state))
 	defer srv.Close()
@@ -98,7 +99,8 @@ func TestHandleAggregate_AllHealthy_200(t *testing.T) {
 func TestHandleAggregate_OneFailed_503(t *testing.T) {
 	state := NewState()
 	state.Set(UpstreamLLM, ProbeResult{Status: StatusHealthy})
-	state.Set(UpstreamEmbed, ProbeResult{Status: StatusFailed, Error: "boom"})
+	state.Set(UpstreamSTT, ProbeResult{Status: StatusFailed, Error: "boom"})
+	state.Set(UpstreamEmbed, ProbeResult{Status: StatusHealthy})
 	srv := httptest.NewServer(mux(state))
 	defer srv.Close()
 
@@ -130,6 +132,7 @@ func TestUnknownPath_404(t *testing.T) {
 func TestHealthReady_IsAggregate(t *testing.T) {
 	state := NewState()
 	state.Set(UpstreamLLM, ProbeResult{Status: StatusHealthy})
+	state.Set(UpstreamSTT, ProbeResult{Status: StatusHealthy})
 	state.Set(UpstreamEmbed, ProbeResult{Status: StatusHealthy})
 	srv := httptest.NewServer(mux(state))
 	defer srv.Close()
