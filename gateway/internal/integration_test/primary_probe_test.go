@@ -114,25 +114,25 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 		"LLM /v1/models endpoint must be probed")
 	require.True(t, probed["http://203.0.113.7:33003/health"],
 		"TTS /health endpoint must be probed (Phase 06.7 — was embed:8002)")
-	// Phase 11.1: STT :33001 endpoint removed — tier-0 STT shrunk to tier-1-only (D-A1).
-	require.False(t, probed["http://203.0.113.7:33001/health"],
-		"STT /health endpoint must NOT be probed post-Phase 11.1")
+	// Phase 11.2: STT :33001 endpoint restored — tier-0 STT re-added (revert 11.1 D-A1).
+	require.True(t, probed["http://203.0.113.7:33001/health"],
+		"STT /health endpoint must be probed post-Phase 11.2")
 	require.True(t, probed["http://203.0.113.7:33400/metrics"],
 		"DCGM /metrics endpoint must be probed")
 
-	// (b) Phase 11.1: 2-role tier-0 override {llm,tts} — stt dropped (D-A1), embed off-pod (D-03).
+	// (b) Phase 11.2: 3-role tier-0 override {llm,stt,tts} — embed off-pod (D-03).
 	require.Eventually(t, func() bool {
 		snap := loader.Snapshot()
-		return len(snap) == 2
+		return len(snap) == 3
 	}, 2*time.Second, 50*time.Millisecond,
-		"Loader.OverrideTier0 must be called 2x (llm/tts); got %v", loader.Snapshot())
+		"Loader.OverrideTier0 must be called 3x (llm/stt/tts); got %v", loader.Snapshot())
 	snap := loader.Snapshot()
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
 		"/v1/models suffix stripped for LLM (parity emerg stripHealthSuffix)")
 	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
 		"/health suffix stripped for TTS")
-	_, sttSet := snap["stt"]
-	require.False(t, sttSet, "stt must NOT be a dynamic primary role post-Phase 11.1 (D-A1)")
+	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
+		"/health suffix stripped for STT (Phase 11.2 restore)")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "embed must NOT be a dynamic primary role (D-03)")
 
