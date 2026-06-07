@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-06-07T17:27:36.071Z"
+last_updated: "2026-06-07T17:52:36.292Z"
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 43
-  completed_plans: 37
+  completed_plans: 38
   percent: 67
 ---
 
@@ -28,7 +28,7 @@ progress:
 ## Current Position
 
 Phase: 11.2 (readd-whisper-local-gemini-fallback) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
@@ -186,10 +186,11 @@ Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55
 | Phase 06.7 P03 | 25m | 2 tasks | 9 files |
 | Phase 06.7 P04 | ~20m | 2 tasks | 8 files |
 | Phase 06.7 P05 | 4 | 2 tasks | 4 files |
+| Phase 11.2 P06 | 35min | 3 tasks | 8 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-06-07T12:07:19.704Z
+- **Last session:** 2026-06-07T17:52:36.285Z
 - **Next session should:** Run the Phase 06.7 live HUMAN-UAT. Plan 06.7-09 Task 1 is DONE (commit `41039b4`: `docs/RUNBOOK-PRIMARY-POD-TTS.md` + `06.7-HUMAN-UAT.md` 6-scenario sheet + CLEANUP). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run S1–S6 + cleanup on a live Vast 5090 (real GPU spend; autonomous mode cannot satisfy it), sign each PASS/FAIL, record spend. After all 6 + cleanup are signed: write `06.7-09-SUMMARY.md` + `06.7-VERIFICATION.md`, then `state advance-plan`. Any FAIL → `/gsd:plan-phase 06.7 --gaps`. Phase 06.7 Plan stays at 9 (06.7-09) — NOT advanced (plan incomplete until UAT signed).
 
 ---

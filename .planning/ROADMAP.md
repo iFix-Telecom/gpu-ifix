@@ -92,7 +92,7 @@ Plans:
 **Goal:** Restore tier-0 local Whisper STT on the primary pod (recover the "free when pod ON" property removed by Phase 11.1) AND swap the tier-1 STT fallback from OpenAI `whisper-1` ($0.36/h) to Google Gemini 2.5 Flash Lite (~$0.05/h audio tokens) — 7× cheaper tier-1 + zero marginal cost when local pod is ON. Requires new `gemini-stt` upstream + multipart→`files.upload`+`generateContent` director adapter (Gemini API differs from OpenAI Whisper schema). Re-adds Speaches venv + whisper weights bootstrap to pod image; restores `role=stt` to primary reconciler trio (back to 3-role llm/stt/tts); migration 0029 re-INSERTs `local-stt` upstream + `(whisper, local-stt)` alias + adds `gemini-stt` upstream + `(whisper, gemini-stt)` alias at tier-1; gateway breaker chain: local-stt (tier-0) → gemini-stt (tier-1) → openai-whisper (tier-1 safety net).
 **Requirements**: D-B1, D-B2, D-B3, D-B4, D-B5′, D-B6′, D-B7, D-B8, D-B9, D-B10, D-B11, D-B12, D-B13, D-B14, UAT-CASCADE-LIVE, UAT-COLD-START (operator decisions in 11.2-CONTEXT.md)
 **Depends on:** Phase 11.1 (closed passed_partial — provides Config split + DefaultSearchFilters + 2-role reconciler foundation to extend)
-**Plans:** 5/8 plans executed
+**Plans:** 6/8 plans executed
 
 Plans:
 
@@ -101,7 +101,7 @@ Plans:
 - [x] 11.2-03-PLAN.md — Wave 2: Migration 0029 (additive tier_priority col + UNIQUE swap + INSERT local-stt + gemini-stt prio=10 cooldown_s=120 + groq-whisper prio=15 + openai-whisper prio=20) + Loader.ResolveAllTier1 + types.TierPriority + reconciler/lifecycle restore role=stt; BLOCKING migrate up
 - [x] 11.2-04-PLAN.md — Wave 3a (pod, parallel with 05): Restore Dockerfile speaches venv + supervisord [program:speaches] + onstart WHISPER guards + download-weights 3-way parallel; BLOCKING rebuild + push + promote PRIMARY_TEMPLATE_IMAGE
 - [x] 11.2-05-PLAN.md — Wave 3b (pod, parallel with 04): Health-bridge restore probeSTT + /health/stt + UpstreamSTT const + TestProbeSTT (verbatim 39bec50^)
-- [ ] 11.2-06-PLAN.md — Wave 4: NEW gemini_stt_director.go (multipart→JSON + flatten resp + x-goog-api-key) + dispatcher multi-tier-1 loop (ResolveAllTier1) + resolver upstreamEnvVarMap +2 entries + openai_whisper_director canonicalAlias +groq-whisper (D-B8 REUSE) + main.go wireup 2 new proxies
+- [x] 11.2-06-PLAN.md — Wave 4: NEW gemini_stt_director.go (multipart→JSON + flatten resp + x-goog-api-key) + dispatcher multi-tier-1 loop (ResolveAllTier1) + resolver upstreamEnvVarMap +2 entries + openai_whisper_director canonicalAlias +groq-whisper (D-B8 REUSE) + main.go wireup 2 new proxies
 - [ ] 11.2-07-PLAN.md — Wave 5: RUNBOOK-OPS Gemini + Groq operator sections (key mint/rotate, D-B10 verbatim cmd, cooldown tuning, Pitfalls) + gateway/.env.example + PROJECT.md tech-stack
 - [ ] 11.2-08-PLAN.md — Wave 6: Implement 6 UAT scenarios in pod/smoke/uat-11.2.sh + BLOCKING operator live UAT (pod-ON local-stt, pod-OFF gemini, gemini-open→groq, gemini+groq-open→openai, sensitive pod-ON local, sensitive pod-OFF→503 RES-08) + 11.2-VERIFICATION.md rollup
 
