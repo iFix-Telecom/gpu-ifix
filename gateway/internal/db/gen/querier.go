@@ -75,7 +75,7 @@ type Querier interface {
 	GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantConfigRow, error)
 	// Used by gatewayctl upstreams update/enable/disable to verify the name
 	// exists before mutating.
-	GetUpstreamByName(ctx context.Context, name string) (AiGatewayUpstream, error)
+	GetUpstreamByName(ctx context.Context, name string) (GetUpstreamByNameRow, error)
 	// Monthly quota check: SUM rows for the calendar month containing today
 	// in America/Sao_Paulo.
 	GetUsageCountersMonth(ctx context.Context, tenantID uuid.UUID) (GetUsageCountersMonthRow, error)
@@ -155,7 +155,7 @@ type Querier interface {
 	ListAllPrices(ctx context.Context) ([]AiGatewayPrice, error)
 	// Admin surface (gatewayctl upstreams list). Returns every row regardless
 	// of enabled state so the operator can re-enable disabled upstreams.
-	ListAllUpstreams(ctx context.Context) ([]AiGatewayUpstream, error)
+	ListAllUpstreams(ctx context.Context) ([]ListAllUpstreamsRow, error)
 	// Phase 7 — paginated read for the observability dashboard's state-change
 	// feed (consumed by the admin handler in plan 07-03). Returns only rows
 	// tagged with a non-NULL event_kind (FSM/state-change audit rows added by
@@ -170,9 +170,11 @@ type Querier interface {
 	// compact for tabwriter rendering.
 	ListEmergencyLifecycles(ctx context.Context, arg ListEmergencyLifecyclesParams) ([]ListEmergencyLifecyclesRow, error)
 	// Hot-path load at boot and on LISTEN/NOTIFY (CONTEXT.md D-D2). Returns
-	// all enabled rows ordered by (role, tier) so the Loader can
-	// deterministically build tier-0/tier-1 maps.
-	ListEnabledUpstreams(ctx context.Context) ([]AiGatewayUpstream, error)
+	// all enabled rows ordered by (role, tier, tier_priority) so the Loader
+	// can deterministically build tier-0/tier-1 maps.
+	// Phase 11.2 (D-B5′/D-B6′): tier_priority widens (role,tier) for the STT
+	// multi-tier-1 cascade.
+	ListEnabledUpstreams(ctx context.Context) ([]ListEnabledUpstreamsRow, error)
 	// Used by leader recovery (D-D5) on leader acquisition. The partial unique
 	// index `emergency_live_singleton` guarantees ≤1 row is returned. Returns
 	// enough state for recovery: vast IDs (to GetInstance) + events (to resume FSM).
