@@ -1508,3 +1508,128 @@ func TestLoad_LogsOneLinePerActiveOverride(t *testing.T) {
 		t.Errorf("UPSTREAM_STT_OPENAI_MODEL is unset; it MUST NOT surface in the log; got:\n%s", out)
 	}
 }
+
+// phase112OptionalEnv enumerates the Phase 11.2 STT cascade env vars +
+// restored whisper weight fields. Cleared in setUp so prior tests do not
+// leak values into the default-value assertions below.
+var phase112OptionalEnv = []string{
+	"PRIMARY_WHISPER_WEIGHTS_KEY",
+	"PRIMARY_WHISPER_WEIGHTS_SHA256",
+	"PRIMARY_SPEACHES_IMAGE",
+	"UPSTREAM_STT_FALLBACK_1_URL",
+	"UPSTREAM_STT_FALLBACK_1_AUTH_BEARER",
+	"UPSTREAM_STT_FALLBACK_1_MODEL",
+	"UPSTREAM_STT_FALLBACK_2_URL",
+	"UPSTREAM_STT_FALLBACK_2_AUTH_BEARER",
+	"UPSTREAM_STT_FALLBACK_2_MODEL",
+}
+
+func clearPhase112(t *testing.T) {
+	t.Helper()
+	for _, v := range phase112OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestConfig_Defaults_Phase112 asserts the Phase 11.2 Wave 1 Config
+// defaults: PRIMARY_WHISPER_WEIGHTS_* restored from 11.1 revert,
+// PRIMARY_SPEACHES_IMAGE locked at D-B1, and the 6 UPSTREAM_STT_FALLBACK_{1,2}_*
+// slot defaults (slot 1 = Gemini 2.5 Flash Lite, slot 2 = Groq Whisper-large-v3).
+func TestConfig_Defaults_Phase112(t *testing.T) {
+	clearAll(t)
+	clearPhase112(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Restored from 11.1 revert (D-B7).
+	if cfg.PrimaryWhisperWeightsKey != "whisper-large-v3/v1.0.0/model.tar.gz" {
+		t.Errorf("PrimaryWhisperWeightsKey default: want whisper-large-v3/v1.0.0/model.tar.gz, got %q",
+			cfg.PrimaryWhisperWeightsKey)
+	}
+	if cfg.PrimaryWhisperWeightsSHA256 != "" {
+		t.Errorf("PrimaryWhisperWeightsSHA256 default: want empty (fail-fast at build), got %q",
+			cfg.PrimaryWhisperWeightsSHA256)
+	}
+	// NEW — speaches image (D-B1 LOCKED).
+	if cfg.PrimarySpeachesImage != "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3" {
+		t.Errorf("PrimarySpeachesImage default: want ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3, got %q",
+			cfg.PrimarySpeachesImage)
+	}
+	// Slot 1 = Gemini (D-B7).
+	if cfg.UpstreamSTTFallback1URL != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Errorf("UpstreamSTTFallback1URL default: want Gemini v1beta, got %q",
+			cfg.UpstreamSTTFallback1URL)
+	}
+	if cfg.UpstreamSTTFallback1AuthBearer != "" {
+		t.Errorf("UpstreamSTTFallback1AuthBearer default: want empty, got %q",
+			cfg.UpstreamSTTFallback1AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback1Model != "gemini-2.5-flash-lite" {
+		t.Errorf("UpstreamSTTFallback1Model default: want gemini-2.5-flash-lite, got %q",
+			cfg.UpstreamSTTFallback1Model)
+	}
+	// Slot 2 = Groq Whisper (D-B8).
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai/v1" {
+		t.Errorf("UpstreamSTTFallback2URL default: want Groq /openai/v1, got %q",
+			cfg.UpstreamSTTFallback2URL)
+	}
+	if cfg.UpstreamSTTFallback2AuthBearer != "" {
+		t.Errorf("UpstreamSTTFallback2AuthBearer default: want empty, got %q",
+			cfg.UpstreamSTTFallback2AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback2Model != "whisper-large-v3" {
+		t.Errorf("UpstreamSTTFallback2Model default: want whisper-large-v3, got %q",
+			cfg.UpstreamSTTFallback2Model)
+	}
+}
+
+// TestConfig_Defaults_Phase112_EnvOverride exercises operator env-overrides
+// for every Phase 11.2 var (model swap to gemini-2.5-flash, custom Groq URL,
+// bearer injection — verifies the loader wiring, not just struct presence).
+func TestConfig_Defaults_Phase112_EnvOverride(t *testing.T) {
+	clearAll(t)
+	clearPhase112(t)
+	setAllRequired(t)
+	t.Setenv("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-custom/v2.0.0/model.tar.gz")
+	t.Setenv("PRIMARY_WHISPER_WEIGHTS_SHA256", "deadbeefcafebabe")
+	t.Setenv("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:1.0.0-cuda-12.6.3")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_URL", "https://generativelanguage.googleapis.com/v1beta-custom")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_AUTH_BEARER", "AIza-fake-key")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai/v1-staging")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_AUTH_BEARER", "gsk_fake-groq-key")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3-turbo")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PrimaryWhisperWeightsKey != "whisper-custom/v2.0.0/model.tar.gz" {
+		t.Errorf("PrimaryWhisperWeightsKey override: got %q", cfg.PrimaryWhisperWeightsKey)
+	}
+	if cfg.PrimaryWhisperWeightsSHA256 != "deadbeefcafebabe" {
+		t.Errorf("PrimaryWhisperWeightsSHA256 override: got %q", cfg.PrimaryWhisperWeightsSHA256)
+	}
+	if cfg.PrimarySpeachesImage != "ghcr.io/speaches-ai/speaches:1.0.0-cuda-12.6.3" {
+		t.Errorf("PrimarySpeachesImage override: got %q", cfg.PrimarySpeachesImage)
+	}
+	if cfg.UpstreamSTTFallback1URL != "https://generativelanguage.googleapis.com/v1beta-custom" {
+		t.Errorf("UpstreamSTTFallback1URL override: got %q", cfg.UpstreamSTTFallback1URL)
+	}
+	if cfg.UpstreamSTTFallback1AuthBearer != "AIza-fake-key" {
+		t.Errorf("UpstreamSTTFallback1AuthBearer override: got %q", cfg.UpstreamSTTFallback1AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback1Model != "gemini-2.5-flash" {
+		t.Errorf("UpstreamSTTFallback1Model override: got %q", cfg.UpstreamSTTFallback1Model)
+	}
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai/v1-staging" {
+		t.Errorf("UpstreamSTTFallback2URL override: got %q", cfg.UpstreamSTTFallback2URL)
+	}
+	if cfg.UpstreamSTTFallback2AuthBearer != "gsk_fake-groq-key" {
+		t.Errorf("UpstreamSTTFallback2AuthBearer override: got %q", cfg.UpstreamSTTFallback2AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback2Model != "whisper-large-v3-turbo" {
+		t.Errorf("UpstreamSTTFallback2Model override: got %q", cfg.UpstreamSTTFallback2Model)
+	}
+}
