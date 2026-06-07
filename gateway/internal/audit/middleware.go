@@ -73,7 +73,9 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 			// Build Event from the captured state. Upstream defaults to
 			// the route-derived value (llm/embed/stt); handlers may
 			// override via audit.WithUpstreamOverride (e.g. dispatcher's
-			// sensitive-block path → "blocked_sensitive" per D-B3).
+			// sensitive-block path → "blocked_sensitive" per D-B3, or the
+			// Phase 11.2 Plan 08 D-B13 audit-distinguish fix that stamps
+			// the factual dispatched-to upstream name).
 			upstream := upstreamForRoute(r.URL.Path)
 			if override := auditctx.UpstreamOverrideFrom(r.Context()); override != "" {
 				upstream = override

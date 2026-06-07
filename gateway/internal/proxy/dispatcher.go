@@ -349,6 +349,19 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// Flush time (the interceptor runs inside ModifyResponse where the
 	// dispatch decision is otherwise opaque).
 	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
+	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): also stamp the
+	// FACTUAL upstream as the audit-row Upstream value via *r = *r in
+	// place, so the audit middleware (which reads from the outer *Request
+	// post-ServeHTTP) records "local-stt"/"gemini-stt"/"groq-whisper"
+	// /"openai-whisper" instead of the route-derived "stt". Limited to
+	// the audit-ctx key (UpstreamOverride) — does NOT mutate request body
+	// state or any header the proxy needs, so it does not interfere with
+	// SSE streaming or backoff retry. Skipped when an UpstreamOverride is
+	// already set (preserves shed/schedule semantics like
+	// "blocked_sensitive" / "off_hours").
+	if auditctx.UpstreamOverrideFromContext(r.Context()) == "" {
+		*r = *r.WithContext(auditctx.WithUpstreamOverride(r.Context(), name))
+	}
 	// RES-02 deferral: ReverseProxy.ServeHTTP writes directly to the
 	// ResponseWriter — backoff retry would require a buffering layer
 	// (see retry.go godoc). Phase 3 relies on breaker fallback instead.
