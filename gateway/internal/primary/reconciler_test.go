@@ -617,8 +617,8 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 		"all 4 endpoints healthy + running + ports populated → markReady fires + FSM → Ready")
 	snap := loader.snapshot()
 	require.Contains(t, snap, "llm", "OverrideTier0('llm', URL) must fire")
+	require.Contains(t, snap, "stt", "OverrideTier0('stt', URL) must fire (Phase 11.2 D-B5′ — restored)")
 	require.Contains(t, snap, "tts", "OverrideTier0('tts', URL) must fire")
-	require.NotContains(t, snap, "stt", "OverrideTier0('stt', ...) must NOT fire (Phase 11.1 D-A4)")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the 9400 host mapping")
 }
@@ -883,6 +883,7 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
 	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
@@ -899,8 +900,8 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 		"evaluateReady with !IsInPeak must transition Ready→Draining")
 	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated")
 	roles := loader.restoredRoles()
-	require.Equal(t, []string{"llm", "tts"}, roles,
-		"startDrain must RestoreTier0 for the 2 primary roles (llm+tts) in order — Phase 11.1 D-A4 dropped stt")
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+		"startDrain must RestoreTier0 for the 3 primary roles (llm+stt+tts) in order — Phase 11.2 D-B5′ restored stt")
 }
 
 // UAT 14 follow-up (2026-05-19): under DISABLED, evaluateReady must
@@ -1014,16 +1015,17 @@ func TestMarkReady_OverridesTier0_2Roles(t *testing.T) {
 
 	urls := primaryPodURLs{
 		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
 		TTS:  "http://1.2.3.4:33003/health",
 		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	err := r.markReady(context.Background(), 5, urls, 0.30, testLogger())
 	require.NoError(t, err)
 	snap := loader.snapshot()
-	require.Len(t, snap, 2, "exactly 2 OverrideTier0 calls (llm+tts; Phase 11.1 D-A4 dropped stt)")
+	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
 	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
-	require.NotContains(t, snap, "stt", "Phase 11.1 D-A4: markReady must NOT override stt")
 	require.Equal(t, urls.DCGM, dcgm.Last(), "DCGM URL passed verbatim to scraper")
 	require.Equal(t, StateReady, r.deps.FSM.State())
 }
@@ -1056,6 +1058,7 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	fsm.SetState(StateDraining, time.Now(), "setup")
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
+	loader.OverrideTier0("stt", "http://x")
 	loader.OverrideTier0("tts", "http://x")
 	infl := newFakeInflight() // all zero → immediate destroy
 	fakeV := &fakeVast{}
@@ -1086,8 +1089,8 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	// startDrain wasn't called in this flow (we pre-set FSM=Draining), but
 	// closeLifecycle in evaluateDestroying also defensively RestoresTier0.
 	restored := loader.restoredRoles()
-	require.GreaterOrEqual(t, len(restored), 2,
-		"closeLifecycle must defensively RestoreTier0 for the 2 roles (llm+tts; Phase 11.1 D-A4 dropped stt)")
+	require.GreaterOrEqual(t, len(restored), 3,
+		"closeLifecycle must defensively RestoreTier0 for the 3 roles (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 }
 
 // ===========================================================================
@@ -1187,6 +1190,7 @@ func TestHandleForceDownRequest_TransitionsReadyToDraining(t *testing.T) {
 	fsm.SetState(StateReady, time.Now(), "setup")
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
+	loader.OverrideTier0("stt", "http://x")
 	loader.OverrideTier0("tts", "http://x")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
@@ -1426,7 +1430,7 @@ func TestRecoverOpenLifecycle_HealthyInstanceRestoresReady(t *testing.T) {
 	require.Equal(t, int64(100), r.activeLifecycleID.Load())
 	require.Equal(t, int64(42), r.activeInstanceID.Load())
 	snap := loader.snapshot()
-	require.Len(t, snap, 2, "2-role OverrideTier0 must fire on recovery (llm+tts; Phase 11.1 D-A4 dropped stt)")
+	require.Len(t, snap, 3, "3-role OverrideTier0 must fire on recovery (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the recovered pod's DCGM endpoint")
 }
@@ -1742,6 +1746,7 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	// activePodURLs must be populated for the re-assert loop to know the URLs.
 	urls := primaryPodURLs{
 		LLM:  "http://203.0.113.7:33000/v1/models",
+		STT:  "http://203.0.113.7:33001/health",
 		TTS:  "http://203.0.113.7:33003/health",
 		DCGM: "http://203.0.113.7:33400/metrics",
 	}
@@ -1752,10 +1757,10 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	snap := loader.snapshot()
 	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
 		"evaluateReady must re-assert the cleared tts slot (stripped /health)")
+	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
+		"evaluateReady must re-assert the cleared stt slot (Phase 11.2 D-B5′ restored)")
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
 		"llm slot stays set")
-	_, sttSet := snap["stt"]
-	require.False(t, sttSet, "stt must NEVER be re-asserted by the primary reconciler (Phase 11.1 D-A4)")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "embed must NEVER be re-asserted by the primary reconciler (D-03)")
 }
@@ -1786,17 +1791,17 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 
 	urls := primaryPodURLs{
 		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
 		TTS:  "http://1.2.3.4:33003/health",
 		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
 
 	snap := loader.snapshot()
-	require.Len(t, snap, 2, "exactly 2 OverrideTier0 calls (llm/tts; Phase 11.1 D-A4 dropped stt)")
+	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm/stt/tts; Phase 11.2 D-B5′ restored stt)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
 	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
-	_, sttSet := snap["stt"]
-	require.False(t, sttSet, "markReady must NOT override stt (Phase 11.1 D-A4 — Whisper deleted)")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "markReady must NOT override embed (D-03 — embed is static off-pod)")
 	require.Equal(t, StateReady, r.deps.FSM.State())
@@ -1809,27 +1814,99 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 // :527/:571/:636 per PATTERNS.md lines 319-337.
 // ---------------------------------------------------------------------------
 
-// TestStartDrain_RestoreTier0_CalledFor_STT — reconciler.go :527 restore.
+// TestStartDrain_RestoreTier0_CalledFor_STT — reconciler.go startDrain
+// restoration (Phase 11.2 D-B5′ revert of 11.1-01). When evaluateReady
+// fires startDrain on a Ready→Draining transition, the fake loader MUST
+// record a RestoreTier0 call for role="stt" alongside llm and tts.
 func TestStartDrain_RestoreTier0_CalledFor_STT(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores RestoreTier0(stt) call in startDrain; unskip + assert fake loader records role=stt restore on drain transition")
-	// Expected:
-	//   r.startDrain(); require.Contains(t, fakeLoader.RestoreCalls, "stt")
-	// Reference: PATTERNS.md line 326-329.
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(42)
+
+	r.evaluateReady(context.Background(), time.Now(), testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State())
+	roles := loader.restoredRoles()
+	require.Contains(t, roles, "stt",
+		"startDrain MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
 }
 
-// TestMarkReady_OverrideTier0_CalledFor_STT — reconciler.go :571 restore.
+// TestMarkReady_OverrideTier0_CalledFor_STT — reconciler.go markReady
+// restoration (Phase 11.2 D-B5′). When markReady transitions
+// Provisioning→Ready with a populated urls.STT, the loader MUST record
+// an OverrideTier0("stt", strippedURL) call with the /health suffix
+// stripped (parity with llm/tts).
 func TestMarkReady_OverrideTier0_CalledFor_STT(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores OverrideTier0(stt, urls.STT) call in markReady; unskip + assert override map gains key=stt with value=urls.STT")
-	// Expected:
-	//   r.markReady(podURLs{STT: "http://primary:8001"})
-	//   require.Equal(t, "http://primary:8001", fakeLoader.OverrideMap["stt"])
-	// Reference: PATTERNS.md line 331.
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	urls := primaryPodURLs{
+		LLM:  "http://primary:33000/v1/models",
+		STT:  "http://primary:33001/health",
+		TTS:  "http://primary:33003/health",
+		DCGM: "http://primary:33400/metrics",
+	}
+	require.NoError(t, r.markReady(context.Background(), 7, urls, 0.30, testLogger()))
+
+	snap := loader.snapshot()
+	require.Equal(t, "http://primary:33001", snap["stt"],
+		"markReady MUST OverrideTier0(stt, strippedURL) — /health suffix stripped (Phase 11.2 D-B5′)")
 }
 
-// TestCloseLifecycle_RestoreTier0_CalledFor_STT — reconciler.go :636 restore.
+// TestCloseLifecycle_RestoreTier0_CalledFor_STT — reconciler.go
+// closeLifecycle defensive restoration (Phase 11.2 D-B5′). The fake
+// loader MUST record a RestoreTier0 call for role="stt" inside the
+// 3-role defensive cleanup that closeLifecycle runs.
 func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores RestoreTier0(stt) call in closeLifecycle; unskip + assert stt restore on pod close")
-	// Expected:
-	//   r.closeLifecycle(); require.Contains(t, fakeLoader.RestoreCalls, "stt")
-	// Reference: PATTERNS.md line 334.
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	fsm.SetState(StateDraining, time.Now(), "setup")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	require.NoError(t, r.closeLifecycle(context.Background(), 99, "test_close", 0.30))
+
+	roles := loader.restoredRoles()
+	require.Contains(t, roles, "stt",
+		"closeLifecycle MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
 }

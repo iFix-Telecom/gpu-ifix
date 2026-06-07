@@ -397,16 +397,15 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// (emerg/reconciler.go RestoreTier0) shares the SAME tier0Override map
 	// and unilaterally clears the slot the primary wrote in markReady. The
 	// primary only writes the slot once (markReady/recoverOpenLifecycle), so
-	// a cutback leaves llm/tts routing to the stale static row until the
+	// a cutback leaves llm/stt/tts routing to the stale static row until the
 	// next pod cycle. Re-assert any cleared dynamic slot here at 1Hz — the
 	// inconsistency window is <=1s. embed is EXCLUDED (D-03 — static off-pod
-	// row, immune to this vector); stt is EXCLUDED (Phase 11.1 D-A4 —
-	// Whisper deleted, stt is now tier-1 static OpenAI-Whisper only). This
-	// runs regardless of DISABLED because an operator force-up pod is Ready
-	// under DISABLED and is just as vulnerable to an emerg cutback clearing
-	// its slot.
+	// row, immune to this vector). Phase 11.2 (D-B5′) restored "stt" here
+	// after Phase 11.1 D-A4 had dropped it. This runs regardless of DISABLED
+	// because an operator force-up pod is Ready under DISABLED and is just
+	// as vulnerable to an emerg cutback clearing its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
-		for _, role := range []string{"llm", "tts"} {
+		for _, role := range []string{"llm", "stt", "tts"} {
 			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
 				r.deps.Loader.OverrideTier0(role, stripPrimaryReadinessSuffix(roleURL(*urls, role)))
 				log.Warn("primary re-asserted tier-0 override (emerg cleared it)", "role", role)
@@ -519,12 +518,13 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 		}
 	}
 
-	// RestoreTier0 for the 2 dynamic roles (llm/tts — NOT embed, D-03;
-	// NOT stt post-Phase 11.1 D-A4) BEFORE the FSM transition. New requests
-	// land on the fallback chain immediately; in-flight ones drain over the
-	// grace window.
+	// RestoreTier0 for the 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
+	// BEFORE the FSM transition. New requests land on the fallback chain
+	// immediately; in-flight ones drain over the grace window. Phase 11.2
+	// (D-B5′) restored "stt" after Phase 11.1 D-A4 had dropped it.
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
+		r.deps.Loader.RestoreTier0("stt")
 		r.deps.Loader.RestoreTier0("tts")
 	}
 
@@ -540,14 +540,15 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 }
 
 // markReady is the success exit of the provisioning poll loop. Marks the
-// DB row healthy, stores activePodURLs, overrides tier-0 for 2 roles
-// (llm+tts post-Phase 11.1 D-A4), points DCGM scraper at :9400/metrics,
+// DB row healthy, stores activePodURLs, overrides tier-0 for 3 roles
+// (llm+stt+tts post-Phase 11.2 D-B5′), points DCGM scraper at :9400/metrics,
 // publishes primary_ready, and transitions Provisioning→Ready.
 func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls primaryPodURLs, acceptedDPH float64, log *slog.Logger) error {
 	if q := r.queries(); q != nil {
 		eventJSON := vastutil.MustEventJSON("health_pass", map[string]any{
 			"lifecycle_id": lifecycleID,
 			"llm_url":      urls.LLM,
+			"stt_url":      urls.STT,
 			"tts_url":      urls.TTS,
 			"dcgm_url":     urls.DCGM,
 			"dph":          acceptedDPH,
@@ -561,14 +562,15 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	}
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
-		// Phase 11.1 (D-A4): the dynamic primary roster is llm/tts — NOT
-		// embed (D-03, embed relocated to a 24/7 CPU host as a static tier-0
-		// row), NOT stt (D-A4, Whisper deleted from pod; /v1/audio/
-		// transcriptions routes to tier-1 OpenAI-Whisper static row only).
-		// We strip the readiness suffix here so the dispatcher's
-		// ReverseProxy target is the BASE URL (parity emerg markHealthy /
-		// stripHealthSuffix).
+		// Phase 11.2 (D-B5′): the dynamic primary roster is llm/stt/tts —
+		// NOT embed (D-03, embed relocated to a 24/7 CPU host as a static
+		// tier-0 row). Phase 11.1 D-A4 had dropped "stt" but Phase 11.2
+		// restored it (Speaches/Whisper is back on the pod via
+		// supervisord [program:speaches] on port 8001). We strip the
+		// readiness suffix here so the dispatcher's ReverseProxy target is
+		// the BASE URL (parity emerg markHealthy / stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
+		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
 		// is atomic and Live; Refresh would re-scan the DB which is
@@ -633,7 +635,9 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 		(*cancelPtr)()
 	}
 	if r.deps.Loader != nil {
+		// Phase 11.2 (D-B5′): defensive 3-role RestoreTier0 (idempotent).
 		r.deps.Loader.RestoreTier0("llm")
+		r.deps.Loader.RestoreTier0("stt")
 		r.deps.Loader.RestoreTier0("tts")
 	}
 	if r.deps.DCGMScraper != nil {
@@ -1017,18 +1021,21 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Ports not fully mapped yet — keep polling. W6 fix parity.
 				continue
 			}
-			// 3-endpoint health check inside ONE container's namespace
-			// (Phase 11.1 supervisord 3-services: llm/tts/dcgm — embed
-			// left the pod per D-03; stt left the pod per Phase 11.1 D-A4
-			// Whisper delete). All 3 must pass.
+			// 4-endpoint health check inside ONE container's namespace
+			// (Phase 11.2 supervisord 4-services: llm/stt/tts/dcgm — embed
+			// left the pod per D-03). All 4 must pass. Phase 11.2 (D-B5′)
+			// restored "stt" after Phase 11.1 D-A4 had dropped it.
 			if r.deps.HealthCheck == nil {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.LLM) {
+				continue
+			}
+			if !r.deps.HealthCheck(ctx, urls.STT) {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.TTS) {
@@ -1053,6 +1060,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 	return primaryPodURLs{
 		LLM:  r.podLLMURL(inst),
+		STT:  r.podSTTURL(inst), // Phase 11.2 D-B5′: restored
 		TTS:  r.podTTSURL(inst),
 		DCGM: r.podDCGMURL(inst),
 	}
@@ -1113,7 +1121,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		return nil
 	}
 	urls := r.buildPodURLs(inst)
-	if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
+	if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 		r.deps.Log.Warn("primary recover: pod ports not fully mapped; closing as unhealthy orphan",
 			"lifecycle_id", open.ID)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
@@ -1126,6 +1134,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	}
 	if r.deps.HealthCheck == nil ||
 		!r.deps.HealthCheck(ctx, urls.LLM) ||
+		!r.deps.HealthCheck(ctx, urls.STT) ||
 		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
 		r.deps.Log.Warn("primary recover: 3-endpoint health check failed; closing as unhealthy orphan",
@@ -1144,7 +1153,9 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	r.activeInstanceID.Store(open.VastInstanceID.Int64)
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
+		// Phase 11.2 (D-B5′): 3-role restart-recovery override.
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
+		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 	}
 	if r.deps.DCGMScraper != nil {

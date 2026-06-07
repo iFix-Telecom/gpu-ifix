@@ -7,6 +7,7 @@ package primary
 
 import (
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -56,12 +57,15 @@ func cfgWithDefaults() config.Config {
 		// PrimaryLlamaArgs empty → primaryLlamaArgsDefault is used.
 		PrimaryLlamaArgs: nil,
 
-		// BGE-M3 — empty by default in config (per reviews #6 fail-fast
-		// policy). Test fixture provides non-empty placeholders so the
-		// precondition gate passes; the dedicated empty-SHA tests zero
-		// them explicitly. (Phase 11.1 D-A4: Whisper fields removed.)
-		PrimaryBGEM3WeightsKey:    "bge-m3/v1.0.0/model.tar.gz",
-		PrimaryBGEM3WeightsSHA256: "bg3m35h4test256",
+		// Whisper + BGE-M3 — empty by default in config (per reviews #6
+		// fail-fast policy). Test fixture provides non-empty placeholders
+		// so the precondition gate passes; the dedicated empty-SHA tests
+		// zero them explicitly. Phase 11.2 D-B5′ restored Whisper fields
+		// (Phase 11.1 D-A4 had removed them).
+		PrimaryWhisperWeightsKey:    "whisper-large-v3/v1.0.0/model.tar.gz",
+		PrimaryWhisperWeightsSHA256: "wh1sp3rsh4test256",
+		PrimaryBGEM3WeightsKey:      "bge-m3/v1.0.0/model.tar.gz",
+		PrimaryBGEM3WeightsSHA256:   "bg3m35h4test256",
 
 		// MinIO 4 credentials (test values).
 		MinioEndpoint:  "https://s3.example.com",
@@ -481,12 +485,12 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
 }
 
-// TestSupervisordConf_3ProgramBlocks — Task 1 structural assertion on
-// pod/primary/supervisord.conf: nodaemon=true + exactly 3 [program:*]
-// blocks (llama, chatterbox, dcgm) + --jinja flag on llama, no
-// --chat-template-file (B1 embedded LOCKED). Phase 06.7 D-03: infinity
-// embed child removed; Phase 11.1 D-A4: speaches STT child removed
-// (tier-0 STT shrunk to tier-1-only).
+// TestSupervisordConf_4ProgramBlocks — Phase 11.2 D-B5′ structural assertion
+// on pod/primary/supervisord.conf: nodaemon=true + exactly 4 [program:*]
+// blocks (llama, speaches, chatterbox, dcgm) + --jinja flag on llama, no
+// --chat-template-file (B1 embedded LOCKED). Phase 06.7 D-03: infinity embed
+// stays removed; Phase 11.2 D-B5′ restored [program:speaches] (Phase 11.1
+// D-A4 had removed it).
 func TestSupervisordConf_3ProgramBlocks(t *testing.T) {
 	confPath := filepath.Join(repoRoot(t), "pod", "primary", "supervisord.conf")
 	data, err := os.ReadFile(confPath)
@@ -495,17 +499,13 @@ func TestSupervisordConf_3ProgramBlocks(t *testing.T) {
 
 	require.Contains(t, src, "[supervisord]", "must declare [supervisord] section")
 	require.Contains(t, src, "nodaemon=true", "PID 1 invariant")
-	// Active [program:*] blocks live on lines that start with the literal
-	// `[program:` token (no leading `; ` comment marker). The narrative
-	// header may mention removed programs in prose, so use a line-anchored
-	// regex to count only live config blocks.
 	progRe := regexp.MustCompile(`(?m)^\[program:([a-z0-9_-]+)\]`)
 	activePrograms := map[string]bool{}
 	for _, m := range progRe.FindAllStringSubmatch(src, -1) {
 		activePrograms[m[1]] = true
 	}
 	require.True(t, activePrograms["llama"], "must have [program:llama]")
-	require.False(t, activePrograms["speaches"], "Phase 11.1 D-A4: [program:speaches] STT child must be removed (tier-0 STT shrunk to tier-1-only)")
+	require.True(t, activePrograms["speaches"], "Phase 11.2 D-B5′: must have [program:speaches] STT child (restored)")
 	require.True(t, activePrograms["chatterbox"], "Phase 06.7 D-05: must have [program:chatterbox] TTS child")
 	require.False(t, activePrograms["infinity"], "Phase 06.7 D-03: [program:infinity] embed must be removed (relocated off the pod)")
 	require.True(t, activePrograms["dcgm"], "must have [program:dcgm]")
@@ -515,13 +515,13 @@ func TestSupervisordConf_3ProgramBlocks(t *testing.T) {
 	require.Contains(t, src, "0.0.0.0:9400", "dcgm-exporter must bind to 0.0.0.0:9400 (D-07)")
 }
 
-// TestDockerfile_HybridStages — Task 1 structural assertion on
-// pod/primary/Dockerfile: exactly 2 SHA-pinned FROM stages remain
-// (dcgm-stage + final llama.cpp b9191). Phase 11.1 D-A4: Speaches
-// venv removed (tier-0 STT shrunk to tier-1-only); Phase 06.7 D-03:
-// Infinity venv removed (embed relocated off-pod). SHA-pin invariant
-// preserved for runtime-critical llama.cpp b9191 (Qwen3.6 SSM tensor
-// support — non-substitutable).
+// TestDockerfile_HybridStages — Phase 11.2 D-B5′ structural assertion on
+// pod/primary/Dockerfile: SHA-pinned FROM stages preserved + Speaches venv
+// restored. Phase 11.2 D-B5′ reverted Phase 11.1 D-A4 (Speaches/Whisper
+// back on the pod). Phase 06.7 D-03 stays in effect — Infinity venv stays
+// removed (embed relocated off-pod). SHA-pin invariant preserved for
+// runtime-critical llama.cpp b9191 (Qwen3.6 SSM tensor support —
+// non-substitutable).
 func TestDockerfile_HybridStages(t *testing.T) {
 	dockerfilePath := filepath.Join(repoRoot(t), "pod", "primary", "Dockerfile")
 	data, err := os.ReadFile(dockerfilePath)
@@ -530,17 +530,16 @@ func TestDockerfile_HybridStages(t *testing.T) {
 
 	fromLine := regexp.MustCompile(`(?m)^FROM\s+\S+@sha256:[0-9a-f]{64}\s+AS\s+\S+`)
 	matches := fromLine.FindAllString(src, -1)
-	require.Len(t, matches, 2, "Dockerfile must have exactly 2 SHA-pinned FROM ... AS ... lines (dcgm-stage + final)")
+	require.GreaterOrEqual(t, len(matches), 2,
+		"Dockerfile must have at least 2 SHA-pinned FROM ... AS ... lines (dcgm-stage + final; speaches stage allowed)")
 
 	require.Contains(t, src, "server-cuda-b9191@sha256:cb37",
 		"final stage must use llama.cpp b9191 (Wave 0 UPGRADED from b9128)")
 	require.Contains(t, src, "COPY --from=dcgm-stage")
 	require.Regexp(t, regexp.MustCompile(`(?s)apt-get\s+install.*supervisor`), src,
 		"final stage must install supervisor via apt-get")
-	require.NotRegexp(t, regexp.MustCompile(`(?s)pip\s+install.*speaches`), src,
-		"Phase 11.1 D-A4: speaches venv must NOT be installed (tier-0 STT shrunk to tier-1-only)")
 	require.NotRegexp(t, regexp.MustCompile(`(?s)pip\s+install.*infinity-emb`), src,
-		"Phase 06.7 D-03 / 11.1: infinity venv must NOT be installed (embed off-pod)")
+		"Phase 06.7 D-03: infinity venv must NOT be installed (embed off-pod)")
 }
 
 // TestPrimaryLlamaArgsDefault_NoChatTemplateFile — Wave 0 Decision 3
@@ -561,31 +560,42 @@ func TestPrimaryLlamaArgsDefault_NoChatTemplateFile(t *testing.T) {
 // :104/:322/:341 per PATTERNS.md lines 341-361.
 // ---------------------------------------------------------------------------
 
-// TestPrimaryPodURLs_HasSTTField — lifecycle.go :104 restore.
+// TestPrimaryPodURLs_HasSTTField asserts the primaryPodURLs struct has
+// an "STT" field of type string (Phase 11.2 D-B5′ revert of 11.1-01).
 func TestPrimaryPodURLs_HasSTTField(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores STT field in primaryPodURLs struct; unskip + assert reflect.TypeOf((*primaryPodURLs)(nil)).Elem() has STT field of type string")
-	// Expected:
-	//   _, ok := reflect.TypeOf(primaryPodURLs{}).FieldByName("STT")
-	//   require.True(t, ok)
-	// Reference: PATTERNS.md line 346-353.
+	field, ok := reflect.TypeOf(primaryPodURLs{}).FieldByName("STT")
+	require.True(t, ok, "primaryPodURLs must have an STT field (Phase 11.2 D-B5′)")
+	require.Equal(t, reflect.String, field.Type.Kind(),
+		"primaryPodURLs.STT must be of type string")
 }
 
-// TestProvisionArgs_Includes_Port8001 — lifecycle.go :322 restore.
+// TestProvisionArgs_Includes_Port8001 asserts that buildCreateRequest
+// injects the -p 8001:8001 port mapping for speaches STT (Phase 11.2
+// D-B5′ — restored after Phase 11.1 D-A4 removed it).
 func TestProvisionArgs_Includes_Port8001(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores -p 8001:8001 (speaches STT) provision arg; unskip + assert provision args list contains port mapping 8001:8001")
-	// Expected:
-	//   args := buildProvisionArgs(cfg)
-	//   require.Contains(t, args, "-p")
-	//   require.Contains(t, args, "8001:8001")
-	// Reference: PATTERNS.md line 357.
+	cfg := testCfg(t)
+	r := buildReconciler(t, Deps{Cfg: cfg})
+	offer := vast.Offer{ID: 12345, GpuName: "RTX 3090"}
+	req, err := r.buildCreateRequest(offer, 7)
+	require.NoError(t, err)
+	require.Contains(t, req.Env, "-p 8001:8001",
+		"provision env MUST include -p 8001:8001 (Phase 11.2 D-B5′ — speaches STT port restored)")
+	require.Equal(t, "1", req.Env["-p 8001:8001"],
+		"-p 8001:8001 value must be \"1\" (Vast.ai port-forward indicator)")
 }
 
-// TestProvisionEnv_Injects_PRIMARY_WHISPER_WEIGHTS_KEY_And_SHA256 — lifecycle.go :341 restore.
+// TestProvisionEnv_Injects_PRIMARY_WHISPER_WEIGHTS_KEY_And_SHA256 asserts
+// that buildCreateRequest injects PRIMARY_WHISPER_WEIGHTS_KEY and
+// PRIMARY_WHISPER_WEIGHTS_SHA256 (Phase 11.2 D-B5′ — restored after
+// Phase 11.1 D-A4 removed them).
 func TestProvisionEnv_Injects_PRIMARY_WHISPER_WEIGHTS_KEY_And_SHA256(t *testing.T) {
-	t.Skip("OWNER: Plan 03 — restores WHISPER weights env injection; unskip + assert env map contains PRIMARY_WHISPER_WEIGHTS_KEY + PRIMARY_WHISPER_WEIGHTS_SHA256")
-	// Expected:
-	//   env := buildProvisionEnv(cfg)
-	//   require.Equal(t, cfg.PrimaryWhisperWeightsKey, env["PRIMARY_WHISPER_WEIGHTS_KEY"])
-	//   require.Equal(t, cfg.PrimaryWhisperWeightsSHA256, env["PRIMARY_WHISPER_WEIGHTS_SHA256"])
-	// Reference: PATTERNS.md line 358-360.
+	cfg := testCfg(t)
+	r := buildReconciler(t, Deps{Cfg: cfg})
+	offer := vast.Offer{ID: 12345, GpuName: "RTX 3090"}
+	req, err := r.buildCreateRequest(offer, 7)
+	require.NoError(t, err)
+	require.Equal(t, cfg.PrimaryWhisperWeightsKey, req.Env["PRIMARY_WHISPER_WEIGHTS_KEY"],
+		"PRIMARY_WHISPER_WEIGHTS_KEY must come from cfg (Phase 11.2 D-B5′)")
+	require.Equal(t, cfg.PrimaryWhisperWeightsSHA256, req.Env["PRIMARY_WHISPER_WEIGHTS_SHA256"],
+		"PRIMARY_WHISPER_WEIGHTS_SHA256 must come from cfg (Phase 11.2 D-B5′)")
 }

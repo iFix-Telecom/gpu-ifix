@@ -83,7 +83,11 @@ var (
 	ErrMissingQwenSHA = errors.New(
 		"primary: PRIMARY_QWEN_WEIGHTS_SHA256 is empty — refusing to build pod request",
 	)
-	// Phase 11.1 D-A4: ErrMissingWhisperSHA removed (STT shrunk to tier-1-only).
+	// Phase 11.2 D-B5′: ErrMissingWhisperSHA restored (revert 11.1 D-A4 —
+	// tier-0 Speaches/Whisper STT is back on the primary pod).
+	ErrMissingWhisperSHA = errors.New(
+		"primary: PRIMARY_WHISPER_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
+	)
 	ErrMissingBGEM3SHA = errors.New(
 		"primary: PRIMARY_BGEM3_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
@@ -103,6 +107,7 @@ var (
 // {llm,stt,tts}.
 type primaryPodURLs struct {
 	LLM  string
+	STT  string // Phase 11.2 D-B5′: restored (revert 11.1 D-A4 — speaches back on pod)
 	TTS  string
 	DCGM string
 }
@@ -297,7 +302,10 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	if cfg.PrimaryQwenWeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingQwenSHA
 	}
-	// Phase 11.1 D-A4: whisper SHA gate removed.
+	// Phase 11.2 D-B5′: whisper SHA gate restored (revert 11.1 D-A4).
+	if cfg.PrimaryWhisperWeightsSHA256 == "" {
+		return vast.CreateRequest{}, ErrMissingWhisperSHA
+	}
 	if cfg.PrimaryBGEM3WeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingBGEM3SHA
 	}
@@ -338,9 +346,14 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// because the precondition gate above bails out otherwise.
 		"PRIMARY_QWEN_WEIGHTS_KEY":    cfg.PrimaryQwenWeightsKey,
 		"PRIMARY_QWEN_WEIGHTS_SHA256": cfg.PrimaryQwenWeightsSHA256,
-		// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
-		"PRIMARY_BGEM3_WEIGHTS_KEY":    cfg.PrimaryBGEM3WeightsKey,
-		"PRIMARY_BGEM3_WEIGHTS_SHA256": cfg.PrimaryBGEM3WeightsSHA256,
+		// Phase 11.2 D-B5′: PRIMARY_WHISPER_WEIGHTS_* restored (revert 11.1 D-A4 —
+		// tier-0 Speaches/Whisper STT is back on the primary pod, consumed by
+		// pod/scripts/download-weights.sh + pod/primary/supervisord.conf
+		// [program:speaches].
+		"PRIMARY_WHISPER_WEIGHTS_KEY":    cfg.PrimaryWhisperWeightsKey,
+		"PRIMARY_WHISPER_WEIGHTS_SHA256": cfg.PrimaryWhisperWeightsSHA256,
+		"PRIMARY_BGEM3_WEIGHTS_KEY":      cfg.PrimaryBGEM3WeightsKey,
+		"PRIMARY_BGEM3_WEIGHTS_SHA256":   cfg.PrimaryBGEM3WeightsSHA256,
 	}
 
 	if cfg.PrimaryQwenJinjaKey != "" {
@@ -432,17 +445,19 @@ func (r *Reconciler) podDCGMURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "9400", "/metrics")
 }
 
-// roleURL maps a dynamic primary role ("llm"/"tts") to its raw
+// roleURL maps a dynamic primary role ("llm"/"stt"/"tts") to its raw
 // per-service URL (with readiness suffix) from a primaryPodURLs snapshot.
 // Used by the evaluateReady Pitfall #11 re-assert loop (D-13) to recover
 // the pod URL for a tier-0 slot an emerg cutback cleared. "embed" is NOT a
-// dynamic primary role post-Phase-06.7 (D-03) and returns "". "stt" is NOT
-// a dynamic primary role post-Phase 11.1 (D-A4 — Whisper deleted) and
-// returns "".
+// dynamic primary role post-Phase-06.7 (D-03) and returns "". Phase 11.2
+// (D-B5′) restored "stt" to the dynamic roster after Phase 11.1 D-A4
+// dropped it.
 func roleURL(urls primaryPodURLs, role string) string {
 	switch role {
 	case "llm":
 		return urls.LLM
+	case "stt":
+		return urls.STT
 	case "tts":
 		return urls.TTS
 	default:
