@@ -691,6 +691,40 @@ func main() {
 			)
 		}
 	}
+	// Phase 11.2 D-B4 — gemini-stt tier-1 primary fallback. Wired ONLY when
+	// the upstream row exists in the loader (migration 0029) AND the URL +
+	// API key env vars are populated. Without the key the proxy is omitted
+	// and the dispatcher cascade simply skips gemini-stt (D-B5′ behavior).
+	if u, ok := loader.Get("gemini-stt"); ok && cfg.UpstreamSTTFallback1URL != "" && cfg.UpstreamSTTFallback1AuthBearer != "" {
+		geminiProxy, perr := buildGeminiSTTProxy(cfg.UpstreamSTTFallback1URL, cfg.UpstreamSTTFallback1AuthBearer, resolver, log)
+		if perr != nil {
+			log.Warn("build gemini-stt proxy", "err", perr)
+		} else {
+			sttRoleProxies["gemini-stt"] = geminiProxy
+		}
+		_ = u
+	}
+	// Phase 11.2 D-B8 — groq-whisper tier-1 fallback (REUSES openai-whisper
+	// director — Groq endpoint is OpenAI-compatible). Loader row carries
+	// the schema URL; the director takes URL + bearer from env config so
+	// operators can hot-swap without a migration. WhisperAbortGuard wraps
+	// it for consistent duplicate-model handling.
+	if u, ok := loader.Get("groq-whisper"); ok && cfg.UpstreamSTTFallback2URL != "" && cfg.UpstreamSTTFallback2AuthBearer != "" {
+		groqUpstream := upstreams.UpstreamConfig{
+			Name:       "groq-whisper",
+			URL:        cfg.UpstreamSTTFallback2URL,
+			AuthBearer: cfg.UpstreamSTTFallback2AuthBearer,
+		}
+		groqRP, perr := buildGroqWhisperProxy(groqUpstream, log, resolver)
+		if perr != nil {
+			log.Warn("build groq-whisper proxy", "err", perr)
+		} else {
+			sttRoleProxies["groq-whisper"] = proxy.WhisperAbortGuard(
+				groqRP, resolver, "groq-whisper", log,
+			)
+		}
+		_ = u
+	}
 	// Phase 06.7 — tts role proxies. tier-0 (local-tts) = the JSON->binary
 	// reverse proxy whose upstream the reconciler overrides; tier-1
 	// (voice-api-piper) = the GATE-3 Option A adapter against UpstreamTTSPiperURL.
@@ -1414,6 +1448,65 @@ func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 			ResponseHeaderTimeout: 10 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("openai-embed", log),
+	}
+	return rp, nil
+}
+
+// buildGeminiSTTProxy constructs the gemini-stt tier-1 STT fallback proxy
+// (Phase 11.2 D-B4). The director adapter translates OpenAI-shaped
+// multipart requests into Gemini's `generateContent` JSON shape; the
+// ModifyResponse flattens Gemini's envelope back into OpenAI's
+// `{"text":"..."}` so downstream consumers see the same response.
+//
+// Both URL + API key come from env (UPSTREAM_STT_FALLBACK_1_URL,
+// UPSTREAM_STT_FALLBACK_1_AUTH_BEARER) rather than the loader row to
+// keep secrets out of the DB.
+func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *slog.Logger) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse gemini-stt url %q: %w", rawURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid gemini-stt url %q", rawURL)
+	}
+	director, modifyResponse := proxy.BuildGeminiSTTDirector(parsed, apiKey, resolver, "gemini-stt", log)
+	rp := &httputil.ReverseProxy{
+		Director:       director,
+		ModifyResponse: modifyResponse,
+		Transport: &http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("gemini-stt", log),
+	}
+	return rp, nil
+}
+
+// buildGroqWhisperProxy constructs the groq-whisper tier-1 STT fallback
+// proxy (Phase 11.2 D-B8). Groq's `/openai/v1/audio/transcriptions` is
+// OpenAI-compatible so this REUSES BuildOpenAIWhisperDirector verbatim —
+// only URL + bearer differ. The director resolves the model via
+// canonicalAliasForUpstream["groq-whisper"]="whisper" + upstreamEnvVarMap
+// (UPSTREAM_STT_FALLBACK_2_MODEL).
+func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(u.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse groq-whisper url %q: %w", u.URL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid groq-whisper url %q", u.URL)
+	}
+	rp := &httputil.ReverseProxy{
+		Director: proxy.BuildOpenAIWhisperDirector(parsed, u.AuthBearer, resolver, "groq-whisper", log),
+		Transport: &http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("groq-whisper", log),
 	}
 	return rp, nil
 }

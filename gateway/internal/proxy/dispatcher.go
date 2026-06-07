@@ -252,24 +252,31 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			return
 		}
 
-		// Normal tenant: try tier-1 (D-C4 — no fallback of fallback for chat;
-		// stt/embed roles are independent).
-		t1, ok := cfg.Loader.Resolve(cfg.Role, 1)
-		if !ok {
+		// Normal tenant: iterate tier-1 candidates in tier_priority ASC order
+		// (Phase 11.2 D-B5′). Dispatch to the first candidate whose breaker
+		// EffectiveState is CLOSED. Backward-compat: roles with a single
+		// tier-1 row (llm/embed/tts) return a 1-slice from ResolveAllTier1,
+		// degenerating to the prior single-tier-1 lookup behavior.
+		//
+		// Phase 06.9 Plan 04: EffectiveState honors operator force-override
+		// (gw:breaker:force:{name}) — force-opening any candidate makes the
+		// loop skip it. Force-opening ALL candidates produces 503.
+		candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
+		if len(candidates) == 0 {
 			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 				"service_unavailable", "upstream_unavailable",
 				"Primary upstream unavailable and no fallback configured for role.")
 			return
 		}
-		// Phase 06.9 Plan 04: also honor force-override on tier-1 (operator
-		// may force-open openrouter-chat to test the "all tiers OPEN" path).
-		if cfg.Breaker.EffectiveState(t1.Name) != gobreaker.StateClosed {
-			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
-				"service_unavailable", "upstream_unavailable",
-				"All inference upstreams are unavailable.")
-			return
+		for _, t1 := range candidates {
+			if cfg.Breaker.EffectiveState(t1.Name) == gobreaker.StateClosed {
+				cfg.dispatchTo(w, r, t1.Name, streaming, log)
+				return
+			}
 		}
-		cfg.dispatchTo(w, r, t1.Name, streaming, log)
+		httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+			"service_unavailable", "upstream_unavailable",
+			"All inference upstreams are unavailable.")
 	})
 }
 

@@ -465,30 +465,173 @@ var _ = context.Background
 //   - all 3 OPEN → 503 upstream_unavailable
 // ---------------------------------------------------------------------------
 
+// sttCascadeFixture wires a 4-upstream STT dispatcher: tier-0 (local-stt)
+// always OPEN + 3 tier-1 candidates (gemini-stt prio=10, groq-whisper
+// prio=15, openai-whisper prio=20). Each tier-1 has its own httptest
+// backend so tests can assert which one received the request.
+type sttCascadeFixture struct {
+	loader     *upstreams.Loader
+	breakerSet *breaker.Set
+	mux        http.Handler
+	localHits  *int64
+	geminiHits *int64
+	groqHits   *int64
+	openaiHits *int64
+	cleanup    func()
+}
+
+func newSTTCascadeFixture(t *testing.T) *sttCascadeFixture {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	var localHits, geminiHits, groqHits, openaiHits int64
+	mk := func(counter *int64, label string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt64(counter, 1)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"upstream":"` + label + `"}`))
+		}))
+	}
+	localSrv := mk(&localHits, "local-stt")
+	geminiSrv := mk(&geminiHits, "gemini-stt")
+	groqSrv := mk(&groqHits, "groq-whisper")
+	openaiSrv := mk(&openaiHits, "openai-whisper")
+
+	loader := upstreams.NewLoaderInMemory(
+		upstreams.UpstreamConfig{Name: "local-stt", Role: "stt", Tier: 0, TierPriority: 0, URL: localSrv.URL, Enabled: true},
+		upstreams.UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10, URL: geminiSrv.URL, Enabled: true},
+		upstreams.UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, TierPriority: 15, URL: groqSrv.URL, Enabled: true},
+		upstreams.UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20, URL: openaiSrv.URL, Enabled: true},
+	)
+	bs := breaker.NewSet(rdb, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 30 * time.Second},
+		loader.Names())
+
+	cfg := DispatcherConfig{
+		Role:    "stt",
+		Loader:  loader,
+		Breaker: bs,
+		Proxies: map[string]http.Handler{
+			"local-stt":      newPassthroughProxy(t, localSrv.URL),
+			"gemini-stt":     newPassthroughProxy(t, geminiSrv.URL),
+			"groq-whisper":   newPassthroughProxy(t, groqSrv.URL),
+			"openai-whisper": newPassthroughProxy(t, openaiSrv.URL),
+		},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	mux := NewDispatcher(cfg)
+
+	cleanup := func() {
+		localSrv.Close()
+		geminiSrv.Close()
+		groqSrv.Close()
+		openaiSrv.Close()
+		_ = rdb.Close()
+		mr.Close()
+	}
+	return &sttCascadeFixture{
+		loader:     loader,
+		breakerSet: bs,
+		mux:        mux,
+		localHits:  &localHits,
+		geminiHits: &geminiHits,
+		groqHits:   &groqHits,
+		openaiHits: &openaiHits,
+		cleanup:    cleanup,
+	}
+}
+
+// makeSTTRequest builds an authenticated POST /v1/audio/transcriptions
+// request (multipart body is opaque to the dispatcher — only the
+// presence of the request matters).
+func makeSTTRequest(t *testing.T) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		strings.NewReader("not-actually-multipart"))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=test")
+	ctx := auth.WithContext(r.Context(), auth.AuthContext{
+		TenantID:  "tenant-1",
+		APIKeyID:  "key-1",
+		DataClass: auth.DataClassNormal,
+	})
+	return r.WithContext(ctx)
+}
+
 // TestDispatcher_TierOneFallthrough_GeminiOpen_GroqClosed_Routes200 — D-B5′.
 func TestDispatcher_TierOneFallthrough_GeminiOpen_GroqClosed_Routes200(t *testing.T) {
-	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade; unskip + assert dispatch lands on groq-whisper when gemini-stt breaker is open")
-	// Expected:
-	//   force-open gemini-stt; ensure groq-whisper + openai-whisper closed;
-	//   send POST /v1/audio/transcriptions; assert backend hit count: groq=1, others=0;
-	//   require.Equal(t, http.StatusOK, resp.StatusCode)
-	// Reference: PATTERNS.md line 206 (RESEARCH §Pattern 3 lines 462-480).
+	f := newSTTCascadeFixture(t)
+	defer f.cleanup()
+
+	// Trip tier-0 + gemini-stt; leave groq-whisper + openai-whisper CLOSED.
+	tripBreaker(t, f.breakerSet, "local-stt")
+	tripBreaker(t, f.breakerSet, "gemini-stt")
+
+	rw := httptest.NewRecorder()
+	f.mux.ServeHTTP(rw, makeSTTRequest(t))
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rw.Code, rw.Body.String())
+	}
+	if atomic.LoadInt64(f.geminiHits) != 0 {
+		t.Errorf("gemini-stt hits=%d, want 0 (breaker OPEN)", atomic.LoadInt64(f.geminiHits))
+	}
+	if atomic.LoadInt64(f.groqHits) != 1 {
+		t.Errorf("groq-whisper hits=%d, want 1 (cascade fall-through)", atomic.LoadInt64(f.groqHits))
+	}
+	if atomic.LoadInt64(f.openaiHits) != 0 {
+		t.Errorf("openai-whisper hits=%d, want 0 (groq picked up first)", atomic.LoadInt64(f.openaiHits))
+	}
 }
 
 // TestDispatcher_TierOneFallthrough_GeminiAndGroqOpen_OpenAIWhisperClosed_Routes200 — D-B5′.
 func TestDispatcher_TierOneFallthrough_GeminiAndGroqOpen_OpenAIWhisperClosed_Routes200(t *testing.T) {
-	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade; unskip + assert dispatch lands on openai-whisper when gemini-stt+groq-whisper breakers are open")
-	// Expected:
-	//   force-open gemini-stt + groq-whisper; openai-whisper closed;
-	//   assert backend openai-whisper hit count == 1; gemini=0; groq=0;
-	//   require.Equal(t, http.StatusOK, resp.StatusCode)
+	f := newSTTCascadeFixture(t)
+	defer f.cleanup()
+
+	tripBreaker(t, f.breakerSet, "local-stt")
+	tripBreaker(t, f.breakerSet, "gemini-stt")
+	tripBreaker(t, f.breakerSet, "groq-whisper")
+
+	rw := httptest.NewRecorder()
+	f.mux.ServeHTTP(rw, makeSTTRequest(t))
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rw.Code, rw.Body.String())
+	}
+	if atomic.LoadInt64(f.geminiHits) != 0 || atomic.LoadInt64(f.groqHits) != 0 {
+		t.Errorf("gemini-stt + groq-whisper should be 0 (both OPEN); got gemini=%d groq=%d",
+			atomic.LoadInt64(f.geminiHits), atomic.LoadInt64(f.groqHits))
+	}
+	if atomic.LoadInt64(f.openaiHits) != 1 {
+		t.Errorf("openai-whisper hits=%d, want 1 (last-resort safety net)", atomic.LoadInt64(f.openaiHits))
+	}
 }
 
 // TestDispatcher_TierOneFallthrough_AllOpen_Returns503 — D-B5′ + RES-08.
 func TestDispatcher_TierOneFallthrough_AllOpen_Returns503(t *testing.T) {
-	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade exhaustion; unskip + assert 503 upstream_unavailable when all 3 tier-1 breakers OPEN")
-	// Expected:
-	//   force-open all 3; POST → require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-	//   require.Contains(t, body, `"upstream_unavailable"`)
-	// Reference: dispatcher.go existing 503 path (PATTERNS.md line 200-203).
+	f := newSTTCascadeFixture(t)
+	defer f.cleanup()
+
+	tripBreaker(t, f.breakerSet, "local-stt")
+	tripBreaker(t, f.breakerSet, "gemini-stt")
+	tripBreaker(t, f.breakerSet, "groq-whisper")
+	tripBreaker(t, f.breakerSet, "openai-whisper")
+
+	rw := httptest.NewRecorder()
+	f.mux.ServeHTTP(rw, makeSTTRequest(t))
+
+	if rw.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503; body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "upstream_unavailable") {
+		t.Errorf("body missing upstream_unavailable: %s", rw.Body.String())
+	}
+	if atomic.LoadInt64(f.geminiHits)+atomic.LoadInt64(f.groqHits)+atomic.LoadInt64(f.openaiHits) != 0 {
+		t.Errorf("expected 0 backend hits when all OPEN; got gemini=%d groq=%d openai=%d",
+			atomic.LoadInt64(f.geminiHits), atomic.LoadInt64(f.groqHits), atomic.LoadInt64(f.openaiHits))
+	}
 }
