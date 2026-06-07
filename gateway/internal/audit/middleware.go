@@ -70,13 +70,23 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 
 			next.ServeHTTP(aw, r)
 
-			// Build Event from the captured state. Upstream defaults to
-			// the route-derived value (llm/embed/stt); handlers may
-			// override via audit.WithUpstreamOverride (e.g. dispatcher's
-			// sensitive-block path → "blocked_sensitive" per D-B3, or the
-			// Phase 11.2 Plan 08 D-B13 audit-distinguish fix that stamps
-			// the factual dispatched-to upstream name).
+			// Build Event from the captured state. Upstream resolution
+			// has 3 layers (last-wins precedence):
+			//   1. route-derived default ("stt"/"llm"/"embed")
+			//   2. dispatched-upstream registry (Phase 11.2 Plan 08
+			//      D-B13 fix): records the FACTUAL upstream name the
+			//      dispatcher chose (local-stt, gemini-stt, etc.). Uses
+			//      a request-id-keyed registry instead of ctx because
+			//      http.TimeoutHandler clones the request before passing
+			//      to the inner handler, breaking ctx propagation back
+			//      to this middleware. TakeDispatchedUpstream removes
+			//      the entry on read so the registry stays bounded.
+			//   3. UpstreamOverride (explicit intent: blocked_sensitive,
+			//      off_hours, shed_*) — wins over registry.
 			upstream := upstreamForRoute(r.URL.Path)
+			if dispatched := auditctx.TakeDispatchedUpstream(httpx.RequestIDFrom(r.Context())); dispatched != "" {
+				upstream = dispatched
+			}
 			if override := auditctx.UpstreamOverrideFrom(r.Context()); override != "" {
 				upstream = override
 			}

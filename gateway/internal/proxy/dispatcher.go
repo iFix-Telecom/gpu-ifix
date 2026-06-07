@@ -325,6 +325,10 @@ func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Requ
 	// schedule-override path (peak off-hours) also attributes cost to the
 	// resolved external upstream.
 	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
+	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): mirror the
+	// dispatchTo registry stamp so peak-off-hours dispatch also records
+	// the factual upstream into audit_log.upstream.
+	auditctx.SetDispatchedUpstream(httpx.RequestIDFrom(r.Context()), name)
 	proxy.ServeHTTP(w, r)
 }
 
@@ -350,18 +354,15 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// dispatch decision is otherwise opaque).
 	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
 	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): also stamp the
-	// FACTUAL upstream as the audit-row Upstream value via *r = *r in
-	// place, so the audit middleware (which reads from the outer *Request
-	// post-ServeHTTP) records "local-stt"/"gemini-stt"/"groq-whisper"
-	// /"openai-whisper" instead of the route-derived "stt". Limited to
-	// the audit-ctx key (UpstreamOverride) — does NOT mutate request body
-	// state or any header the proxy needs, so it does not interfere with
-	// SSE streaming or backoff retry. Skipped when an UpstreamOverride is
-	// already set (preserves shed/schedule semantics like
-	// "blocked_sensitive" / "off_hours").
-	if auditctx.UpstreamOverrideFromContext(r.Context()) == "" {
-		*r = *r.WithContext(auditctx.WithUpstreamOverride(r.Context(), name))
-	}
+	// FACTUAL upstream into the request-id-keyed registry so the audit
+	// middleware (which sits OUTSIDE http.TimeoutHandler and therefore
+	// captured the pre-clone *Request) can record the cascade
+	// fall-through target name into audit_log.upstream. The registry
+	// pattern bypasses ctx propagation entirely — TimeoutHandler clones
+	// the request before passing to the inner handler, breaking any
+	// `*r = *r.WithContext(...)` mutation done here. See
+	// auditctx.SetDispatchedUpstream godoc for full rationale.
+	auditctx.SetDispatchedUpstream(httpx.RequestIDFrom(r.Context()), name)
 	// RES-02 deferral: ReverseProxy.ServeHTTP writes directly to the
 	// ResponseWriter — backoff retry would require a buffering layer
 	// (see retry.go godoc). Phase 3 relies on breaker fallback instead.
