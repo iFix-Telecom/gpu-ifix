@@ -1,10 +1,13 @@
 # pod/docker-compose.yml
-# 3-service GPU inference pod for Vast.ai RTX 3090 (post Phase 11.1 shrink).
+# 4-service GPU inference pod for Vast.ai RTX 3090.
 # Launched by pod/onstart.sh (plan 05) after weights downloaded from MinIO (D-02).
 # Image tagged/pushed by .github/workflows/build-pod.yml (plan 07).
 #
-# Phase 11.1 (2026-06-04): STT removed from pod — handled off-pod via tier-1
-# gateway fallback chain. See SEED-010 + phase 11.1 docs.
+# Phase 11.2 (2026-06-07): STT RE-ADDED to pod as tier-0 local-stt (Speaches +
+# faster-whisper-large-v3) after Phase 11.1 D-A4 revert. Cascade tier-1 in the
+# gateway = gemini-stt -> groq-whisper -> openai-whisper.
+# Phase 11.1 (2026-06-04, now reverted): STT was briefly removed from pod —
+# tier-0 local-stt restored by Phase 11.2 to drop pod-ON STT cost to $0/req.
 #
 # Refs:
 #   - .planning/phases/01-gpu-pod-image-smoke-test/01-03-PLAN.md
@@ -64,10 +67,39 @@ services:
     stop_grace_period: 30s
 
   # -----------------------------------------------------------------------
+  # speaches: Whisper large-v3 OpenAI-compat STT (D-25; Phase 11.2 D-B1 LOCKED)
+  # Image pin: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3 — Phase
+  # 06.7/06.8 UAT-validated. HF_HUB_CACHE=/weights/whisper workaround per
+  # Phase 06.8 fix-iii (Pitfall 4 in 11.2-RESEARCH).
+  # -----------------------------------------------------------------------
+  speaches:
+    image: ${PRIMARY_SPEACHES_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3}
+    container_name: ifix-ai-pod-speaches
+    environment:
+      <<: *common-env
+      WHISPER_MODEL: Systran/faster-whisper-large-v3
+      WHISPER_MODEL_PATH: /weights/whisper
+      HF_HUB_CACHE: /weights/whisper
+    volumes:
+      - ${WEIGHTS_DIR:-/weights}/whisper:/weights/whisper:rw
+    ports:
+      - "8001:8000"
+    networks:
+      - ifix-ai-pod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8000/health > /dev/null || python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    <<: *gpu-all
+    stop_grace_period: 30s
+
+  # -----------------------------------------------------------------------
   # health-bridge: aggregated health probes on port 9100 (D-10..D-13)
-  # Built from pod/health-bridge/Dockerfile (plan 04). Phase 11.1: probe set
-  # shrunk to {LLM} (STT removed; embed handled separately as off-pod when
-  # applicable per gateway config).
+  # Built from pod/health-bridge/Dockerfile (plan 04). Phase 11.2: probe set
+  # restored to {LLM, STT} after 11.1 revert.
   # -----------------------------------------------------------------------
   health-bridge:
     image: ${IFIX_AI_POD_HEALTH_BRIDGE_IMAGE:-ghcr.io/ifixtelecom/ifix-ai-pod-health-bridge:latest}
@@ -76,6 +108,8 @@ services:
       <<: *common-env
       HEALTH_BRIDGE_PORT: "9100"
       LLAMA_URL: "http://llama:8000"
+      SPEACHES_URL: "http://speaches:8000"
+      SPEACHES_MODEL: "${SPEACHES_MODEL:-Systran/faster-whisper-large-v3}"
       PROBE_INTERVAL_SECONDS: "10"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       ENV: "${ENV:-production}"
@@ -85,6 +119,7 @@ services:
       - ifix-ai-pod
     depends_on:
       - llama
+      - speaches
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/health-bridge", "--self-check"]
