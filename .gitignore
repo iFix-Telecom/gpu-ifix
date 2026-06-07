@@ -61,3 +61,4 @@ Thumbs.db
 .claude/
 ConverseAI_GPU_Stack_Guide.*
 gatewayctl
+pod/health-bridge/health-bridge
