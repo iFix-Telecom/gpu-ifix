@@ -454,3 +454,41 @@ func TestDispatcher_EmergencyOverride_200WhenProxyRegistered(t *testing.T) {
 // Compile-time assertion: ctx import unused if dispatcher tests above
 // don't use context directly. Pin the import to silence unused-import.
 var _ = context.Background
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for tier-1 cascade fallthrough (D-B5′).
+// OWNER: Plan 06 (dispatcher.go :257-272 surgical replace per PATTERNS.md
+// lines 181-208). Tests pin the iterate-`ResolveAllTier1` + breaker-check
+// loop contract:
+//   - gemini-stt OPEN, groq-whisper CLOSED, openai-whisper CLOSED → groq picks up (200)
+//   - gemini-stt + groq OPEN, openai-whisper CLOSED → openai picks up (200)
+//   - all 3 OPEN → 503 upstream_unavailable
+// ---------------------------------------------------------------------------
+
+// TestDispatcher_TierOneFallthrough_GeminiOpen_GroqClosed_Routes200 — D-B5′.
+func TestDispatcher_TierOneFallthrough_GeminiOpen_GroqClosed_Routes200(t *testing.T) {
+	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade; unskip + assert dispatch lands on groq-whisper when gemini-stt breaker is open")
+	// Expected:
+	//   force-open gemini-stt; ensure groq-whisper + openai-whisper closed;
+	//   send POST /v1/audio/transcriptions; assert backend hit count: groq=1, others=0;
+	//   require.Equal(t, http.StatusOK, resp.StatusCode)
+	// Reference: PATTERNS.md line 206 (RESEARCH §Pattern 3 lines 462-480).
+}
+
+// TestDispatcher_TierOneFallthrough_GeminiAndGroqOpen_OpenAIWhisperClosed_Routes200 — D-B5′.
+func TestDispatcher_TierOneFallthrough_GeminiAndGroqOpen_OpenAIWhisperClosed_Routes200(t *testing.T) {
+	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade; unskip + assert dispatch lands on openai-whisper when gemini-stt+groq-whisper breakers are open")
+	// Expected:
+	//   force-open gemini-stt + groq-whisper; openai-whisper closed;
+	//   assert backend openai-whisper hit count == 1; gemini=0; groq=0;
+	//   require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestDispatcher_TierOneFallthrough_AllOpen_Returns503 — D-B5′ + RES-08.
+func TestDispatcher_TierOneFallthrough_AllOpen_Returns503(t *testing.T) {
+	t.Skip("OWNER: Plan 06 — implements ResolveAllTier1 cascade exhaustion; unskip + assert 503 upstream_unavailable when all 3 tier-1 breakers OPEN")
+	// Expected:
+	//   force-open all 3; POST → require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	//   require.Contains(t, body, `"upstream_unavailable"`)
+	// Reference: dispatcher.go existing 503 path (PATTERNS.md line 200-203).
+}

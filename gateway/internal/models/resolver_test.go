@@ -212,3 +212,30 @@ func TestResolver_EmptyEnvValueTreatedAsUnset(t *testing.T) {
 		t.Errorf("Resolve(qwen,openrouter-chat)=%q; want qwen/qwen3.5-27b (empty env treated as unset)", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for upstreamEnvVarMap extension (D-B7/D-B8).
+// OWNER: Plan 06 — resolver.go :56-60 adds gemini-stt + groq-whisper entries
+// per PATTERNS.md lines 276-295.
+// ---------------------------------------------------------------------------
+
+// TestUpstreamEnvVarMap_GeminiSTT_MapsToGeminiModelEnv — D-B7.
+// gemini-stt MUST resolve via UPSTREAM_STT_FALLBACK_1_MODEL.
+func TestUpstreamEnvVarMap_GeminiSTT_MapsToGeminiModelEnv(t *testing.T) {
+	t.Skip("OWNER: Plan 06 — extends upstreamEnvVarMap; unskip + assert env UPSTREAM_STT_FALLBACK_1_MODEL drives Resolve(alias, gemini-stt)")
+	// Expected:
+	//   t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash")
+	//   require.Equal(t, "gemini-2.5-flash", r.Resolve("whisper", "gemini-stt"))
+	// Reference: PATTERNS.md line 282-291.
+}
+
+// TestUpstreamEnvVarMap_GroqWhisper_MapsToGroqModelEnv — D-B8.
+// groq-whisper MUST resolve via UPSTREAM_STT_FALLBACK_2_MODEL (Groq reuses
+// OpenAI-compat director with different URL/bearer/model).
+func TestUpstreamEnvVarMap_GroqWhisper_MapsToGroqModelEnv(t *testing.T) {
+	t.Skip("OWNER: Plan 06 — extends upstreamEnvVarMap; unskip + assert env UPSTREAM_STT_FALLBACK_2_MODEL drives Resolve(alias, groq-whisper)")
+	// Expected:
+	//   t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3")
+	//   require.Equal(t, "whisper-large-v3", r.Resolve("whisper", "groq-whisper"))
+	// Reference: CONTEXT D-B8, PATTERNS.md line 290.
+}

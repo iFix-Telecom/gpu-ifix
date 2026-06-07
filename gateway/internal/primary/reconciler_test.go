@@ -1801,3 +1801,35 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 	require.False(t, embedSet, "markReady must NOT override embed (D-03 — embed is static off-pod)")
 	require.Equal(t, StateReady, r.deps.FSM.State())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for primary STT lifecycle hooks
+// (D-B5′ revert of 11.1-01). OWNER: Plan 03 — restores
+// OverrideTier0("stt")/RestoreTier0("stt") calls at reconciler.go
+// :527/:571/:636 per PATTERNS.md lines 319-337.
+// ---------------------------------------------------------------------------
+
+// TestStartDrain_RestoreTier0_CalledFor_STT — reconciler.go :527 restore.
+func TestStartDrain_RestoreTier0_CalledFor_STT(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores RestoreTier0(stt) call in startDrain; unskip + assert fake loader records role=stt restore on drain transition")
+	// Expected:
+	//   r.startDrain(); require.Contains(t, fakeLoader.RestoreCalls, "stt")
+	// Reference: PATTERNS.md line 326-329.
+}
+
+// TestMarkReady_OverrideTier0_CalledFor_STT — reconciler.go :571 restore.
+func TestMarkReady_OverrideTier0_CalledFor_STT(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores OverrideTier0(stt, urls.STT) call in markReady; unskip + assert override map gains key=stt with value=urls.STT")
+	// Expected:
+	//   r.markReady(podURLs{STT: "http://primary:8001"})
+	//   require.Equal(t, "http://primary:8001", fakeLoader.OverrideMap["stt"])
+	// Reference: PATTERNS.md line 331.
+}
+
+// TestCloseLifecycle_RestoreTier0_CalledFor_STT — reconciler.go :636 restore.
+func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores RestoreTier0(stt) call in closeLifecycle; unskip + assert stt restore on pod close")
+	// Expected:
+	//   r.closeLifecycle(); require.Contains(t, fakeLoader.RestoreCalls, "stt")
+	// Reference: PATTERNS.md line 334.
+}

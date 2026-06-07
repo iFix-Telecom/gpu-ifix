@@ -502,62 +502,55 @@ func TestTier0OverrideURL_Getter(t *testing.T) {
 	}
 }
 
-// TestPostMigration0028_NoLocalSTTInSnapshot — Phase 11.1 Plan 02 Task 2
-// Mudança 11 regression: with migration 0028 deleting the local-stt upstream
-// row, the Loader's snapshot (which drives the probe loop's per-upstream
-// goroutine registration) MUST NOT contain any entry named "local-stt".
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for migration 0029 + cascade resolve
+// (D-B5′/D-B6′/D-B12). OWNER: Plan 02 — adds ResolveAllTier1 + tier_priority
+// snapshot load + circuit_config read per PATTERNS.md lines 211-247.
 //
-// Why a loader-level test for the probe loop:
-//
-//	The probe loop in probe.go iterates loader.All() each tick to decide
-//	which upstreams to probe. If a stale local-stt entry survives in the
-//	snapshot, the probe goroutine would attempt to dial it every 10s,
-//	leaking goroutines and driving the (deleted) breaker key. This test
-//	pins the contract at the snapshot boundary — the same contract that
-//	the DB-level migration_0028_test.go asserts at the row level.
-//
-// Seeds an in-memory snapshot matching the post-0028 production shape
-// (5 upstreams: 2 tier-0 local-* + 3 tier-1 externals) and asserts the
-// snapshot's name set is free of local-stt.
-func TestPostMigration0028_NoLocalSTTInSnapshot(t *testing.T) {
-	l := NewLoaderInMemory(
-		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary:8000", Enabled: true},
-		UpstreamConfig{Name: "openrouter-chat", Role: "llm", Tier: 1, URL: "https://openrouter.example/v1", Enabled: true},
-		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, URL: "https://api.openai.com/v1", Enabled: true},
-		UpstreamConfig{Name: "local-embed", Role: "embed", Tier: 0, URL: "http://embed:8002", Enabled: true},
-		UpstreamConfig{Name: "openai-embed", Role: "embed", Tier: 1, URL: "https://api.openai.com/v1", Enabled: true},
-	)
+// NOTE: the stale post-0028 snapshot test was DELETED in this plan (0029
+// reverts the 0028 delete). The post-0029 contract is pinned by
+// TestPostMigration0029_RestoresLocalSTT_AddsGeminiSTT_AddsGroqWhisper below.
+// ---------------------------------------------------------------------------
 
-	// All() — the slice the probe loop iterates.
-	for _, u := range l.All() {
-		if u.Name == "local-stt" {
-			t.Errorf("local-stt MUST NOT appear in loader.All() snapshot post-0028 (probe loop would dial it)")
-		}
-	}
+// TestPostMigration0029_RestoresLocalSTT_AddsGeminiSTT_AddsGroqWhisper — D-B6′.
+// Loader snapshot post-0029 MUST contain local-stt (tier-0), gemini-stt
+// (tier-1 prio=10), groq-whisper (tier-1 prio=15), openai-whisper
+// (tier-1 prio=20). Replaces the deleted 0028 test.
+func TestPostMigration0029_RestoresLocalSTT_AddsGeminiSTT_AddsGroqWhisper(t *testing.T) {
+	t.Skip("OWNER: Plan 02 — wires migration 0029 + loader tier_priority parse; unskip + seed in-memory snapshot mirroring post-0029 prod shape + assert all 4 STT rows present")
+	// Expected:
+	//   l := NewLoaderInMemory(
+	//     UpstreamConfig{Name:"local-stt", Role:"stt", Tier:0, ...},
+	//     UpstreamConfig{Name:"gemini-stt", Role:"stt", Tier:1, TierPriority:10, ...},
+	//     UpstreamConfig{Name:"groq-whisper", Role:"stt", Tier:1, TierPriority:15, ...},
+	//     UpstreamConfig{Name:"openai-whisper", Role:"stt", Tier:1, TierPriority:20, ...},
+	//   )
+	//   u, ok := l.Resolve("stt", 0); require.True(t, ok); require.Equal(t, "local-stt", u.Name)
+	//   names := names(l.ResolveAllTier1("stt")); require.Equal(t, []string{"gemini-stt","groq-whisper","openai-whisper"}, names)
+	// Reference: PATTERNS.md line 17-18.
+}
 
-	// Names() — what breaker.NewSet registers as breaker keys.
-	for _, n := range l.Names() {
-		if n == "local-stt" {
-			t.Errorf("local-stt MUST NOT appear in loader.Names() post-0028 (breaker key registry)")
-		}
-	}
+// TestResolveAllTier1_OrderByTierPriority_ASC — D-B5′ ordering invariant.
+// ResolveAllTier1 MUST return slice ordered by tier_priority ASC so
+// dispatcher iterates gemini (10) → groq (15) → openai (20).
+func TestResolveAllTier1_OrderByTierPriority_ASC(t *testing.T) {
+	t.Skip("OWNER: Plan 02 — implements ResolveAllTier1; unskip + assert returned slice ordered by tier_priority ASC even when DB rows are loaded out of order")
+	// Expected:
+	//   // seed snapshot with rows in REVERSE prio order (20, 15, 10)
+	//   got := l.ResolveAllTier1("stt")
+	//   require.Equal(t, []int{10, 15, 20}, []int{got[0].TierPriority, got[1].TierPriority, got[2].TierPriority})
+	// Reference: PATTERNS.md line 229-244 (sort.SliceStable on TierPriority).
+}
 
-	// Get("local-stt") — direct lookup MUST fail.
-	if _, ok := l.Get("local-stt"); ok {
-		t.Errorf("loader.Get(local-stt) returned ok=true; expected ok=false post-0028")
-	}
-
-	// Resolve("stt", 0) — tier-0 stt slot MUST be empty post-0028.
-	if u, ok := l.Resolve("stt", 0); ok {
-		t.Errorf("Resolve(stt,0) returned %+v ok=true; expected ok=false post-0028 (local-stt deleted)", u)
-	}
-
-	// Resolve("stt", 1) — tier-1 openai-whisper MUST resolve (D-A5 preservation).
-	if u, ok := l.Resolve("stt", 1); !ok || u.Name != "openai-whisper" {
-		t.Errorf("Resolve(stt,1) = %+v ok=%v; expected openai-whisper (D-A5 preservation contract)", u, ok)
-	}
-
-	if got := len(l.All()); got != 5 {
-		t.Errorf("len(All()) = %d, want 5 (post-0028 shape: 2 tier-0 + 3 tier-1)", got)
-	}
+// TestCircuitConfigParsed_GeminiCooldownS120 — D-B11/D-B12.
+// Loader MUST parse circuit_config JSONB cooldown_s=120 for gemini-stt
+// row (parser already exists at types.go:97 per PATTERNS.md line 534 —
+// this test pins the contract end-to-end).
+func TestCircuitConfigParsed_GeminiCooldownS120(t *testing.T) {
+	t.Skip("OWNER: Plan 02 — wires migration row + reads existing CircuitConfig.CooldownS parser; unskip + assert loader returns gemini-stt with CircuitConfig.CooldownS == 120")
+	// Expected:
+	//   u, ok := l.Get("gemini-stt")
+	//   require.True(t, ok)
+	//   require.Equal(t, 120, u.CircuitConfig.CooldownS)
+	// Reference: PATTERNS.md line 60 (CONTEXT D-B12 — parser already wired).
 }

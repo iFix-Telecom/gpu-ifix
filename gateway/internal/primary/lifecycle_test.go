@@ -553,3 +553,39 @@ func TestPrimaryLlamaArgsDefault_NoChatTemplateFile(t *testing.T) {
 	require.Contains(t, joined, "--jinja",
 		"Wave 0 B1 embedded LOCKED: primaryLlamaArgsDefault must include --jinja")
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for primary STT lifecycle restore
+// (D-B5′ revert of 11.1-01). OWNER: Plan 03 — restores primaryPodURLs.STT
+// field + port mapping + WHISPER env injection at lifecycle.go
+// :104/:322/:341 per PATTERNS.md lines 341-361.
+// ---------------------------------------------------------------------------
+
+// TestPrimaryPodURLs_HasSTTField — lifecycle.go :104 restore.
+func TestPrimaryPodURLs_HasSTTField(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores STT field in primaryPodURLs struct; unskip + assert reflect.TypeOf((*primaryPodURLs)(nil)).Elem() has STT field of type string")
+	// Expected:
+	//   _, ok := reflect.TypeOf(primaryPodURLs{}).FieldByName("STT")
+	//   require.True(t, ok)
+	// Reference: PATTERNS.md line 346-353.
+}
+
+// TestProvisionArgs_Includes_Port8001 — lifecycle.go :322 restore.
+func TestProvisionArgs_Includes_Port8001(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores -p 8001:8001 (speaches STT) provision arg; unskip + assert provision args list contains port mapping 8001:8001")
+	// Expected:
+	//   args := buildProvisionArgs(cfg)
+	//   require.Contains(t, args, "-p")
+	//   require.Contains(t, args, "8001:8001")
+	// Reference: PATTERNS.md line 357.
+}
+
+// TestProvisionEnv_Injects_PRIMARY_WHISPER_WEIGHTS_KEY_And_SHA256 — lifecycle.go :341 restore.
+func TestProvisionEnv_Injects_PRIMARY_WHISPER_WEIGHTS_KEY_And_SHA256(t *testing.T) {
+	t.Skip("OWNER: Plan 03 — restores WHISPER weights env injection; unskip + assert env map contains PRIMARY_WHISPER_WEIGHTS_KEY + PRIMARY_WHISPER_WEIGHTS_SHA256")
+	// Expected:
+	//   env := buildProvisionEnv(cfg)
+	//   require.Equal(t, cfg.PrimaryWhisperWeightsKey, env["PRIMARY_WHISPER_WEIGHTS_KEY"])
+	//   require.Equal(t, cfg.PrimaryWhisperWeightsSHA256, env["PRIMARY_WHISPER_WEIGHTS_SHA256"])
+	// Reference: PATTERNS.md line 358-360.
+}
