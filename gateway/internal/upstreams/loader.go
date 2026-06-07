@@ -27,8 +27,11 @@ type snapshot struct {
 // loaderQueries isolates the sqlc surface so tests can stub it without
 // standing up a real Postgres pool. Mirrors the resolverQueries pattern
 // in gateway/internal/models/resolver.go.
+//
+// Phase 11.2 (D-B5′/D-B6′) — ListEnabledUpstreamsRow returns the new
+// per-query Row struct that includes tier_priority (sqlc autogen).
 type loaderQueries interface {
-	ListEnabledUpstreams(ctx context.Context) ([]gen.AiGatewayUpstream, error)
+	ListEnabledUpstreams(ctx context.Context) ([]gen.ListEnabledUpstreamsRow, error)
 }
 
 // Loader holds the in-memory authoritative snapshot of ai_gateway.upstreams.
@@ -156,6 +159,7 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			Name:          r.Name,
 			Role:          r.Role,
 			Tier:          int(r.Tier),
+			TierPriority:  int(r.TierPriority),
 			URL:           url,
 			AuthBearer:    authBearer,
 			AuthBearerEnv: authBearerEnv,
@@ -164,16 +168,29 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			CircuitConfig: parseCircuitConfig(r.CircuitConfig),
 		}
 		s.byName[u.Name] = u
-		s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
+		// Phase 11.2 (D-B5′): when multiple rows share (role, tier), the
+		// lowest tier_priority wins in byRoleTier (rows are loaded in
+		// ASC tier_priority order; first writer wins). This preserves
+		// single-tier-1 backward-compat for llm/embed/tts (only one row
+		// per (role, tier)) while STT's multi-tier-1 cascade is exposed
+		// via ResolveAllTier1.
+		if _, exists := s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}]; !exists {
+			s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
+		}
 		s.ordered = append(s.ordered, u)
 	}
-	// Stable order for All() — by (role, tier) so callers see a
-	// deterministic listing in /v1/health/upstreams + gatewayctl output.
+	// Stable order for All() — by (role, tier, tier_priority) so callers
+	// see a deterministic listing in /v1/health/upstreams + gatewayctl
+	// output. Phase 11.2 (D-B5′): tier_priority breaks ties when multiple
+	// rows share (role, tier) — STT cascade gemini(10)→groq(15)→openai(20).
 	sort.SliceStable(s.ordered, func(i, j int) bool {
 		if s.ordered[i].Role != s.ordered[j].Role {
 			return s.ordered[i].Role < s.ordered[j].Role
 		}
-		return s.ordered[i].Tier < s.ordered[j].Tier
+		if s.ordered[i].Tier != s.ordered[j].Tier {
+			return s.ordered[i].Tier < s.ordered[j].Tier
+		}
+		return s.ordered[i].TierPriority < s.ordered[j].TierPriority
 	})
 	l.snap.Store(s)
 	obs.UpstreamsReloadTotal.WithLabelValues("ok").Inc()
@@ -234,6 +251,41 @@ func (l *Loader) Resolve(role string, tier int) (UpstreamConfig, bool) {
 	}
 	u, ok := s.byRoleTier[RoleTier{Role: role, Tier: tier}]
 	return u, ok
+}
+
+// ResolveAllTier1 returns every enabled tier-1 upstream for the given
+// role, ordered by tier_priority ASC (lower wins). Phase 11.2 (D-B5′)
+// — STT cascade dispatcher iterates this slice on pod-OFF, dispatching
+// to the first CLOSED-breaker upstream:
+//
+//   ResolveAllTier1("stt") → [gemini-stt(10), groq-whisper(15), openai-whisper(20)]
+//
+// Backward-compat: roles with a single tier-1 row (llm/embed/tts) return
+// a slice of length 1, so existing single-tier-1 callers can be rewritten
+// to ResolveAllTier1 without behavior change.
+//
+// Lock-free (atomic.Pointer read on the snapshot). Returns nil when the
+// snapshot is uninitialised; returns an empty slice (not nil) when the
+// role has no tier-1 rows.
+func (l *Loader) ResolveAllTier1(role string) []UpstreamConfig {
+	s := l.snap.Load()
+	if s == nil {
+		return nil
+	}
+	var out []UpstreamConfig
+	for _, u := range s.ordered {
+		if u.Role == role && u.Tier == 1 && u.Enabled {
+			out = append(out, u)
+		}
+	}
+	// s.ordered is already sorted by (role, tier, tier_priority) ASC in
+	// Refresh, so the filtered slice is in the desired order. SliceStable
+	// is a defensive belt-and-suspenders guard against a future ordering
+	// regression in Refresh.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].TierPriority < out[j].TierPriority
+	})
+	return out
 }
 
 // OverrideTier0 sets a runtime tier-0 override URL for the given role.

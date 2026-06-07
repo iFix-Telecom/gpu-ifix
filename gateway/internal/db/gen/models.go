@@ -207,6 +207,8 @@ type AiGatewayUpstream struct {
 	LastProbeError  pgtype.Text        `json:"last_probe_error"`
 	CreatedAt       time.Time          `json:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at"`
+	// Phase 11.2: ordering within (role, tier). Lower wins. Tier-0 rows always 0. Tier-1 with multiple providers: (stt,1,10)=gemini-stt primary fallback, (stt,1,15)=groq-whisper secondary, (stt,1,20)=openai-whisper safety net.
+	TierPriority int32 `json:"tier_priority"`
 }
 
 type AiGatewayUsageCounter struct {

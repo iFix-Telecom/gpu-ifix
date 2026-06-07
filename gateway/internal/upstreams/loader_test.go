@@ -517,40 +517,116 @@ func TestTier0OverrideURL_Getter(t *testing.T) {
 // (tier-1 prio=10), groq-whisper (tier-1 prio=15), openai-whisper
 // (tier-1 prio=20). Replaces the deleted 0028 test.
 func TestPostMigration0029_RestoresLocalSTT_AddsGeminiSTT_AddsGroqWhisper(t *testing.T) {
-	t.Skip("OWNER: Plan 02 — wires migration 0029 + loader tier_priority parse; unskip + seed in-memory snapshot mirroring post-0029 prod shape + assert all 4 STT rows present")
-	// Expected:
-	//   l := NewLoaderInMemory(
-	//     UpstreamConfig{Name:"local-stt", Role:"stt", Tier:0, ...},
-	//     UpstreamConfig{Name:"gemini-stt", Role:"stt", Tier:1, TierPriority:10, ...},
-	//     UpstreamConfig{Name:"groq-whisper", Role:"stt", Tier:1, TierPriority:15, ...},
-	//     UpstreamConfig{Name:"openai-whisper", Role:"stt", Tier:1, TierPriority:20, ...},
-	//   )
-	//   u, ok := l.Resolve("stt", 0); require.True(t, ok); require.Equal(t, "local-stt", u.Name)
-	//   names := names(l.ResolveAllTier1("stt")); require.Equal(t, []string{"gemini-stt","groq-whisper","openai-whisper"}, names)
-	// Reference: PATTERNS.md line 17-18.
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "local-stt", Role: "stt", Tier: 0, TierPriority: 0,
+			URL: "http://primary:8001", Enabled: true},
+		UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10,
+			URL: "https://generativelanguage.googleapis.com/v1beta", Enabled: true,
+			CircuitConfig: CircuitConfig{CooldownS: 120}},
+		UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, TierPriority: 15,
+			URL: "https://api.groq.com/openai/v1", Enabled: true},
+		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20,
+			URL: "https://api.openai.com/v1", Enabled: true},
+	)
+
+	// tier-0 still resolves to local-stt.
+	u, ok := l.Resolve("stt", 0)
+	if !ok {
+		t.Fatalf("Resolve(stt,0) not found")
+	}
+	if u.Name != "local-stt" {
+		t.Errorf("Resolve(stt,0).Name = %q, want local-stt", u.Name)
+	}
+
+	// ResolveAllTier1 returns the cascade in tier_priority ASC order.
+	got := l.ResolveAllTier1("stt")
+	if len(got) != 3 {
+		t.Fatalf("ResolveAllTier1(stt) len = %d, want 3 (gemini/groq/openai)", len(got))
+	}
+	wantNames := []string{"gemini-stt", "groq-whisper", "openai-whisper"}
+	for i, w := range wantNames {
+		if got[i].Name != w {
+			t.Errorf("ResolveAllTier1(stt)[%d].Name = %q, want %q", i, got[i].Name, w)
+		}
+	}
 }
 
 // TestResolveAllTier1_OrderByTierPriority_ASC — D-B5′ ordering invariant.
-// ResolveAllTier1 MUST return slice ordered by tier_priority ASC so
-// dispatcher iterates gemini (10) → groq (15) → openai (20).
+// ResolveAllTier1 MUST return slice ordered by tier_priority ASC even when
+// the in-memory snapshot is seeded out of order (sort.SliceStable guard).
 func TestResolveAllTier1_OrderByTierPriority_ASC(t *testing.T) {
-	t.Skip("OWNER: Plan 02 — implements ResolveAllTier1; unskip + assert returned slice ordered by tier_priority ASC even when DB rows are loaded out of order")
-	// Expected:
-	//   // seed snapshot with rows in REVERSE prio order (20, 15, 10)
-	//   got := l.ResolveAllTier1("stt")
-	//   require.Equal(t, []int{10, 15, 20}, []int{got[0].TierPriority, got[1].TierPriority, got[2].TierPriority})
-	// Reference: PATTERNS.md line 229-244 (sort.SliceStable on TierPriority).
+	// Seed in REVERSE prio order — the test asserts the sort happens.
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20,
+			URL: "https://api.openai.com/v1", Enabled: true},
+		UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, TierPriority: 15,
+			URL: "https://api.groq.com/openai/v1", Enabled: true},
+		UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10,
+			URL: "https://generativelanguage.googleapis.com/v1beta", Enabled: true},
+	)
+
+	got := l.ResolveAllTier1("stt")
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	wantPrio := []int{10, 15, 20}
+	for i, w := range wantPrio {
+		if got[i].TierPriority != w {
+			t.Errorf("ResolveAllTier1[%d].TierPriority = %d, want %d", i, got[i].TierPriority, w)
+		}
+	}
+}
+
+// TestResolveAllTier1_BackwardCompat_SingleRow — D-B5′ backward-compat.
+// For roles with a single tier-1 row (llm/embed/tts), ResolveAllTier1
+// returns a slice of length 1 so existing single-tier-1 callers can be
+// rewritten without behavior change.
+func TestResolveAllTier1_BackwardCompat_SingleRow(t *testing.T) {
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary:8000", Enabled: true},
+		UpstreamConfig{Name: "openrouter-chat", Role: "llm", Tier: 1, URL: "https://openrouter.example/v1", Enabled: true},
+	)
+	got := l.ResolveAllTier1("llm")
+	if len(got) != 1 {
+		t.Fatalf("ResolveAllTier1(llm) len = %d, want 1", len(got))
+	}
+	if got[0].Name != "openrouter-chat" {
+		t.Errorf("got[0].Name = %q, want openrouter-chat", got[0].Name)
+	}
+}
+
+// TestResolveAllTier1_EmptyForUnknownRole returns nil/empty when no
+// tier-1 rows match the given role.
+func TestResolveAllTier1_EmptyForUnknownRole(t *testing.T) {
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary:8000", Enabled: true},
+	)
+	if got := l.ResolveAllTier1("vision"); len(got) != 0 {
+		t.Errorf("ResolveAllTier1(vision) = %d entries, want 0", len(got))
+	}
 }
 
 // TestCircuitConfigParsed_GeminiCooldownS120 — D-B11/D-B12.
-// Loader MUST parse circuit_config JSONB cooldown_s=120 for gemini-stt
-// row (parser already exists at types.go:97 per PATTERNS.md line 534 —
-// this test pins the contract end-to-end).
+// Loader MUST expose CircuitConfig.CooldownS=120 for the gemini-stt row
+// when the snapshot row carries cooldown_s=120 (parser already exists at
+// types.go:97 per PATTERNS.md line 534 — this test pins the contract
+// end-to-end via the in-memory fixture). The integration_test package
+// pins the persisted JSONB → CircuitConfig parse round-trip separately.
 func TestCircuitConfigParsed_GeminiCooldownS120(t *testing.T) {
-	t.Skip("OWNER: Plan 02 — wires migration row + reads existing CircuitConfig.CooldownS parser; unskip + assert loader returns gemini-stt with CircuitConfig.CooldownS == 120")
-	// Expected:
-	//   u, ok := l.Get("gemini-stt")
-	//   require.True(t, ok)
-	//   require.Equal(t, 120, u.CircuitConfig.CooldownS)
-	// Reference: PATTERNS.md line 60 (CONTEXT D-B12 — parser already wired).
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10,
+			URL:     "https://generativelanguage.googleapis.com/v1beta",
+			Enabled: true,
+			CircuitConfig: CircuitConfig{
+				CooldownS: 120,
+				Cooldown:  120 * time.Second,
+			}},
+	)
+	u, ok := l.Get("gemini-stt")
+	if !ok {
+		t.Fatalf("Get(gemini-stt) not found")
+	}
+	if u.CircuitConfig.CooldownS != 120 {
+		t.Errorf("CircuitConfig.CooldownS = %d, want 120 (D-B11)", u.CircuitConfig.CooldownS)
+	}
 }

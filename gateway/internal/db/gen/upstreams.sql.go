@@ -7,28 +7,50 @@ package gen
 
 import (
 	"context"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getUpstreamByName = `-- name: GetUpstreamByName :one
-SELECT id, name, role, tier, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
 WHERE name = $1
 `
 
+type GetUpstreamByNameRow struct {
+	ID              uuid.UUID          `json:"id"`
+	Name            string             `json:"name"`
+	Role            string             `json:"role"`
+	Tier            int32              `json:"tier"`
+	TierPriority    int32              `json:"tier_priority"`
+	UrlEnv          string             `json:"url_env"`
+	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
+	Enabled         bool               `json:"enabled"`
+	Weight          pgtype.Int4        `json:"weight"`
+	CircuitConfig   []byte             `json:"circuit_config"`
+	LastProbeAt     pgtype.Timestamptz `json:"last_probe_at"`
+	LastProbeMs     pgtype.Int4        `json:"last_probe_ms"`
+	LastProbeStatus pgtype.Text        `json:"last_probe_status"`
+	LastProbeError  pgtype.Text        `json:"last_probe_error"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+}
+
 // Used by gatewayctl upstreams update/enable/disable to verify the name
 // exists before mutating.
-func (q *Queries) GetUpstreamByName(ctx context.Context, name string) (AiGatewayUpstream, error) {
+func (q *Queries) GetUpstreamByName(ctx context.Context, name string) (GetUpstreamByNameRow, error) {
 	row := q.db.QueryRow(ctx, getUpstreamByName, name)
-	var i AiGatewayUpstream
+	var i GetUpstreamByNameRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Role,
 		&i.Tier,
+		&i.TierPriority,
 		&i.UrlEnv,
 		&i.AuthBearerEnv,
 		&i.Enabled,
@@ -45,29 +67,49 @@ func (q *Queries) GetUpstreamByName(ctx context.Context, name string) (AiGateway
 }
 
 const listAllUpstreams = `-- name: ListAllUpstreams :many
-SELECT id, name, role, tier, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
-ORDER BY role, tier
+ORDER BY role, tier, tier_priority
 `
+
+type ListAllUpstreamsRow struct {
+	ID              uuid.UUID          `json:"id"`
+	Name            string             `json:"name"`
+	Role            string             `json:"role"`
+	Tier            int32              `json:"tier"`
+	TierPriority    int32              `json:"tier_priority"`
+	UrlEnv          string             `json:"url_env"`
+	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
+	Enabled         bool               `json:"enabled"`
+	Weight          pgtype.Int4        `json:"weight"`
+	CircuitConfig   []byte             `json:"circuit_config"`
+	LastProbeAt     pgtype.Timestamptz `json:"last_probe_at"`
+	LastProbeMs     pgtype.Int4        `json:"last_probe_ms"`
+	LastProbeStatus pgtype.Text        `json:"last_probe_status"`
+	LastProbeError  pgtype.Text        `json:"last_probe_error"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+}
 
 // Admin surface (gatewayctl upstreams list). Returns every row regardless
 // of enabled state so the operator can re-enable disabled upstreams.
-func (q *Queries) ListAllUpstreams(ctx context.Context) ([]AiGatewayUpstream, error) {
+func (q *Queries) ListAllUpstreams(ctx context.Context) ([]ListAllUpstreamsRow, error) {
 	rows, err := q.db.Query(ctx, listAllUpstreams)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []AiGatewayUpstream
+	var items []ListAllUpstreamsRow
 	for rows.Next() {
-		var i AiGatewayUpstream
+		var i ListAllUpstreamsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
 			&i.Role,
 			&i.Tier,
+			&i.TierPriority,
 			&i.UrlEnv,
 			&i.AuthBearerEnv,
 			&i.Enabled,
@@ -91,31 +133,53 @@ func (q *Queries) ListAllUpstreams(ctx context.Context) ([]AiGatewayUpstream, er
 }
 
 const listEnabledUpstreams = `-- name: ListEnabledUpstreams :many
-SELECT id, name, role, tier, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
 WHERE enabled = TRUE
-ORDER BY role, tier
+ORDER BY role, tier, tier_priority
 `
 
+type ListEnabledUpstreamsRow struct {
+	ID              uuid.UUID          `json:"id"`
+	Name            string             `json:"name"`
+	Role            string             `json:"role"`
+	Tier            int32              `json:"tier"`
+	TierPriority    int32              `json:"tier_priority"`
+	UrlEnv          string             `json:"url_env"`
+	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
+	Enabled         bool               `json:"enabled"`
+	Weight          pgtype.Int4        `json:"weight"`
+	CircuitConfig   []byte             `json:"circuit_config"`
+	LastProbeAt     pgtype.Timestamptz `json:"last_probe_at"`
+	LastProbeMs     pgtype.Int4        `json:"last_probe_ms"`
+	LastProbeStatus pgtype.Text        `json:"last_probe_status"`
+	LastProbeError  pgtype.Text        `json:"last_probe_error"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+}
+
 // Hot-path load at boot and on LISTEN/NOTIFY (CONTEXT.md D-D2). Returns
-// all enabled rows ordered by (role, tier) so the Loader can
-// deterministically build tier-0/tier-1 maps.
-func (q *Queries) ListEnabledUpstreams(ctx context.Context) ([]AiGatewayUpstream, error) {
+// all enabled rows ordered by (role, tier, tier_priority) so the Loader
+// can deterministically build tier-0/tier-1 maps.
+// Phase 11.2 (D-B5′/D-B6′): tier_priority widens (role,tier) for the STT
+// multi-tier-1 cascade.
+func (q *Queries) ListEnabledUpstreams(ctx context.Context) ([]ListEnabledUpstreamsRow, error) {
 	rows, err := q.db.Query(ctx, listEnabledUpstreams)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []AiGatewayUpstream
+	var items []ListEnabledUpstreamsRow
 	for rows.Next() {
-		var i AiGatewayUpstream
+		var i ListEnabledUpstreamsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
 			&i.Role,
 			&i.Tier,
+			&i.TierPriority,
 			&i.UrlEnv,
 			&i.AuthBearerEnv,
 			&i.Enabled,

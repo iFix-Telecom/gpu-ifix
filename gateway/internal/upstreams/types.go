@@ -26,6 +26,11 @@ type UpstreamConfig struct {
 	Name          string        `json:"name"`
 	Role          string        `json:"role"` // "llm" | "stt" | "embed" | "tts"
 	Tier          int           `json:"tier"` // 0 = primary, 1 = fallback
+	// TierPriority orders rows that share the same (Role, Tier). Lower
+	// wins. Phase 11.2 (D-B5′/D-B6′) — STT cascade has 3 tier-1 rows
+	// ordered gemini-stt(10) → groq-whisper(15) → openai-whisper(20).
+	// Other roles default to 0 (single tier-1 row, backward-compat).
+	TierPriority  int           `json:"tier_priority"`
 	URL           string        `json:"url"`
 	AuthBearer    string        `json:"-"` // resolved; NEVER log/serialize
 	AuthBearerEnv string        `json:"auth_bearer_env,omitempty"`
