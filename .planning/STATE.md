@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-last_updated: "2026-06-07T12:07:19.714Z"
+status: executing
+last_updated: "2026-06-07T15:08:25.312Z"
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 43
-  completed_plans: 32
+  completed_plans: 33
   percent: 67
 ---
 
@@ -27,8 +27,8 @@ progress:
 
 ## Current Position
 
-Phase: 11.1 (closed `passed_partial` 2026-06-05T02:30Z — 6/7 plans complete + Wave 5 live UAT deferred + code-review found 3 critical + 6 warning auto-fixed in 7 commits). Phase 11 (closed `passed_partial` 2026-05-28T01:42Z; addendum closure 2026-05-28T20:48Z — PRD-03 flipped to `passed` after audit-pipeline 5-PR chain)
-Plan: All 10 plans landed
+Phase: 11.2 (readd-whisper-local-gemini-fallback) — EXECUTING
+Plan: 2 of 8
 Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
@@ -127,7 +127,7 @@ Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Milestone complete
+- **Status:** Ready to execute
 
 ## Performance Metrics
 
