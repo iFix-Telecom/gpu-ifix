@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-last_updated: "2026-06-08T00:34:04.741Z"
+status: completed
+last_updated: "2026-06-08T00:35:04.647Z"
 progress:
   total_phases: 6
   completed_phases: 5
@@ -27,7 +27,7 @@ progress:
 
 ## Current Position
 
-Phase: 11.2 (readd-whisper-local-gemini-fallback) — EXECUTING
+Phase: 11.2 — COMPLETE
 Plan: 8 of 8
 Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
@@ -127,7 +127,7 @@ Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Phase complete — ready for verification
+- **Status:** Phase 11.2 complete
 
 ## Performance Metrics
 
