@@ -105,6 +105,14 @@ Plans:
 - [x] 11.2-07-PLAN.md — Wave 5: RUNBOOK-OPS Gemini + Groq operator sections (key mint/rotate, D-B10 verbatim cmd, cooldown tuning, Pitfalls) + gateway/.env.example + PROJECT.md tech-stack
 - [x] 11.2-08-PLAN.md — Wave 6: Implement 6 UAT scenarios in pod/smoke/uat-11.2.sh + BLOCKING operator live UAT (pod-ON local-stt, pod-OFF gemini, gemini-open→groq, gemini+groq-open→openai, sensitive pod-ON local, sensitive pod-OFF→503 RES-08) + 11.2-VERIFICATION.md rollup
 
+### Phase 6.6.X: Pod cold-start hardening + env precedence audit (INSERTED, from 11.2-GAPS-DECISION)
+
+**Goal:** Resolve the 2 Phase 11.2 carry-forward items that belong to Phase 6.6 primary-pod plane (not the cascade objective): (1) cold-start flakiness where `actual_status=created` permanent with no port mapping after image-load — blocks D-B13 cenários 1+5 pod-ON UAT; (2) dual-shape env precedence drift where `PRIMARY_NUM_GPUS=2` is set in vps-ifix-vm env but `PRIMARY_VAST_NUM_GPUS_PRIMARY=1` wins the Vast.ai search (1× RTX 3090 provisioned in 11.2 UAT) — conflicts with MEMORY `primary-gpu-shape-06.8-final` (2×3090 standing config). Pod weights pre-bake (whisper baked into image vs onstart download) may eliminate item 1 — investigate as part of this.
+**Requirements:** PC-COLD-START-FIX, PC-ENV-PRECEDENCE
+**Depends on:** Phase 11.2 (closed passed_partial — provides carry-forward decision document); Phase 06.8 (provides 2×3090 baseline shape)
+**Carry-forward source:** .planning/phases/11.2-readd-whisper-local-gemini-fallback/11.2-GAPS-DECISION.md
+**Plans:** TBD via /gsd-discuss-phase 6.6.X
+
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
 **Goal:** Fix the gateway dispatcher → tier-1 fallback model-name rewriting gap so `POST /v1/chat/completions {"model":"qwen"}` against ai-gateway-dev (with primary pod down) returns a real OpenRouter Qwen 3.5 completion instead of the current HTTP 404 "Not Found" HTML. Wave 0 Gate A (Phase 03, 2026-04-20) defined `UPSTREAM_LLM_OPENROUTER_MODEL=qwen/qwen3.5-27b` as the env var operator must set; Plan 03-06 implementation never wired it. Bug masked through Phase 04-08 because integration tests use a fake upstream that accepts any model name + live UAT was always deferred. Also surfaced same-shape gaps for openai-whisper (`UPSTREAM_STT_OPENAI_MODEL`) and openai-embed (`UPSTREAM_EMBED_OPENAI_MODEL`) — verify and bundle. Reference fix-path = SEED-004 Option B (schema-driven `model_aliases` PK widened to `(alias, upstream_name)`). Per D-06: schema row is the default, env vars remain the per-instance escape hatch (env wins over schema when set) — both supported permanently.
