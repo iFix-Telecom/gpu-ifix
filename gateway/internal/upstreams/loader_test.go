@@ -524,7 +524,7 @@ func TestPostMigration0029_RestoresLocalSTT_AddsGeminiSTT_AddsGroqWhisper(t *tes
 			URL: "https://generativelanguage.googleapis.com/v1beta", Enabled: true,
 			CircuitConfig: CircuitConfig{CooldownS: 120}},
 		UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, TierPriority: 15,
-			URL: "https://api.groq.com/openai/v1", Enabled: true},
+			URL: "https://api.groq.com/openai", Enabled: true},
 		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20,
 			URL: "https://api.openai.com/v1", Enabled: true},
 	)
@@ -560,7 +560,7 @@ func TestResolveAllTier1_OrderByTierPriority_ASC(t *testing.T) {
 		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20,
 			URL: "https://api.openai.com/v1", Enabled: true},
 		UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, TierPriority: 15,
-			URL: "https://api.groq.com/openai/v1", Enabled: true},
+			URL: "https://api.groq.com/openai", Enabled: true},
 		UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10,
 			URL: "https://generativelanguage.googleapis.com/v1beta", Enabled: true},
 	)

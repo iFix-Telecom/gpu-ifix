@@ -1571,7 +1571,7 @@ func TestConfig_Defaults_Phase112(t *testing.T) {
 			cfg.UpstreamSTTFallback1Model)
 	}
 	// Slot 2 = Groq Whisper (D-B8).
-	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai/v1" {
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai" {
 		t.Errorf("UpstreamSTTFallback2URL default: want Groq /openai/v1, got %q",
 			cfg.UpstreamSTTFallback2URL)
 	}
@@ -1598,7 +1598,7 @@ func TestConfig_Defaults_Phase112_EnvOverride(t *testing.T) {
 	t.Setenv("UPSTREAM_STT_FALLBACK_1_URL", "https://generativelanguage.googleapis.com/v1beta-custom")
 	t.Setenv("UPSTREAM_STT_FALLBACK_1_AUTH_BEARER", "AIza-fake-key")
 	t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash")
-	t.Setenv("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai/v1-staging")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai-staging")
 	t.Setenv("UPSTREAM_STT_FALLBACK_2_AUTH_BEARER", "gsk_fake-groq-key")
 	t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3-turbo")
 	cfg, err := config.Load()
@@ -1623,7 +1623,7 @@ func TestConfig_Defaults_Phase112_EnvOverride(t *testing.T) {
 	if cfg.UpstreamSTTFallback1Model != "gemini-2.5-flash" {
 		t.Errorf("UpstreamSTTFallback1Model override: got %q", cfg.UpstreamSTTFallback1Model)
 	}
-	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai/v1-staging" {
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai-staging" {
 		t.Errorf("UpstreamSTTFallback2URL override: got %q", cfg.UpstreamSTTFallback2URL)
 	}
 	if cfg.UpstreamSTTFallback2AuthBearer != "gsk_fake-groq-key" {

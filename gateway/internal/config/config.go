@@ -364,7 +364,7 @@ func Load() (Config, error) {
 		UpstreamSTTFallback1URL:        envOr("UPSTREAM_STT_FALLBACK_1_URL", "https://generativelanguage.googleapis.com/v1beta"),
 		UpstreamSTTFallback1AuthBearer: os.Getenv("UPSTREAM_STT_FALLBACK_1_AUTH_BEARER"),
 		UpstreamSTTFallback1Model:      envOr("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash-lite"),
-		UpstreamSTTFallback2URL:        envOr("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai/v1"),
+		UpstreamSTTFallback2URL:        envOr("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai"),
 		UpstreamSTTFallback2AuthBearer: os.Getenv("UPSTREAM_STT_FALLBACK_2_AUTH_BEARER"),
 		UpstreamSTTFallback2Model:      envOr("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3"),
 

@@ -175,7 +175,7 @@ OpenAI-compatible.
 ### Env vars
 
 ```bash
-UPSTREAM_STT_FALLBACK_2_URL=https://api.groq.com/openai/v1
+UPSTREAM_STT_FALLBACK_2_URL=https://api.groq.com/openai
 UPSTREAM_STT_FALLBACK_2_AUTH_BEARER=<paste from console.groq.com/keys>
 UPSTREAM_STT_FALLBACK_2_MODEL=whisper-large-v3
 ```
