@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-06-07T18:12:23.697Z"
+status: verifying
+last_updated: "2026-06-08T00:34:04.741Z"
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 43
-  completed_plans: 39
-  percent: 67
+  completed_plans: 40
+  percent: 83
 ---
 
 # STATE: ifix-ai-gateway
@@ -127,7 +127,7 @@ Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Ready to execute
+- **Status:** Phase complete — ready for verification
 
 ## Performance Metrics
 
@@ -188,10 +188,11 @@ Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55
 | Phase 06.7 P05 | 4 | 2 tasks | 4 files |
 | Phase 11.2 P06 | 35min | 3 tasks | 8 files |
 | Phase 11.2 P07 | 8m | 2 tasks | 3 files |
+| Phase 11.2 P08 | 2h 20min | 3 tasks | 10 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-06-07T18:12:19.345Z
+- **Last session:** 2026-06-08T00:34:04.729Z
 - **Next session should:** Run the Phase 06.7 live HUMAN-UAT. Plan 06.7-09 Task 1 is DONE (commit `41039b4`: `docs/RUNBOOK-PRIMARY-POD-TTS.md` + `06.7-HUMAN-UAT.md` 6-scenario sheet + CLEANUP). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run S1–S6 + cleanup on a live Vast 5090 (real GPU spend; autonomous mode cannot satisfy it), sign each PASS/FAIL, record spend. After all 6 + cleanup are signed: write `06.7-09-SUMMARY.md` + `06.7-VERIFICATION.md`, then `state advance-plan`. Any FAIL → `/gsd:plan-phase 06.7 --gaps`. Phase 06.7 Plan stays at 9 (06.7-09) — NOT advanced (plan incomplete until UAT signed).
 
 ---
