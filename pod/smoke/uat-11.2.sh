@@ -143,8 +143,14 @@ post_transcription() {
 last_status()     { cat "$STATUS_FILE" 2>/dev/null || echo "000"; }
 last_request_id() { cat "$REQUEST_ID_FILE" 2>/dev/null || echo ""; }
 
-# Query audit_log for the upstream column matching the request_id (if known)
-# or the latest transcription row. Echoes the upstream string.
+# Query audit_log for the upstream column. Strategy:
+#   1. Try via $request_id (when gateway emits its own UUID in X-Request-ID)
+#   2. Fallback: pick the most recent transcriptions row in the last 30s
+#      (rationale: when the dispatched-to upstream is OpenAI-compat
+#      external like Groq, the ReverseProxy preserves the UPSTREAM's
+#      X-Request-ID in the response — clobbering ours. We can't recover
+#      our own request_id from headers in that case, so timestamp-based
+#      "most recent row" is the only correlation path.)
 audit_query_upstream() {
   local request_id="${1:-}"
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -156,23 +162,42 @@ audit_query_upstream() {
     echo ""
     return 0
   fi
+  # First try: request_id match (works when gateway UUID survives).
+  local got=""
   if [[ -n "$request_id" ]]; then
-    psql "$AUDIT_DB" -At -c \
-      "SELECT COALESCE(upstream,'') FROM ai_gateway.audit_log WHERE request_id='${request_id}' ORDER BY ts DESC LIMIT 1;" \
-      2>/dev/null
-  else
-    psql "$AUDIT_DB" -At -c \
-      "SELECT COALESCE(upstream,'') FROM ai_gateway.audit_log WHERE route='/v1/audio/transcriptions' ORDER BY ts DESC LIMIT 1;" \
-      2>/dev/null
+    # Skip the lookup outright if the request_id is clearly NOT a UUIDv7
+    # (upstreams like Groq emit `req_*` ids that pollute the X-Request-ID
+    # header). Avoids a useless DB roundtrip.
+    if [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4} ]]; then
+      got=$(psql "$AUDIT_DB" -At -c \
+        "SELECT COALESCE(upstream,'') FROM ai_gateway.audit_log WHERE request_id='${request_id}' ORDER BY ts DESC LIMIT 1;" \
+        2>/dev/null)
+    fi
   fi
+  # Fallback: most recent transcription row in last 30s.
+  if [[ -z "$got" ]]; then
+    got=$(psql "$AUDIT_DB" -At -c \
+      "SELECT COALESCE(upstream,'') FROM ai_gateway.audit_log WHERE route='/v1/audio/transcriptions' AND ts > NOW() - INTERVAL '30 seconds' ORDER BY ts DESC LIMIT 1;" \
+      2>/dev/null)
+  fi
+  echo "$got"
 }
 
 audit_query_data_class() {
   local request_id="$1"
   [[ -z "$AUDIT_DB" || "$DRY_RUN" == 1 ]] && { echo "?"; return; }
-  psql "$AUDIT_DB" -At -c \
-    "SELECT COALESCE(data_class::text,'?') FROM ai_gateway.audit_log WHERE request_id='${request_id}' ORDER BY ts DESC LIMIT 1;" \
-    2>/dev/null
+  local got=""
+  if [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4} ]]; then
+    got=$(psql "$AUDIT_DB" -At -c \
+      "SELECT COALESCE(data_class::text,'?') FROM ai_gateway.audit_log WHERE request_id='${request_id}' ORDER BY ts DESC LIMIT 1;" \
+      2>/dev/null)
+  fi
+  if [[ -z "$got" ]]; then
+    got=$(psql "$AUDIT_DB" -At -c \
+      "SELECT COALESCE(data_class::text,'?') FROM ai_gateway.audit_log WHERE route='/v1/audio/transcriptions' AND ts > NOW() - INTERVAL '30 seconds' ORDER BY ts DESC LIMIT 1;" \
+      2>/dev/null)
+  fi
+  echo "$got"
 }
 
 wait_for_primary_ready() {
