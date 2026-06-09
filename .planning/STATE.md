@@ -27,9 +27,11 @@ progress:
 
 ## Current Position
 
-Phase: 11.2 — COMPLETE
-Plan: 8 of 8
-Next autonomous-eligible work: 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Prod cutover 2026-05-26 (~2 days ago) insufficient corpus. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage (estimate 1-2 weeks). See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
+Phase: 06.6.X — COMPLETE (verdict=passed, 2026-06-09)
+Plan: 9 of 9
+Next autonomous-eligible work: Phase 6.6.Y — implement cold-start + env-precedence fixes from 06.6.X-RESEARCH-COLD-START.md (Option A+B bundle recommended) + 06.6.X-RESEARCH-ENV-PRECEDENCE.md (hard fail-fast canonical PRIMARY_VAST_*_{PRIMARY,FALLBACK}). Phase 6.6.X total spend $0.040 / $1.20 cap.
+
+Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
   - Phase 1: smoke.yml Vast.ai HUMAN-UAT pending

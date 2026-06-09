@@ -118,11 +118,11 @@ Plans:
 - [x] 06.6.X-02-PLAN.md — Wave 1: runtime env capture from vps-ifix-vm
 - [x] 06.6.X-03-PLAN.md — Wave 1: docs-side var values (runbooks + .env.examples + MEMORY)
 - [x] 06.6.X-04-PLAN.md — Wave 2: iter-1 spike via gateway live-tick + 4-signal parallel capture (autonomous:false)
-- [ ] 06.6.X-05-PLAN.md — Wave 3: iter-1 analysis (suspect ranking by evidence + iter-2 go/no-go)
-- [ ] 06.6.X-06-PLAN.md — Wave 4: iter-2 conditional spike (top-1 hypothesis isolation) or skip-rationale (autonomous:false)
-- [ ] 06.6.X-07-PLAN.md — Wave 5: RESEARCH-ENV-PRECEDENCE.md synthesis from 3 audit inputs
-- [ ] 06.6.X-08-PLAN.md — Wave 5: RESEARCH-COLD-START.md synthesis from iter-1/iter-2 evidence
-- [ ] 06.6.X-09-PLAN.md — Wave 6: phase VERIFICATION rollup (pod destruction confirm + spend log + verdict)
+- [x] 06.6.X-05-PLAN.md — Wave 3: iter-1 analysis (suspect ranking by evidence + iter-2 go/no-go)
+- [x] 06.6.X-06-PLAN.md — Wave 4: iter-2 SKIP-rationale (top-1 already D-15 confirmed; $0 spend)
+- [x] 06.6.X-07-PLAN.md — Wave 5: RESEARCH-ENV-PRECEDENCE.md synthesis from 3 audit inputs
+- [x] 06.6.X-08-PLAN.md — Wave 5: RESEARCH-COLD-START.md synthesis from iter-1 evidence
+- [x] 06.6.X-09-PLAN.md — Wave 6: phase VERIFICATION rollup — verdict=passed, spend $0.040/$1.20
 
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
