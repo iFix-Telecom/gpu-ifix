@@ -189,8 +189,16 @@ type CreateResponse struct {
 type SearchFilter map[string]any
 
 // DefaultSearchFilter returns the canonical Phase 6 filter per CONTEXT.md
-// D-A2: ≥0.99 reliability, ≤cap dph_total, ≥500 Mbps inet_down,
+// D-A2: ≥0.99 reliability, ≤cap dph_total, ≥200 Mbps inet_down,
 // ≥12.8 cuda_max_good, driver ≥570, ordered by dph_total ascending limit 20.
+//
+// inet_down lowered from 500 → 200 Mbps on 2026-05-28 after the 2×3090 inventory
+// survey showed the entire EU/DE/PL fleet sits in the 246–311 Mbps band — the
+// 500 gate excluded every reasonable EU offer and forced provisioning into
+// $1+/hr long-haul hosts (Oman, US). 200 Mbps still completes the ~17GB cold-
+// start weight download in <10 min, which fits inside coldstart_budget_seconds
+// (2400s default). Tightening back to 500 stays a per-deploy operator option
+// once EU 3090 inventory inet capacity catches up.
 //
 // `gpuName` is the gpu_name eq filter — emerg pods default to "RTX 4090"
 // (cheap fallback for the LLM-only emerg path); primary pods default to
@@ -235,7 +243,7 @@ func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string, nu
 		"num_gpus":      map[string]any{"eq": numGPUs},
 		"reliability":   map[string]any{"gte": 0.99},
 		"dph_total":     map[string]any{"lte": maxDPH},
-		"inet_down":     map[string]any{"gte": 500},
+		"inet_down":     map[string]any{"gte": 200},
 		"cuda_max_good": map[string]any{"gte": 12.8},
 		"driver_vers":   map[string]any{"gte": 570000000},
 		"rentable":      map[string]any{"eq": true},
@@ -253,6 +261,30 @@ func DefaultSearchFilter(maxDPH float64, primaryHostID int64, gpuName string, nu
 		f["machine_id"] = map[string]any{"notin": ids}
 	}
 	return f
+}
+
+// DefaultSearchFilters builds a [primary, fallback] SearchFilter pair per
+// Phase 11.1 D-A6. The reconciler iterates the pair and breaks on the
+// first non-empty offer list — primary shape preferred, fallback only when
+// the primary cap returns zero qualified offers.
+//
+// Defaults: primary = 1×RTX 3090 @ $0.30; fallback = 2×RTX 3090 @ $0.60
+// (same GPU model both shapes, single CDI/driver matrix; Wave 0
+// EVIDENCE-00 found 7 EU offers within the fallback cap).
+//
+// primaryNumGPUs / fallbackNumGPUs are SPLIT so the fallback shape can ask
+// for a different GPU-per-machine count than the primary (e.g. 1 primary →
+// 2 fallback). Both filters carry the same primaryHostID exclusion +
+// machineBlocklist, so the variadic blocklist parses identically.
+func DefaultSearchFilters(primaryCap, fallbackCap float64,
+	primaryHostID int64,
+	primaryGPU, fallbackGPU string,
+	primaryNumGPUs, fallbackNumGPUs int,
+	blocklist ...int64) []SearchFilter {
+	return []SearchFilter{
+		DefaultSearchFilter(primaryCap, primaryHostID, primaryGPU, primaryNumGPUs, blocklist...),
+		DefaultSearchFilter(fallbackCap, primaryHostID, fallbackGPU, fallbackNumGPUs, blocklist...),
+	}
 }
 
 // WithMachineAllowlist returns a shallow copy of f with the machine_id clause

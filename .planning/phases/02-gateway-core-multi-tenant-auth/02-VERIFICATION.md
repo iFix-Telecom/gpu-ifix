@@ -11,6 +11,8 @@ re_verification:
     - "SC-5 live deploy 10-step checklist re-run on 2026-05-23 against ai-gateway-dev (image develop-d689321): steps 1-6 + 8 + 9 (inferred) + 10 PASS; container Up 2h healthy, /health 200, 25 migrations applied (0001..0025), tenant + key CRUD work, unauth 401 OpenAI envelope confirmed, key revoke works. See 02-UAT-2026-05-23.md"
   gaps_closed_2026_05_25:
     - "Step 7 chat E2E (was 503 on 2026-05-23) re-run on 2026-05-25 against ai-gateway-dev (image develop-560aa2a) — HTTP 200 + DeepSeek v4 Flash completion via OpenRouter (Novita provider). Phase 06.9 (PR #1) wired schema-driven per-upstream model rewrite; follow-up PRs #2 (target → deepseek-v4-flash:nitro), #3 (BuildDirector path-join), #4 (EffectiveState force-override), #5 (HasSuffix chat-path check) closed every link in the dispatcher → tier-1 chain. See 06.9-HUMAN-UAT.md S5 + 06.9-VERIFICATION.md."
+  gaps_closed_phase_10_2026_05_26:
+    - "SC-5 step 7 chat E2E re-verified under PROD URL 2026-05-26 (image sha256:17e9873ec810) — POST https://ai-gateway.converse-ai.app/v1/chat/completions {model:qwen} → HTTP 200 + non-empty completion via OpenRouter tier-1. Confirms Phase 06.9 fix holds end-to-end against the prod hostname, not just the dev URL. See 10-HUMAN-UAT.md S1 + 10-VERIFICATION.md frontmatter gaps_closed_phase_10_2026_05_26.s1_chat_e2e_https."
   gaps_remaining:
     - "Step 9 audit row count via direct psql — MCP postgres-grupo-ifix prompt rejected; AuditInterceptor wired confirmed via main.go:160 + Integration_03_AuditWrite covers persistence (non-blocking observability gap, not a SC gate)"
   regressions: []

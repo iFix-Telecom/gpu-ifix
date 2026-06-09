@@ -1,0 +1,34 @@
+=== 2026-06-09T16:29:57Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:30:28Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:30:58Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:31:29Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:32:00Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:32:30Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:33:01Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:33:32Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:34:03Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:34:33Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:35:04Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:35:35Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:36:05Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:36:36Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:37:07Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:37:37Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:38:08Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:38:39Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:39:09Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:39:40Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:40:11Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:40:41Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:41:12Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:41:43Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:42:14Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:42:44Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:43:15Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:43:46Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:44:16Z probe ssh: host=null port=null status=null ===
+=== 2026-06-09T16:44:47Z probe ssh: host=null port=null status=null ===
+POD SSH UNREACHABLE for entire 900s window
+
+=== MANUAL CORRECTION ===
+"POD SSH UNREACHABLE for entire 900s window" is CORRECT — Vast API (via corrected ?api_key= auth, see iter1-vast-timeline.log addendum) confirms ssh_host=null and ssh_port=null throughout the lifecycle. The instance ran with public_ipaddr=192.168.1.8 (RFC1918 private) and direct_port_count=250 unallocated. Host machine 51096 / host_id 348505 in Brazil did not bind any direct ports for this pod. This is the cold-start flakiness root-cause signal: pod technically "running" per Vast but unreachable from internet → gateway reconciler waits indefinitely for endpoint to become reachable.

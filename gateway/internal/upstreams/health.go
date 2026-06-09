@@ -2,7 +2,9 @@
 //
 // Replaces the Phase 2 implementation that proxied to the pod's
 // :9100 health-bridge. Phase 3 derives state in-process from
-// breaker.Set.Snapshot() (live circuit-breaker state) + Loader.All()
+// breaker.Set.EffectiveStateSnapshot() (live circuit-breaker state
+// honoring operator force-overrides installed via
+// `gatewayctl breaker force-open`, per SEED-005) + Loader.All()
 // (the 6-row config) + the upstreams.last_probe_* columns the probe
 // loop populates (Task 1).
 //
@@ -38,7 +40,7 @@ type healthResponse struct {
 // upstreamStatus is one entry under .upstreams. NOTE: AuthBearer is
 // NEVER included (T-03-04-03) — only public config + live state.
 type upstreamStatus struct {
-	State           string `json:"state"` // "closed" | "half-open" | "open" | "unknown"
+	State           string `json:"state"` // "closed" | "half-open" | "open" | "forced-open" | "unknown"
 	Role            string `json:"role"`
 	Tier            int    `json:"tier"`
 	LastProbeMs     *int32 `json:"last_probe_ms,omitempty"`
@@ -131,7 +133,11 @@ func buildHealthResponse(loader *Loader, bs *breaker.Set) ([]byte, int, error) {
 
 	var snap map[string]string
 	if bs != nil {
-		snap = bs.Snapshot()
+		// SEED-005: honor operator force-override (gw:breaker:force:{name}).
+		// Snapshot() reads raw FSM only; EffectiveStateSnapshot() emits
+		// "forced-open" when a force-override is active so dashboards +
+		// smoke pre-condition gates see routing-layer reality.
+		snap = bs.EffectiveStateSnapshot()
 	}
 
 	// tier0Closed tracks per-role: is the tier-0 breaker CLOSED?

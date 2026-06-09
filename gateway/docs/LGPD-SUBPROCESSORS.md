@@ -1,6 +1,6 @@
 # LGPD — Sub-processadores do ifix-ai-gateway
 
-**Last updated: 2026-05-14.**
+**Last updated: 2026-05-27.**
 
 ## Purpose
 
@@ -23,6 +23,16 @@ proxiados para um provedor externo.
 | **Vast.ai**     | Host da GPU (RTX 4090 alugada) — executa o **upstream local** (Qwen 3.5 27B + Whisper + BGE-M3) | Dados de **todos** os tenants — `normal` **e** `sensitive` | **Sempre** que o gateway está saudável. É o caminho primário; o pod roda na infraestrutura da Vast.ai. |
 | **OpenAI**      | Provedor de **failover** (LLM, Whisper STT, embeddings)            | **Somente** dados de tenants `normal` (Campanhas, voice-api) | Apenas durante failover, quando o upstream local cai/satura, **e somente** para tenants `normal`. |
 | **OpenRouter**  | Provedor de **failover** (LLM Qwen 3.5 27B via Novita)             | **Somente** dados de tenants `normal` (Campanhas, voice-api) | Apenas durante failover, quando o upstream local cai/satura, **e somente** para tenants `normal`. |
+| **MinIO — componente de infraestrutura (sub-processador se aplicável — confirmar com jurídico)** | Armazenamento S3-compatible de pesos de modelos open-source (`s3.ifixtelecom.com.br`, bucket `ai-gateway`); self-hosted internamente — classificação final (sub-processador formal vs componente interno) é decisão do jurídico Ifix | **Nenhum dado de cliente** — apenas artefatos de modelo open-source pré-treinados consumidos pelo pod no boot | **Sempre** no boot do pod GPU primário — o pod baixa os pesos do bucket via `mc cp`/curl antes de servir tráfego. |
+
+> **MinIO bucket `ai-gateway` em `s3.ifixtelecom.com.br` armazena pesos GGUF/safetensors
+> do pod GPU primário — nenhum dado de cliente persistido, apenas artefatos de modelo
+> open-source pré-treinados.** A inclusão aqui é divulgação completa (full-disclosure)
+> do plano de dados, ainda que o sub-processador (se assim classificado pelo jurídico)
+> não receba PII por design. A classificação final (sub-processador formal versus
+> componente de infraestrutura interno) é decisão do jurídico da Ifix dado o caráter
+> self-hosted — esta hedge é intencional e espelhada na carta de sign-off
+> (`gateway/docs/LGPD-SIGNOFF-LETTER-TEMPLATE.md`).
 
 > **Garantia "never-external" para tenants sensíveis.** Dados de tenants
 > `data_class: sensitive` (Telefonia — áudio de ligações; Cobranças — dados

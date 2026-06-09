@@ -96,7 +96,8 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond,
 		"recoverOpenLifecycle must SetState(Ready, 'restart_recovery') for a healthy instance")
 
-	// 3-role OverrideTier0 fires.
+	// Phase 11.2: 3-role OverrideTier0 (llm/stt/tts) — stt restored (revert
+	// 11.1 D-A1), embed remains off-pod (D-03).
 	require.Eventually(t, func() bool {
 		return len(loader.Snapshot()) == 3
 	}, 2*time.Second, 50*time.Millisecond,

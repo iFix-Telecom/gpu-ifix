@@ -96,12 +96,12 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 
 ### Produção — Hardening Final
 
-- [ ] **PRD-01**: Load test com 3 tenants simultâneos usando perfil real de produção (não sintético); baseline de P95 e capacidade
-- [ ] **PRD-02**: Chaos test: matar pod primário durante carga, medir tempo até recovery completo (meta: invisível para cliente com streaming fail-fast + retry automático)
-- [ ] **PRD-03**: Chaos test: simular OpenRouter indisponível durante failover, validar comportamento (enfileirar, retry OpenAI tier 3, ou falha controlada)
-- [ ] **PRD-04**: Runbook de incidentes documentado (detecção → diagnóstico → rollback → postmortem)
-- [ ] **PRD-05**: Revisão LGPD concluída antes de ativar tenant `sensitive` (Telefonia, Cobranças) em produção — evidência de base legal, disclosure de sub-processadores (OpenAI, OpenRouter, Vast.ai)
-- [ ] **PRD-06**: Dashboard acessível por admin Ifix com autenticação SSO ou Better Auth (a confirmar)
+- [x] **PRD-01**: Load test com 3 tenants simultâneos usando perfil real de produção (não sintético); baseline de P95 e capacidade
+- [x] **PRD-02**: Chaos test: matar pod primário durante carga, medir tempo até recovery completo (meta: invisível para cliente com streaming fail-fast + retry automático)
+- [x] **PRD-03**: Chaos test: simular OpenRouter indisponível durante failover, validar comportamento (enfileirar, retry OpenAI tier 3, ou falha controlada)
+- [x] **PRD-04**: Runbook de incidentes documentado (detecção → diagnóstico → rollback → postmortem)
+- [x] **PRD-05**: Revisão LGPD concluída antes de ativar tenant `sensitive` (Telefonia, Cobranças) em produção — evidência de base legal, disclosure de sub-processadores (OpenAI, OpenRouter, Vast.ai)
+- [x] **PRD-06**: Dashboard acessível por admin Ifix com autenticação SSO ou Better Auth (a confirmar)
 - [ ] **PRD-07**: DNS `gateway.ifix.com.br` configurado via Cloudflare; TLS/HTTPS end-to-end
 
 ## v2 Requirements
@@ -218,21 +218,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INT-03 | Phase 9: Client Integration — Sensitive Tenants | Pending |
 | INT-04 | Phase 9: Client Integration — Sensitive Tenants | Pending |
 | INT-05 | Phase 9: Client Integration — Sensitive Tenants | Pending |
-| INT-06 | Phase 10: Production Hardening & GA | Pending |
-| PRD-01 | Phase 10: Production Hardening & GA | Pending |
-| PRD-02 | Phase 10: Production Hardening & GA | Pending |
-| PRD-03 | Phase 10: Production Hardening & GA | Pending |
-| PRD-04 | Phase 10: Production Hardening & GA | Pending |
-| PRD-05 | Phase 10: Production Hardening & GA | Pending |
-| PRD-06 | Phase 10: Production Hardening & GA | Pending |
-| PRD-07 | Phase 10: Production Hardening & GA | Pending |
+| INT-06 | Phase 10: prod-deploy-ai-gateway | Pending |
+| PRD-01 | Phase 11: prod-hardening | Complete |
+| PRD-02 | Phase 11: prod-hardening | Complete |
+| PRD-03 | Phase 11: prod-hardening | Complete |
+| PRD-04 (partial) | Phase 10: prod-deploy-ai-gateway | Pending — RUNBOOK-DEPLOY.md only |
+| PRD-04 (full) | Phase 11: prod-hardening | Complete — RUNBOOK-INCIDENTS.md (4 D-11 classes) + POSTMORTEM-TEMPLATE.md (Google SRE blameless 9-section) + RUNBOOK-2FA-RECOVERY.md shipped via 11-09 |
+| PRD-05 | Phase 11: prod-hardening | Complete |
+| PRD-06 | Phase 11: prod-hardening | Complete |
+| PRD-07 | Phase 10: prod-deploy-ai-gateway | Pending |
+
+<!-- 2026-05-26: Phase 10 plan-phase per D-16 split PRD-01/02/03/05/06 from Phase 10 → Phase 11; PRD-04 split into partial (Phase 10 RUNBOOK-DEPLOY.md) + full (Phase 11 incident runbook). -->
 
 **Coverage:**
 
 - v1 requirements: 70 total
-- Mapped to phases: 70 (100%)
+- Mapped to phases: 70 (100% — Phase 10 + Phase 11 split per D-16; PRD-04 counted once as the requirement, mapped to two phases as partial + full)
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-17*
-*Last updated: 2026-04-17 after roadmap creation (traceability populated)*
+*Last updated: 2026-05-26 — D-16 split: 5 PRDs moved to new Phase 11; PRD-04 split partial (Phase 10) + full (Phase 11)*

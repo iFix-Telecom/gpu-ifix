@@ -17,6 +17,26 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// TestProbeSTT_Success — Phase 11.2 Plan 05: verbatim restore from
+// 39bec50^:pod/health-bridge/probes_test.go. Asserts probeSTT POSTs
+// multipart/form-data to /v1/audio/transcriptions and parses 200 +
+// {"text":"silence"} as StatusHealthy.
+func TestProbeSTT_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("expected multipart, got %s", r.Header.Get("Content-Type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"text": "silence"})
+	}))
+	defer srv.Close()
+
+	r := probeSTT(context.Background(), newHTTPClient(), srv.URL, discardLogger())
+	if r.Status != StatusHealthy {
+		t.Errorf("got %q want healthy; err=%q", r.Status, r.Error)
+	}
+}
+
 func TestProbeLLM_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -100,22 +120,6 @@ func TestProbeEmbed_Malformed(t *testing.T) {
 	}
 	if !strings.Contains(r.Error, "no embeddings returned") {
 		t.Errorf("err=%q, expected contains 'no embeddings returned'", r.Error)
-	}
-}
-
-func TestProbeSTT_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-			t.Errorf("expected multipart, got %s", r.Header.Get("Content-Type"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"text": "silence"})
-	}))
-	defer srv.Close()
-
-	r := probeSTT(context.Background(), newHTTPClient(), srv.URL, discardLogger())
-	if r.Status != StatusHealthy {
-		t.Errorf("got %q want healthy; err=%q", r.Status, r.Error)
 	}
 }
 

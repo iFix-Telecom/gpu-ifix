@@ -1,0 +1,122 @@
+# ============================================================
+# Phase 10 — ifix-ai-gateway prod stack (operator-managed direct compose)
+# ============================================================
+#
+# Target host:    n8n-ia-vm (VM 101, 10.10.10.20) — Hetzner dedicated
+#                 ifix-prod-01 (162.55.92.154), Proxmox VE 8.4.
+# Target path:    /opt/ai-gateway-prod/docker-compose.yml
+#                 (rsync this file as that filename — D-11)
+# Deploy method:  ssh n8n-ia-vm "cd /opt/ai-gateway-prod && \
+#                 docker compose pull && docker compose up -d"
+# Rollback:       sed -i 's/:v1.0.0/:v0.X.Y/' \
+#                 /opt/ai-gateway-prod/docker-compose.yml && \
+#                 docker compose up -d --force-recreate
+#
+# This file is the OPERATOR-MANAGED prod stack (D-11). It is a sibling
+# of gateway/docker-compose.yml (the Portainer Swarm template) — that
+# file stays canonical for the Portainer-managed dev stack and future
+# Swarm-managed deployments. DO NOT edit gateway/docker-compose.yml
+# in this plan.
+#
+# RESEARCH PITFALLS closed by file shape:
+#
+# Pitfall 1 — Network name `worker_intra` vs `intra`.
+#   The Portainer Swarm template references `worker_intra` external.
+#   That network does NOT exist on n8n-ia-vm. The actual existing
+#   Swarm overlay there is named `intra` (attachable=true, driver=overlay).
+#   This file uses `intra` — see networks block at file bottom.
+#
+# Pitfall 3 — `deploy:` block is Swarm-only and silently ignored by
+#   `docker compose up -d`. The Portainer template uses `deploy:` for
+#   restart_policy / resources / labels — all three of which must move
+#   to top-level under plain compose v2 semantics. This file uses
+#   top-level `restart: unless-stopped` and top-level `labels:`.
+#
+# Pitfall 4 — Internal Traefik on n8n-ia-vm listens on :80 only;
+#   TLS terminates at edge Traefik on vps-ifix-vm (NOT on the Proxmox
+#   host, despite what the original CONTEXT.md D-02 implied). The
+#   `tls.certresolver=letsencryptresolver` label from the Swarm
+#   template is therefore meaningless here AND the literal differs
+#   (edge uses `letsencrypt` not `letsencryptresolver`). This file
+#   OMITS the `tls.certresolver` label entirely and uses
+#   `entrypoints=web` (:80) instead of `=websecure`.
+#
+# DEVIATION 2026-05-26 — Traefik internal v2.11 swarmMode bypass:
+#   The traefik-internal_traefik Swarm service on n8n-ia-vm runs Traefik
+#   v2.11 with --providers.docker.swarmMode=true; in v2 this flag makes
+#   the docker provider ignore standalone (non-Swarm) containers, so the
+#   gateway + dashboard compose containers are NEVER discovered via
+#   Traefik labels (preflight probe 4 FAIL'd 2026-05-26). Two fixes
+#   exist: (a) convert to Swarm services (breaks D-11 direct compose),
+#   (b) bypass Traefik internal by publishing host ports and pointing
+#   edge Traefik (vps-ifix-vm) directly at 10.10.10.20:8080 + :3001.
+#   Operator picked (b) — host-port bypass, minimal infra change.
+#
+#   Implication:
+#     - gateway publishes 8080:8080, dashboard 3001:3001 (bind 10.10.10.20)
+#     - Traefik labels removed (no longer used by traefik-internal)
+#     - artifacts/ai-gateway-prod.yml URLs updated to host:port direct
+#     - n8n-ia-vm UFW: ports 8080+3001 reachable from 10.10.10.0/24
+#       only (NAT private; not exposed to public 162.55.92.154 since
+#       ingress is via edge Traefik on vps-ifix-vm:443 → DNAT to .30
+#       → edge file-provider routes to 10.10.10.20:8080/:3001).
+#
+# Anti-patterns to avoid:
+#   - No `deploy:` block (see Pitfall 3 above).
+#   - No `worker_intra` (see Pitfall 1 above).
+
+services:
+  ifix-ai-gateway:
+    image: ghcr.io/ifixtelecom/ifix-ai-gateway:${TAG:-v1.0.0}
+    container_name: ifix-ai-gateway
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - intra
+    ports:
+      - "10.10.10.20:8080:8080"
+    healthcheck:
+      test: ["CMD", "/gateway", "--self-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  ifix-ai-dashboard:
+    image: ghcr.io/ifixtelecom/ifix-ai-dashboard:${DASHBOARD_TAG:-v1.0.0}
+    container_name: ifix-ai-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: America/Sao_Paulo
+      NODE_ENV: production
+      PORT: 3001
+    depends_on:
+      - ifix-ai-gateway
+    networks:
+      - intra
+    ports:
+      - "10.10.10.20:3001:3001"
+
+  redis-gateway-prod:
+    image: redis:7-alpine
+    container_name: redis-gateway-prod
+    restart: unless-stopped
+    command: >-
+      redis-server
+      --requirepass ${AI_GATEWAY_REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    networks:
+      - intra
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${AI_GATEWAY_REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+networks:
+  intra:
+    external: true

@@ -25,7 +25,7 @@ func TestIntegration_UpstreamsListener_NotifyTriggersRefresh(t *testing.T) {
 
 	clearUpstreamEnvs(t)
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
+	// Phase 11.1: UPSTREAM_STT_URL setenv removed (local-stt row deleted by 0028).
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 	t.Setenv("UPSTREAM_LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1")
 	t.Setenv("UPSTREAM_LLM_OPENROUTER_AUTH_BEARER", "or-test")
@@ -105,7 +105,7 @@ func TestIntegration_UpstreamsListener_ProbeWritebackDoesNotTrigger(t *testing.T
 
 	clearUpstreamEnvs(t)
 	t.Setenv("UPSTREAM_LLM_URL", "http://local-llm:8000")
-	t.Setenv("UPSTREAM_STT_URL", "http://local-stt:8001")
+	// Phase 11.1: UPSTREAM_STT_URL setenv removed (local-stt row deleted by 0028).
 	t.Setenv("UPSTREAM_EMBED_URL", "http://local-embed:8002")
 
 	loader, err := upstreams.NewLoader(ctx, pool, discardLogger())

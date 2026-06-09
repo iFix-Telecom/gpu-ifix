@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-last_updated: "2026-05-25T23:03:03.517Z"
+last_updated: "2026-06-09T10:40:01.707Z"
 progress:
-  total_phases: 2
-  completed_phases: 2
-  total_plans: 12
-  completed_plans: 12
-  percent: 100
+  total_phases: 7
+  completed_phases: 5
+  total_plans: 43
+  completed_plans: 40
+  percent: 71
 ---
 
 # STATE: ifix-ai-gateway
@@ -27,9 +27,11 @@ progress:
 
 ## Current Position
 
-Phase: 06.9
-Plan: Not started
-Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questions in ROADMAP: embed CPU host, TTS server shim vs community wrapper, voice-cloning workflow, tts tier-0 role). Engine decided: Kani-TTS-2-pt (Apache 2.0, PT-BR, 3 GB VRAM, zero-shot voice clone).
+Phase: 06.6.X — COMPLETE (verdict=passed, 2026-06-09)
+Plan: 9 of 9
+Next autonomous-eligible work: Phase 6.6.Y — implement cold-start + env-precedence fixes from 06.6.X-RESEARCH-COLD-START.md (Option A+B bundle recommended) + 06.6.X-RESEARCH-ENV-PRECEDENCE.md (hard fail-fast canonical PRIMARY_VAST_*_{PRIMARY,FALLBACK}). Phase 6.6.X total spend $0.040 / $1.20 cap.
+
+Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
   - Phase 1: smoke.yml Vast.ai HUMAN-UAT pending
@@ -127,7 +129,7 @@ Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questi
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Milestone complete
+- **Status:** Phase 11.2 complete
 
 ## Performance Metrics
 
@@ -179,14 +181,20 @@ Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questi
 |---|-------------|------|--------|-----------|
 | 260515-ayc | Fix STATE.md corruption (heading `## Current Position` duplicado injetado no meio do Phase 6.5 bullet) | 2026-05-15 | f44cf11 | [260515-ayc-fix-state-md-corruption-linha-40-42-tem-](./quick/260515-ayc-fix-state-md-corruption-linha-40-42-tem-/) |
 | 260516-rym | Fix handleForceProvision não trata FSM em cooldown — pod Vast.ai órfão queimava $$ quando operator force-provision após falha. Precheck FSM.State() + SetState(EmergencyProvisioning) em vez de 2x Transition. +2 regression tests. | 2026-05-16 | 5aec0eb | [260516-rym-fix-force-provision-cooldown-transition](./quick/260516-rym-fix-force-provision-cooldown-transition/) |
+| 260527-wgs | Fix primary reconciler silent-exit on transient ErrInstanceNotFound. waitForReadyOrDestroy now uses 3-strike confirm pattern + BestEffortDestroy on confirmed terminal (orphan Vast pod prevention). +2 regression subtests. Closes carry-forward critical bug from .planning/debug/primary-reconciler-silent-hang.md; unblocks Phase 11 11-06/07 live UATs. | 2026-05-27 | 01e7558 | [260527-wgs-fix-primary-reconciler-silent-terminal](./quick/260527-wgs-fix-primary-reconciler-silent-terminal/) |
+| 260528-h12 | SEED-005: breaker.Set.EffectiveStateSnapshot() emits "forced-open" when Redis force-override is active; /v1/health/upstreams switched off raw Snapshot() so health surface matches dispatcher routing (EffectiveState). 4 RED/GREEN commits, 5 new sub-tests. Unblocks smoke-sensitive-failover.py ensure_tier0_open pre-condition on force-open-driven test beds. | 2026-05-28 | 7d0b345 | [260528-h12-breaker-snapshot-honor-force-override](./quick/260528-h12-breaker-snapshot-honor-force-override/) |
+| 260528-h8z | SEED-006: scripts/integration-smoke/smoke-sensitive-failover.py query_audit refactored into bounded-deadline poll wrapper (5s/250ms) around new _query_audit_once helper. Stops racing audit-writer 1s flush timer; honest gates against correct gateway. Single-file blast, +74/-22 LOC, schema unchanged, call site source-compatible via defaults. T-09-07/T-09-09 contracts preserved verbatim. | 2026-05-28 | 2d30a60 | [260528-h8z-smoke-audit-query-retry-loop](./quick/260528-h8z-smoke-audit-query-retry-loop/) |
 | Phase 06.7 P02 | 10m | 2 tasks | 7 files |
 | Phase 06.7 P03 | 25m | 2 tasks | 9 files |
 | Phase 06.7 P04 | ~20m | 2 tasks | 8 files |
 | Phase 06.7 P05 | 4 | 2 tasks | 4 files |
+| Phase 11.2 P06 | 35min | 3 tasks | 8 files |
+| Phase 11.2 P07 | 8m | 2 tasks | 3 files |
+| Phase 11.2 P08 | 2h 20min | 3 tasks | 10 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-05-20T21:20:02Z
+- **Last session:** 2026-06-09T10:40:01.699Z
 - **Next session should:** Run the Phase 06.7 live HUMAN-UAT. Plan 06.7-09 Task 1 is DONE (commit `41039b4`: `docs/RUNBOOK-PRIMARY-POD-TTS.md` + `06.7-HUMAN-UAT.md` 6-scenario sheet + CLEANUP). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run S1–S6 + cleanup on a live Vast 5090 (real GPU spend; autonomous mode cannot satisfy it), sign each PASS/FAIL, record spend. After all 6 + cleanup are signed: write `06.7-09-SUMMARY.md` + `06.7-VERIFICATION.md`, then `state advance-plan`. Any FAIL → `/gsd:plan-phase 06.7 --gaps`. Phase 06.7 Plan stays at 9 (06.7-09) — NOT advanced (plan incomplete until UAT signed).
 
 ---
@@ -200,3 +208,5 @@ Next autonomous-eligible work: Phase 06.7 — discuss-phase first (4 open questi
 - [Phase 06.7]: Every Wave 0 test stub carries an OWNER annotation + skip reason naming the downstream plan (03/05/07/08) that must unskip + implement it (Codex consensus action #3 — a skipped stub satisfies compile-time scaffolding but does not fail if implementation never happens)
 - [Phase 06.7]: 06.7-03: tier-0 dynamic-override roster {llm,stt,embed}->{llm,stt,tts} — tts dynamic (D-11), embed static (D-03); added Loader.Tier0OverrideURL getter for Plan 08 re-assert (D-13)
 - [Phase ?]: [Phase 06.7]: 06.7-04 voices.tenant_id = UUID FK->tenants(id) ON DELETE CASCADE, matching the verified ai_gateway schema convention (api_keys/usage_counters/billing_events) over the PATTERNS TEXT placeholder; no .pt column (Chatterbox zero-shot D-08)
+- [Phase ?]: Phase 11.2 Plan 07 — created docs/RUNBOOK-OPS.md as canonical STT cascade operator playbook
+- [Phase ?]: Phase 11.2 Plan 07 — gateway/.env.example created mirroring pod/.env.example parity

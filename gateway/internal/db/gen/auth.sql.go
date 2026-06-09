@@ -141,6 +141,66 @@ func (q *Queries) ListActiveKeysAll(ctx context.Context) ([]ListActiveKeysAllRow
 	return items, nil
 }
 
+const listActiveKeysAllWithMeta = `-- name: ListActiveKeysAllWithMeta :many
+SELECT k.id, k.tenant_id, t.slug AS tenant_slug,
+       k.key_prefix, k.status, k.data_class,
+       k.created_at, k.last_used_at
+FROM ai_gateway.api_keys k
+JOIN ai_gateway.tenants t ON t.id = k.tenant_id
+WHERE k.status = 'active'
+ORDER BY t.slug ASC, k.last_used_at DESC NULLS LAST
+`
+
+type ListActiveKeysAllWithMetaRow struct {
+	ID         uuid.UUID          `json:"id"`
+	TenantID   uuid.UUID          `json:"tenant_id"`
+	TenantSlug string             `json:"tenant_slug"`
+	KeyPrefix  string             `json:"key_prefix"`
+	Status     interface{}        `json:"status"`
+	DataClass  interface{}        `json:"data_class"`
+	CreatedAt  time.Time          `json:"created_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+}
+
+// Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+// `gatewayctl key list` (no tenant filter). NOT used on the request hot
+// path; the hot path remains GetActiveKeyByLookupHash. Projects only
+// operator-safe metadata columns: never key_hash and never
+// key_lookup_hash, so a captured stdout cannot leak secret material
+// (threat T-11-OPS-02). The JOIN against ai_gateway.tenants exposes the
+// human-readable slug so operators can read the table without UUID
+// lookups during incident triage. Ordered by (slug, last_used_at DESC)
+// so the most recently active keys per tenant surface at the top of
+// each tenant group.
+func (q *Queries) ListActiveKeysAllWithMeta(ctx context.Context) ([]ListActiveKeysAllWithMetaRow, error) {
+	rows, err := q.db.Query(ctx, listActiveKeysAllWithMeta)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveKeysAllWithMetaRow
+	for rows.Next() {
+		var i ListActiveKeysAllWithMetaRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.TenantSlug,
+			&i.KeyPrefix,
+			&i.Status,
+			&i.DataClass,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listActiveKeysByTenant = `-- name: ListActiveKeysByTenant :many
 SELECT id, tenant_id, key_hash, key_lookup_hash, key_prefix, status, data_class, created_at, revoked_at, last_used_at
 FROM ai_gateway.api_keys
@@ -183,6 +243,61 @@ func (q *Queries) ListActiveKeysByTenant(ctx context.Context, tenantID uuid.UUID
 			&i.DataClass,
 			&i.CreatedAt,
 			&i.RevokedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveKeysByTenantWithMeta = `-- name: ListActiveKeysByTenantWithMeta :many
+SELECT k.id, k.tenant_id, t.slug AS tenant_slug,
+       k.key_prefix, k.status, k.data_class,
+       k.created_at, k.last_used_at
+FROM ai_gateway.api_keys k
+JOIN ai_gateway.tenants t ON t.id = k.tenant_id
+WHERE k.status = 'active' AND k.tenant_id = $1
+ORDER BY k.last_used_at DESC NULLS LAST
+`
+
+type ListActiveKeysByTenantWithMetaRow struct {
+	ID         uuid.UUID          `json:"id"`
+	TenantID   uuid.UUID          `json:"tenant_id"`
+	TenantSlug string             `json:"tenant_slug"`
+	KeyPrefix  string             `json:"key_prefix"`
+	Status     interface{}        `json:"status"`
+	DataClass  interface{}        `json:"data_class"`
+	CreatedAt  time.Time          `json:"created_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+}
+
+// Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+// `gatewayctl key list --tenant <uuid>`. Tenant-filtered companion of
+// ListActiveKeysAllWithMeta with the same operator-safe projection
+// (never key_hash, never key_lookup_hash). NOT used on the request hot
+// path.
+func (q *Queries) ListActiveKeysByTenantWithMeta(ctx context.Context, tenantID uuid.UUID) ([]ListActiveKeysByTenantWithMetaRow, error) {
+	rows, err := q.db.Query(ctx, listActiveKeysByTenantWithMeta, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveKeysByTenantWithMetaRow
+	for rows.Next() {
+		var i ListActiveKeysByTenantWithMetaRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.TenantSlug,
+			&i.KeyPrefix,
+			&i.Status,
+			&i.DataClass,
+			&i.CreatedAt,
 			&i.LastUsedAt,
 		); err != nil {
 			return nil, err

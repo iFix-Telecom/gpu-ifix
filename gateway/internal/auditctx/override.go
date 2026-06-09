@@ -10,7 +10,10 @@
 // without circular import.
 package auditctx
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 type upstreamOverrideKey struct{}
 
@@ -117,3 +120,57 @@ const (
 	// the audit row (D-D1).
 	UpstreamShedTier1UnavailableValue = "shed_tier1_unavailable"
 )
+
+// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): a request-id-keyed
+// registry of the factual dispatched-to upstream. The audit middleware
+// reads from this registry AFTER next.ServeHTTP returns so the
+// audit_log.upstream column carries the cascade fall-through target
+// name (local-stt, gemini-stt, groq-whisper, openai-whisper) instead of
+// the route-derived "stt"/"llm"/"embed".
+//
+// Why a registry instead of ctx propagation: http.TimeoutHandler clones
+// the request before passing it to the inner handler, breaking the
+// `*r = *r.WithContext(...)` mutation pattern used by shed/schedule
+// middlewares. The audit middleware sits OUTSIDE the TimeoutHandler
+// wrap, so it captured the pre-clone *http.Request — any in-handler
+// mutation is invisible. Registry is keyed by request_id (UUIDv7,
+// emitted by httpx.RequestID before any wrap), so producer (dispatcher)
+// and consumer (audit middleware) share the same logical key without
+// needing the same *Request pointer.
+//
+// Lifetime: producer (dispatcher.dispatchTo) sets the value before
+// invoking the proxy; consumer (audit.Middleware) reads + deletes
+// AFTER next.ServeHTTP returns. The DELETE on read prevents unbounded
+// growth even if a request panics — combined with the request_id-keyed
+// design (one entry per in-flight request), worst case is the current
+// request count. No timer-based GC needed.
+var dispatchedUpstreamRegistry sync.Map // map[string]string — request_id → upstream
+
+// SetDispatchedUpstream stamps the factual upstream name into the
+// registry. Called by proxy.dispatcher.dispatchTo just before invoking
+// the upstream's proxy handler. No-op if request_id is empty (no
+// request_id middleware ran, e.g. unit tests with bare http.NewRequest).
+func SetDispatchedUpstream(requestID, upstream string) {
+	if requestID == "" || upstream == "" {
+		return
+	}
+	dispatchedUpstreamRegistry.Store(requestID, upstream)
+}
+
+// TakeDispatchedUpstream returns the stamped upstream name (or empty
+// string when none) AND removes the entry. The take-semantic ensures
+// the registry never grows unboundedly. Called by audit.Middleware once
+// per request after next.ServeHTTP returns.
+func TakeDispatchedUpstream(requestID string) string {
+	if requestID == "" {
+		return ""
+	}
+	v, ok := dispatchedUpstreamRegistry.LoadAndDelete(requestID)
+	if !ok {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}

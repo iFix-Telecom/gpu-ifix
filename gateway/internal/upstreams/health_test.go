@@ -1,6 +1,7 @@
 package upstreams_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -170,6 +171,60 @@ func TestHealthHandler_NoClosedForRole_Failed(t *testing.T) {
 	}
 	if body["status"] != "failed" {
 		t.Fatalf("status = %v, want failed", body["status"])
+	}
+}
+
+// TestHealthHandler_ForceOverrideEmitsForcedOpen — Phase 06.9 (SEED-005):
+// when an operator installs a force-override at gw:breaker:force:{name},
+// /v1/health/upstreams MUST report state="forced-open" for that upstream
+// and overall status="degraded" (because the same role's tier-1 is still
+// closed, so allTier0Closed=false but allRolesHaveAnyClosed=true).
+func TestHealthHandler_ForceOverrideEmitsForcedOpen(t *testing.T) {
+	loader := upstreams.NewLoaderForTest(sixUpstreams()...)
+	rdb := newMinRedis(t)
+	bs := breaker.NewSet(rdb, discardLogger(), breaker.DefaultOptions(), loaderNames(loader))
+
+	ctx := context.Background()
+	val := breaker.ForceOverrideValue{State: "open", TTLSec: 300, SetBy: "test", SetAt: time.Now().UTC()}
+	buf, _ := json.Marshal(val)
+	if err := rdb.Set(ctx, breaker.ForceOverrideKey("local-llm"), string(buf), 300*time.Second).Err(); err != nil {
+		t.Fatalf("SET: %v", err)
+	}
+	bs.RefreshForceOverride(ctx, "local-llm")
+
+	h := upstreams.NewHealthHandler(loader, bs, discardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/health/upstreams", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degraded keeps 200)", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["status"] != "degraded" {
+		t.Fatalf("top-level status = %v, want degraded", body["status"])
+	}
+	ups, ok := body["upstreams"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstreams field missing or wrong type: %v", body["upstreams"])
+	}
+	llm, ok := ups["local-llm"].(map[string]any)
+	if !ok {
+		t.Fatalf("local-llm entry missing")
+	}
+	if llm["state"] != "forced-open" {
+		t.Fatalf("local-llm.state = %v, want forced-open", llm["state"])
+	}
+	// Sibling tier-1 must still report closed — force-override is per-name.
+	or, ok := ups["openrouter-chat"].(map[string]any)
+	if !ok {
+		t.Fatalf("openrouter-chat entry missing")
+	}
+	if or["state"] != "closed" {
+		t.Fatalf("openrouter-chat.state = %v, want closed (force-override is per-name)", or["state"])
 	}
 }
 

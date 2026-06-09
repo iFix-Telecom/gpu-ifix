@@ -67,6 +67,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
@@ -399,9 +400,10 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// a cutback leaves llm/stt/tts routing to the stale static row until the
 	// next pod cycle. Re-assert any cleared dynamic slot here at 1Hz — the
 	// inconsistency window is <=1s. embed is EXCLUDED (D-03 — static off-pod
-	// row, immune to this vector). This runs regardless of DISABLED because
-	// an operator force-up pod is Ready under DISABLED and is just as
-	// vulnerable to an emerg cutback clearing its slot.
+	// row, immune to this vector). Phase 11.2 (D-B5′) restored "stt" here
+	// after Phase 11.1 D-A4 had dropped it. This runs regardless of DISABLED
+	// because an operator force-up pod is Ready under DISABLED and is just
+	// as vulnerable to an emerg cutback clearing its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
 		for _, role := range []string{"llm", "stt", "tts"} {
 			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
@@ -445,7 +447,6 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 	inflight := int64(0)
 	if r.deps.Inflight != nil {
 		inflight = r.deps.Inflight.Count("local-llm") +
-			r.deps.Inflight.Count("local-stt") +
 			r.deps.Inflight.Count("local-embed")
 	}
 
@@ -517,9 +518,10 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 		}
 	}
 
-	// RestoreTier0 for all 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
+	// RestoreTier0 for the 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
 	// BEFORE the FSM transition. New requests land on the fallback chain
-	// immediately; in-flight ones drain over the grace window.
+	// immediately; in-flight ones drain over the grace window. Phase 11.2
+	// (D-B5′) restored "stt" after Phase 11.1 D-A4 had dropped it.
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
@@ -538,13 +540,9 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 }
 
 // markReady is the success exit of the provisioning poll loop. Marks the
-// DB row healthy, stores activePodURLs, overrides tier-0 for 3 roles,
-// points DCGM scraper at :9400/metrics, publishes primary_ready, and
-// transitions Provisioning→Ready.
-//
-// Plan 06.6-06b's 3-role OverrideTier0 extension is consumed here — when
-// the Plan 06.6-06b PR lands, this method continues to call OverrideTier0
-// for "llm" / "stt" / "embed" unchanged.
+// DB row healthy, stores activePodURLs, overrides tier-0 for 3 roles
+// (llm+stt+tts post-Phase 11.2 D-B5′), points DCGM scraper at :9400/metrics,
+// publishes primary_ready, and transitions Provisioning→Ready.
 func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls primaryPodURLs, acceptedDPH float64, log *slog.Logger) error {
 	if q := r.queries(); q != nil {
 		eventJSON := vastutil.MustEventJSON("health_pass", map[string]any{
@@ -564,11 +562,13 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	}
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
-		// Phase 06.7 (D-03/D-11): the dynamic primary roster is llm/stt/tts
-		// — NOT embed (embed relocated to a 24/7 CPU host as a static tier-0
-		// row). We strip the readiness suffix here so the dispatcher's
-		// ReverseProxy target is the BASE URL (parity emerg markHealthy /
-		// stripHealthSuffix).
+		// Phase 11.2 (D-B5′): the dynamic primary roster is llm/stt/tts —
+		// NOT embed (D-03, embed relocated to a 24/7 CPU host as a static
+		// tier-0 row). Phase 11.1 D-A4 had dropped "stt" but Phase 11.2
+		// restored it (Speaches/Whisper is back on the pod via
+		// supervisord [program:speaches] on port 8001). We strip the
+		// readiness suffix here so the dispatcher's ReverseProxy target is
+		// the BASE URL (parity emerg markHealthy / stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
 		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
@@ -635,6 +635,7 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 		(*cancelPtr)()
 	}
 	if r.deps.Loader != nil {
+		// Phase 11.2 (D-B5′): defensive 3-role RestoreTier0 (idempotent).
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
 		r.deps.Loader.RestoreTier0("tts")
@@ -758,6 +759,18 @@ func (r *Reconciler) spawnProvisioning(parentCtx context.Context, reason string,
 }
 
 // provisionLifecycle runs SearchOffers → CreateInstance → waitForReady.
+// gpuShapeLabel renders a human-readable "<num>x<name>" label for the
+// shape index used by DefaultSearchFilters / the primary+fallback pair.
+// Phase 11.1 WR-04: surfaced on offer-pick log events so operators can
+// confirm whether the cheap primary or the wider fallback path served
+// the lifecycle without parsing the numeric shape index.
+func gpuShapeLabel(cfg config.Config, shape int) string {
+	if shape == 0 {
+		return fmt.Sprintf("%dx%s", cfg.PrimaryVastNumGPUsPrimary, cfg.PrimaryVastGPUNamePrimary)
+	}
+	return fmt.Sprintf("%dx%s", cfg.PrimaryVastNumGPUsFallback, cfg.PrimaryVastGPUNameFallback)
+}
+
 // Mirrors emerg.provisionLifecycle without the 3-attempt bid race retry
 // (primary pods schedule at known peak hours; a transient bid race can be
 // retried on the next tick after cooldown).
@@ -766,56 +779,95 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_vast_client", 0)
 		return errors.New("primary: no Vast.ai client wired")
 	}
-	filter := vast.DefaultSearchFilter(r.cfg.PrimaryVastPriceCapDPH, r.cfg.PrimaryHostID, r.cfg.PrimaryGPUName, r.cfg.PrimaryNumGPUs, r.cfg.PrimaryVastMachineBlocklist...)
-	// No geolocation restriction (operator decision 2026-05-21): the EU-only
-	// allowlist (added UAT 2026-05-18 to keep MinIO/Hetzner-DE weight transfer
-	// in-continent) left the cheapest qualifying 5090s (e.g. CA/CZ/US at ~$0.32/h
-	// vs ~$2/h EU) unreachable. The inet_down>=500 Mbps gate in DefaultSearchFilter
-	// still guards transfer bandwidth; cross-continent weight fetch fits inside the
-	// 2400s coldstart budget.
-	//
-	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass. When
-	// set, search the preferred known-good hosts first; broaden to the full
-	// qualified search only when they are unavailable. Vast is a spot marketplace
-	// (no reservation), so a hard allowlist would block provisioning whenever the
-	// host is busy — the broaden-fallback keeps cheap-marketplace economics while
-	// still preferring trusted hosts.
+	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
+	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
+	// $0.30), fallback shape only when the primary cap returns zero
+	// qualified offers (2×3090 @ $0.60; same GPU model, deeper EU pool).
+	filters := vast.DefaultSearchFilters(
+		r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback,
+		r.cfg.PrimaryHostID,
+		r.cfg.PrimaryVastGPUNamePrimary, r.cfg.PrimaryVastGPUNameFallback,
+		r.cfg.PrimaryVastNumGPUsPrimary, r.cfg.PrimaryVastNumGPUsFallback,
+		r.cfg.PrimaryVastMachineBlocklist...,
+	)
+	// shapeCaps mirrors the filter pair so vastutil.FilterBelowCap can
+	// re-apply the per-shape ceiling client-side (epsilon-tolerant; UAT 17
+	// 2026-05-19 Vast inventory race regression).
+	shapeCaps := []float64{r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback}
+
+	// No geolocation restriction (operator decision 2026-05-21).
+	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass
+	// applied to BOTH shapes (Phase 11.1 WR-05) — the catalog currently
+	// holds known-good 1×3090 hosts (primary shape) AND 2×3090 hosts
+	// (fallback shape), so restricting the allowlist pass to filters[0]
+	// would silently skip allowlisted fallback hosts. For each shape we
+	// try allowlist-first, then broaden to the full qualified search, and
+	// only iterate the next shape when both passes return no qualified
+	// offers below the per-shape cap.
 	var pickable []vast.Offer
-	if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
-		allowFilter := vast.WithMachineAllowlist(filter, r.cfg.PrimaryVastMachineAllowlist)
-		offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
+	var pickedShape int
+
+	for i, f := range filters {
+		// Allowlist preference pass for this shape.
+		if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
+			allowFilter := vast.WithMachineAllowlist(f, r.cfg.PrimaryVastMachineAllowlist)
+			offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
+			if err != nil {
+				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
+				return err
+			}
+			candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
+			if len(candidates) > 0 {
+				pickable = candidates
+				pickedShape = i
+				log.Info("primary offers found for shape (allowlist pass)",
+					"shape", i, "offer_count", len(candidates),
+					"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+				break
+			}
+			log.Info("primary allowlist exhausted for shape; broadening to full qualified search",
+				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", i,
+				"gpu_shape", gpuShapeLabel(r.cfg, i))
+		}
+
+		// Broaden to the full qualified search for this shape.
+		offers, err := r.deps.Vast.SearchOffers(ctx, f)
 		if err != nil {
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 			return err
 		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
-		if len(pickable) == 0 {
-			log.Info("primary allowlist exhausted; broadening to full qualified search",
-				"allowlist", r.cfg.PrimaryVastMachineAllowlist)
+		candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
+		if len(candidates) > 0 {
+			pickable = candidates
+			pickedShape = i
+			log.Info("primary offers found for shape",
+				"shape", i, "offer_count", len(candidates),
+				"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+			break
 		}
+		log.Info("primary shape returned no qualified offers; trying next",
+			"shape", i, "cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
 	}
-	if len(pickable) == 0 {
-		offers, err := r.deps.Vast.SearchOffers(ctx, filter)
-		if err != nil {
-			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
-			return err
-		}
-		pickable = vastutil.FilterBelowCap(offers, r.cfg.PrimaryVastPriceCapDPH)
-	}
+
 	if len(pickable) == 0 {
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_offers_below_cap", 0)
-		return errors.New("primary: no offers below cap")
+		return errors.New("primary: no offers below cap (both shapes exhausted)")
 	}
 	offer := pickable[0]
 	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
 	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the
 	// later terminal/CDI error (logged with instance_id) back to the host.
+	// Phase 11.1 WR-04: propagate pickedShape (+ gpu_shape label) on the
+	// offer-picked event so operators can confirm whether the cheap primary
+	// or the wider fallback path served the lifecycle.
 	log.Info("primary offer picked",
 		"offer_id", offer.ID,
 		"machine_id", offer.MachineID,
 		"host_id", offer.HostID,
 		"dph", offer.DphTotal,
-		"geo", offer.Geolocation)
+		"geo", offer.Geolocation,
+		"shape", pickedShape,
+		"gpu_shape", gpuShapeLabel(r.cfg, pickedShape))
 	req, err := r.buildCreateRequest(offer, lifecycleID)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "build_create_request_failed:"+err.Error(), 0)
@@ -835,6 +887,9 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			"machine_id":  offer.MachineID,
 			"host_id":     offer.HostID,
 			"dph":         offer.DphTotal,
+			// Phase 11.1 WR-04: per-shape attribution in audit trail
+			"shape":     pickedShape,
+			"gpu_shape": gpuShapeLabel(r.cfg, pickedShape),
 		})
 		if err := q.UpdatePrimaryLifecycleVastIDs(ctx, gen.UpdatePrimaryLifecycleVastIDsParams{
 			ID:             lifecycleID,
@@ -879,6 +934,20 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	terminalStrikes := 0
 	const terminalConfirmStrikes = 3
 
+	// Counter for consecutive ErrInstanceNotFound observations. Same
+	// transient-flap rationale as terminalStrikes but for a different
+	// upstream signal: Vast can return `{"instances": null}` for an
+	// instance that is STILL alive on the host (state-transition glitch /
+	// eventual consistency). UAT 2026-05-27 lifecycle 2 captured this —
+	// 4m24s of successful polls then a single null response silently
+	// closed the DB row + left a $0.04 Vast orphan because the close
+	// path also missed BestEffortDestroy. Apply the same 3-strike
+	// confirmation that already gates IsTerminal(); reset on ANY
+	// non-ErrInstanceNotFound result (success OR different error class)
+	// so unrelated flaps do not accumulate strikes. See
+	// .planning/debug/primary-reconciler-silent-hang.md.
+	notFoundStrikes := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -893,11 +962,30 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
 				if errors.Is(err, vast.ErrInstanceNotFound) {
-					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					return errors.New("primary: instance terminal")
+					notFoundStrikes++
+					log.Warn("primary provisioning: Vast GET returned no_such_instance",
+						"lifecycle_id", lifecycleID,
+						"vast_instance_id", instanceID,
+						"strike_count", notFoundStrikes,
+						"confirm_at", terminalConfirmStrikes,
+						"error_class", "ErrInstanceNotFound")
+					if notFoundStrikes >= terminalConfirmStrikes {
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
+						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+					}
+					continue
 				}
+				// Transient non-not-found GET error — reset the not-found
+				// strike counter so an unrelated flap mode does not
+				// accumulate strikes across error classes.
+				notFoundStrikes = 0
 				continue
 			}
+			// Healthy GET response — reset the not-found strike counter so a
+			// single transient null between healthy polls does not trip the
+			// 3-strike close. Mirrors the terminalStrikes reset below.
+			notFoundStrikes = 0
 			// Reviews #11 — Vast `status_msg` early-abort.
 			if msg := strings.TrimSpace(inst.StatusMsg); msg != "" {
 				if strings.Contains(strings.ToLower(msg), "error") {
@@ -938,8 +1026,9 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			// 4-endpoint health check inside ONE container's namespace
-			// (Wave 0 supervisord 4-services: llm/stt/tts/dcgm — embed left
-			// the pod per D-03). All 4 must pass.
+			// (Phase 11.2 supervisord 4-services: llm/stt/tts/dcgm — embed
+			// left the pod per D-03). All 4 must pass. Phase 11.2 (D-B5′)
+			// restored "stt" after Phase 11.1 D-A4 had dropped it.
 			if r.deps.HealthCheck == nil {
 				continue
 			}
@@ -971,7 +1060,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 	return primaryPodURLs{
 		LLM:  r.podLLMURL(inst),
-		STT:  r.podSTTURL(inst),
+		STT:  r.podSTTURL(inst), // Phase 11.2 D-B5′: restored
 		TTS:  r.podTTSURL(inst),
 		DCGM: r.podDCGMURL(inst),
 	}
@@ -1048,7 +1137,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		!r.deps.HealthCheck(ctx, urls.STT) ||
 		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
-		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
+		r.deps.Log.Warn("primary recover: 3-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
@@ -1064,6 +1153,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	r.activeInstanceID.Store(open.VastInstanceID.Int64)
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
+		// Phase 11.2 (D-B5′): 3-role restart-recovery override.
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
 		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))

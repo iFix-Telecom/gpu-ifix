@@ -1,8 +1,9 @@
 # Phase 6.6 Strategy α — build converseai-primary-pod image.
+# Phase 11.1 (2026-06-04) shrunk: tier-0 STT + rollback embed venvs removed.
 #
 # Builds the multi-stage image (pod/primary/Dockerfile) bundling
-# supervisord + 4 upstream service binaries (llama.cpp b9191, speaches,
-# infinity, dcgm-exporter) and pushes to
+# supervisord + 3 upstream service binaries (llama.cpp b9191,
+# chatterbox-tts, dcgm-exporter) and pushes to
 # ghcr.io/ifixtelecom/converseai-primary-pod.
 #
 # Image bump policy: any bump to one of the 4 upstream SHA-pinned FROM

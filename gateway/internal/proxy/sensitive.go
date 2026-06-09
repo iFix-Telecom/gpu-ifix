@@ -51,11 +51,19 @@ func SensitiveRetry(ctx context.Context, bs *breaker.Set, upstreamName string) (
 			return false, ctx.Err()
 		case <-time.After(d):
 		}
-		cb, ok := bs.Get(upstreamName)
-		if !ok {
+		// Use EffectiveState so a Redis-backed operator force-open keeps
+		// the loop in retry-and-fail-closed mode even when the natural
+		// gobreaker FSM has not observed enough failures to trip. Without
+		// this, sensitive requests escape to dispatcher.dispatchTo while
+		// the operator believes tier-0 is being held OPEN — surfaced
+		// during the SEED-005 sanity rerun (request_id 019e7008-3cc0
+		// emitted 502 upstream_unreachable instead of 503
+		// upstream_unavailable_for_sensitive_tenant). Same symmetry as
+		// EffectiveState use in dispatcher.go:211.
+		if _, ok := bs.Get(upstreamName); !ok {
 			continue
 		}
-		if cb.State() == gobreaker.StateClosed {
+		if bs.EffectiveState(upstreamName) == gobreaker.StateClosed {
 			obs.SensitiveRetryTotal.WithLabelValues("closed").Inc()
 			return true, nil
 		}

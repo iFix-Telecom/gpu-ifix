@@ -37,3 +37,36 @@ WHERE id = $1;
 -- is debounced via an in-memory buffer flushing every 60s or on shutdown). This
 -- sqlc query remains the low-level write path used by that buffer.
 UPDATE ai_gateway.api_keys SET last_used_at = NOW() WHERE id = $1;
+
+-- name: ListActiveKeysAllWithMeta :many
+-- Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+-- `gatewayctl key list` (no tenant filter). NOT used on the request hot
+-- path; the hot path remains GetActiveKeyByLookupHash. Projects only
+-- operator-safe metadata columns: never key_hash and never
+-- key_lookup_hash, so a captured stdout cannot leak secret material
+-- (threat T-11-OPS-02). The JOIN against ai_gateway.tenants exposes the
+-- human-readable slug so operators can read the table without UUID
+-- lookups during incident triage. Ordered by (slug, last_used_at DESC)
+-- so the most recently active keys per tenant surface at the top of
+-- each tenant group.
+SELECT k.id, k.tenant_id, t.slug AS tenant_slug,
+       k.key_prefix, k.status, k.data_class,
+       k.created_at, k.last_used_at
+FROM ai_gateway.api_keys k
+JOIN ai_gateway.tenants t ON t.id = k.tenant_id
+WHERE k.status = 'active'
+ORDER BY t.slug ASC, k.last_used_at DESC NULLS LAST;
+
+-- name: ListActiveKeysByTenantWithMeta :many
+-- Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+-- `gatewayctl key list --tenant <uuid>`. Tenant-filtered companion of
+-- ListActiveKeysAllWithMeta with the same operator-safe projection
+-- (never key_hash, never key_lookup_hash). NOT used on the request hot
+-- path.
+SELECT k.id, k.tenant_id, t.slug AS tenant_slug,
+       k.key_prefix, k.status, k.data_class,
+       k.created_at, k.last_used_at
+FROM ai_gateway.api_keys k
+JOIN ai_gateway.tenants t ON t.id = k.tenant_id
+WHERE k.status = 'active' AND k.tenant_id = $1
+ORDER BY k.last_used_at DESC NULLS LAST;

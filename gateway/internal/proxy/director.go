@@ -75,6 +75,21 @@ func BuildDirector(upstream *url.URL) func(*http.Request) {
 		} else {
 			r.Header.Del("X-Request-ID")
 		}
+
+		// Strip client Accept-Encoding so Go's http.Transport can negotiate
+		// compression with the upstream on its own — when Transport adds the
+		// Accept-Encoding header itself, it also auto-decompresses the
+		// response body, leaving resp.Body as plain bytes. If the client's
+		// Accept-Encoding survives, Transport assumes end-to-end client gzip
+		// and passes the gzipped resp.Body through unchanged — which breaks
+		// downstream consumers that expect decoded JSON (audit's
+		// audit_log_content jsonb insert chokes on the gzip magic byte 0x8b,
+		// rolling back the entire audit row; usageJSONBuffer also fails to
+		// parse "usage" from gzipped bytes, losing per-request billing
+		// attribution). The gateway always wants Transport's auto-decode
+		// behaviour. Worth ~500 B of bandwidth on chat completions and is the
+		// only viable fix without an explicit gzip-aware tee in audit.
+		r.Header.Del("Accept-Encoding")
 	}
 }
 

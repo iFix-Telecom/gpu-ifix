@@ -12,13 +12,13 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 )
 
-// allRequired are the five env vars Load() insists on (Phase 3 MED-06:
-// UPSTREAM_HEALTH_BRIDGE_URL was demoted to optional — see config.go).
+// allRequired are the env vars Load() insists on (Phase 3 MED-06:
+// UPSTREAM_HEALTH_BRIDGE_URL was demoted to optional; Phase 11.1 D-A4:
+// UPSTREAM_STT_URL demoted to optional — tier-0 STT removed).
 var allRequired = []string{
 	"AI_GATEWAY_PG_DSN",
 	"AI_GATEWAY_REDIS_ADDR",
 	"UPSTREAM_LLM_URL",
-	"UPSTREAM_STT_URL",
 	"UPSTREAM_EMBED_URL",
 }
 
@@ -70,13 +70,13 @@ func TestLoad_MissingRequired(t *testing.T) {
 func TestLoad_MissingSingleVarNamedInError(t *testing.T) {
 	clearAll(t)
 	setAllRequired(t)
-	t.Setenv("UPSTREAM_STT_URL", "")
+	t.Setenv("UPSTREAM_LLM_URL", "")
 	_, err := config.Load()
 	if err == nil {
-		t.Fatalf("expected error when UPSTREAM_STT_URL unset")
+		t.Fatalf("expected error when UPSTREAM_LLM_URL unset")
 	}
-	if !strings.Contains(err.Error(), "UPSTREAM_STT_URL") {
-		t.Fatalf("expected error to mention UPSTREAM_STT_URL, got %q", err.Error())
+	if !strings.Contains(err.Error(), "UPSTREAM_LLM_URL") {
+		t.Fatalf("expected error to mention UPSTREAM_LLM_URL, got %q", err.Error())
 	}
 }
 
@@ -88,7 +88,7 @@ func TestLoad_AllRequiredPresent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.PGDSN == "" || cfg.RedisAddr == "" || cfg.UpstreamLLMURL == "" ||
-		cfg.UpstreamSTTURL == "" || cfg.UpstreamEmbedURL == "" {
+		cfg.UpstreamEmbedURL == "" {
 		t.Fatalf("expected populated required fields, got %+v", cfg)
 	}
 	// UpstreamHealthBridgeURL is optional since Phase 3 MED-06; not checked here.
@@ -803,7 +803,6 @@ func TestLoad_Phase7NotRequired(t *testing.T) {
 //   - Decision 6: ColdStartBudget default 2400 (40min generous margin)
 var phase6_6OptionalEnv = []string{
 	"PRIMARY_TEMPLATE_IMAGE",
-	"PRIMARY_SPEACHES_IMAGE",
 	"PRIMARY_INFINITY_IMAGE",
 	"PRIMARY_DCGM_IMAGE",
 	"PRIMARY_QWEN_WEIGHTS_KEY",
@@ -811,8 +810,7 @@ var phase6_6OptionalEnv = []string{
 	"PRIMARY_QWEN_JINJA_KEY",
 	"PRIMARY_QWEN_JINJA_SHA256",
 	"PRIMARY_LLAMA_ARGS",
-	"PRIMARY_WHISPER_WEIGHTS_KEY",
-	"PRIMARY_WHISPER_WEIGHTS_SHA256",
+	// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed.
 	"PRIMARY_BGEM3_WEIGHTS_KEY",
 	"PRIMARY_BGEM3_WEIGHTS_SHA256",
 	"PRIMARY_VAST_PRICE_CAP_DPH",
@@ -891,12 +889,10 @@ func TestConfig_PrimaryPod_DefaultsLoaded(t *testing.T) {
 		t.Errorf("PrimaryProvisionColdStartBudgetSeconds = %d, want 2400 (WAVE0-GATES Decision 6 40min budget)", cfg.PrimaryProvisionColdStartBudgetSeconds)
 	}
 
-	// FAIL-FAST policy per reviews consensus action #6 — Whisper/BGE SHA
-	// have NO envOr default; empty passthrough so Plan 06.6-04
-	// buildPrimaryCreateRequest rejects at build time.
-	if cfg.PrimaryWhisperWeightsSHA256 != "" {
-		t.Errorf("PrimaryWhisperWeightsSHA256 default = %q, want empty (reviews #6 fail-fast policy)", cfg.PrimaryWhisperWeightsSHA256)
-	}
+	// FAIL-FAST policy per reviews consensus action #6 — BGE-M3 SHA has
+	// NO envOr default; empty passthrough so Plan 06.6-04
+	// buildPrimaryCreateRequest rejects at build time. (Phase 11.1 D-A4:
+	// PrimaryWhisperWeightsSHA256 removed — STT shrunk to tier-1-only.)
 	if cfg.PrimaryBGEM3WeightsSHA256 != "" {
 		t.Errorf("PrimaryBGEM3WeightsSHA256 default = %q, want empty (reviews #6 fail-fast policy)", cfg.PrimaryBGEM3WeightsSHA256)
 	}
@@ -919,9 +915,7 @@ func TestConfig_PrimaryPod_DefaultsLoaded(t *testing.T) {
 	if cfg.PrimaryLlamaArgs != nil {
 		t.Errorf("PrimaryLlamaArgs default = %v, want nil (empty CSV → lifecycle.go uses const)", cfg.PrimaryLlamaArgs)
 	}
-	if cfg.PrimaryWhisperWeightsKey != "whisper-large-v3/v1.0.0/model.tar.gz" {
-		t.Errorf("PrimaryWhisperWeightsKey = %q, want whisper-large-v3/v1.0.0/model.tar.gz", cfg.PrimaryWhisperWeightsKey)
-	}
+	// Phase 11.1 D-A4: PrimaryWhisperWeightsKey removed.
 	if cfg.PrimaryBGEM3WeightsKey != "bge-m3/v1.0.0/model.tar.gz" {
 		t.Errorf("PrimaryBGEM3WeightsKey = %q, want bge-m3/v1.0.0/model.tar.gz", cfg.PrimaryBGEM3WeightsKey)
 	}
@@ -986,27 +980,13 @@ func TestConfig_PrimaryPod_DaysCSVParse(t *testing.T) {
 	}
 }
 
-// TestConfig_PrimaryPod_WhisperSHANoDefault enforces reviews consensus
-// action #6 — fail-fast SHA policy. Operator MUST set the env explicitly;
-// Plan 06.6-04 buildPrimaryCreateRequest rejects empty values.
-func TestConfig_PrimaryPod_WhisperSHANoDefault(t *testing.T) {
-	clearAll(t)
-	clearPhase3(t)
-	clearPhase4(t)
-	clearPhase6(t)
-	clearPhase6_6(t)
-	setAllRequired(t)
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if cfg.PrimaryWhisperWeightsSHA256 != "" {
-		t.Errorf("PrimaryWhisperWeightsSHA256 = %q, want empty (reviews #6 fail-fast — operator must set explicitly)", cfg.PrimaryWhisperWeightsSHA256)
-	}
-}
+// Phase 11.1 D-A4: TestConfig_PrimaryPod_WhisperSHANoDefault removed —
+// PRIMARY_WHISPER_WEIGHTS_* fields no longer exist (STT shrunk to
+// tier-1-only).
 
-// TestConfig_PrimaryPod_BGEM3SHANoDefault — same fail-fast policy as
-// TestConfig_PrimaryPod_WhisperSHANoDefault for BGE-M3 embedding weights.
+// TestConfig_PrimaryPod_BGEM3SHANoDefault — fail-fast policy per reviews
+// consensus action #6 for BGE-M3 embedding weights: operator MUST set the
+// env explicitly; Plan 06.6-04 buildPrimaryCreateRequest rejects empty values.
 func TestConfig_PrimaryPod_BGEM3SHANoDefault(t *testing.T) {
 	clearAll(t)
 	clearPhase3(t)
@@ -1146,9 +1126,6 @@ func TestConfig_PrimaryPod_AllUpstreamImagesSHAPinned(t *testing.T) {
 	if !strings.Contains(cfg.PrimaryTemplateImage, "@sha256:cb37") {
 		t.Errorf("PrimaryTemplateImage missing @sha256:cb37 digest prefix: %q", cfg.PrimaryTemplateImage)
 	}
-	if !strings.Contains(cfg.PrimarySpeachesImage, "@sha256:5c62") {
-		t.Errorf("PrimarySpeachesImage missing @sha256:5c62 digest prefix: %q", cfg.PrimarySpeachesImage)
-	}
 	if !strings.Contains(cfg.PrimaryInfinityImage, "@sha256:11e8") {
 		t.Errorf("PrimaryInfinityImage missing @sha256:11e8 digest prefix: %q", cfg.PrimaryInfinityImage)
 	}
@@ -1201,6 +1178,94 @@ func TestConfig_PrimaryPod_JinjaDefaultsEmpty_B1Embedded(t *testing.T) {
 	}
 	if cfg.PrimaryQwenJinjaSHA256 != "" {
 		t.Errorf("PrimaryQwenJinjaSHA256 default = %q, want empty (WAVE0-GATES Decision 3 B1 embedded)", cfg.PrimaryQwenJinjaSHA256)
+	}
+}
+
+// =============================================================================
+// Phase 11.1 D-A6 — primary+fallback shape defaults + deprecated-alias warn
+// =============================================================================
+
+// phase11_1OptionalEnv enumerates the Phase 11.1 D-A6 env vars + their legacy
+// aliases. Cleared in setUp so a stray Portainer value cannot leak into the
+// default-value assertions.
+var phase11_1OptionalEnv = []string{
+	"PRIMARY_VAST_GPU_NAME_PRIMARY",
+	"PRIMARY_VAST_GPU_NAME_FALLBACK",
+	"PRIMARY_VAST_PRICE_CAP_PRIMARY",
+	"PRIMARY_VAST_PRICE_CAP_FALLBACK",
+	"PRIMARY_VAST_NUM_GPUS_PRIMARY",
+	"PRIMARY_VAST_NUM_GPUS_FALLBACK",
+	"PRIMARY_GPU_NAME",
+	"PRIMARY_VAST_PRICE_CAP_DPH",
+	"PRIMARY_NUM_GPUS",
+}
+
+func clearPhase11_1(t *testing.T) {
+	t.Helper()
+	for _, v := range phase11_1OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestPrimaryVastShapeDefaults — empty env produces the Wave 0 EVIDENCE-00
+// locked defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
+func TestPrimaryVastShapeDefaults(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase6_6(t)
+	clearPhase11_1(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.PrimaryVastGPUNamePrimary != "RTX 3090" {
+		t.Errorf("PrimaryVastGPUNamePrimary = %q, want \"RTX 3090\"", cfg.PrimaryVastGPUNamePrimary)
+	}
+	if cfg.PrimaryVastGPUNameFallback != "RTX 3090" {
+		t.Errorf("PrimaryVastGPUNameFallback = %q, want \"RTX 3090\"", cfg.PrimaryVastGPUNameFallback)
+	}
+	if cfg.PrimaryVastPriceCapPrimary != 0.30 {
+		t.Errorf("PrimaryVastPriceCapPrimary = %v, want 0.30", cfg.PrimaryVastPriceCapPrimary)
+	}
+	if cfg.PrimaryVastPriceCapFallback != 0.60 {
+		t.Errorf("PrimaryVastPriceCapFallback = %v, want 0.60", cfg.PrimaryVastPriceCapFallback)
+	}
+	if cfg.PrimaryVastNumGPUsPrimary != 1 {
+		t.Errorf("PrimaryVastNumGPUsPrimary = %d, want 1", cfg.PrimaryVastNumGPUsPrimary)
+	}
+	if cfg.PrimaryVastNumGPUsFallback != 2 {
+		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 2 (Wave 0 EVIDENCE-00 2×3090 fallback)", cfg.PrimaryVastNumGPUsFallback)
+	}
+}
+
+// TestPrimaryVastLegacyAlias — setting only the legacy env vars without their
+// new counterparts populates the new slots (PRIMARY_GPU_NAME →
+// PrimaryVastGPUNamePrimary; PRIMARY_NUM_GPUS → PrimaryVastNumGPUsFallback)
+// and emits an slog.Warn observable in the captured handler buffer.
+func TestPrimaryVastLegacyAlias(t *testing.T) {
+	clearAll(t)
+	clearPhase3(t)
+	clearPhase4(t)
+	clearPhase6(t)
+	clearPhase6_6(t)
+	clearPhase11_1(t)
+	setAllRequired(t)
+
+	t.Setenv("PRIMARY_GPU_NAME", "RTX 4090")
+	t.Setenv("PRIMARY_NUM_GPUS", "4")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.PrimaryVastGPUNamePrimary != "RTX 4090" {
+		t.Errorf("PrimaryVastGPUNamePrimary = %q, want \"RTX 4090\" (alias read from PRIMARY_GPU_NAME)", cfg.PrimaryVastGPUNamePrimary)
+	}
+	if cfg.PrimaryVastNumGPUsFallback != 4 {
+		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 4 (alias read from PRIMARY_NUM_GPUS)", cfg.PrimaryVastNumGPUsFallback)
 	}
 }
 
@@ -1441,5 +1506,130 @@ func TestLoad_LogsOneLinePerActiveOverride(t *testing.T) {
 	// The unset env MUST NOT appear.
 	if strings.Contains(out, "env_var=UPSTREAM_STT_OPENAI_MODEL") {
 		t.Errorf("UPSTREAM_STT_OPENAI_MODEL is unset; it MUST NOT surface in the log; got:\n%s", out)
+	}
+}
+
+// phase112OptionalEnv enumerates the Phase 11.2 STT cascade env vars +
+// restored whisper weight fields. Cleared in setUp so prior tests do not
+// leak values into the default-value assertions below.
+var phase112OptionalEnv = []string{
+	"PRIMARY_WHISPER_WEIGHTS_KEY",
+	"PRIMARY_WHISPER_WEIGHTS_SHA256",
+	"PRIMARY_SPEACHES_IMAGE",
+	"UPSTREAM_STT_FALLBACK_1_URL",
+	"UPSTREAM_STT_FALLBACK_1_AUTH_BEARER",
+	"UPSTREAM_STT_FALLBACK_1_MODEL",
+	"UPSTREAM_STT_FALLBACK_2_URL",
+	"UPSTREAM_STT_FALLBACK_2_AUTH_BEARER",
+	"UPSTREAM_STT_FALLBACK_2_MODEL",
+}
+
+func clearPhase112(t *testing.T) {
+	t.Helper()
+	for _, v := range phase112OptionalEnv {
+		t.Setenv(v, "")
+	}
+}
+
+// TestConfig_Defaults_Phase112 asserts the Phase 11.2 Wave 1 Config
+// defaults: PRIMARY_WHISPER_WEIGHTS_* restored from 11.1 revert,
+// PRIMARY_SPEACHES_IMAGE locked at D-B1, and the 6 UPSTREAM_STT_FALLBACK_{1,2}_*
+// slot defaults (slot 1 = Gemini 2.5 Flash Lite, slot 2 = Groq Whisper-large-v3).
+func TestConfig_Defaults_Phase112(t *testing.T) {
+	clearAll(t)
+	clearPhase112(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Restored from 11.1 revert (D-B7).
+	if cfg.PrimaryWhisperWeightsKey != "whisper-large-v3/v1.0.0/model.tar.gz" {
+		t.Errorf("PrimaryWhisperWeightsKey default: want whisper-large-v3/v1.0.0/model.tar.gz, got %q",
+			cfg.PrimaryWhisperWeightsKey)
+	}
+	if cfg.PrimaryWhisperWeightsSHA256 != "" {
+		t.Errorf("PrimaryWhisperWeightsSHA256 default: want empty (fail-fast at build), got %q",
+			cfg.PrimaryWhisperWeightsSHA256)
+	}
+	// NEW — speaches image (D-B1 LOCKED).
+	if cfg.PrimarySpeachesImage != "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3" {
+		t.Errorf("PrimarySpeachesImage default: want ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3, got %q",
+			cfg.PrimarySpeachesImage)
+	}
+	// Slot 1 = Gemini (D-B7).
+	if cfg.UpstreamSTTFallback1URL != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Errorf("UpstreamSTTFallback1URL default: want Gemini v1beta, got %q",
+			cfg.UpstreamSTTFallback1URL)
+	}
+	if cfg.UpstreamSTTFallback1AuthBearer != "" {
+		t.Errorf("UpstreamSTTFallback1AuthBearer default: want empty, got %q",
+			cfg.UpstreamSTTFallback1AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback1Model != "gemini-2.5-flash-lite" {
+		t.Errorf("UpstreamSTTFallback1Model default: want gemini-2.5-flash-lite, got %q",
+			cfg.UpstreamSTTFallback1Model)
+	}
+	// Slot 2 = Groq Whisper (D-B8).
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai" {
+		t.Errorf("UpstreamSTTFallback2URL default: want Groq /openai/v1, got %q",
+			cfg.UpstreamSTTFallback2URL)
+	}
+	if cfg.UpstreamSTTFallback2AuthBearer != "" {
+		t.Errorf("UpstreamSTTFallback2AuthBearer default: want empty, got %q",
+			cfg.UpstreamSTTFallback2AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback2Model != "whisper-large-v3" {
+		t.Errorf("UpstreamSTTFallback2Model default: want whisper-large-v3, got %q",
+			cfg.UpstreamSTTFallback2Model)
+	}
+}
+
+// TestConfig_Defaults_Phase112_EnvOverride exercises operator env-overrides
+// for every Phase 11.2 var (model swap to gemini-2.5-flash, custom Groq URL,
+// bearer injection — verifies the loader wiring, not just struct presence).
+func TestConfig_Defaults_Phase112_EnvOverride(t *testing.T) {
+	clearAll(t)
+	clearPhase112(t)
+	setAllRequired(t)
+	t.Setenv("PRIMARY_WHISPER_WEIGHTS_KEY", "whisper-custom/v2.0.0/model.tar.gz")
+	t.Setenv("PRIMARY_WHISPER_WEIGHTS_SHA256", "deadbeefcafebabe")
+	t.Setenv("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:1.0.0-cuda-12.6.3")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_URL", "https://generativelanguage.googleapis.com/v1beta-custom")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_AUTH_BEARER", "AIza-fake-key")
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_URL", "https://api.groq.com/openai-staging")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_AUTH_BEARER", "gsk_fake-groq-key")
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3-turbo")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PrimaryWhisperWeightsKey != "whisper-custom/v2.0.0/model.tar.gz" {
+		t.Errorf("PrimaryWhisperWeightsKey override: got %q", cfg.PrimaryWhisperWeightsKey)
+	}
+	if cfg.PrimaryWhisperWeightsSHA256 != "deadbeefcafebabe" {
+		t.Errorf("PrimaryWhisperWeightsSHA256 override: got %q", cfg.PrimaryWhisperWeightsSHA256)
+	}
+	if cfg.PrimarySpeachesImage != "ghcr.io/speaches-ai/speaches:1.0.0-cuda-12.6.3" {
+		t.Errorf("PrimarySpeachesImage override: got %q", cfg.PrimarySpeachesImage)
+	}
+	if cfg.UpstreamSTTFallback1URL != "https://generativelanguage.googleapis.com/v1beta-custom" {
+		t.Errorf("UpstreamSTTFallback1URL override: got %q", cfg.UpstreamSTTFallback1URL)
+	}
+	if cfg.UpstreamSTTFallback1AuthBearer != "AIza-fake-key" {
+		t.Errorf("UpstreamSTTFallback1AuthBearer override: got %q", cfg.UpstreamSTTFallback1AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback1Model != "gemini-2.5-flash" {
+		t.Errorf("UpstreamSTTFallback1Model override: got %q", cfg.UpstreamSTTFallback1Model)
+	}
+	if cfg.UpstreamSTTFallback2URL != "https://api.groq.com/openai-staging" {
+		t.Errorf("UpstreamSTTFallback2URL override: got %q", cfg.UpstreamSTTFallback2URL)
+	}
+	if cfg.UpstreamSTTFallback2AuthBearer != "gsk_fake-groq-key" {
+		t.Errorf("UpstreamSTTFallback2AuthBearer override: got %q", cfg.UpstreamSTTFallback2AuthBearer)
+	}
+	if cfg.UpstreamSTTFallback2Model != "whisper-large-v3-turbo" {
+		t.Errorf("UpstreamSTTFallback2Model override: got %q", cfg.UpstreamSTTFallback2Model)
 	}
 }

@@ -212,3 +212,45 @@ func TestResolver_EmptyEnvValueTreatedAsUnset(t *testing.T) {
 		t.Errorf("Resolve(qwen,openrouter-chat)=%q; want qwen/qwen3.5-27b (empty env treated as unset)", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for upstreamEnvVarMap extension (D-B7/D-B8).
+// OWNER: Plan 06 — resolver.go :56-60 adds gemini-stt + groq-whisper entries
+// per PATTERNS.md lines 276-295.
+// ---------------------------------------------------------------------------
+
+// TestUpstreamEnvVarMap_GeminiSTT_MapsToGeminiModelEnv — D-B7.
+// gemini-stt MUST resolve via UPSTREAM_STT_FALLBACK_1_MODEL.
+func TestUpstreamEnvVarMap_GeminiSTT_MapsToGeminiModelEnv(t *testing.T) {
+	// D-B7: gemini-stt MUST resolve via UPSTREAM_STT_FALLBACK_1_MODEL.
+	r := newResolverFromMap(map[aliasKey]string{
+		{"whisper", "gemini-stt"}: "gemini-2.5-flash-lite",
+	})
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "gemini-2.5-flash")
+	if got := r.Resolve("whisper", "gemini-stt"); got != "gemini-2.5-flash" {
+		t.Fatalf("Resolve(whisper,gemini-stt)=%q; want gemini-2.5-flash (env override)", got)
+	}
+	// Without env, schema wins.
+	t.Setenv("UPSTREAM_STT_FALLBACK_1_MODEL", "")
+	if got := r.Resolve("whisper", "gemini-stt"); got != "gemini-2.5-flash-lite" {
+		t.Fatalf("Resolve(whisper,gemini-stt)=%q; want gemini-2.5-flash-lite (schema fallback)", got)
+	}
+}
+
+// TestUpstreamEnvVarMap_GroqWhisper_MapsToGroqModelEnv — D-B8.
+// groq-whisper MUST resolve via UPSTREAM_STT_FALLBACK_2_MODEL (Groq reuses
+// OpenAI-compat director with different URL/bearer/model).
+func TestUpstreamEnvVarMap_GroqWhisper_MapsToGroqModelEnv(t *testing.T) {
+	// D-B8: groq-whisper MUST resolve via UPSTREAM_STT_FALLBACK_2_MODEL.
+	r := newResolverFromMap(map[aliasKey]string{
+		{"whisper", "groq-whisper"}: "whisper-large-v3",
+	})
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "whisper-large-v3-turbo")
+	if got := r.Resolve("whisper", "groq-whisper"); got != "whisper-large-v3-turbo" {
+		t.Fatalf("Resolve(whisper,groq-whisper)=%q; want whisper-large-v3-turbo (env override)", got)
+	}
+	t.Setenv("UPSTREAM_STT_FALLBACK_2_MODEL", "")
+	if got := r.Resolve("whisper", "groq-whisper"); got != "whisper-large-v3" {
+		t.Fatalf("Resolve(whisper,groq-whisper)=%q; want whisper-large-v3 (schema fallback)", got)
+	}
+}

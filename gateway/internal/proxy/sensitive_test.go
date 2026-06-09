@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -148,5 +149,55 @@ func TestSensitiveRetry_UnknownUpstreamExhausts(t *testing.T) {
 	// Either ctx.Err (canceled by timeout) OR ErrSensitiveRetryExhausted is acceptable.
 	if err == nil {
 		t.Errorf("err = nil, want non-nil")
+	}
+}
+
+// TestSensitiveRetry_ForceOverrideKeepsLoopOpen is the SEED-005 sanity
+// regression: with a Redis-backed operator force-open in place and the
+// natural gobreaker FSM in StateClosed, SensitiveRetry MUST honor the
+// override (returning ok=false, ErrSensitiveRetryExhausted) so the
+// dispatcher's sensitive-tenant path stays at writeSensitiveBlock instead
+// of escaping to dispatchTo. Pre-fix the loop polled `cb.State()` only
+// and returned (true, nil) immediately — sensitive requests hit the
+// real upstream and emitted 502 upstream_unreachable instead of the
+// contracted 503 upstream_unavailable_for_sensitive_tenant
+// (live request_id 019e7008-3cc0 on 2026-05-28T19:20:48 UTC).
+func TestSensitiveRetry_ForceOverrideKeepsLoopOpen(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	bs := breaker.NewSet(rdb, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 30 * time.Second}, []string{"local-llm"})
+
+	// Natural FSM stays CLOSED (no trips). Plant a force-open in Redis.
+	val := breaker.ForceOverrideValue{
+		State:  "open",
+		TTLSec: 60,
+		SetBy:  "test-seed-005-regression",
+		SetAt:  time.Now().UTC(),
+	}
+	buf, err := json.Marshal(val)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := rdb.Set(context.Background(), breaker.ForceOverrideKey("local-llm"), string(buf), 60*time.Second).Err(); err != nil {
+		t.Fatalf("redis SET: %v", err)
+	}
+
+	// With force-override active, SensitiveRetry must NOT return (true, nil)
+	// just because the natural FSM is StateClosed. EffectiveState must win.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ok, retryErr := SensitiveRetry(ctx, bs, "local-llm")
+	if ok {
+		t.Fatalf("ok = true with force-override active; want false (must exhaust). natural state was %v", bs.Snapshot()["local-llm"])
+	}
+	if !errors.Is(retryErr, ErrSensitiveRetryExhausted) {
+		t.Errorf("err = %v, want ErrSensitiveRetryExhausted", retryErr)
 	}
 }
