@@ -111,7 +111,18 @@ Plans:
 **Requirements:** PC-COLD-START-FIX, PC-ENV-PRECEDENCE
 **Depends on:** Phase 11.2 (closed passed_partial — provides carry-forward decision document); Phase 06.8 (provides 2×3090 baseline shape)
 **Carry-forward source:** .planning/phases/11.2-readd-whisper-local-gemini-fallback/11.2-GAPS-DECISION.md
-**Plans:** TBD via /gsd-discuss-phase 6.6.X
+**Plans:** 9 plans
+
+Plans:
+- [ ] 06.6.X-01-PLAN.md — Wave 1: code-side shape var map (grep + alias mapping quote)
+- [ ] 06.6.X-02-PLAN.md — Wave 1: runtime env capture from vps-ifix-vm
+- [ ] 06.6.X-03-PLAN.md — Wave 1: docs-side var values (runbooks + .env.examples + MEMORY)
+- [ ] 06.6.X-04-PLAN.md — Wave 2: iter-1 spike via gateway live-tick + 4-signal parallel capture (autonomous:false)
+- [ ] 06.6.X-05-PLAN.md — Wave 3: iter-1 analysis (suspect ranking by evidence + iter-2 go/no-go)
+- [ ] 06.6.X-06-PLAN.md — Wave 4: iter-2 conditional spike (top-1 hypothesis isolation) or skip-rationale (autonomous:false)
+- [ ] 06.6.X-07-PLAN.md — Wave 5: RESEARCH-ENV-PRECEDENCE.md synthesis from 3 audit inputs
+- [ ] 06.6.X-08-PLAN.md — Wave 5: RESEARCH-COLD-START.md synthesis from iter-1/iter-2 evidence
+- [ ] 06.6.X-09-PLAN.md — Wave 6: phase VERIFICATION rollup (pod destruction confirm + spend log + verdict)
 
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
