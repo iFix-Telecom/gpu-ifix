@@ -114,9 +114,9 @@ Plans:
 **Plans:** 9 plans
 
 Plans:
-- [ ] 06.6.X-01-PLAN.md — Wave 1: code-side shape var map (grep + alias mapping quote)
-- [ ] 06.6.X-02-PLAN.md — Wave 1: runtime env capture from vps-ifix-vm
-- [ ] 06.6.X-03-PLAN.md — Wave 1: docs-side var values (runbooks + .env.examples + MEMORY)
+- [x] 06.6.X-01-PLAN.md — Wave 1: code-side shape var map (grep + alias mapping quote)
+- [x] 06.6.X-02-PLAN.md — Wave 1: runtime env capture from vps-ifix-vm
+- [x] 06.6.X-03-PLAN.md — Wave 1: docs-side var values (runbooks + .env.examples + MEMORY)
 - [ ] 06.6.X-04-PLAN.md — Wave 2: iter-1 spike via gateway live-tick + 4-signal parallel capture (autonomous:false)
 - [ ] 06.6.X-05-PLAN.md — Wave 3: iter-1 analysis (suspect ranking by evidence + iter-2 go/no-go)
 - [ ] 06.6.X-06-PLAN.md — Wave 4: iter-2 conditional spike (top-1 hypothesis isolation) or skip-rationale (autonomous:false)
