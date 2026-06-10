@@ -327,7 +327,15 @@ change requires the gateway container to restart.
 | `PRIMARY_WHISPER_WEIGHTS_SHA256` | string | `""` (empty → **FAIL-FAST**) | **Reviews #6 FAIL-FAST.** Empty value causes `buildPrimaryCreateRequest` to return `ErrMissingWhisperSHA`; reconciler logs + enters Cooldown WITHOUT calling Vast.ai. Operator MUST set this before deploy. | Yes |
 | `PRIMARY_BGEM3_WEIGHTS_KEY` | string | `bge-m3/v1.0.0/model.tar.gz` | MinIO object key for BGE-M3 tar.gz. | Yes |
 | `PRIMARY_BGEM3_WEIGHTS_SHA256` | string | `""` (empty → **FAIL-FAST**) | Reviews #6 — same fail-fast policy as Whisper. | Yes |
-| `PRIMARY_VAST_PRICE_CAP_DPH` | float | `0.40` | RTX 4090 price cap (USD/hour). Epsilon-comparison `cap+0.0001` per Pitfall 5. | Yes |
+| `PRIMARY_VAST_NUM_GPUS_PRIMARY` | int | `1` | **Canonical shape-0 (PRIMARY) GPU count.** Searched first. 1×RTX 3090. | Yes |
+| `PRIMARY_VAST_NUM_GPUS_FALLBACK` | int | `2` | **Canonical shape-1 (FALLBACK) GPU count.** Standing config (2×RTX 3090, allowlist 43803/55158). Searched when shape-0 returns zero qualified offers. | Yes |
+| `PRIMARY_VAST_GPU_NAME_PRIMARY` | string | `RTX 3090` | Canonical shape-0 GPU model. | Yes |
+| `PRIMARY_VAST_GPU_NAME_FALLBACK` | string | `RTX 3090` | Canonical shape-1 GPU model. | Yes |
+| `PRIMARY_VAST_PRICE_CAP_PRIMARY` | float | `0.30` | Canonical shape-0 price cap (USD/hour). Epsilon-comparison `cap+0.0001` per Pitfall 5. | Yes |
+| `PRIMARY_VAST_PRICE_CAP_FALLBACK` | float | `0.60` | Canonical shape-1 price cap (USD/hour). The standing 2×3090 cap. | Yes |
+| `PRIMARY_VAST_REJECT_PRIVATE_IP` | bool | `true` | **Phase 6.6.Y Option A.** Drops offers advertising an RFC1918 `public_ipaddr` (10/8, 172.16/12, 192.168/16) at offer time, pre-provision. Cheap guard for the RFC1918 subclass only — the timeout-on-public-IP failure mode is caught by `PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS`. | Yes |
+| `PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS` | int | `120` | **Phase 6.6.Y Option B (D-02).** Runtime fail-fast budget for the pod to become gateway-observably reachable (URLs probe, NOT the Vast `ports` map — a populated ports map with `actual_status=running` is the lie characterized in 6.6.Y-01 SPIKE-EVIDENCE). On expiry the reconciler destroys the pod with `closure_reason=public_port_bind_timeout`. Operator-tunable per D-02. | Yes |
+| ~~deprecated primary aliases~~ | — | — | **REMOVED (Phase 6.6.Y-02).** The three deprecated primary alias vars (the old unprefixed num-gpus / gpu-name / dph-cap names) now HARD-FAIL gateway boot. Use the canonical `PRIMARY_VAST_*_PRIMARY` / `PRIMARY_VAST_*_FALLBACK` rows above. The unprefixed emerg-pod `VAST_PRICE_CAP_DPH` is a different subsystem and is retained. | — |
 | `PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS` | int | `2400` (40 min) | Wave 0 Decision 6. Reconciler treats > 40min as provision failure → enter Cooldown. Generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + supervisord init. | Yes |
 | `PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS` | int | `300` (5 min) | Cooldown gate after a provision failure. Mirrors emerg's `PROVISION_FAILURE_COOLDOWN_SECONDS=60`, scaled-up for the schedule-cadence (primary should NOT thrash on schedule peaks if Vast/MinIO is degraded). Plan 06.6-03 revision. | Yes |
 | `MONTHLY_PRIMARY_BUDGET_BRL` | float | `800.0` | Pitfall #12 — separate budget from emerg (~R$130/mo nominal, gives 5x headroom for soak phase). Audit cost separately as `event_kind=primary_lifecycle_close`. | Yes |
@@ -870,13 +878,38 @@ persistent Vast/MinIO/network issue.
 
 ---
 
+## Shape pair model
+
+The primary reconciler searches Vast in two shape passes (Phase 6.6.Y canonical migration):
+
+- **Shape 0 — PRIMARY (searched first):** `PRIMARY_VAST_NUM_GPUS_PRIMARY=1`,
+  `PRIMARY_VAST_GPU_NAME_PRIMARY=RTX 3090`, `PRIMARY_VAST_PRICE_CAP_PRIMARY=0.30`.
+  A single 1×RTX 3090 instance is the cheapest viable shape and is tried first.
+- **Shape 1 — FALLBACK (the standing config):** `PRIMARY_VAST_NUM_GPUS_FALLBACK=2`,
+  `PRIMARY_VAST_GPU_NAME_FALLBACK=RTX 3090`, `PRIMARY_VAST_PRICE_CAP_FALLBACK=0.60`.
+  The validated 2×RTX 3090 single-pod shape (allowlist hosts 43803/55158). Searched
+  when the shape-0 pass returns zero qualified offers.
+
+> The standing 2×3090 config has always been the FALLBACK shape (shape 1), not the
+> primary — set the canonical `PRIMARY_VAST_*_FALLBACK` per-shape names. The deprecated
+> primary aliases now **HARD-FAIL gateway boot** (plan 6.6.Y-02); see the removal note
+> in the env table above for the exact names.
+
+**Cold-start closure:** when a provisioned pod never becomes gateway-observably reachable
+within `PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS` (default 120s), the reconciler destroys
+it with `closure_reason=public_port_bind_timeout`. The Vast `ports` map is NOT a readiness
+signal (6.6.Y-01 SPIKE-EVIDENCE: `actual_status=running` + populated `ports` while the host
+stayed externally unreachable across n=2 sampled hosts); readiness gates on the URLs probe.
+
 ## Cost Budget Monitoring
 
-- **DPH cap:** `PRIMARY_VAST_PRICE_CAP_DPH=0.40` (USD/hour). RTX 4090 at this
-  cap ≈ R$2/hour at `USD_TO_BRL_RATE=5.0`.
+- **DPH caps (per-shape, Phase 6.6.Y canonical):** shape-0 PRIMARY
+  `PRIMARY_VAST_PRICE_CAP_PRIMARY=0.30` (1×RTX 3090 ≈ R$1.5/hour at
+  `USD_TO_BRL_RATE=5.0`); shape-1 FALLBACK `PRIMARY_VAST_PRICE_CAP_FALLBACK=0.60`
+  (2×RTX 3090 ≈ R$3/hour). Epsilon-comparison `cap+0.0001` per Pitfall 5.
 - **Monthly budget:** `MONTHLY_PRIMARY_BUDGET_BRL=800` (default).
-  Nominal usage `14h × 22 weekdays × $0.40 × 5 BRL/USD ≈ R$616/month`,
-  giving ~30% headroom for soak phase + cost drift.
+  Nominal usage `14h × 22 weekdays × $0.60 × 5 BRL/USD ≈ R$924/month` at the
+  fallback cap; the shape-0 1×3090 path runs roughly half that.
 - **Cost calculation:** `total_cost_brl = accepted_dph × hours_active × USD_TO_BRL_RATE`
   where `hours_active = (ended_at - first_health_pass_at) / 3600`
   (cold-start time is EXCLUDED from the audit — D-D4 parity with emerg).
