@@ -114,6 +114,7 @@ Plans:
 **Plans:** 9 plans
 
 Plans:
+
 - [x] 06.6.X-01-PLAN.md — Wave 1: code-side shape var map (grep + alias mapping quote)
 - [x] 06.6.X-02-PLAN.md — Wave 1: runtime env capture from vps-ifix-vm
 - [x] 06.6.X-03-PLAN.md — Wave 1: docs-side var values (runbooks + .env.examples + MEMORY)
@@ -130,7 +131,7 @@ Plans:
 **Requirements:** PC-COLD-START-FIX, PC-ENV-PRECEDENCE
 **Depends on:** Phase 06.6.X (closed passed — provides 06.6.X-RESEARCH-COLD-START.md + 06.6.X-RESEARCH-ENV-PRECEDENCE.md as canonical inputs)
 **Research inputs:** .planning/phases/06.6.X-pod-cold-start-env-precedence-audit/06.6.X-RESEARCH-COLD-START.md; .planning/phases/06.6.X-pod-cold-start-env-precedence-audit/06.6.X-RESEARCH-ENV-PRECEDENCE.md
-**Plans:** 7 plans in 6 waves
+**Plans:** 12/13 plans executed
 
 Plans:
 
