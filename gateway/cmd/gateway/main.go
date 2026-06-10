@@ -993,7 +993,19 @@ func main() {
 			"grace_ramp_down_seconds", cfg.PrimaryPodScheduleGraceRampDownSeconds,
 			"coldstart_budget_seconds", cfg.PrimaryProvisionColdStartBudgetSeconds,
 			"failure_cooldown_seconds", cfg.PrimaryProvisionFailureCooldownSeconds,
-			"price_cap_dph", cfg.PrimaryVastPriceCapDPH,
+			// Phase 6.6.Y resolved primary-shape dump (fix-option-agnostic, locked
+			// from 06.6.X-RESEARCH-ENV-PRECEDENCE). Surfaces BOTH shapes so the
+			// operator can confirm resolved env precedence at boot.
+			// shape0 = PRIMARY (1×3090 @ 0.30); shape1 = FALLBACK (2×3090 @ 0.60).
+			"shape0_num_gpus", cfg.PrimaryVastNumGPUsPrimary,
+			"shape0_gpu", cfg.PrimaryVastGPUNamePrimary,
+			"shape0_cap", cfg.PrimaryVastPriceCapPrimary,
+			"shape1_num_gpus", cfg.PrimaryVastNumGPUsFallback,
+			"shape1_gpu", cfg.PrimaryVastGPUNameFallback,
+			"shape1_cap", cfg.PrimaryVastPriceCapFallback,
+			"allowlist", cfg.PrimaryVastMachineAllowlist,
+			"port_bind_budget_seconds", cfg.PrimaryPublicPortBindBudgetSeconds,
+			"reject_private_ip", cfg.PrimaryVastRejectPrivateIP,
 			"monthly_budget_brl", cfg.MonthlyPrimaryBudgetBRL,
 			"template_image", cfg.PrimaryTemplateImage, // Wave 0 SHA pin visibility for operator forensics
 		)
