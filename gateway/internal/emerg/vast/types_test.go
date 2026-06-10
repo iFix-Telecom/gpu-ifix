@@ -278,3 +278,62 @@ func TestWithMachineAllowlist(t *testing.T) {
 		require.Contains(t, s, `"limit":20`)
 	})
 }
+
+// TestRejectPrivateIPOffers asserts the Option A (6.6.Y-03) client-side
+// RFC1918 reject filter: offers whose non-empty public_ipaddr is in
+// 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16 are dropped; offers with a
+// routable public IP or an EMPTY public_ipaddr are KEPT (empty cannot be
+// proven private — Option B is the runtime backstop per 6.6.Y-01 spike).
+// The six cases mirror the plan <behavior> block exactly.
+func TestRejectPrivateIPOffers(t *testing.T) {
+	// iter-1 root cause: host advertised public_ipaddr=192.168.1.8 → dropped.
+	offers := []Offer{
+		{ID: 1, PublicIPAddr: "192.168.1.8"},  // 192.168/16 → reject
+		{ID: 2, PublicIPAddr: "172.20.0.5"},   // 172.16/12 → reject
+		{ID: 3, PublicIPAddr: "10.5.5.5"},     // 10/8 → reject
+		{ID: 4, PublicIPAddr: "85.218.235.6"}, // routable → keep
+		{ID: 5, PublicIPAddr: ""},             // empty → keep (Option B backstop)
+		{ID: 6, PublicIPAddr: "172.32.0.1"},   // 172.32 is OUTSIDE 172.16/12 → keep
+	}
+
+	got := RejectPrivateIPOffers(offers)
+
+	gotIDs := make(map[int64]bool, len(got))
+	for _, o := range got {
+		gotIDs[o.ID] = true
+	}
+	require.False(t, gotIDs[1], "192.168.1.8 (192.168/16) MUST be rejected — iter-1 root cause")
+	require.False(t, gotIDs[2], "172.20.0.5 (172.16/12) MUST be rejected")
+	require.False(t, gotIDs[3], "10.5.5.5 (10/8) MUST be rejected")
+	require.True(t, gotIDs[4], "85.218.235.6 (routable) MUST be kept")
+	require.True(t, gotIDs[5], "empty public_ipaddr MUST be kept (Option B backstop)")
+	require.True(t, gotIDs[6], "172.32.0.1 (outside 172.16/12) MUST be kept")
+	require.Len(t, got, 3, "exactly 3 of 6 offers survive the RFC1918 reject")
+}
+
+// TestIsRFC1918 pins the CIDR boundary logic for the three private ranges
+// plus the routable / empty / malformed edge cases.
+func TestIsRFC1918(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"10.0.0.0", true},
+		{"10.255.255.255", true},
+		{"172.16.0.0", true},
+		{"172.31.255.255", true},
+		{"172.15.255.255", false}, // just below 172.16/12
+		{"172.32.0.0", false},     // just above 172.16/12
+		{"192.168.0.0", true},
+		{"192.168.255.255", true},
+		{"192.167.255.255", false},
+		{"192.169.0.0", false},
+		{"85.218.235.6", false},
+		{"", false},          // empty cannot be proven private
+		{"not-an-ip", false}, // unparseable → not private (kept)
+		{"::1", false},       // IPv6 loopback is not RFC1918
+	}
+	for _, c := range cases {
+		require.Equalf(t, c.want, isRFC1918(c.ip), "isRFC1918(%q)", c.ip)
+	}
+}
