@@ -130,7 +130,17 @@ Plans:
 **Requirements:** PC-COLD-START-FIX, PC-ENV-PRECEDENCE
 **Depends on:** Phase 06.6.X (closed passed — provides 06.6.X-RESEARCH-COLD-START.md + 06.6.X-RESEARCH-ENV-PRECEDENCE.md as canonical inputs)
 **Research inputs:** .planning/phases/06.6.X-pod-cold-start-env-precedence-audit/06.6.X-RESEARCH-COLD-START.md; .planning/phases/06.6.X-pod-cold-start-env-precedence-audit/06.6.X-RESEARCH-ENV-PRECEDENCE.md
-**Plans:** TBD (plan-phase)
+**Plans:** 7 plans in 6 waves
+
+Plans:
+
+- [ ] 6.6.Y-01-PLAN.md — Wave 0: D-01 disambiguation spike (operator, ~$0.30) — 2nd-host port-bind + offer-side public_ipaddr availability → freeze Option A site
+- [ ] 6.6.Y-02-PLAN.md — Wave 1: config.go hard fail-fast on legacy primary vars + delete legacy fields/reads + 2 cold-start readers + main.go boot-shape log
+- [ ] 6.6.Y-03-PLAN.md — Wave 2: cold-start Option A (RFC1918 offer reject) + Option B (120s port-bind fail-fast + per-strike log) in vast/types.go + reconciler.go
+- [ ] 6.6.Y-04-PLAN.md — Wave 2: canonical migration of docs/env surfaces (compose, .env.prod.example, runbook, MEMORY) + live allowlist refresh
+- [ ] 6.6.Y-05-PLAN.md — Wave 3: D-04 SAFETY-CRITICAL operator stack.env migration BEFORE fail-fast deploy (autonomous: false)
+- [ ] 6.6.Y-06-PLAN.md — Wave 4: Option C whisper 3-way onstart download (D-03) + fail-fast image build/deploy with GHCR PAT-retag fallback (autonomous: false)
+- [ ] 6.6.Y-07-PLAN.md — Wave 5: live UAT (2×3090 cold-start ≤ budget, suspects #1/#3 retired, ≤ $2.00) + VERIFICATION (autonomous: false)
 
 ### Phase 06.9: OpenRouter model-rewrite per-upstream — close Phase 03 SC-1 fallback chain (INSERTED, promoted from SEED-004)
 
