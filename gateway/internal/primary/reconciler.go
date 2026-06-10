@@ -816,6 +816,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 				return err
 			}
+			offers = r.rejectPrivateIPOffers(offers, log, i, "allowlist")
 			candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
 			if len(candidates) > 0 {
 				pickable = candidates
@@ -836,6 +837,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 			return err
 		}
+		offers = r.rejectPrivateIPOffers(offers, log, i, "broaden")
 		candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
 		if len(candidates) > 0 {
 			pickable = candidates
@@ -1051,6 +1053,39 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			return nil
 		}
 	}
+}
+
+// rejectPrivateIPOffers (Option A, plan 6.6.Y-03) applies the client-side
+// RFC1918 reject to a freshly-searched offer slice BEFORE FilterBelowCap,
+// guarded by cfg.PrimaryVastRejectPrivateIP (default true). When any offers
+// are dropped it emits a log.Info so operators see the RFC1918 advertisers
+// being filtered at pick stage. Mirrors the FilterBelowCap client-side
+// filtering idiom exactly — there is NO Vast search-filter-map clause for
+// public_ipaddr (no clean comparator; review finding #4).
+//
+// SPIKE-EVIDENCE (6.6.Y-01-SPIKE-EVIDENCE.md §"Answer Q2"): offers DO carry a
+// non-empty public_ipaddr at offer time (55/55 in the live sample), so this
+// reject is EFFECTIVE pre-provision — an RFC1918 advertiser (iter-1 root cause:
+// public_ipaddr=192.168.1.8) is dropped before any pod is created. CAVEAT
+// (verbatim from the spike): neither OBSERVED failing host advertised an
+// RFC1918 IP — both carried public routable IPs and timed out anyway. Option A
+// alone would NOT have caught either observed failure; it is a cheap guard for
+// the RFC1918 subclass ONLY. The observed (timeout-on-public-IP) failure mode
+// is caught by Option B (waitForReadyOrDestroy port-bind 120s fail-fast), which
+// is the PRIMARY runtime catch. Offers with an empty public_ipaddr are KEPT
+// (cannot prove private) — Option B is their sole backstop.
+func (r *Reconciler) rejectPrivateIPOffers(offers []vast.Offer, log *slog.Logger, shape int, pass string) []vast.Offer {
+	if !r.cfg.PrimaryVastRejectPrivateIP {
+		return offers
+	}
+	before := len(offers)
+	offers = vast.RejectPrivateIPOffers(offers)
+	if dropped := before - len(offers); dropped > 0 {
+		log.Info("primary offer reject: RFC1918 public_ipaddr",
+			"dropped", dropped, "remaining", len(offers),
+			"shape", shape, "pass", pass)
+	}
+	return offers
 }
 
 // buildPodURLs is the shared 4-URL builder consumed by waitForReadyOrDestroy

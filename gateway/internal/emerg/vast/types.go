@@ -37,6 +37,8 @@
 //     `--onstart-cmd` does NOT shell-wrap in args runtype).
 package vast
 
+import "net"
+
 // Offer is one row of the `offers` array returned by GET /bundles?q=...
 //
 // `ID` is the ask_id used as the path parameter in PUT /asks/{id}/. Other
@@ -54,6 +56,64 @@ type Offer struct {
 	HostID      int64   `json:"host_id"`
 	Geolocation string  `json:"geolocation"`
 	Rentable    bool    `json:"rentable"`
+	// PublicIPAddr is the host-advertised public IP carried on the offer
+	// object (confirmed present on 55/55 offers in the 6.6.Y-01 spike sample,
+	// see 6.6.Y-01-SPIKE-EVIDENCE.md §"Answer Q2"). Consumed CLIENT-SIDE by
+	// RejectPrivateIPOffers (Option A, plan 6.6.Y-03) — the Vast search-filter
+	// map has no clean comparator for public_ipaddr, so the RFC1918 reject is
+	// always a post-search slice filter, mirroring vastutil.FilterBelowCap.
+	PublicIPAddr string `json:"public_ipaddr"`
+}
+
+// isRFC1918 reports whether ip parses to an IPv4 address inside one of the
+// three RFC1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16.
+// An empty string, an unparseable value, or an IPv6 address returns false
+// ("cannot prove private" → the offer is KEPT and Option B catches it at
+// runtime per the 6.6.Y-01 spike caveat).
+func isRFC1918(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return false // not IPv4 — RFC1918 is an IPv4-only concept
+	}
+	switch {
+	case v4[0] == 10:
+		return true // 10.0.0.0/8
+	case v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31:
+		return true // 172.16.0.0/12
+	case v4[0] == 192 && v4[1] == 168:
+		return true // 192.168.0.0/16
+	}
+	return false
+}
+
+// RejectPrivateIPOffers (Option A, plan 6.6.Y-03) drops offers whose
+// non-empty PublicIPAddr is an RFC1918 private address — the host advertises
+// a NAT-internal IP that will never be externally reachable (iter-1 root
+// cause: host advertised public_ipaddr=192.168.1.8, never bound public ports,
+// gateway silent-waited 17 min; see 06.6.X-RESEARCH-COLD-START §6).
+//
+// Offers with an EMPTY PublicIPAddr are KEPT — emptiness cannot prove the host
+// is private, and the runtime port-bind fail-fast (Option B in reconciler.go)
+// is the backstop for that subclass. Per the 6.6.Y-01 spike, neither observed
+// failing host advertised an RFC1918 IP, so this filter is a cheap guard for
+// the RFC1918 subclass ONLY; Option B is the primary runtime catch.
+//
+// Returns a fresh slice (mirrors vastutil.FilterBelowCap semantics); nil/empty
+// input yields an empty non-nil slice. The reconciler applies this BEFORE
+// FilterBelowCap, guarded by cfg.PrimaryVastRejectPrivateIP.
+func RejectPrivateIPOffers(offers []Offer) []Offer {
+	out := make([]Offer, 0, len(offers))
+	for _, o := range offers {
+		if o.PublicIPAddr != "" && isRFC1918(o.PublicIPAddr) {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
 }
 
 // PortBinding is one entry in the `ports["{container_port}/tcp"]` array
