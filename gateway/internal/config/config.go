@@ -210,11 +210,12 @@ type Config struct {
 	PrimarySpeachesImage        string  // PRIMARY_SPEACHES_IMAGE (default ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3)
 	PrimaryBGEM3WeightsKey      string  // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
 	PrimaryBGEM3WeightsSHA256   string  // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
-	PrimaryVastPriceCapDPH      float64 // PRIMARY_VAST_PRICE_CAP_DPH (DEPRECATED — historical default 2.20 sized for RTX 5090 EU running Qwen 27B + bge-m3 + KV cache + whisper-large-v3 on-pod; Phase 11.1 D-A4 dropped STT and Phase 11.1 D-A6 split caps into PRIMARY_VAST_PRICE_CAP_PRIMARY (0.30 / 1×3090) and PRIMARY_VAST_PRICE_CAP_FALLBACK (0.60 / 2×3090). Read-with-warn for backwards compat. TODO-remove-in-11.2.)
+	// Phase 6.6.Y — legacy primary-shape fields (PrimaryVastPriceCapDPH,
+	// PrimaryGPUName, PrimaryNumGPUs) DELETED. Their env vars now hard-fail
+	// at boot via ErrLegacyPrimaryEnv (06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6).
+	// Use the per-shape canonical fields below.
 	PrimaryVastMachineBlocklist []int64 // PRIMARY_VAST_MACHINE_BLOCKLIST (comma-separated Vast machine_ids excluded from offer search; catalogs hosts that fail pod boot, e.g. multi-GPU machines with broken CDI on non-zero GPU slots)
 	PrimaryVastMachineAllowlist []int64 // PRIMARY_VAST_MACHINE_ALLOWLIST (comma-separated Vast machine_ids PREFERRED in offer search; catalogs known-good hosts (CDI ok, reliability/price validated). PREFERENCE not guarantee: reconciler searches allowlist-only first, then broadens to the full qualified search when allowlisted hosts are unavailable. Vast is a spot marketplace — no machine can be reserved, so a hard filter would block provisioning whenever the host is busy; the broaden-fallback keeps the cheap-marketplace economics while still preferring trusted hosts. Empty = no preference (default))
-	PrimaryGPUName              string  // PRIMARY_GPU_NAME (DEPRECATED-alias for PrimaryVastGPUNamePrimary; Phase 11.1 D-A6 split shape into primary "RTX 3090" + fallback "RTX 3090" — leaving legacy "RTX 5090" in .env would silently overshoot the new $0.30 primary cap and starve the search. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
-	PrimaryNumGPUs              int     // PRIMARY_NUM_GPUS (DEPRECATED-alias for PrimaryVastNumGPUsFallback; legacy var historically meant "GPUs per primary pod" which is now the FALLBACK shape (default 2 — 2×3090) per primary-gpu-shape-06.8-final memory. Read-with-warn for backwards compat. TODO-remove-in-11.2.)
 	// Phase 11.1 D-A6 primary+fallback shape (split per Wave 0 EVIDENCE-00 —
 	// 4090 @ $0.40 returned 0 EU offers, pivoted to 2×3090 @ $0.60 fallback
 	// with 7 EU offers, cheapest $0.42/h). Same GPU model both shapes —
@@ -226,6 +227,9 @@ type Config struct {
 	PrimaryVastPriceCapFallback            float64  // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
 	PrimaryVastNumGPUsPrimary              int      // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
 	PrimaryVastNumGPUsFallback             int      // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
+	// Phase 6.6.Y cold-start plumbing (consumed by plan 6.6.Y-03).
+	PrimaryPublicPortBindBudgetSeconds int  // PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS (default 120 per D-02; operator-tunable budget for a freshly-provisioned Vast pod to bind its public port — gated on gateway-observable URL reachability, NOT the unreliable Vast ports map per 6.6.Y-01 spike)
+	PrimaryVastRejectPrivateIP         bool // PRIMARY_VAST_REJECT_PRIVATE_IP (default true; reject Vast hosts whose public IP falls in RFC1918 ranges. Opt-out: only literal "false" disables)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
 	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
@@ -283,6 +287,23 @@ var ErrMissingEnv = errors.New("config: required environment variable not set")
 // OR-FIX for months; the validation makes the misconfiguration crash boot
 // with an operator-actionable error rather than ship as a runtime 404.
 var ErrInvalidURLSuffix = errors.New("config: external upstream URL must not end with /v1")
+
+// ErrLegacyPrimaryEnv is returned by Load when one or more legacy primary-shape
+// env vars (PRIMARY_GPU_NAME, PRIMARY_VAST_PRICE_CAP_DPH, PRIMARY_NUM_GPUS) are
+// PRESENT in the environment — including when set to an empty string.
+//
+// Phase 6.6.Y / 06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6 hard fail-fast. The legacy
+// vars were soft-warn aliases for the per-shape canonical names
+// (PRIMARY_VAST_{NUM_GPUS,GPU_NAME,PRICE_CAP}_{PRIMARY,FALLBACK}). Silent env
+// drift (a stale PRIMARY_NUM_GPUS=2 row) mis-provisioned the wrong GPU shape, so
+// the gateway now REFUSES to boot until the legacy vars are removed from the
+// environment.
+//
+// Detection uses os.LookupEnv (review finding #6): policy is "legacy var PRESENT
+// fails", value-agnostic. Docker Compose can pass `PRIMARY_NUM_GPUS=` as an empty
+// row, and that must still hard-fail — os.Getenv would silently treat empty as
+// "unset" and let the drift through.
+var ErrLegacyPrimaryEnv = errors.New("config: legacy primary-shape env var(s) detected; use per-shape canonical names")
 
 // upstreamModelEnvVarMap is the curated Phase 06.9 D-06 env-override
 // observability mapping. Mirrors models.upstreamEnvVarMap in the models
@@ -451,11 +472,12 @@ func Load() (Config, error) {
 		PrimaryBGEM3WeightsKey: envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — no envOr default; empty passthrough so buildPrimaryCreateRequest rejects at build time.
 		PrimaryBGEM3WeightsSHA256:   os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
-		PrimaryVastPriceCapDPH:      floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"), 2.20),
 		PrimaryVastMachineBlocklist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
 		PrimaryVastMachineAllowlist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
-		PrimaryGPUName:              envOr("PRIMARY_GPU_NAME", "RTX 5090"),
-		PrimaryNumGPUs:              atoiOr(os.Getenv("PRIMARY_NUM_GPUS"), 1),
+		// Phase 6.6.Y — legacy PRIMARY_VAST_PRICE_CAP_DPH / PRIMARY_GPU_NAME /
+		// PRIMARY_NUM_GPUS reads DELETED; hard-fail enforced below via
+		// ErrLegacyPrimaryEnv. (Emerg VAST_PRICE_CAP_DPH above is a different
+		// subsystem and untouched.)
 		// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00).
 		// Defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
 		PrimaryVastGPUNamePrimary:              envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
@@ -464,6 +486,9 @@ func Load() (Config, error) {
 		PrimaryVastPriceCapFallback:            floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
 		PrimaryVastNumGPUsPrimary:              atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
 		PrimaryVastNumGPUsFallback:             atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
+		// Phase 6.6.Y cold-start readers (consumed by plan 6.6.Y-03).
+		PrimaryPublicPortBindBudgetSeconds:     atoiOr(os.Getenv("PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS"), 120),
+		PrimaryVastRejectPrivateIP:             os.Getenv("PRIMARY_VAST_REJECT_PRIVATE_IP") != "false",
 		PrimaryProvisionColdStartBudgetSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS"), 2400),
 		PrimaryProvisionFailureCooldownSeconds: atoiOr(os.Getenv("PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS"), 300),
 		MonthlyPrimaryBudgetBRL:                floatOr(os.Getenv("MONTHLY_PRIMARY_BUDGET_BRL"), 800.0),
@@ -605,40 +630,34 @@ func Load() (Config, error) {
 		}
 	}
 
-	// Phase 11.1 D-A6 deprecated-alias resolution. When the caller sets ONLY
-	// the legacy env var without its _PRIMARY/_FALLBACK counterpart, copy the
-	// legacy value into the new slot and emit a slog.Warn so operators see
-	// the rename. The new env var always wins when set non-empty.
+	// Phase 6.6.Y / 06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6 — HARD fail-fast on
+	// legacy primary-shape env vars. The Phase 11.1 soft-warn alias resolution
+	// is REMOVED: silent env drift (a stale PRIMARY_NUM_GPUS=2 row in the
+	// Portainer stack) mis-provisioned the wrong GPU shape, so the gateway now
+	// REFUSES to boot until the legacy vars are gone.
 	//
-	// Mapping (legacy → new slot):
-	//   - PRIMARY_GPU_NAME            → PrimaryVastGPUNamePrimary
-	//   - PRIMARY_VAST_PRICE_CAP_DPH  → PrimaryVastPriceCapPrimary
-	//   - PRIMARY_NUM_GPUS            → PrimaryVastNumGPUsFallback (legacy
-	//     variable historically meant "GPUs per primary pod", which is now
-	//     the FALLBACK shape per primary-gpu-shape-06.8-final memory.)
-	// Note: "set-but-empty" env (e.g. t.Setenv to "") counts as unset for
-	// alias purposes — operators clear vars by setting them blank in
-	// Portainer, not by unsetting the entry entirely.
-	if legacy := os.Getenv("PRIMARY_GPU_NAME"); legacy != "" {
-		if os.Getenv("PRIMARY_VAST_GPU_NAME_PRIMARY") == "" {
-			slog.Warn("config: PRIMARY_GPU_NAME is deprecated; use PRIMARY_VAST_GPU_NAME_PRIMARY",
-				"legacy_value", legacy)
-			cfg.PrimaryVastGPUNamePrimary = legacy
+	// Detection uses os.LookupEnv, NOT os.Getenv (review finding #6): policy is
+	// "legacy var PRESENT fails", value-agnostic. Docker Compose passes
+	// `PRIMARY_NUM_GPUS=` as an empty row, and that must still hard-fail —
+	// os.Getenv would silently treat empty as "unset" and let the drift
+	// through.
+	type legacyVar struct {
+		name string
+		hint string
+	}
+	legacyVars := []legacyVar{
+		{"PRIMARY_GPU_NAME", "PRIMARY_GPU_NAME is removed; set PRIMARY_VAST_GPU_NAME_PRIMARY=<v> (and PRIMARY_VAST_GPU_NAME_FALLBACK=<v> for the fallback shape)"},
+		{"PRIMARY_VAST_PRICE_CAP_DPH", "PRIMARY_VAST_PRICE_CAP_DPH is removed; set PRIMARY_VAST_PRICE_CAP_PRIMARY=<v> (and PRIMARY_VAST_PRICE_CAP_FALLBACK=<v> for the fallback shape)"},
+		{"PRIMARY_NUM_GPUS", "PRIMARY_NUM_GPUS is removed; set PRIMARY_VAST_NUM_GPUS_FALLBACK=<v> (and PRIMARY_VAST_NUM_GPUS_PRIMARY=1 if you want shape-0 search to find 1×3090 hosts first)"},
+	}
+	var legacyErrs []string
+	for _, lv := range legacyVars {
+		if _, present := os.LookupEnv(lv.name); present {
+			legacyErrs = append(legacyErrs, lv.hint)
 		}
 	}
-	if legacy := os.Getenv("PRIMARY_VAST_PRICE_CAP_DPH"); legacy != "" {
-		if os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY") == "" {
-			slog.Warn("config: PRIMARY_VAST_PRICE_CAP_DPH is deprecated; use PRIMARY_VAST_PRICE_CAP_PRIMARY",
-				"legacy_value", legacy)
-			cfg.PrimaryVastPriceCapPrimary = floatOr(legacy, cfg.PrimaryVastPriceCapPrimary)
-		}
-	}
-	if legacy := os.Getenv("PRIMARY_NUM_GPUS"); legacy != "" {
-		if os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK") == "" {
-			slog.Warn("config: PRIMARY_NUM_GPUS is deprecated; use PRIMARY_VAST_NUM_GPUS_FALLBACK (legacy var historically meant 'GPUs per primary pod', which is now the FALLBACK shape per Phase 11.1 D-A6)",
-				"legacy_value", legacy)
-			cfg.PrimaryVastNumGPUsFallback = atoiOr(legacy, cfg.PrimaryVastNumGPUsFallback)
-		}
+	if len(legacyErrs) > 0 {
+		return Config{}, fmt.Errorf("%w: %s", ErrLegacyPrimaryEnv, strings.Join(legacyErrs, "; "))
 	}
 
 	return cfg, nil
