@@ -5,12 +5,36 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 )
+
+// unsetLegacyPrimary removes the three legacy primary-shape env vars from the
+// environment entirely (os.Unsetenv, not t.Setenv("","")) so os.LookupEnv
+// returns ok=false and config.Load does NOT trip ErrLegacyPrimaryEnv. Phase
+// 6.6.Y: these vars now hard-fail when PRESENT (even empty), so a setUp helper
+// must UNSET them rather than blank them. t.Cleanup is not needed — the parent
+// test process inherits a clean env and subtests using t.Setenv are isolated.
+var legacyPrimaryEnvVars = []string{
+	"PRIMARY_GPU_NAME",
+	"PRIMARY_VAST_PRICE_CAP_DPH",
+	"PRIMARY_NUM_GPUS",
+}
+
+func unsetLegacyPrimary(t *testing.T) {
+	t.Helper()
+	for _, v := range legacyPrimaryEnvVars {
+		if orig, ok := os.LookupEnv(v); ok {
+			// Restore on cleanup so we never leak state into sibling tests.
+			t.Cleanup(func() { os.Setenv(v, orig) })
+		}
+		os.Unsetenv(v)
+	}
+}
 
 // allRequired are the env vars Load() insists on (Phase 3 MED-06:
 // UPSTREAM_HEALTH_BRIDGE_URL was demoted to optional; Phase 11.1 D-A4:
@@ -813,7 +837,9 @@ var phase6_6OptionalEnv = []string{
 	// Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed.
 	"PRIMARY_BGEM3_WEIGHTS_KEY",
 	"PRIMARY_BGEM3_WEIGHTS_SHA256",
-	"PRIMARY_VAST_PRICE_CAP_DPH",
+	// Phase 6.6.Y: PRIMARY_VAST_PRICE_CAP_DPH is now a legacy var that
+	// hard-fails when present — UNSET it via unsetLegacyPrimary(), do NOT
+	// t.Setenv("") it here (set-empty = present = ErrLegacyPrimaryEnv).
 	"PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS",
 	"PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS",
 	"MONTHLY_PRIMARY_BUDGET_BRL",
@@ -831,6 +857,9 @@ func clearPhase6_6(t *testing.T) {
 	for _, v := range phase6_6OptionalEnv {
 		t.Setenv(v, "")
 	}
+	// Phase 6.6.Y: legacy primary-shape vars must be UNSET (not blanked) or
+	// config.Load hard-fails with ErrLegacyPrimaryEnv.
+	unsetLegacyPrimary(t)
 }
 
 // TestConfig_PrimaryPod_DefaultsLoaded validates that with no Phase 6.6 env
@@ -919,8 +948,14 @@ func TestConfig_PrimaryPod_DefaultsLoaded(t *testing.T) {
 	if cfg.PrimaryBGEM3WeightsKey != "bge-m3/v1.0.0/model.tar.gz" {
 		t.Errorf("PrimaryBGEM3WeightsKey = %q, want bge-m3/v1.0.0/model.tar.gz", cfg.PrimaryBGEM3WeightsKey)
 	}
-	if cfg.PrimaryVastPriceCapDPH != 2.20 {
-		t.Errorf("PrimaryVastPriceCapDPH = %v, want 2.20 (RTX 5090 EU cap; UAT 17 follow-up)", cfg.PrimaryVastPriceCapDPH)
+	// Phase 6.6.Y: PrimaryVastPriceCapDPH field DELETED — per-shape caps
+	// (PrimaryVastPriceCapPrimary/Fallback) are asserted in
+	// TestPrimaryVastShapeDefaults. Assert the new cold-start readers instead.
+	if cfg.PrimaryPublicPortBindBudgetSeconds != 120 {
+		t.Errorf("PrimaryPublicPortBindBudgetSeconds = %d, want 120 (D-02 default)", cfg.PrimaryPublicPortBindBudgetSeconds)
+	}
+	if !cfg.PrimaryVastRejectPrivateIP {
+		t.Errorf("PrimaryVastRejectPrivateIP default = false, want true (opt-out only via literal \"false\")")
 	}
 	if cfg.MonthlyPrimaryBudgetBRL != 800.0 {
 		t.Errorf("MonthlyPrimaryBudgetBRL = %v, want 800.0 (Pitfall #12 separate from emergency)", cfg.MonthlyPrimaryBudgetBRL)
@@ -938,7 +973,10 @@ func TestConfig_PrimaryPod_EnvOverride(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("PRIMARY_POD_SCHEDULE_UP_HOUR", "7")
 	t.Setenv("PRIMARY_POD_SCHEDULE_DISABLED", "false")
-	t.Setenv("PRIMARY_VAST_PRICE_CAP_DPH", "0.50")
+	// Phase 6.6.Y cold-start readers (PRIMARY_VAST_PRICE_CAP_DPH override
+	// removed — that var now hard-fails).
+	t.Setenv("PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS", "200")
+	t.Setenv("PRIMARY_VAST_REJECT_PRIVATE_IP", "false")
 	t.Setenv("PRIMARY_LLAMA_ARGS", "--host,0.0.0.0,--port,8000")
 	cfg, err := config.Load()
 	if err != nil {
@@ -950,8 +988,11 @@ func TestConfig_PrimaryPod_EnvOverride(t *testing.T) {
 	if cfg.PrimaryPodScheduleDisabled {
 		t.Errorf("PrimaryPodScheduleDisabled override: want false")
 	}
-	if cfg.PrimaryVastPriceCapDPH != 0.50 {
-		t.Errorf("PrimaryVastPriceCapDPH override = %v, want 0.50", cfg.PrimaryVastPriceCapDPH)
+	if cfg.PrimaryPublicPortBindBudgetSeconds != 200 {
+		t.Errorf("PrimaryPublicPortBindBudgetSeconds override = %d, want 200", cfg.PrimaryPublicPortBindBudgetSeconds)
+	}
+	if cfg.PrimaryVastRejectPrivateIP {
+		t.Errorf("PrimaryVastRejectPrivateIP override = true, want false (literal \"false\" disables)")
 	}
 	if got := cfg.PrimaryLlamaArgs; len(got) != 4 ||
 		got[0] != "--host" || got[1] != "0.0.0.0" ||
@@ -1195,9 +1236,10 @@ var phase11_1OptionalEnv = []string{
 	"PRIMARY_VAST_PRICE_CAP_FALLBACK",
 	"PRIMARY_VAST_NUM_GPUS_PRIMARY",
 	"PRIMARY_VAST_NUM_GPUS_FALLBACK",
-	"PRIMARY_GPU_NAME",
-	"PRIMARY_VAST_PRICE_CAP_DPH",
-	"PRIMARY_NUM_GPUS",
+	// Phase 6.6.Y: the 3 legacy aliases (PRIMARY_GPU_NAME,
+	// PRIMARY_VAST_PRICE_CAP_DPH, PRIMARY_NUM_GPUS) are removed from this
+	// blank-list — blanking them = present = ErrLegacyPrimaryEnv. They are
+	// UNSET via unsetLegacyPrimary() in clearPhase11_1 instead.
 }
 
 func clearPhase11_1(t *testing.T) {
@@ -1205,6 +1247,7 @@ func clearPhase11_1(t *testing.T) {
 	for _, v := range phase11_1OptionalEnv {
 		t.Setenv(v, "")
 	}
+	unsetLegacyPrimary(t)
 }
 
 // TestPrimaryVastShapeDefaults — empty env produces the Wave 0 EVIDENCE-00
@@ -1241,11 +1284,17 @@ func TestPrimaryVastShapeDefaults(t *testing.T) {
 	}
 }
 
-// TestPrimaryVastLegacyAlias — setting only the legacy env vars without their
-// new counterparts populates the new slots (PRIMARY_GPU_NAME →
-// PrimaryVastGPUNamePrimary; PRIMARY_NUM_GPUS → PrimaryVastNumGPUsFallback)
-// and emits an slog.Warn observable in the captured handler buffer.
-func TestPrimaryVastLegacyAlias(t *testing.T) {
+// =============================================================================
+// Phase 6.6.Y — HARD fail-fast on legacy primary-shape env vars (ErrLegacyPrimaryEnv)
+// 06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6. Detection via os.LookupEnv: presence
+// fails, value-agnostic (empty-string row from Compose must still hard-fail).
+// =============================================================================
+
+// setUpAllCanonical clears every layer + sets all required + unsets the legacy
+// primary-shape vars, leaving a clean all-canonical environment. Used by the
+// fail-fast subtests which then set ONE legacy var.
+func setUpAllCanonical(t *testing.T) {
+	t.Helper()
 	clearAll(t)
 	clearPhase3(t)
 	clearPhase4(t)
@@ -1253,19 +1302,109 @@ func TestPrimaryVastLegacyAlias(t *testing.T) {
 	clearPhase6_6(t)
 	clearPhase11_1(t)
 	setAllRequired(t)
+}
 
-	t.Setenv("PRIMARY_GPU_NAME", "RTX 4090")
-	t.Setenv("PRIMARY_NUM_GPUS", "4")
+// TestPrimaryLegacyEnv_HardFail_NonEmpty asserts config.Load returns
+// ErrLegacyPrimaryEnv when each legacy var is SET to a non-empty value.
+func TestPrimaryLegacyEnv_HardFail_NonEmpty(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"PRIMARY_NUM_GPUS", "2"},
+		{"PRIMARY_GPU_NAME", "RTX 3090"},
+		{"PRIMARY_VAST_PRICE_CAP_DPH", "0.60"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setUpAllCanonical(t)
+			t.Setenv(c.name, c.value)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("expected error when %s=%q is present, got nil", c.name, c.value)
+			}
+			if !errors.Is(err, config.ErrLegacyPrimaryEnv) {
+				t.Fatalf("expected errors.Is(err, ErrLegacyPrimaryEnv) for %s, got err=%v", c.name, err)
+			}
+		})
+	}
+}
 
+// TestPrimaryLegacyEnv_HardFail_Empty asserts config.Load returns
+// ErrLegacyPrimaryEnv when each legacy var is set to the EMPTY string. This is
+// the review finding #6 policy: os.LookupEnv returns ok=true for an empty value
+// (Compose passes `PRIMARY_NUM_GPUS=` as an empty row), so presence — not value
+// — triggers the failure. os.Getenv would have silently let this drift through.
+func TestPrimaryLegacyEnv_HardFail_Empty(t *testing.T) {
+	for _, name := range []string{"PRIMARY_NUM_GPUS", "PRIMARY_GPU_NAME", "PRIMARY_VAST_PRICE_CAP_DPH"} {
+		t.Run(name, func(t *testing.T) {
+			setUpAllCanonical(t)
+			t.Setenv(name, "") // present-but-empty — os.LookupEnv ok=true
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("expected error when %s is present-but-empty, got nil", name)
+			}
+			if !errors.Is(err, config.ErrLegacyPrimaryEnv) {
+				t.Fatalf("expected errors.Is(err, ErrLegacyPrimaryEnv) for empty %s, got err=%v", name, err)
+			}
+		})
+	}
+}
+
+// TestPrimaryLegacyEnv_MigrationHint asserts the PRIMARY_NUM_GPUS error names
+// the canonical replacement so operators can self-serve the migration.
+func TestPrimaryLegacyEnv_MigrationHint(t *testing.T) {
+	setUpAllCanonical(t)
+	t.Setenv("PRIMARY_NUM_GPUS", "2")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "PRIMARY_VAST_NUM_GPUS_FALLBACK") {
+		t.Errorf("error must name canonical replacement PRIMARY_VAST_NUM_GPUS_FALLBACK; got %q", err.Error())
+	}
+}
+
+// TestPrimaryLegacyEnv_AllCanonicalNoLegacy asserts that with all 6 canonical
+// vars set and the 3 legacy vars fully UNSET (os.LookupEnv ok=false),
+// config.Load succeeds. unsetLegacyPrimary() guarantees the legacy vars are
+// absent — a t.Setenv("") would NOT suffice (that's the empty-presence case
+// which hard-fails).
+func TestPrimaryLegacyEnv_AllCanonicalNoLegacy(t *testing.T) {
+	setUpAllCanonical(t)
+	t.Setenv("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090")
+	t.Setenv("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090")
+	t.Setenv("PRIMARY_VAST_PRICE_CAP_PRIMARY", "0.30")
+	t.Setenv("PRIMARY_VAST_PRICE_CAP_FALLBACK", "0.60")
+	t.Setenv("PRIMARY_VAST_NUM_GPUS_PRIMARY", "1")
+	t.Setenv("PRIMARY_VAST_NUM_GPUS_FALLBACK", "2")
+	// Belt-and-suspenders: ensure no legacy var leaked in.
+	for _, v := range legacyPrimaryEnvVars {
+		if _, ok := os.LookupEnv(v); ok {
+			t.Fatalf("test precondition broken: legacy var %s is still present", v)
+		}
+	}
 	cfg, err := config.Load()
 	if err != nil {
-		t.Fatalf("unexpected: %v", err)
+		t.Fatalf("unexpected error with all-canonical, no-legacy env: %v", err)
 	}
-	if cfg.PrimaryVastGPUNamePrimary != "RTX 4090" {
-		t.Errorf("PrimaryVastGPUNamePrimary = %q, want \"RTX 4090\" (alias read from PRIMARY_GPU_NAME)", cfg.PrimaryVastGPUNamePrimary)
+	if cfg.PrimaryVastNumGPUsFallback != 2 {
+		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 2", cfg.PrimaryVastNumGPUsFallback)
 	}
-	if cfg.PrimaryVastNumGPUsFallback != 4 {
-		t.Errorf("PrimaryVastNumGPUsFallback = %d, want 4 (alias read from PRIMARY_NUM_GPUS)", cfg.PrimaryVastNumGPUsFallback)
+}
+
+// TestPrimaryLegacyEnv_EmergVarDoesNotTrigger asserts the unprefixed emergency
+// var VAST_PRICE_CAP_DPH (a DIFFERENT subsystem) does NOT trip
+// ErrLegacyPrimaryEnv — only the 3 PRIMARY_-prefixed legacy vars do.
+func TestPrimaryLegacyEnv_EmergVarDoesNotTrigger(t *testing.T) {
+	setUpAllCanonical(t)
+	t.Setenv("VAST_PRICE_CAP_DPH", "0.40") // emerg subsystem, NOT a primary alias
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("emerg VAST_PRICE_CAP_DPH must NOT trigger ErrLegacyPrimaryEnv; got err=%v", err)
+	}
+	if cfg.VastPriceCapDPH != 0.40 {
+		t.Errorf("emerg VastPriceCapDPH = %v, want 0.40 (untouched)", cfg.VastPriceCapDPH)
 	}
 }
 

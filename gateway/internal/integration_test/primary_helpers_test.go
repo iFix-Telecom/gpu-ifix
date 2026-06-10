@@ -72,7 +72,7 @@ func primaryTestCfg(t *testing.T) config.Config {
 	cfg.PrimaryProvisionFailureCooldownSeconds = 1
 	cfg.PrimaryPodScheduleGraceRampDownSeconds = 1
 	cfg.PrimaryPodScheduleProvisionLeadSeconds = 0
-	cfg.PrimaryVastPriceCapDPH = 0.40
+	// Phase 6.6.Y: cfg.PrimaryVastPriceCapDPH deleted.
 	cfg.USDToBRLRate = 5.0
 	cfg.MonthlyPrimaryBudgetBRL = 800
 	return cfg

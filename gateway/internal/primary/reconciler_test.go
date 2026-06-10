@@ -333,7 +333,7 @@ func testCfg(t *testing.T) config.Config {
 	c.PrimaryProvisionColdStartBudgetSeconds = 60 // shorter for tests
 	c.PrimaryPodScheduleGraceRampDownSeconds = 5
 	c.PrimaryPodScheduleProvisionLeadSeconds = 1800
-	c.PrimaryVastPriceCapDPH = 0.40
+	// Phase 6.6.Y: c.PrimaryVastPriceCapDPH deleted — per-shape caps below.
 	// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00 locked).
 	c.PrimaryVastGPUNamePrimary = "RTX 3090"
 	c.PrimaryVastGPUNameFallback = "RTX 3090"
