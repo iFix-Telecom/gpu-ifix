@@ -96,6 +96,14 @@ const (
 	primaryInstancePollInterval = 5 * time.Second
 )
 
+// primaryInstancePollIntervalForTest is the poll cadence waitForReadyOrDestroy
+// actually uses. It defaults to the production primaryInstancePollInterval and
+// is overridden ONLY in unit tests (6.6.Y-03 finding #7) to e.g. 5ms so the
+// port-bind-timeout fail-fast test completes deterministically in well under a
+// second instead of sleeping a real 5s tick + the 120s budget. Never mutated
+// in production code paths.
+var primaryInstancePollIntervalForTest = primaryInstancePollInterval
+
 // Start begins the reconciler. Spawns three goroutines:
 //
 //   - recovery: ONE-SHOT call to recoverOpenLifecycle BEFORE the loops
@@ -921,7 +929,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // network namespace. The reconciler does not need to know this — it polls
 // 4 URLs via the Vast.ai-exposed host port mapping.
 func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) error {
-	poll := time.NewTicker(primaryInstancePollInterval)
+	poll := time.NewTicker(primaryInstancePollIntervalForTest)
 	defer poll.Stop()
 	deadline := time.NewTimer(time.Duration(r.cfg.PrimaryProvisionColdStartBudgetSeconds) * time.Second)
 	defer deadline.Stop()
@@ -949,6 +957,19 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// so unrelated flaps do not accumulate strikes. See
 	// .planning/debug/primary-reconciler-silent-hang.md.
 	notFoundStrikes := 0
+
+	// Option B (plan 6.6.Y-03): port-bind health-gate fail-fast. The
+	// 6.6.Y-01 spike (n=2) confirmed hosts that reach actual_status=running
+	// with a populated Vast ports map yet stay externally UNREACHABLE for
+	// 40+ min while the gateway silent-waited the full cold-start budget.
+	// firstRunningAt anchors the budget at the FIRST running observation (not
+	// lifecycle start); once running but pod URLs stay empty past
+	// PrimaryPublicPortBindBudgetSeconds we BestEffortDestroy + close with
+	// closure_reason public_port_bind_timeout. The budget gates on
+	// gateway-observable URL reachability (buildPodURLs), NOT the unreliable
+	// Vast ports map (spike DIRECTIVE).
+	var firstRunningAt time.Time
+	portBindBudget := time.Duration(r.cfg.PrimaryPublicPortBindBudgetSeconds) * time.Second
 
 	for {
 		select {
@@ -1020,11 +1041,39 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// terminal `terminalConfirmStrikes` times IN A ROW for the close.
 			terminalStrikes = 0
 			if inst.ActualStatus != "running" {
+				// Reset the port-bind budget anchor: it tracks ONLY contiguous
+				// running time (consistent with how terminalStrikes resets), so
+				// a flap back below running does not burn the 120s budget.
+				firstRunningAt = time.Time{}
 				continue
+			}
+			// First running observation: anchor the port-bind budget here.
+			if firstRunningAt.IsZero() {
+				firstRunningAt = time.Now()
 			}
 			urls := r.buildPodURLs(inst)
 			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
-				// Ports not fully mapped yet — keep polling. W6 fix parity.
+				// Option B (plan 6.6.Y-03): previously a SILENT continue. The
+				// 6.6.Y-01 spike confirmed this exact branch swallowed a 17-min
+				// (40+ min observed) wait with zero operator-visible logs. Emit
+				// a per-poll Warn carrying the forensic fields, THEN fail fast
+				// once contiguous running time exceeds the bind budget.
+				elapsed := time.Since(firstRunningAt)
+				log.Warn("primary provisioning: running but public ports not bound",
+					"lifecycle_id", lifecycleID,
+					"vast_instance_id", instanceID,
+					"actual_status", inst.ActualStatus,
+					"ssh_host", inst.SshHost,
+					"public_ipaddr", inst.PublicIPAddr,
+					"elapsed_since_running_s", int(elapsed.Seconds()),
+					"budget_s", r.cfg.PrimaryPublicPortBindBudgetSeconds)
+				// `>=` (not `>`) so a budget of 0 fires on the first running
+				// poll — required for the deterministic timeout test (finding #7).
+				if elapsed >= portBindBudget {
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
+					return errors.New("primary: public port bind timeout")
+				}
 				continue
 			}
 			// 4-endpoint health check inside ONE container's namespace

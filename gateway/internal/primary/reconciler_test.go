@@ -1599,6 +1599,143 @@ func TestLeaderElection_OnlyOneLeaderEvaluatesTick(t *testing.T) {
 }
 
 // ===========================================================================
+// Plan 6.6.Y-03 Task 2 — Option B: port-bind health-gate fail-fast.
+// These tests drive the PRODUCTION waitForReadyOrDestroy (where the Option B
+// logic lives), overriding the package poll interval to 5ms so the loop runs
+// deterministically and fast (finding #7). PrimaryPublicPortBindBudgetSeconds
+// is set to 0 so the fail-fast fires on the FIRST running observation.
+// ===========================================================================
+
+// runningInstanceNoPorts returns a vast.Instance reporting actual_status=running
+// with NO published ports — i.e. buildPodURLs returns all-empty URLs. This is
+// the exact lie the 6.6.Y-01 spike characterized: running + populated/empty
+// ports map yet never externally reachable.
+func runningInstanceNoPorts(id int64) vast.Instance {
+	return vast.Instance{
+		ID:           id,
+		ActualStatus: "running",
+		SshHost:      "", // spike: ssh_host stayed null the entire lifetime
+		PublicIPAddr: "203.0.113.7",
+		Ports:        map[string][]vast.PortBinding{}, // empty → buildPodURLs empty
+	}
+}
+
+// withTestPollInterval overrides primaryInstancePollIntervalForTest for the
+// duration of a test and restores it on cleanup.
+func withTestPollInterval(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := primaryInstancePollIntervalForTest
+	primaryInstancePollIntervalForTest = d
+	t.Cleanup(func() { primaryInstancePollIntervalForTest = orig })
+}
+
+// TestWaitForReady_PublicPortBindTimeout asserts Option B: when the instance
+// reports actual_status=running but pod URLs stay empty past
+// PrimaryPublicPortBindBudgetSeconds (set to 0 for determinism), the
+// reconciler fails fast — BestEffortDestroy fires AND closeLifecycle records
+// closure_reason public_port_bind_timeout AND a non-nil error is returned.
+func TestWaitForReady_PublicPortBindTimeout(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // fail-fast on first running poll
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceNoPorts(42), nil
+		},
+	}
+	closeReasons := []string{}
+	var closeMu sync.Mutex
+	dbtx := &fakeDBTX{
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+				if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+					closeMu.Lock()
+					closeReasons = append(closeReasons, reason.String)
+					closeMu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Rule:        alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "running-but-unbound-ports past budget MUST return a non-nil error")
+	require.Contains(t, err.Error(), "public port bind timeout",
+		"error must identify the port-bind fail-fast path")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST fire exactly once on the port-bind timeout (orphan-prevention contract T-6.6.Y-03-02)")
+
+	closeMu.Lock()
+	defer closeMu.Unlock()
+	require.Contains(t, closeReasons, "public_port_bind_timeout",
+		"closeLifecycle must record the distinct closure_reason public_port_bind_timeout")
+}
+
+// TestWaitForReady_BindsBeforeBudget_NoFalseClose asserts no regression: a pod
+// that binds all 4 URLs before the budget proceeds to the existing 4-endpoint
+// health check and promotes to Ready — the port-bind branch must NOT fire a
+// false public_port_bind_timeout close. Budget is 0 here too; because the very
+// first poll already has all 4 URLs, the empty-URLs branch (and thus the
+// fail-fast) is never entered.
+func TestWaitForReady_BindsBeforeBudget_NoFalseClose(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceWithAllPorts(42), nil // all 4 ports bound immediately
+		},
+	}
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.NoError(t, err,
+		"a pod that binds all 4 URLs before budget MUST promote to Ready, not false-close on port-bind timeout")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"the bound-before-budget pod must reach Ready")
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST NOT fire when ports bind before the budget")
+}
+
+// ===========================================================================
 // Helpers for tests — waitForReadyOrDestroyForTest exposes the poll
 // interval so tests can drive the loop in milliseconds.
 // ===========================================================================

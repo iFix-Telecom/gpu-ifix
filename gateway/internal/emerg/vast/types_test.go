@@ -288,12 +288,12 @@ func TestWithMachineAllowlist(t *testing.T) {
 func TestRejectPrivateIPOffers(t *testing.T) {
 	// iter-1 root cause: host advertised public_ipaddr=192.168.1.8 → dropped.
 	offers := []Offer{
-		{ID: 1, PublicIPAddr: "192.168.1.8"},   // 192.168/16 → reject
-		{ID: 2, PublicIPAddr: "172.20.0.5"},    // 172.16/12 → reject
-		{ID: 3, PublicIPAddr: "10.5.5.5"},      // 10/8 → reject
-		{ID: 4, PublicIPAddr: "85.218.235.6"},  // routable → keep
-		{ID: 5, PublicIPAddr: ""},              // empty → keep (Option B backstop)
-		{ID: 6, PublicIPAddr: "172.32.0.1"},    // 172.32 is OUTSIDE 172.16/12 → keep
+		{ID: 1, PublicIPAddr: "192.168.1.8"},  // 192.168/16 → reject
+		{ID: 2, PublicIPAddr: "172.20.0.5"},   // 172.16/12 → reject
+		{ID: 3, PublicIPAddr: "10.5.5.5"},     // 10/8 → reject
+		{ID: 4, PublicIPAddr: "85.218.235.6"}, // routable → keep
+		{ID: 5, PublicIPAddr: ""},             // empty → keep (Option B backstop)
+		{ID: 6, PublicIPAddr: "172.32.0.1"},   // 172.32 is OUTSIDE 172.16/12 → keep
 	}
 
 	got := RejectPrivateIPOffers(offers)
