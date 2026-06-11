@@ -59,7 +59,11 @@ var primaryLlamaArgsDefault = []string{
 //     `: "${VAR:?required}"` so missing env triggers immediate non-zero
 //     exit BEFORE any download, MinIO alias setup, or supervisord exec.
 //   - `set -e` propagates aria2c / sha256sum / tar failures so a single
-//     bad weight download aborts the pod (T-06.6-02 mitigation).
+//     bad weight download aborts the pod (T-06.6-02 mitigation). The 3
+//     parallel weight downloads are `wait`ed PER-PID (CR-02 6.6.Y review):
+//     a multi-id `wait` returns only the LAST id's status, so a failed
+//     Qwen/bge-m3 download would otherwise be swallowed — each PID is
+//     waited individually and any non-zero aborts before supervisord exec.
 //
 // # Behaviour
 //
@@ -154,7 +158,20 @@ if [ -n "${PRIMARY_QWEN_JINJA_KEY:-}" ]; then
 fi
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 3 downloads"
-wait "$QWEN_PID" "$BGE_PID" "$WHISPER_PID"
+# CR-02 (6.6.Y review): bash 'wait' with multiple IDs returns ONLY the last
+# id's exit status, so a failed Qwen/bge-m3 download or SHA-256 mismatch was
+# silently swallowed and supervisord exec'd with a missing/corrupt weight.
+# Wait each PID individually and fail the whole onstart (no supervisord exec)
+# if ANY download/verify failed — restores the T-06.6-02 integrity fail-fast
+# for all 3 weights.
+FAIL=
+wait "$QWEN_PID" || FAIL=1
+wait "$BGE_PID" || FAIL=1
+wait "$WHISPER_PID" || FAIL=1
+if [ -n "$FAIL" ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: FATAL — weight download/verify failed; aborting before supervisord"
+  exit 1
+fi
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 3 downloads complete; extracting tarballs"
 
 tar -xzf /weights/bge-m3/model.tar.gz -C /weights/bge-m3
