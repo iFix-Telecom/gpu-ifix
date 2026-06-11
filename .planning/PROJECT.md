@@ -155,4 +155,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-20 after Phase 3 (resilience + fallback chain) complete*
+*Last updated: 2026-06-11 after Phase 6.6.Y (pod cold-start fix + env precedence canonical) complete — VERIFICATION passed 2/2*
