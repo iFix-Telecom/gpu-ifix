@@ -111,7 +111,9 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: checking env vars"
 : "${MINIO_SECRET_KEY:?required}"
 : "${PRIMARY_QWEN_WEIGHTS_KEY:?required}"
 : "${PRIMARY_QWEN_WEIGHTS_SHA256:?required}"
-# Phase 11.1 D-A4: PRIMARY_WHISPER_WEIGHTS_* removed (STT shrunk to tier-1-only).
+# Phase 11.2 D-B5'/6.6.Y-06 D-03: PRIMARY_WHISPER_WEIGHTS_* restored (tier-0 Whisper STT back on-pod).
+: "${PRIMARY_WHISPER_WEIGHTS_KEY:?required}"
+: "${PRIMARY_WHISPER_WEIGHTS_SHA256:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_KEY:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_SHA256:?required}"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: env vars OK"
@@ -136,24 +138,27 @@ download_with_verify() {
   echo "$sha  $target" | sha256sum -c -
 }
 
-mkdir -p /weights/qwen /weights/bge-m3 /app/templates
+mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 2 parallel downloads"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 3 parallel downloads"
 download_with_verify "$PRIMARY_QWEN_WEIGHTS_KEY" "/weights/qwen/model.gguf" "$PRIMARY_QWEN_WEIGHTS_SHA256" &
 QWEN_PID=$!
 download_with_verify "$PRIMARY_BGEM3_WEIGHTS_KEY" "/weights/bge-m3/model.tar.gz" "$PRIMARY_BGEM3_WEIGHTS_SHA256" &
 BGE_PID=$!
+download_with_verify "$PRIMARY_WHISPER_WEIGHTS_KEY" "/weights/whisper/model.tar.gz" "$PRIMARY_WHISPER_WEIGHTS_SHA256" &
+WHISPER_PID=$!
 
 if [ -n "${PRIMARY_QWEN_JINJA_KEY:-}" ]; then
   : "${PRIMARY_QWEN_JINJA_SHA256:?required when PRIMARY_QWEN_JINJA_KEY is set}"
   download_with_verify "$PRIMARY_QWEN_JINJA_KEY" "/app/templates/qwen3.6.jinja" "$PRIMARY_QWEN_JINJA_SHA256"
 fi
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 2 downloads"
-wait "$QWEN_PID" "$BGE_PID"
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 2 downloads complete; extracting tarball"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 3 downloads"
+wait "$QWEN_PID" "$BGE_PID" "$WHISPER_PID"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 3 downloads complete; extracting tarballs"
 
 tar -xzf /weights/bge-m3/model.tar.gz -C /weights/bge-m3
+tar -xzf /weights/whisper/model.tar.gz -C /weights/whisper
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisord"
 
 `
