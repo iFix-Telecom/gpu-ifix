@@ -140,6 +140,28 @@ type Deps struct {
 	// evaluateProvisioning can be exercised deterministically).
 	HealthCheck func(ctx context.Context, url string) bool
 
+	// Reachable is the connection-LEVEL reachability probe for Option B
+	// (CR-01 6.6.Y review). Given a pod URL it performs a cheap TCP dial to
+	// the URL's host:port and returns:
+	//
+	//   - true  → the host accepted the connection OR refused it (the host
+	//             is NAT-published and responding; services may still be
+	//             booting — a legitimate cold start, keep polling).
+	//   - false → connection-level failure (dial timeout / no route): the
+	//             host never NAT-published its port. This is the EXACT spike
+	//             signature (running + populated Vast ports map yet TCP
+	//             timeout from external vantage points for 40+ min).
+	//
+	// This is the gate Option B MUST key on — NOT buildPodURLs / the Vast
+	// ports map (6.6.Y-01 spike DIRECTIVE), and NOT the HTTP HealthCheck
+	// (which cannot distinguish "host unreachable" from "host up, service
+	// not ready yet" — killing the latter would defeat the cold-start
+	// budget that intentionally allows slow post-reachability weight
+	// downloads). When nil the port-bind budget gate is skipped (no
+	// false-positive destroys); the cold-start budget remains the backstop.
+	// Tests inject a scriptable closure.
+	Reachable func(ctx context.Context, url string) bool
+
 	// Loader is the upstream loader (3-role tier-0 override target). Plan
 	// 06.6-06b satisfies LoaderAdapter on the real *upstreams.Loader.
 	Loader LoaderAdapter

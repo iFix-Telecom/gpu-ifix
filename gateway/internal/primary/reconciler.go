@@ -958,16 +958,35 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// .planning/debug/primary-reconciler-silent-hang.md.
 	notFoundStrikes := 0
 
-	// Option B (plan 6.6.Y-03): port-bind health-gate fail-fast. The
+	// Option B (plan 6.6.Y-03 + CR-01 6.6.Y review): port-bind fail-fast. The
 	// 6.6.Y-01 spike (n=2) confirmed hosts that reach actual_status=running
-	// with a populated Vast ports map yet stay externally UNREACHABLE for
-	// 40+ min while the gateway silent-waited the full cold-start budget.
+	// with a POPULATED Vast ports map yet stay externally UNREACHABLE (TCP
+	// probes from two vantage points timed out) for 40+ min while the gateway
+	// silent-waited the full cold-start budget.
+	//
 	// firstRunningAt anchors the budget at the FIRST running observation (not
-	// lifecycle start); once running but pod URLs stay empty past
-	// PrimaryPublicPortBindBudgetSeconds we BestEffortDestroy + close with
-	// closure_reason public_port_bind_timeout. The budget gates on
-	// gateway-observable URL reachability (buildPodURLs), NOT the unreliable
-	// Vast ports map (spike DIRECTIVE).
+	// lifecycle start). Two distinct catches share that anchor:
+	//
+	//   1. empty-URLs branch — pod reports running but buildPodURLs yields an
+	//      empty URL (Vast ports map empty). The narrower subclass; neither
+	//      OBSERVED failure exhibited it, but it is a cheap belt-and-braces.
+	//
+	//   2. TCP-unreachable branch (CR-01) — pod reports running, buildPodURLs
+	//      yields 4 NON-empty URLs (populated ports map), yet a connection-
+	//      level dial to the LLM host:port fails (timeout / no route). This
+	//      is the ACTUAL observed failure signature the empty-URLs gate could
+	//      never catch, because buildPodURLs IS the Vast ports map the spike
+	//      DIRECTIVE deemed an unreliable readiness signal.
+	//
+	// Both branches BestEffortDestroy + close with closure_reason
+	// public_port_bind_timeout once contiguous running time exceeds
+	// PrimaryPublicPortBindBudgetSeconds. CRITICAL distinction (spike + design
+	// note): the gate keys on CONNECTION-LEVEL failure (no TCP response at
+	// all), NOT on a not-ready HTTP response. A host that is TCP-reachable but
+	// whose services are still warming (HealthCheck failing while onstart
+	// downloads weights) is a LEGITIMATE cold start and must keep polling
+	// under the cold-start budget — Reachable() returns true for connect /
+	// connection-refused and false only for dial timeout / no route.
 	var firstRunningAt time.Time
 	portBindBudget := time.Duration(r.cfg.PrimaryPublicPortBindBudgetSeconds) * time.Second
 
@@ -1076,6 +1095,37 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				}
 				continue
 			}
+			// Option B primary catch (CR-01 6.6.Y review): URLs are now
+			// non-empty (Vast ports map populated) — but the spike proved this
+			// is NOT a reachability guarantee. Probe the LLM host:port at the
+			// CONNECTION level. A dial timeout / no-route (Reachable == false)
+			// is the observed failure signature: running + published ports yet
+			// externally unreachable. Distinguished from a host that is TCP-
+			// reachable but not-yet-ready (Reachable == true, HealthCheck
+			// below still failing) — that is a legitimate slow cold start and
+			// must keep polling under the cold-start budget, NOT be killed.
+			// Skipped entirely when no Reachable probe is wired (nil) so unit
+			// tests / minimal Deps never false-positive destroy.
+			if r.deps.Reachable != nil && !r.deps.Reachable(ctx, urls.LLM) {
+				elapsed := time.Since(firstRunningAt)
+				log.Warn("primary provisioning: running, ports published, host TCP-unreachable",
+					"lifecycle_id", lifecycleID,
+					"vast_instance_id", instanceID,
+					"actual_status", inst.ActualStatus,
+					"ssh_host", inst.SshHost,
+					"public_ipaddr", inst.PublicIPAddr,
+					"llm_url", urls.LLM,
+					"elapsed_since_running_s", int(elapsed.Seconds()),
+					"budget_s", r.cfg.PrimaryPublicPortBindBudgetSeconds)
+				// `>=` (not `>`) so a budget of 0 fires on the first running
+				// poll — required for the deterministic timeout test.
+				if elapsed >= portBindBudget {
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
+					return errors.New("primary: public port bind timeout")
+				}
+				continue
+			}
 			// 4-endpoint health check inside ONE container's namespace
 			// (Phase 11.2 supervisord 4-services: llm/stt/tts/dcgm — embed
 			// left the pod per D-03). All 4 must pass. Phase 11.2 (D-B5′)
@@ -1120,9 +1170,13 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 // RFC1918 IP — both carried public routable IPs and timed out anyway. Option A
 // alone would NOT have caught either observed failure; it is a cheap guard for
 // the RFC1918 subclass ONLY. The observed (timeout-on-public-IP) failure mode
-// is caught by Option B (waitForReadyOrDestroy port-bind 120s fail-fast), which
-// is the PRIMARY runtime catch. Offers with an empty public_ipaddr are KEPT
-// (cannot prove private) — Option B is their sole backstop.
+// is caught by Option B's CONNECTION-LEVEL reachability gate (CR-01): once the
+// pod is running with published ports, a TCP dial to the LLM host:port that
+// times out (Deps.Reachable == false) trips public_port_bind_timeout — this is
+// the gateway-observable reachability signal the spike DIRECTIVE mandated, NOT
+// the Vast ports map (which buildPodURLs reads and which lies). Offers with an
+// empty public_ipaddr are KEPT (cannot prove private) — Option B is their sole
+// backstop.
 func (r *Reconciler) rejectPrivateIPOffers(offers []vast.Offer, log *slog.Logger, shape int, pass string) []vast.Offer {
 	if !r.cfg.PrimaryVastRejectPrivateIP {
 		return offers

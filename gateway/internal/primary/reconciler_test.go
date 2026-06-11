@@ -1735,6 +1735,132 @@ func TestWaitForReady_BindsBeforeBudget_NoFalseClose(t *testing.T) {
 		"BestEffortDestroy MUST NOT fire when ports bind before the budget")
 }
 
+// TestWaitForReady_RunningPortsBoundButTCPUnreachable_DestroysWithinBudget is
+// the CR-01 (6.6.Y review) regression test for the ACTUAL observed spike
+// failure: the instance reports actual_status=running WITH a fully populated
+// Vast ports map (buildPodURLs returns 4 non-empty URLs) — yet the host is
+// externally TCP-unreachable (Deps.Reachable returns false, the dial-timeout
+// signature). The empty-URLs branch can NEVER catch this (URLs are non-empty);
+// only the connection-level reachability gate does. With budget=0 the fail-fast
+// must fire on the first running poll: BestEffortDestroy + closure_reason
+// public_port_bind_timeout + non-nil error.
+func TestWaitForReady_RunningPortsBoundButTCPUnreachable_DestroysWithinBudget(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // fail-fast on first running poll
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			// populated ports map — the exact spike "lie": running + ports
+			// bound in the Vast API, yet unreachable from outside.
+			return runningInstanceWithAllPorts(42), nil
+		},
+	}
+	closeReasons := []string{}
+	var closeMu sync.Mutex
+	dbtx := &fakeDBTX{
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+				if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+					closeMu.Lock()
+					closeReasons = append(closeReasons, reason.String)
+					closeMu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Rule: alwaysInPeakRule(),
+		// HealthCheck would PASS — proving the kill is driven by the
+		// connection-level Reachable gate, not the HTTP health gate.
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		// connection-level dial times out: host never NAT-published.
+		Reachable: func(_ context.Context, _ string) bool { return false },
+		Vast:      fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err,
+		"running + ports-bound + TCP-unreachable past budget MUST return a non-nil error")
+	require.Contains(t, err.Error(), "public port bind timeout",
+		"error must identify the port-bind fail-fast path even when URLs are non-empty")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST fire exactly once on the TCP-unreachable port-bind timeout")
+
+	closeMu.Lock()
+	defer closeMu.Unlock()
+	require.Contains(t, closeReasons, "public_port_bind_timeout",
+		"closeLifecycle must record public_port_bind_timeout for the unreachable-but-ports-bound path")
+}
+
+// TestWaitForReady_ReachableButNotReady_NoFalseClose asserts the design-note
+// invariant (CR-01): a host that is TCP-reachable (Reachable == true) but whose
+// services are still warming (HealthCheck failing while onstart downloads
+// weights) is a LEGITIMATE cold start and MUST NOT be killed by the port-bind
+// fail-fast — even with budget=0. The connection-level gate is satisfied, so
+// the loop falls through to the HTTP health checks and keeps polling under the
+// cold-start budget. Here we let it eventually pass health and promote.
+func TestWaitForReady_ReachableButNotReady_NoFalseClose(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // would fire immediately IF gated on Reachable==false
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceWithAllPorts(42), nil
+		},
+	}
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	// HealthCheck fails for the first few polls (services warming) then passes.
+	var healthCalls atomic.Int32
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		// host is reachable the whole time — NOT the spike failure signature.
+		Reachable: func(_ context.Context, _ string) bool { return true },
+		HealthCheck: func(_ context.Context, _ string) bool {
+			// first 4 calls (one full poll's worth across LLM URL) fail to
+			// simulate warming, then everything passes.
+			return healthCalls.Add(1) > 1
+		},
+		Vast: fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.NoError(t, err,
+		"a TCP-reachable but still-warming pod MUST NOT false-close on port-bind timeout; it keeps polling and promotes")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"the reachable-but-warming pod must eventually reach Ready")
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST NOT fire when the host is TCP-reachable (cold-start budget owns the warming window)")
+}
+
 // ===========================================================================
 // Helpers for tests — waitForReadyOrDestroyForTest exposes the poll
 // interval so tests can drive the loop in milliseconds.

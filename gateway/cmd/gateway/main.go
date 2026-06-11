@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -950,11 +951,46 @@ func main() {
 			return resp.StatusCode >= 200 && resp.StatusCode < 300
 		}
 
+		// CR-01 (6.6.Y): connection-LEVEL reachability probe for Option B.
+		// Distinguishes the observed spike failure (running + published Vast
+		// ports yet TCP-unreachable: dial TIMEOUT) from a legitimately-warming
+		// cold start (host up, service not ready: connect SUCCESS or REFUSED).
+		// Returns true if the TCP dial connects OR is refused (host responding
+		// — keep polling under the cold-start budget); false ONLY on a dial
+		// timeout / no-route (host never NAT-published — fail fast once the
+		// port-bind budget is exhausted). Keys on the URL's host:port, NOT on
+		// the unreliable Vast ports map (spike DIRECTIVE).
+		primaryReachable := func(rctx context.Context, rawURL string) bool {
+			if rawURL == "" {
+				return false
+			}
+			u, perr := url.Parse(rawURL)
+			if perr != nil || u.Host == "" {
+				return false
+			}
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			conn, derr := dialer.DialContext(rctx, "tcp", u.Host)
+			if derr == nil {
+				_ = conn.Close()
+				return true // host accepted the connection — reachable
+			}
+			// A connection REFUSED means the host IS reachable (NAT-published)
+			// but nothing is listening on the port yet — services still
+			// booting. That is a legitimate cold start, NOT the spike failure.
+			// Only a dial TIMEOUT / no-route (host never published its port)
+			// counts as unreachable.
+			if errors.Is(derr, syscall.ECONNREFUSED) {
+				return true
+			}
+			return false
+		}
+
 		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
 			Cfg:         cfg,
 			Log:         log.With("subsys", "primary"),
 			Vast:        primaryVastClient,
 			HealthCheck: primaryHealthCheck,
+			Reachable:   primaryReachable,
 			Loader:      loader,       // *upstreams.Loader satisfies LoaderAdapter (3-role per Plan 06.6-06b)
 			DCGMScraper: dcgmScraper,  // *dcgm.Scraper satisfies DCGMScraperAdapter (SetURL per Plan 06.6-06b); nil-safe
 			Inflight:    shedInflight, // *shed.InflightRegistry satisfies InflightAdapter (Count per Plan 06.6-06b)
