@@ -207,9 +207,9 @@ type Config struct {
 	PrimaryWhisperWeightsKey    string // PRIMARY_WHISPER_WEIGHTS_KEY (MinIO; default whisper-large-v3/v1.0.0/model.tar.gz)
 	PrimaryWhisperWeightsSHA256 string // PRIMARY_WHISPER_WEIGHTS_SHA256 (FAIL-FAST; reviews consensus action #6)
 	// Phase 11.2 D-B1 LOCKED — speaches image pin (Phase 06.7/06.8 UAT-validated, HF_HUB_CACHE workaround known).
-	PrimarySpeachesImage        string  // PRIMARY_SPEACHES_IMAGE (default ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3)
-	PrimaryBGEM3WeightsKey      string  // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
-	PrimaryBGEM3WeightsSHA256   string  // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
+	PrimarySpeachesImage      string // PRIMARY_SPEACHES_IMAGE (default ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3)
+	PrimaryBGEM3WeightsKey    string // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
+	PrimaryBGEM3WeightsSHA256 string // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
 	// Phase 6.6.Y — legacy primary-shape fields (PrimaryVastPriceCapDPH,
 	// PrimaryGPUName, PrimaryNumGPUs) DELETED. Their env vars now hard-fail
 	// at boot via ErrLegacyPrimaryEnv (06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6).
@@ -221,15 +221,15 @@ type Config struct {
 	// with 7 EU offers, cheapest $0.42/h). Same GPU model both shapes —
 	// single CDI/driver matrix. Reconciler iterates [primary, fallback]
 	// filters and breaks on the first non-empty offer list.
-	PrimaryVastGPUNamePrimary              string   // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
-	PrimaryVastGPUNameFallback             string   // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
-	PrimaryVastPriceCapPrimary             float64  // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
-	PrimaryVastPriceCapFallback            float64  // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
-	PrimaryVastNumGPUsPrimary              int      // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
-	PrimaryVastNumGPUsFallback             int      // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
+	PrimaryVastGPUNamePrimary   string  // PRIMARY_VAST_GPU_NAME_PRIMARY (default "RTX 3090"; primary shape — single 3090 ~$0.30/h, llama-only flux)
+	PrimaryVastGPUNameFallback  string  // PRIMARY_VAST_GPU_NAME_FALLBACK (default "RTX 3090"; fallback shape — 2×3090 @ ~$0.60/h, deeper EU pool)
+	PrimaryVastPriceCapPrimary  float64 // PRIMARY_VAST_PRICE_CAP_PRIMARY (default 0.30; single 3090 EU cap)
+	PrimaryVastPriceCapFallback float64 // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
+	PrimaryVastNumGPUsPrimary   int     // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
+	PrimaryVastNumGPUsFallback  int     // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
 	// Phase 6.6.Y cold-start plumbing (consumed by plan 6.6.Y-03).
-	PrimaryPublicPortBindBudgetSeconds int  // PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS (default 120 per D-02; operator-tunable budget for a freshly-provisioned Vast pod to bind its public port — gated on gateway-observable URL reachability, NOT the unreliable Vast ports map per 6.6.Y-01 spike)
-	PrimaryVastRejectPrivateIP         bool // PRIMARY_VAST_REJECT_PRIVATE_IP (default true; reject Vast hosts whose public IP falls in RFC1918 ranges. Opt-out: only literal "false" disables)
+	PrimaryPublicPortBindBudgetSeconds     int      // PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS (default 120 per D-02; operator-tunable budget for a freshly-provisioned Vast pod to bind its public port — gated on gateway-observable URL reachability, NOT the unreliable Vast ports map per 6.6.Y-01 spike)
+	PrimaryVastRejectPrivateIP             bool     // PRIMARY_VAST_REJECT_PRIVATE_IP (default true; reject Vast hosts whose public IP falls in RFC1918 ranges. Opt-out: only literal "false" disables)
 	PrimaryProvisionColdStartBudgetSeconds int      // PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS (default 2400 = 40min; WAVE0-GATES Decision 6 — generous margin for slow inet hosts + multi-stage image pull + aria2c weight download + 4-service supervisord startup; reconciler treats >40min as provision failure)
 	PrimaryProvisionFailureCooldownSeconds int      // PRIMARY_PROVISION_FAILURE_COOLDOWN_SECONDS (default 300 = 5min; mirror emerg's ProvisionFailureCooldownSeconds=60 scaled-up for schedule cadence; Plan 06.6-06a reconciler.evaluateAsleep enforces)
 	MonthlyPrimaryBudgetBRL                float64  // MONTHLY_PRIMARY_BUDGET_BRL (default 800.0; Pitfall #12 separate from emergency budget — primary pod runs ~14h × 22 days × $0.40 ≈ R$130/mo, budget gives 5x headroom for soak phase)
@@ -480,12 +480,12 @@ func Load() (Config, error) {
 		// subsystem and untouched.)
 		// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00).
 		// Defaults: 1×RTX 3090 @ $0.30 primary; 2×RTX 3090 @ $0.60 fallback.
-		PrimaryVastGPUNamePrimary:              envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
-		PrimaryVastGPUNameFallback:             envOr("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090"),
-		PrimaryVastPriceCapPrimary:             floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY"), 0.30),
-		PrimaryVastPriceCapFallback:            floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
-		PrimaryVastNumGPUsPrimary:              atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
-		PrimaryVastNumGPUsFallback:             atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
+		PrimaryVastGPUNamePrimary:   envOr("PRIMARY_VAST_GPU_NAME_PRIMARY", "RTX 3090"),
+		PrimaryVastGPUNameFallback:  envOr("PRIMARY_VAST_GPU_NAME_FALLBACK", "RTX 3090"),
+		PrimaryVastPriceCapPrimary:  floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_PRIMARY"), 0.30),
+		PrimaryVastPriceCapFallback: floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
+		PrimaryVastNumGPUsPrimary:   atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
+		PrimaryVastNumGPUsFallback:  atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
 		// Phase 6.6.Y cold-start readers (consumed by plan 6.6.Y-03).
 		PrimaryPublicPortBindBudgetSeconds:     atoiOr(os.Getenv("PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS"), 120),
 		PrimaryVastRejectPrivateIP:             os.Getenv("PRIMARY_VAST_REJECT_PRIVATE_IP") != "false",
