@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-06-12T12:57:58.835Z"
+last_updated: "2026-06-12T21:11:10.379Z"
 progress:
   total_phases: 9
   completed_phases: 6
@@ -194,7 +194,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ## Session Continuity
 
-- **Last session:** 2026-06-12T12:57:58.822Z
+- **Last session:** 2026-06-12T21:11:10.366Z
 - **Next session should:** Run the Phase 06.7 live HUMAN-UAT. Plan 06.7-09 Task 1 is DONE (commit `41039b4`: `docs/RUNBOOK-PRIMARY-POD-TTS.md` + `06.7-HUMAN-UAT.md` 6-scenario sheet + CLEANUP). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run S1–S6 + cleanup on a live Vast 5090 (real GPU spend; autonomous mode cannot satisfy it), sign each PASS/FAIL, record spend. After all 6 + cleanup are signed: write `06.7-09-SUMMARY.md` + `06.7-VERIFICATION.md`, then `state advance-plan`. Any FAIL → `/gsd:plan-phase 06.7 --gaps`. Phase 06.7 Plan stays at 9 (06.7-09) — NOT advanced (plan incomplete until UAT signed).
 
 ---
