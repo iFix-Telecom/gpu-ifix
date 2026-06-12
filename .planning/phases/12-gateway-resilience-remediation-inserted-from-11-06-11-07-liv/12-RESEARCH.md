@@ -425,19 +425,19 @@ var PrimaryDeathDetectedTotal = promauto.NewCounterVec(
 
 **These five assumptions are the items discuss-phase / planning should confirm before locking the corresponding tasks.** A1 and A4 are the highest-leverage (they shape the death classifier and the alert wiring).
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **D-13 force-close mechanism**
+1. **D-13 force-close mechanism** — RESOLVED: extend force-override key with State="closed" honored by EffectiveState (Plan 12-01 Task 2)
    - What we know: The force-override Redis key is open-only today (force_override.go:84); the field is string-typed for forward-compat.
    - What's unclear: Whether to extend `State` to "closed" (and teach `EffectiveState` to honor it) vs delete-key + reset gobreaker counts directly on markReady.
    - Recommendation: Plan a small spike/decision task in the RES-12 wave (D-13 belongs with markReady). Prefer extending the existing key semantics for symmetry with D-04's force-open.
 
-2. **Billing-stop signal source (A1)**
+2. **Billing-stop signal source (A1)** — RESOLVED: dual-signal (IntendedStatus==stopped primary + ActualStatus==exited && StatusMsg credit/account fallback), confirmed against live JSON before merge (Plan 12-02 Task 2)
    - What we know: `Instance.IsTerminal()` covers the `exited` shape; 11-06 saw `actual_status=exited`, `intended_status=stopped`, balance -$0.056.
    - What's unclear: Whether `GetInstance` returns a balance/credit field, or whether billing-stop must be inferred from `intended_status=stopped` + a separate account-balance call.
    - Recommendation: During planning, inspect one live billing-stopped instance's full JSON to pin the exact field for the distinct alert.
 
-3. **D-05 trackedID repair: source of truth**
+3. **D-05 trackedID repair: source of truth** — RESOLVED: both — repair write path AND fall back to open primary_lifecycles row at poll time (Plan 12-02 Task 1)
    - What we know: in-memory `activeInstanceID` can be 0 while the proxy route + open DB row exist.
    - What's unclear: Whether to repair the force-up path (always set `activeInstanceID`) or reconcile from the DB row at poll time, or both.
    - Recommendation: Do both — repair the write path AND have the death poll fall back to the open `primary_lifecycles` row (defense in depth; the recover path already reads that row).
