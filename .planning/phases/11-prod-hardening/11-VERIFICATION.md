@@ -4,6 +4,30 @@ slug: prod-hardening
 status: passed_partial
 closed_at: 2026-05-28T01:42Z
 addendum_closed_at: 2026-05-28T20:48Z
+addendum2_closed_at: 2026-06-12T13:30Z
+addendum2_summary: |
+  PRD-01 + PRD-02 live UATs EXECUTED 2026-06-11/12 (plans 11-06 + 11-07
+  complete, 10/10 plans with SUMMARY). Both flipped from "deferred" to
+  "executed-with-findings":
+  PRD-01 (11-06): 30-min sustained replay of real 1207-row prod fixture
+  against ai-gateway.converse-ai.app with healthy 1×RTX 5090 primary
+  Ready throughout. gates.all_passed=FALSE — chat p95 21680ms (limit
+  5000), embed p95 2662ms (limit 1000), error rate 2.73% (limit 1%);
+  STT p95 PASS, zero panics PASS. Honest saturation baseline of the
+  single-GPU shape at concurrency 50 / speedup 4 — input for Phase 12.
+  PRD-02 (11-07): mid-load Vast DELETE executed. CRITICAL FINDING:
+  NO autonomous failover exists. FSM stayed `ready` through the full
+  90s observation window (SEED-011 confirmed live on the destroy path
+  despite 01e7558), no tier-1 takeover, 100× HTTP 502
+  upstream_unreachable in T+0..60s (MEDIUM #2 hard-gate breach).
+  Zero panics. The failure IS the finding — canonical class-1 incident
+  recipe for RUNBOOK-INCIDENTS.
+  Also surfaced: SEED-012 prober bug (loader.All() ignores
+  tier0Override → local-* breakers flap open forever in prod;
+  /v1/health/upstreams 503 with healthy pod).
+  Remediation routed to Phase 12 (reconciler death detection +
+  prober override + tier-1 failover + capacity). Spend: $0.82 of $5
+  cap. Teardown clean: 0 instances, FSM asleep, credit $19.39.
 addendum_summary: |
   PRD-03 flipped passed_partial → passed after live smoke 4/4 GREEN
   validation of the audit-pipeline upstream='blocked_sensitive' label
@@ -45,8 +69,8 @@ status_flip_rationale: |
   stay deferred — primary reconciler tech debt is unblocked but live UAT
   not yet executed in this session.
 prds_status:
-  PRD-01: passed_partial   # infra shipped (11-01); 30-min sustained live UAT deferred (11-06 blocked)
-  PRD-02: passed_partial   # chaos script shipped (11-07); live exec deferred (depends_on 11-06)
+  PRD-01: executed_with_findings   # 30-min live run 2026-06-12 (11-06): SLO gates FAIL (chat p95 21.7s, err 2.73%) — saturation baseline captured, remediation → Phase 12
+  PRD-02: executed_with_findings   # live Vast DELETE 2026-06-12 (11-07): NO autonomous failover (SEED-011 live-confirmed, 100×502) — CRITICAL, remediation → Phase 12
   PRD-03: passed           # Segment A LIVE PASS 3/3 (11-08); Segment B 4/4 PASS 2026-05-28T20:48Z post-audit-pipeline closure (5 PRs #8/#9/#11/#12/#13)
   PRD-04: passed           # RUNBOOK-INCIDENTS + POSTMORTEM-TEMPLATE + RUNBOOK-2FA-RECOVERY (11-09)
   PRD-05: passed           # LGPD-SIGNOFF-PROCESS + LGPD-SIGNOFF-LETTER-TEMPLATE (11-03)

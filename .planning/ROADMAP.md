@@ -164,3 +164,18 @@ Plans:
 - [x] 06.9-05a-PLAN.md — Wave 3a (split): R8 freshSchema gate + body-capturing upstreamMock + newSelectiveMock + 3 model-rewrite integration tests (OR/Whisper/Embed) + 3 R6 Whisper edge-case tests (missing/duplicate/resolver-miss — all PASS, no SKIP per WARNING-3 wiring)
 - [x] 06.9-05b-PLAN.md — Wave 3b (split, depends_on 05a): R4 local-tier byte-identical (chat + embed) + R13 historical-bug regression (selective-reject mock) + R1 breaker force-override TTL restoration + R3 migration 0026 Down-abort guard + Up→Down→Up round-trip + BLOCKER-1/D-06 end-to-end env-override-wins integration tests (3 cases) + PROJECT.md tier-1 stack confirmation + D-06 coequal-paths doc note
 - [x] 06.9-06-PLAN.md — Wave 5 (autonomous: false): 06.9-HUMAN-UAT.md author with R2 hardened Pre-UAT preconditions + D-06 coequal-paths setup options (S1 schema CLI vs env var) + WARNING-6 dual breaker drivers (S1 force-open + docker-stop fallback; S2/S3 REQUIRE force-open) + operator-driven S1-S6 live UAT on dev stack (~$0.05 spend, no Vast/GPU) + cascade close Phase 02/03/05 VERIFICATION.md (3 small commits, WARNING-5 positive-assertion grep) + write 06.9-VERIFICATION.md
+
+### Phase 12: gateway-resilience-remediation (INSERTED, from 11-06/11-07 live UAT findings)
+
+**Goal:** Fix the three resilience gaps proven live in the Phase 11 PRD-01/PRD-02 UATs (2026-06-12) so the prod gateway survives a primary-pod death autonomously and its health surfaces tell the truth. (1) SEED-011 — primary reconciler steady-state Ready loop is blind to instance death: FSM stayed `ready` through the full 90s window after a real Vast DELETE (and earlier after a billing-stop with `actual_status in {exited,stopped}`); the startup recover path already classifies both correctly — port that classification into the Ready-state reconcile tick (404 3-strike from 01e7558 AND exited/stopped detection), advance Ready → Draining → Asleep, BestEffortDestroy, and emit a distinct critical alert for billing-stop (`account lacks credit`). (2) SEED-012 — prober resolves tier-0 via loader.All() which ignores tier0Override, so local-* breakers flap open forever in prod and /v1/health/upstreams returns 503 with a healthy pod; make the probe tick resolve tier-0 through the same Resolve(role,0) path the dispatcher uses. (3) NO tier-1 failover on dead tier-0: 11-07 chaos produced 100× HTTP 502 upstream_unreachable in T+0..60s with OpenRouter healthy and closed — dispatcher must fall through to tier-1 when the tier-0 dial fails (connection-refused class), not only when the breaker is open. Stretch (capacity, may split): PRD-01 saturation baseline (chat p95 21.7s @ concurrency 50 on 1×5090) feeds a queue-depth/concurrency-cap or shape decision — document-only acceptance is OK for this item.
+
+**Requirements:** RES-11 (FSM death detection on Ready tick), RES-12 (prober/dispatcher tier-0 resolution parity), RES-13 (dial-failure tier-1 fallthrough, zero-502 budget under chaos), CAP-01 (saturation baseline decision doc)
+**Depends on:** Phase 11 (11-06/11-07 evidence + seeds SEED-011/SEED-012); Phase 06.9 (tier-1 model rewrite working — failover target must actually serve)
+**Blocks:** continuous prod primary operation (24/7 tier-0 unsafe until RES-11+RES-13 land)
+**Mode:** sequential (not MVP)
+**Plans:** TBD (run /gsd:discuss-phase 12 then /gsd:plan-phase 12)
+**Cost:** chaos re-validation UAT ~$0.50-1.00 Vast spend (re-run 11-07 recipe expecting zero-502); dev-stack testing otherwise
+
+Plans:
+
+- [ ] (pending planning)
