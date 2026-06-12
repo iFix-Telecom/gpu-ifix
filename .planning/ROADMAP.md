@@ -177,8 +177,19 @@ Plans:
 **Cost:** chaos re-validation UAT ~$0.50-1.00 Vast spend (re-run 11-07 recipe expecting zero-502); dev-stack testing otherwise
 
 Plans:
+**Wave 1**
+
 - [ ] 12-01-PLAN.md — RES-12 prober/health tier-0 parity (Resolve(role,0)) + breaker force-close mechanism (D-13) + obs counters
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 12-02-PLAN.md — RES-11 Ready-tick death detection + D-05 trackedID repair + D-04 force-open + D-03 distinct billing-stop alert
 - [ ] 12-03-PLAN.md — RES-13 connection-class dial-failure fallthrough to tier-1 cascade (sensitive 503 preserved)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 12-04-PLAN.md — Dev chaos UAT (HUMAN-UAT): cheap pod kill validates all 3 fixes together (D-16 dev-first)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 12-05-PLAN.md — Prod chaos gate (HUMAN-UAT, zero-502 D-18) + CAP-01 saturation decision doc (D-19)
