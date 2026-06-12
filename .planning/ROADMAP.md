@@ -46,7 +46,7 @@ Plans:
 **Goal:** Endurecer prod pós-Phase 10 — PRD-01 load test 30min sustained com SLO v1.0 D-04, PRD-02 chaos primary kill (Vast API DELETE), PRD-03 chaos OpenRouter DROP egress (iptables on n8n-ia-vm), PRD-04 RUNBOOK-INCIDENTS.md (4 classes D-11) + POSTMORTEM-TEMPLATE.md (Google SRE blameless 9-section), PRD-05 LGPD signoff doc-only deliverables, PRD-06 dashboard SSO hardening (better-auth twoFactor + rateLimit + allowlist + session 30min). Fold Phase 10 deferred items (D-18.1..D-18.4) e separação per-env keys (D-19).
 **Requirements:** PRD-01, PRD-02, PRD-03, PRD-04 (full), PRD-05, PRD-06
 **Depends on:** Phase 10
-**Plans:** 9/10 plans executed
+**Plans:** 10/10 plans complete
 
 Plans:
 
@@ -61,7 +61,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 11-06-PLAN.md — Wave 2: PRD-01 30-min sustained load-test live UAT (Vast 2×3090 primary UP; ~$1-3 spend)
-- [ ] 11-07-PLAN.md — Wave 2: PRD-02 chaos primary kill live UAT (Vast API DELETE; ~$0.30 spend)
+- [x] 11-07-PLAN.md — Wave 2: PRD-02 chaos primary kill live UAT (Vast API DELETE; ~$0.30 spend)
 - [x] 11-08-PLAN.md — Wave 2: PRD-03 chaos OpenRouter iptables DROP live UAT (sensitive 503 + normal fallthrough + cleanup)
 
 **Wave 3** *(blocked on Wave 2 completion)*
