@@ -67,6 +67,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
@@ -300,6 +301,11 @@ func (r *Reconciler) handleForceUpRequest(ctx context.Context, ev redisx.Primary
 	// the spawnProvisioning we are about to fire) don't re-fence behind
 	// a stale failure timestamp.
 	r.lastProvisionFailureAt.Store(nil)
+	// Phase 12 Plan 02 (D-01): an operator force-up means the operator has
+	// explicitly decided to re-provision NOW — they have added Vast credit (or
+	// accepted the cost). Clear any active billing-stop suppression marker so it
+	// does not silently re-fence the next schedule tick.
+	r.clearBillingSuppression()
 	r.spawnProvisioning(ctx, "operator_force_up:"+ev.ReplicaID+":"+ev.Reason, log)
 }
 
@@ -370,6 +376,18 @@ func (r *Reconciler) evaluateAsleep(ctx context.Context, now time.Time, log *slo
 	if r.cfg.PrimaryPodScheduleDisabled {
 		// Soak-gate posture; schedule-driven provisioning is off. Force
 		// events bypass this gate via the event subscriber path.
+		return
+	}
+	// Phase 12 Plan 02 (D-01): billing-stop suppression gate. A zero-credit
+	// pod death armed a durable suppression marker (handleConfirmedDeath). While
+	// it is active, SKIP re-provision — re-bidding a Vast pod with no account
+	// credit would fail every attempt and burn the schedule loop in a
+	// provision-fail loop during a peak window (Codex HIGH / Pitfall 5). This is
+	// a checked FLAG, not retry machinery. The marker clears when the operator
+	// force-ups (credit added) or a successful provision occurs. The distinct
+	// billing-stop alert (Task 3) tells the operator to add credit.
+	if r.billingSuppressionActive(now) {
+		log.Warn("primary evaluateAsleep: billing-stop suppression active; awaiting operator credit (skipping re-provision)")
 		return
 	}
 	if !r.rule.ShouldBeProvisioned(now) {
@@ -552,16 +570,118 @@ func (r *Reconciler) pollDeathOnReadyTick(ctx context.Context, log *slog.Logger)
 	return nil
 }
 
-// handleConfirmedDeath is the death-confirmed action path. Task 1 ships the
-// poll + classification only; Task 2 wires startDrain + force-open breakers +
-// billing-stop suppression marker + distinct alert event here. Kept as a
-// single seam so evaluateReady's death branch is stable across the two tasks.
+const (
+	// deathForceOpenTTL is the TTL for the D-04 death force-OPEN of the local-*
+	// breakers. Rationale: it must outlast drain+destroy AND span the schedule
+	// loop's typical re-provision latency so the breaker stays OPEN (routing to
+	// tier-1) until a fresh pod's markReady force-CLOSEs it via D-13 (Task 4).
+	// 10 minutes comfortably covers a drain (grace ≤5min) + BestEffortDestroy +
+	// a re-provision cold start; the D-13 short-TTL force-close on the new pod's
+	// markReady overrides this open key (same key, last-writer-wins) before it
+	// expires, so the TTL is a safety expiry, not the primary close mechanism.
+	deathForceOpenTTL = 10 * time.Minute
+
+	// billingSuppressionWindow bounds the D-01 billing-stop suppression marker.
+	// While active, evaluateAsleep SKIPS re-provision so a zero-credit pod death
+	// does not enter a provision-fail loop. It is a generous safety expiry —
+	// the marker is normally consumed earlier by an operator force-up (credit
+	// added) or a successful provision (markReady), both of which clear it. Set
+	// to outlast a full peak window so an operator who is asleep when credit
+	// runs out does not get a provision-fail storm before they wake.
+	billingSuppressionWindow = 6 * time.Hour
+)
+
+// localDeathBreakers is the set of tier-0 upstream breakers force-OPENed on a
+// confirmed primary death (D-04) and force-CLOSEd on a new pod's markReady
+// (D-13). These are the dispatcher upstream NAMES (not the dynamic role keys) —
+// the request path keys breaker state on the upstream name.
+var localDeathBreakers = []string{"local-llm", "local-stt", "local-tts"}
+
+// handleConfirmedDeath is the death-confirmed action path (D-01/D-03/D-04). On a
+// confirmed death from pollDeathOnReadyTick it:
+//
+//	(1) startDrain — Ready→Draining + RestoreTier0 the 3 dynamic slots; the
+//	    existing Draining→Destroying→evaluateDestroying path then reaches
+//	    BestEffortDestroy for free (D-01: no new destroy machinery).
+//	(2) D-04 — deterministically force-OPEN the local-* breakers (long TTL)
+//	    BEFORE the destroy completes, so requests stop hitting the dead address
+//	    while observation would otherwise still be accumulating.
+//	(3) D-01 — for a billing-stop, record a DURABLE suppression marker so
+//	    evaluateAsleep SKIPS re-provision while active (no zero-credit
+//	    provision-fail loop). Host-yank records NO marker (re-provisions
+//	    naturally via the schedule loop).
+//	(4) D-03 — publish a distinct, cause-tagged primary_death_confirmed event.
+//	(5) Increment obs.PrimaryDeathDetectedTotal{cause}.
+//
+// No new FSM state is added — it reuses Ready→Draining→Asleep.
 func (r *Reconciler) handleConfirmedDeath(ctx context.Context, death deathClassification, log *slog.Logger) {
-	// Task 2 fills this in. For now record the metric so the death is
-	// observable; the drain/breaker/alert wiring lands in Task 2.
+	reason := "primary_instance_dead_" + death.cause
+	log.Error("primary death confirmed on Ready tick",
+		"cause", death.cause, "vast_instance_id", r.activeInstanceID.Load(),
+		"lifecycle_id", r.activeLifecycleID.Load())
+
+	// (2) D-04 force-OPEN the local-* breakers BEFORE startDrain reaches the
+	// destroy path, eliminating the dead-address window. Best-effort: a Redis
+	// error is logged but never blocks the drain (the FSM is authoritative).
+	if r.deps.Redis != nil {
+		setBy := "primary_death:" + r.deps.ReplicaID
+		for _, name := range localDeathBreakers {
+			if err := breaker.WriteForceOverride(ctx, r.deps.Redis, name, "open", deathForceOpenTTL, setBy); err != nil {
+				log.Warn("primary death: force-open breaker failed", "breaker", name, "err", err)
+			}
+		}
+	}
+
+	// (1) startDrain advances Ready→Draining + RestoreTier0s the slots.
+	r.startDrain(ctx, reason, log)
+
+	// (3) D-01 billing-stop suppression marker. A billing-stop (IntendedStatus
+	// ==stopped, or the A1 fallback ActualStatus==exited + StatusMsg credit/
+	// account marker — see classifyDeath) records a durable suppression flag;
+	// evaluateAsleep checks it and SKIPS re-provision while active. Host-yank
+	// records NO marker so the schedule loop re-provisions naturally.
+	// A1: billing signal = IntendedStatus==stopped (committed 11-06 evidence:
+	// intended_status=stopped/actual_status=exited/balance −$0.056); fallback =
+	// ActualStatus==exited && StatusMsg credit/account marker. This is a
+	// suppression FLAG checked by the existing schedule evaluator, NOT new retry
+	// machinery (D-01).
+	if death.cause == "billing_stopped" {
+		now := time.Now()
+		r.billingSuppressedAt.Store(&now)
+		log.Warn("primary death: billing-stop suppression marker armed; awaiting operator credit",
+			"window", billingSuppressionWindow)
+	}
+
+	// (4) D-03 distinct cause-tagged death event.
+	r.publishPrimaryEvent(ctx, redisx.PrimaryEvent{
+		Type:        "primary_death_confirmed",
+		State:       "draining",
+		LifecycleID: r.activeLifecycleID.Load(),
+		Reason:      death.cause, // "billing_stopped" | "host_death" | "not_found"
+		SinceUnix:   time.Now().Unix(),
+		ReplicaID:   r.deps.ReplicaID,
+	}, log)
+
+	// (5) metric.
 	obs.PrimaryDeathDetectedTotal.WithLabelValues(death.cause).Inc()
-	_ = ctx
-	_ = log
+}
+
+// billingSuppressionActive reports whether a billing-stop suppression marker is
+// currently active (set AND within billingSuppressionWindow). evaluateAsleep
+// consults it to SKIP re-provision during a zero-credit window (D-01).
+func (r *Reconciler) billingSuppressionActive(now time.Time) bool {
+	marker := r.billingSuppressedAt.Load()
+	if marker == nil {
+		return false
+	}
+	return now.Sub(*marker) < billingSuppressionWindow
+}
+
+// clearBillingSuppression retires the suppression marker. Called when the
+// operator force-ups (credit added) or a successful provision occurs (markReady)
+// — the marker is naturally consumed.
+func (r *Reconciler) clearBillingSuppression() {
+	r.billingSuppressedAt.Store(nil)
 }
 
 // classifyDeath maps a confirmed-terminal Vast instance to a death cause for
@@ -753,6 +873,11 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	r.terminalStrikes = 0
 	r.notFoundStrikes = 0
 	r.deathStrikeMu.Unlock()
+	// Phase 12 Plan 02 (D-01): a successful provision naturally consumes any
+	// active billing-stop suppression marker — the operator clearly has credit
+	// again (this pod was created + reached Ready), so the schedule loop must be
+	// free to re-provision on the next cycle.
+	r.clearBillingSuppression()
 	now := time.Now()
 	_ = r.deps.FSM.Transition(StateProvisioning, StateReady, now, "all_probes_passed")
 	r.publishPrimaryEvent(ctx, redisx.PrimaryEvent{

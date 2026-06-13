@@ -48,14 +48,30 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
+
+// breakerReadForce reads a breaker force-override key for assertions.
+func breakerReadForce(t *testing.T, rdb *redis.Client, name string) (string, time.Duration, bool, error) {
+	t.Helper()
+	return breaker.ReadForceOverride(context.Background(), rdb, name)
+}
+
+// deathCount returns the current PrimaryDeathDetectedTotal counter value for a
+// cause label.
+func deathCount(t *testing.T, cause string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(obs.PrimaryDeathDetectedTotal.WithLabelValues(cause))
+}
 
 // ===========================================================================
 // Fakes
@@ -2375,4 +2391,170 @@ func TestEvaluateReady_StrikesResetOnEnterReady(t *testing.T) {
 		"markReady (enter-Ready) must reset the terminal strike counter")
 	require.Equal(t, 0, r.notFoundStrikesForTest(),
 		"markReady (enter-Ready) must reset the not-found strike counter")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 2 — death-confirmed path (D-01/D-03/D-04)
+//
+// On a confirmed death evaluateReady → handleConfirmedDeath:
+//   (1) startDrain (Ready→Draining + RestoreTier0)
+//   (2) D-04 force-open local-llm/local-stt/local-tts BEFORE destroy
+//   (3) D-01 billing-stop suppression marker (host-yank records none)
+//   (4) D-03 distinct primary_death_confirmed event (cause-tagged)
+//   (5) PrimaryDeathDetectedTotal{cause}.Inc()
+// ===========================================================================
+
+// readyReconcilerWithRedis builds a Ready-state reconciler wired to a miniredis
+// client so the death path's WriteForceOverride + publishPrimaryEvent observe a
+// real Redis. The death poll is driven directly via handleConfirmedDeath so the
+// test controls the cause without 3 strike ticks.
+func readyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	rdb, _ := miniredisClient(t)
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Redis:  rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(42)
+	urls := primaryPodURLs{
+		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
+		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+	return r, loader, rdb
+}
+
+func forceOverrideState(t *testing.T, rdb *redis.Client, name string) (string, bool) {
+	t.Helper()
+	state, _, set, err := breakerReadForce(t, rdb, name)
+	require.NoError(t, err)
+	return state, set
+}
+
+// TestDeath_HostYankDrainsAndForceOpens — confirmed host-yank death drains the
+// FSM, force-opens the 3 local-* breakers, publishes a host_death event, and
+// records NO billing-stop suppression marker.
+func TestDeath_HostYankDrainsAndForceOpens(t *testing.T) {
+	r, loader, rdb := readyReconcilerWithRedis(t)
+	startDeaths := deathCount(t, "host_death")
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"confirmed death must startDrain (Ready→Draining)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, loader.restoredRoles(),
+		"startDrain RestoreTier0s the 3 dynamic roles")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s must be force-overridden", name)
+		require.Equal(t, "open", state, "breaker %s must be force-OPEN", name)
+	}
+	require.Nil(t, r.billingSuppressionActiveForTest(),
+		"host-yank death must NOT record a billing-stop suppression marker")
+	require.InDelta(t, startDeaths+1, deathCount(t, "host_death"), 0.001,
+		"PrimaryDeathDetectedTotal{cause=host_death} must increment")
+}
+
+// TestDeath_BillingStopRecordsSuppression — confirmed billing-stop death drains
+// + force-opens + publishes a billing_stopped event AND records a durable
+// suppression marker.
+func TestDeath_BillingStopRecordsSuppression(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "billing_stopped"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State())
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set)
+		require.Equal(t, "open", state)
+	}
+	require.NotNil(t, r.billingSuppressionActiveForTest(),
+		"billing-stop death MUST record a durable suppression marker")
+}
+
+// TestEvaluateAsleep_BillingStopSuppressesReprovision — full path: after a
+// billing-stop suppression marker is active, evaluateAsleep inside the peak
+// window does NOT spawn provisioning. Host-yank (no marker) re-provisions.
+func TestEvaluateAsleep_BillingStopSuppressesReprovision(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil) // StateAsleep
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+			return insertReturningRow{id: 7, startedAt: time.Now()}
+		},
+	}
+	// Block SearchOffers so the spawnProvisioning goroutine cannot reach the
+	// error branch + FSM.SetState(Asleep) before this test asserts Provisioning.
+	stopBlock := make(chan struct{})
+	t.Cleanup(func() { close(stopBlock) })
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Rule: alwaysInPeakRule(), // in peak → ShouldBeProvisioned true
+		Vast: &fakeVast{
+			searchOffersFn: func(_ context.Context, _ vast.SearchFilter) ([]vast.Offer, error) {
+				<-stopBlock
+				return nil, errors.New("test teardown")
+			},
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	// Arm the billing-stop suppression marker.
+	r.armBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateAsleep, r.deps.FSM.State(),
+		"billing-stop suppression must make evaluateAsleep SKIP re-provision (no provision-fail loop)")
+
+	// Clear suppression → schedule loop re-provisions normally inside peak.
+	r.clearBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateProvisioning, r.deps.FSM.State(),
+		"with no suppression marker the schedule loop re-provisions normally inside peak (host-yank path)")
+}
+
+// TestDeath_BreakersForceOpenedBeforeDestroy — force-open is written at
+// drain-start (handleConfirmedDeath calls startDrain + force-open together),
+// well before evaluateDestroying's BestEffortDestroy runs. We assert the keys
+// exist immediately after handleConfirmedDeath, while the FSM is still Draining
+// (BestEffortDestroy has not yet been reached).
+func TestDeath_BreakersForceOpenedBeforeDestroy(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"after handleConfirmedDeath the FSM is Draining — destroy has NOT yet run")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		_, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s force-open must be written before destroy", name)
+	}
+}
+
+// TestDeath_BillingStopFallbackSignal — IntendedStatus empty but
+// ActualStatus==exited && StatusMsg has a credit/account marker → billing_stopped.
+func TestDeath_BillingStopFallbackSignal(t *testing.T) {
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "instance stopped: account out of credit"}),
+		"exited + credit StatusMsg must classify billing_stopped (A1 fallback)")
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{IntendedStatus: "stopped", ActualStatus: "exited"}),
+		"IntendedStatus==stopped is the primary billing signal")
+	require.Equal(t, "host_death",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "container crashed"}),
+		"exited with no credit/account marker is host_death")
 }

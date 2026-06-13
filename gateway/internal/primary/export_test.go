@@ -17,6 +17,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 // SetScheduleRuleForTest replaces the Reconciler's ScheduleRule with the
@@ -56,4 +57,24 @@ func (r *Reconciler) notFoundStrikesForTest() int {
 	r.deathStrikeMu.Lock()
 	defer r.deathStrikeMu.Unlock()
 	return r.notFoundStrikes
+}
+
+// billingSuppressionActiveForTest returns the suppression marker timestamp (nil
+// when no active billing-stop suppression). Test-only (Phase 12 Plan 02 D-01).
+func (r *Reconciler) billingSuppressionActiveForTest() *time.Time {
+	if r.billingSuppressionActive(time.Now()) {
+		return r.billingSuppressedAt.Load()
+	}
+	return nil
+}
+
+// armBillingSuppressionForTest sets the suppression marker to now.
+func (r *Reconciler) armBillingSuppressionForTest() {
+	now := time.Now()
+	r.billingSuppressedAt.Store(&now)
+}
+
+// clearBillingSuppressionForTest clears the suppression marker.
+func (r *Reconciler) clearBillingSuppressionForTest() {
+	r.billingSuppressedAt.Store(nil)
 }
