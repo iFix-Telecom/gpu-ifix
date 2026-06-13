@@ -70,6 +70,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
@@ -94,6 +95,15 @@ const (
 	// fast enough to detect terminal-state transitions without hammering
 	// the Vast.ai REST API.
 	primaryInstancePollInterval = 5 * time.Second
+
+	// terminalConfirmStrikes is the number of CONSECUTIVE terminal/not-found
+	// observations required before declaring a Vast instance dead (D-02). Vast
+	// reports actual_status from a host polling agent that can transiently
+	// report exited/offline during boot or eventual-consistency glitches;
+	// 3 in a row (~15s at the Ready tick / provisioning poll cadence) filters
+	// the flap. Shared by waitForReadyOrDestroy (provisioning poll) and
+	// pollDeathOnReadyTick (Phase 12 Plan 02 Ready-tick death poll).
+	terminalConfirmStrikes = 3
 )
 
 // primaryInstancePollIntervalForTest is the poll cadence waitForReadyOrDestroy
@@ -421,6 +431,22 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 		}
 	}
 
+	// Phase 12 Plan 02 (RES-11): Ready-tick death poll. Runs REGARDLESS of
+	// DISABLED — a Ready pod under the soak gate is just as mortal as a
+	// scheduled one (mirrors the Pitfall #11 re-assert above, which also runs
+	// under DISABLED). FINDING 2: evaluateReady never polled Vast before this
+	// plan, so a dead pod kept the FSM Ready for 25+ minutes pointing at a
+	// dead address. The poll confirms death via a 3-strike confirm on both
+	// IsTerminal() and ErrInstanceNotFound, repairs an empty trackedID from
+	// the open lifecycle row (D-05), and on confirmed death drives the
+	// drain/breaker/alert path (Task 2). Placed BEFORE the schedule drain
+	// check so a confirmed death drains immediately even inside the peak
+	// window (a dead pod must not wait for the window to close).
+	if death := r.pollDeathOnReadyTick(ctx, log); death != nil {
+		r.handleConfirmedDeath(ctx, *death, log)
+		return
+	}
+
 	if r.cfg.PrimaryPodScheduleDisabled {
 		return
 	}
@@ -431,6 +457,134 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// Future hook: when all 3 breakers OPEN >60s, start drain for
 	// "pod_unhealthy". Plan 06.6-06b owns the breaker observers; this
 	// reconciler does not consume them directly.
+}
+
+// deathClassification is the result of a single Ready-tick death poll. dead is
+// true only on a CONFIRMED death (3-strike threshold reached on one of the two
+// terminal signals); cause is one of "billing_stopped" | "host_death" |
+// "not_found" (the obs.PrimaryDeathDetectedTotal label set).
+type deathClassification struct {
+	dead  bool
+	cause string
+}
+
+// pollDeathOnReadyTick polls Vast for the tracked instance once and updates the
+// persisted strike counters. It returns a non-nil *deathClassification ONLY
+// when a death is CONFIRMED (a strike counter reaches terminalConfirmStrikes);
+// otherwise it returns nil (the caller keeps the FSM Ready).
+//
+// D-05 (the load-bearing prerequisite that defeated the 11-07 reproduction —
+// Pitfall 1): when r.activeInstanceID is 0 but a pod is routing (activePodURLs
+// set), the tracked id was lost on a force-up that never Stored it. Reconcile
+// it from the open primary_lifecycles row (exactly as recoverOpenLifecycle
+// does) BEFORE polling, so the death poll never silently no-ops on a lost id.
+//
+// The 3-strike confirm is ported from waitForReadyOrDestroy (reconciler.go
+// terminalStrikes / notFoundStrikes), but here the counters live on the
+// Reconciler struct (deathStrikeMu-guarded) because each Ready tick is a
+// separate call — unlike the in-loop provisioning poll. Strikes reset on ANY
+// healthy/non-terminal observation here AND on the Provisioning→Ready
+// transition inside markReady (a fresh pod lifecycle starts with zero strikes).
+func (r *Reconciler) pollDeathOnReadyTick(ctx context.Context, log *slog.Logger) *deathClassification {
+	if r.deps.Vast == nil {
+		return nil
+	}
+	instanceID := r.activeInstanceID.Load()
+	if instanceID == 0 {
+		// D-05 repair: a pod is routing but the tracked id was lost. Read the
+		// open lifecycle row and Store the id, mirroring recoverOpenLifecycle.
+		if r.activePodURLs.Load() == nil {
+			return nil
+		}
+		q := r.queries()
+		if q == nil {
+			return nil
+		}
+		open, err := q.GetOpenPrimaryLifecycle(ctx)
+		if err != nil || !open.VastInstanceID.Valid {
+			return nil
+		}
+		instanceID = open.VastInstanceID.Int64
+		r.activeInstanceID.Store(instanceID)
+		log.Warn("primary death poll: repaired lost trackedID from open lifecycle row (D-05)",
+			"lifecycle_id", open.ID, "vast_instance_id", instanceID)
+	}
+
+	inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
+
+	r.deathStrikeMu.Lock()
+	defer r.deathStrikeMu.Unlock()
+
+	if err != nil {
+		if errors.Is(err, vast.ErrInstanceNotFound) {
+			r.notFoundStrikes++
+			log.Warn("primary death poll: Vast GET returned no_such_instance",
+				"vast_instance_id", instanceID,
+				"strike_count", r.notFoundStrikes, "confirm_at", terminalConfirmStrikes)
+			if r.notFoundStrikes >= terminalConfirmStrikes {
+				return &deathClassification{dead: true, cause: "not_found"}
+			}
+			return nil
+		}
+		// Transient non-not-found GET error — reset the not-found strike
+		// counter so an unrelated flap mode does not accumulate strikes across
+		// error classes (parity with waitForReadyOrDestroy).
+		r.notFoundStrikes = 0
+		return nil
+	}
+	// Healthy GET — reset the not-found counter (a single transient null
+	// between healthy polls must not trip the 3-strike close).
+	r.notFoundStrikes = 0
+	if inst.IsTerminal() {
+		r.terminalStrikes++
+		log.Warn("primary death poll: Vast reports terminal status",
+			"vast_instance_id", instanceID, "actual_status", inst.ActualStatus,
+			"intended_status", inst.IntendedStatus,
+			"strike", r.terminalStrikes, "confirm_at", terminalConfirmStrikes)
+		if r.terminalStrikes >= terminalConfirmStrikes {
+			return &deathClassification{dead: true, cause: classifyDeath(inst)}
+		}
+		return nil
+	}
+	// Non-terminal observation — reset the terminal strike counter (Vast must
+	// report terminal terminalConfirmStrikes times IN A ROW to confirm).
+	r.terminalStrikes = 0
+	return nil
+}
+
+// handleConfirmedDeath is the death-confirmed action path. Task 1 ships the
+// poll + classification only; Task 2 wires startDrain + force-open breakers +
+// billing-stop suppression marker + distinct alert event here. Kept as a
+// single seam so evaluateReady's death branch is stable across the two tasks.
+func (r *Reconciler) handleConfirmedDeath(ctx context.Context, death deathClassification, log *slog.Logger) {
+	// Task 2 fills this in. For now record the metric so the death is
+	// observable; the drain/breaker/alert wiring lands in Task 2.
+	obs.PrimaryDeathDetectedTotal.WithLabelValues(death.cause).Inc()
+	_ = ctx
+	_ = log
+}
+
+// classifyDeath maps a confirmed-terminal Vast instance to a death cause for
+// the obs.PrimaryDeathDetectedTotal label set and the alert title.
+//
+// A1 (RESOLVED from committed 11-06 evidence — intended_status=stopped,
+// actual_status=exited, balance −$0.056; no live billing-stopped instance
+// required): the PRIMARY billing signal is IntendedStatus=="stopped"; the
+// FALLBACK is ActualStatus=="exited" && StatusMsg contains a credit/account
+// marker (case-insensitive "credit"/"account"/"saldo"). Implementing BOTH
+// ensures a missed IntendedStatus does not silently re-classify a billing-stop
+// as host-yank (which would re-provision and burn bid attempts — Pitfall 5).
+func classifyDeath(inst vast.Instance) string {
+	if strings.EqualFold(strings.TrimSpace(inst.IntendedStatus), "stopped") {
+		return "billing_stopped"
+	}
+	if strings.EqualFold(strings.TrimSpace(inst.ActualStatus), "exited") {
+		msg := strings.ToLower(inst.StatusMsg)
+		if strings.Contains(msg, "credit") || strings.Contains(msg, "account") || strings.Contains(msg, "saldo") {
+			return "billing_stopped"
+		}
+	}
+	return "host_death"
 }
 
 // evaluateDraining ramps down the pod. Transitions Draining→Destroying
@@ -588,6 +742,17 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	if r.deps.DCGMScraper != nil {
 		r.deps.DCGMScraper.SetURL(urls.DCGM)
 	}
+	// Phase 12 Plan 02 (RES-11, Gemini suggestion): reset the Ready-tick
+	// death-poll strike counters on the Provisioning→Ready transition. Entering
+	// Ready from Provisioning is a FRESH pod lifecycle — it must start with a
+	// clean strike count so strikes carried from a prior (dead) pod's polling
+	// do not falsely confirm a death on the new pod's first few ticks. This is
+	// the enter-Ready reset; pollDeathOnReadyTick also resets on any
+	// healthy/non-terminal observation.
+	r.deathStrikeMu.Lock()
+	r.terminalStrikes = 0
+	r.notFoundStrikes = 0
+	r.deathStrikeMu.Unlock()
 	now := time.Now()
 	_ = r.deps.FSM.Transition(StateProvisioning, StateReady, now, "all_probes_passed")
 	r.publishPrimaryEvent(ctx, redisx.PrimaryEvent{
@@ -942,7 +1107,6 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// the instance dead. UAT 2026-05-18 lifecycle 4 captured a false-positive
 	// terminal close 12s before 4 endpoints were actually reachable.
 	terminalStrikes := 0
-	const terminalConfirmStrikes = 3
 
 	// Counter for consecutive ErrInstanceNotFound observations. Same
 	// transient-flap rationale as terminalStrikes but for a different
