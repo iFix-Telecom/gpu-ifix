@@ -46,9 +46,11 @@ func dynamicOverrideDirector(overrideURL func() (string, bool)) func(*http.Reque
 // interceptors run in ModifyResponse exactly like the static proxies.
 func NewDynamicOverrideProxy(role string, overrideURL func() (string, bool), flushInterval time.Duration, transport *http.Transport, log *slog.Logger, interceptors ...ProxyResponseInterceptor) http.Handler {
 	return &httputil.ReverseProxy{
-		Director:       dynamicOverrideDirector(overrideURL),
-		FlushInterval:  flushInterval,
-		Transport:      transport,
+		Director:      dynamicOverrideDirector(overrideURL),
+		FlushInterval: flushInterval,
+		// RES-13 / Plan 12-03: wrap so a pre-byte dial failure to the live
+		// pod surfaces the sentinel the ErrorHandler suppresses → fallthrough.
+		Transport:      fallthroughRoundTripper{base: transport},
 		ErrorHandler:   ErrorHandler(role, log),
 		ModifyResponse: ComposeInterceptors(interceptors...),
 	}
