@@ -581,6 +581,17 @@ const (
 	// expires, so the TTL is a safety expiry, not the primary close mechanism.
 	deathForceOpenTTL = 10 * time.Minute
 
+	// markReadyForceCloseTTL is the TTL for the D-13 markReady force-CLOSE of
+	// the local-* breakers. Rationale: it is SHORT (60s) because it only needs
+	// to outlast the next probe cycle — the now-live pod probes CLOSED on its
+	// own, so the force-close is a brief override that hands control back to
+	// observation, NOT a long mask. Short enough that a genuinely-dead pod is
+	// not pinned CLOSED past the next observation window; long enough to outlast
+	// one probe cycle so the freshly-Ready pod is dispatched to immediately.
+	// Contrast deathForceOpenTTL (10min) which HOLDS the dead address open until
+	// re-provision.
+	markReadyForceCloseTTL = 60 * time.Second
+
 	// billingSuppressionWindow bounds the D-01 billing-stop suppression marker.
 	// While active, evaluateAsleep SKIPS re-provision so a zero-credit pod death
 	// does not enter a provision-fail loop. It is a generous safety expiry —
@@ -878,6 +889,29 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	// again (this pod was created + reached Ready), so the schedule loop must be
 	// free to re-provision on the next cycle.
 	r.clearBillingSuppression()
+	// Phase 12 Plan 02 (D-13): force-CLOSE the stale local-* breakers. This is
+	// the symmetric counterpart to the D-04 death force-OPEN (Task 2). A pod
+	// that just passed every provisioning probe is live by definition, so any
+	// OPEN local-* breaker is a STALE leftover from probing the PREVIOUS dead
+	// URL (Pitfall 4 / SEED-012) — left untouched it would keep traffic parked
+	// on tier-1 even though the live pod is back. We force-CLOSE with a SHORT
+	// TTL: it only needs to outlast the next probe cycle so the now-live
+	// observation-driven breaker takes over the truth from natural probes. The
+	// short close hands control back to observation quickly (vs the long death
+	// open-TTL that HOLDS the dead address closed off until re-provision). Runs
+	// AFTER the OverrideTier0 block above so the pod URL slot is set before the
+	// breaker is reset. Best-effort — a Redis hiccup logs a warning but never
+	// blocks the Provisioning→Ready transition (mirror publishPrimaryEvent's
+	// nil-safe pattern). Loader.Refresh is intentionally NOT called (see the
+	// OverrideTier0 comment above) — the force-close is orthogonal.
+	if r.deps.Redis != nil {
+		setBy := "primary_markready:" + r.deps.ReplicaID
+		for _, name := range localDeathBreakers {
+			if err := breaker.WriteForceOverride(ctx, r.deps.Redis, name, "closed", markReadyForceCloseTTL, setBy); err != nil {
+				log.Warn("primary markReady: force-close breaker failed", "breaker", name, "err", err)
+			}
+		}
+	}
 	now := time.Now()
 	_ = r.deps.FSM.Transition(StateProvisioning, StateReady, now, "all_probes_passed")
 	r.publishPrimaryEvent(ctx, redisx.PrimaryEvent{

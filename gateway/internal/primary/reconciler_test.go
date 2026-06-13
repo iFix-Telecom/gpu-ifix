@@ -2558,3 +2558,112 @@ func TestDeath_BillingStopFallbackSignal(t *testing.T) {
 		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "container crashed"}),
 		"exited with no credit/account marker is host_death")
 }
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 4 — D-13 markReady force-CLOSE (symmetric to D-04)
+//
+// markReady force-CLOSES the stale local-llm/local-stt/local-tts breakers
+// (short TTL) when a new pod goes Ready, so a re-provisioned pod never inherits
+// an OPEN breaker left over from probing the previous dead URL.
+// ===========================================================================
+
+// markReadyReconcilerWithRedis builds a Provisioning-state reconciler wired to
+// miniredis so markReady's force-CLOSE write is observable.
+func markReadyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	rdb, _ := miniredisClient(t)
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	return r, loader, rdb
+}
+
+func markReadyURLs() primaryPodURLs {
+	return primaryPodURLs{
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
+	}
+}
+
+// TestMarkReady_ResetsStaleBreakers — markReady force-CLOSEs each of the 3
+// local-* breakers (state="closed") so a breaker left OPEN by the previous dead
+// pod's probing is reset and traffic returns to the live pod.
+func TestMarkReady_ResetsStaleBreakers(t *testing.T) {
+	r, _, rdb := markReadyReconcilerWithRedis(t)
+	// Simulate a stale OPEN inherited from the previous dead pod's death path.
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		require.NoError(t, breaker.WriteForceOverride(context.Background(), rdb, name, "open", 10*time.Minute, "prev_death"))
+	}
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set, "breaker %s must still be force-overridden (now closed)", name)
+		require.Equal(t, "closed", state,
+			"markReady must force-CLOSE the stale %s breaker (D-13)", name)
+	}
+}
+
+// TestMarkReady_ForceCloseAfterOverrideTier0 — the force-close write lands AFTER
+// the OverrideTier0 block, so the pod URL slot is set before the breaker is
+// reset (no request hits a closed breaker pointing at a not-yet-overridden slot).
+func TestMarkReady_ForceCloseAfterOverrideTier0(t *testing.T) {
+	r, loader, rdb := markReadyReconcilerWithRedis(t)
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	// OverrideTier0 fired for the 3 roles (slots set) ...
+	snap := loader.snapshot()
+	require.Equal(t, "http://1.2.3.4:33000", snap["llm"])
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"])
+	require.Equal(t, "http://1.2.3.4:33003", snap["tts"])
+	// ... and the force-close keys are present (written after the slots).
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set)
+		require.Equal(t, "closed", state)
+	}
+}
+
+// TestMarkReady_ForceCloseBestEffort — a Redis write error in the force-close
+// path is logged but does NOT fail markReady (best-effort, mirroring
+// publishPrimaryEvent's nil-Redis safety): the pod still reaches Ready. We
+// model the Redis-unavailable case by passing a nil Redis client.
+func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       nil, // Redis not wired — force-close is skipped, markReady still completes
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()),
+		"a missing/failing Redis must NOT block markReady from reaching Ready")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"markReady completes the Provisioning→Ready transition despite no Redis")
+}
