@@ -173,13 +173,13 @@ Plans:
 **Depends on:** Phase 11 (11-06/11-07 evidence + seeds SEED-011/SEED-012); Phase 06.9 (tier-1 model rewrite working — failover target must actually serve)
 **Blocks:** continuous prod primary operation (24/7 tier-0 unsafe until RES-11+RES-13 land)
 **Mode:** sequential (not MVP)
-**Plans:** 5 plans in 4 waves
+**Plans:** 1/5 plans executed
 **Cost:** chaos re-validation UAT ~$0.50-1.00 Vast spend (re-run 11-07 recipe expecting zero-502); dev-stack testing otherwise
 
 Plans:
 **Wave 1**
 
-- [ ] 12-01-PLAN.md — RES-12 prober/health tier-0 parity (Resolve(role,0)) + breaker force-close mechanism (D-13) + obs counters
+- [x] 12-01-PLAN.md — RES-12 prober/health tier-0 parity (Resolve(role,0)) + breaker force-close mechanism (D-13) + obs counters
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
