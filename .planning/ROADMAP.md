@@ -173,7 +173,7 @@ Plans:
 **Depends on:** Phase 11 (11-06/11-07 evidence + seeds SEED-011/SEED-012); Phase 06.9 (tier-1 model rewrite working — failover target must actually serve)
 **Blocks:** continuous prod primary operation (24/7 tier-0 unsafe until RES-11+RES-13 land)
 **Mode:** sequential (not MVP)
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 **Cost:** chaos re-validation UAT ~$0.50-1.00 Vast spend (re-run 11-07 recipe expecting zero-502); dev-stack testing otherwise
 
 Plans:
@@ -188,7 +188,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 12-04-PLAN.md — Dev chaos UAT (HUMAN-UAT): cheap pod kill validates all 3 fixes together (D-16 dev-first)
+- [x] 12-04-PLAN.md — Dev chaos UAT (HUMAN-UAT): cheap pod kill validates all 3 fixes together (D-16 dev-first)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
