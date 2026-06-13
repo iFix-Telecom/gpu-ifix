@@ -29,11 +29,11 @@ import (
 // recordingResponseWriter counts every WriteHeader / Write call so tests can
 // assert ZERO writes before the tier-1 dispatch (Pitfall 2).
 type recordingResponseWriter struct {
-	header       http.Header
-	wroteHeader  int32
-	wroteBody    int32
-	status       int
-	body         bytes.Buffer
+	header      http.Header
+	wroteHeader int32
+	wroteBody   int32
+	status      int
+	body        bytes.Buffer
 }
 
 func newRecordingRW() *recordingResponseWriter {
