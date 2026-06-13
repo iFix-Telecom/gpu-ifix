@@ -26,8 +26,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -48,6 +50,58 @@ import (
 // intentional: changing the wire value in audit/middleware.go MUST be
 // done in lockstep here.
 const UpstreamBlockedSensitiveValue = "blocked_sensitive"
+
+// maxSTTBodyBuffer caps how many bytes of a request body the dispatcher will
+// buffer in memory to make it replayable across the tier-1 cascade (RES-13 /
+// Plan 12-03). A body larger than this is EXEMPT from buffering and from
+// fallthrough — on a tier-0 dial failure it takes the normal 502/503 path,
+// so an over-cap multipart STT upload can never exhaust memory (T-12-10).
+//
+// maxSTTBodyBuffer: matches the global request body ceiling enforced at
+// cmd/gateway/main.go:1189 via http.MaxBytesHandler(r, cfg.MaxBodyBytes),
+// where cfg.MaxBodyBytes is the fixed 25 MiB STT/audio limit set at
+// internal/config/config.go:350 (`MaxBodyBytes: 25 * (1 << 20)`). Chat/embed
+// bodies are additionally token-capped (16k/8k) so they always sit far below
+// this; the cap is effectively the STT upload ceiling.
+const maxSTTBodyBuffer = 25 * (1 << 20) // 25 MiB — mirrors config.MaxBodyBytes
+
+// dispatchResult is the request-scoped control-flow channel between
+// dispatchTo / the sentinel-aware ErrorHandler and the dispatch decision
+// (RES-13 / Plan 12-03 — Pitfall 2). It is installed into the request context
+// by dispatchTo BEFORE proxy.ServeHTTP and read AFTER:
+//
+//   - fallthrough_ == true && wrote == false  → a pre-byte connection-class
+//     dial failure occurred and NOTHING was written; the caller may
+//     re-dispatch into the tier-1 cascade.
+//   - wrote == true → a response was committed (a normal 502 for a
+//     non-sentinel error, or a successful upstream response); the dispatch is
+//     terminal and the caller MUST NOT re-dispatch (D-07: never re-dispatch
+//     after any byte was written).
+//
+// The struct is carried via context.WithValue (Codex suggestion) rather than
+// an implicit side effect so the control flow is explicit and testable.
+type dispatchResult struct {
+	fallthrough_ bool  // pre-byte dial failure observed (sentinel suppressed)
+	wrote        bool  // a response was committed to the ResponseWriter
+	err          error // the underlying error (sentinel or upstream)
+}
+
+// dispatchResultCtxKey is the unexported context key for *dispatchResult.
+type dispatchResultCtxKey struct{}
+
+// withDispatchResult installs a *dispatchResult into ctx so the ErrorHandler
+// running inside ReverseProxy.ServeHTTP can record the fallthrough signal.
+func withDispatchResult(ctx context.Context, res *dispatchResult) context.Context {
+	return context.WithValue(ctx, dispatchResultCtxKey{}, res)
+}
+
+// dispatchResultFrom reads the *dispatchResult installed by dispatchTo. Returns
+// nil when none is present (e.g. dispatchOverride path, which does not
+// participate in dial fallthrough).
+func dispatchResultFrom(ctx context.Context) *dispatchResult {
+	res, _ := ctx.Value(dispatchResultCtxKey{}).(*dispatchResult)
+	return res
+}
 
 // EmergTrafficRegistrar abstracts the emerg.Reconciler for the dispatcher.
 // Plan 06-08 (D-E3) integration: when Resolve returns an UpstreamConfig
@@ -224,7 +278,49 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 
 		// 4. Routing decision tree.
 		if t0State == gobreaker.StateClosed {
-			cfg.dispatchTo(w, r, t0.Name, streaming, log)
+			// RES-13 / Plan 12-03: prepare the body for replay across the
+			// cascade BEFORE the first dispatch. If the body is over-cap or
+			// non-replayable, replayable=false → we still dispatch tier-0 but
+			// a dial failure takes the normal 502 path (no fallthrough).
+			restoreBody, replayable := prepareReplayBody(r)
+			res := cfg.dispatchTo(w, r, t0.Name, streaming, log)
+			if !res.fallthrough_ || res.wrote {
+				// Terminal: successful response OR a committed 502/non-dial
+				// error (D-07 — never re-dispatch after a byte was written).
+				return
+			}
+			// Pre-byte connection-class dial failure on tier-0.
+			// D-09: record a failure on the tier-0 breaker so it opens
+			// naturally after N dials.
+			cfg.recordDialFailure(t0.Name)
+
+			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
+			// to an external tier-1 — emit the sensitive 503 block.
+			if sensitive {
+				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
+				cfg.writeSensitiveBlock(w, r)
+				return
+			}
+
+			// Over-cap / non-replayable body: cannot safely resend → normal
+			// 502 path (the ErrorHandler suppressed the write, so emit it).
+			if !replayable {
+				httpx.WriteOpenAIError(w, http.StatusBadGateway,
+					"api_error", "upstream_unreachable",
+					"The upstream inference service is temporarily unreachable.")
+				return
+			}
+
+			// Normal tenant: re-dispatch into the tier-1 cascade, replaying
+			// the body before each attempt (D-08). The cascade outcome drives
+			// the DialFallthroughTotal label: tier1_served when a candidate
+			// served, chain_exhausted when every candidate failed.
+			served := cfg.cascadeTier1(w, r, streaming, restoreBody, log)
+			if served {
+				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "tier1_served").Inc()
+			} else {
+				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "chain_exhausted").Inc()
+			}
 			return
 		}
 
@@ -248,36 +344,71 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				cfg.writeSensitiveBlock(w, r)
 				return
 			}
-			cfg.dispatchTo(w, r, t0.Name, streaming, log)
+			// Sensitive non-stream retry succeeded → tier-0 CLOSED again.
+			// If the post-retry dispatch ALSO hits a pre-byte dial failure,
+			// the ErrorHandler suppressed the write; a sensitive tenant MUST
+			// still 503-block, never fall through (D-10 HARD GATE).
+			res := cfg.dispatchTo(w, r, t0.Name, streaming, log)
+			if res.fallthrough_ && !res.wrote {
+				cfg.recordDialFailure(t0.Name)
+				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
+				cfg.writeSensitiveBlock(w, r)
+			}
 			return
 		}
 
-		// Normal tenant: iterate tier-1 candidates in tier_priority ASC order
-		// (Phase 11.2 D-B5′). Dispatch to the first candidate whose breaker
-		// EffectiveState is CLOSED. Backward-compat: roles with a single
-		// tier-1 row (llm/embed/tts) return a 1-slice from ResolveAllTier1,
-		// degenerating to the prior single-tier-1 lookup behavior.
-		//
-		// Phase 06.9 Plan 04: EffectiveState honors operator force-override
-		// (gw:breaker:force:{name}) — force-opening any candidate makes the
-		// loop skip it. Force-opening ALL candidates produces 503.
-		candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
-		if len(candidates) == 0 {
-			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
-				"service_unavailable", "upstream_unavailable",
-				"Primary upstream unavailable and no fallback configured for role.")
-			return
-		}
-		for _, t1 := range candidates {
-			if cfg.Breaker.EffectiveState(t1.Name) == gobreaker.StateClosed {
-				cfg.dispatchTo(w, r, t1.Name, streaming, log)
-				return
-			}
-		}
+		// Normal tenant, tier-0 OPEN/HALF: iterate tier-1 candidates in
+		// tier_priority ASC order (Phase 11.2 D-B5′ + Plan 12-03 dial-aware).
+		// Prepare the body for replay so a tier-1 dial failure can advance to
+		// the next candidate with identical bytes.
+		restoreBody, _ := prepareReplayBody(r)
+		cfg.cascadeTier1(w, r, streaming, restoreBody, log)
+	})
+}
+
+// cascadeTier1 dispatches to the first CLOSED tier-1 candidate (tier_priority
+// ASC). On a pre-byte connection-class dial failure (D-08) it records the
+// candidate's breaker failure and advances to the next CLOSED candidate,
+// replaying the body identically each hop (restoreBody). When the chain is
+// exhausted it writes the existing 503 exhaustion envelope exactly once.
+//
+// Returns true when a candidate committed a response without dial-failing
+// (served), false on exhaustion. The caller owns DialFallthroughTotal
+// accounting so the metric is only emitted on the tier-0 dial-fallthrough
+// path (NOT the plain tier-0-OPEN cascade, which is not a dial fallthrough).
+//
+// EffectiveState honors operator force-override (gw:breaker:force:{name}) —
+// force-opening a candidate makes the loop skip it (Phase 06.9 Plan 04).
+func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request, streaming bool, restoreBody func(), log *slog.Logger) bool {
+	candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
+	if len(candidates) == 0 {
 		httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 			"service_unavailable", "upstream_unavailable",
-			"All inference upstreams are unavailable.")
-	})
+			"Primary upstream unavailable and no fallback configured for role.")
+		return false
+	}
+	for _, t1 := range candidates {
+		if cfg.Breaker.EffectiveState(t1.Name) != gobreaker.StateClosed {
+			continue
+		}
+		if restoreBody != nil {
+			restoreBody() // resend identical bytes on every hop (D-08)
+		}
+		res := cfg.dispatchTo(w, r, t1.Name, streaming, log)
+		if res.fallthrough_ && !res.wrote {
+			// This tier-1 candidate dial-failed pre-byte: record its breaker
+			// failure and try the next CLOSED candidate.
+			cfg.recordDialFailure(t1.Name)
+			continue
+		}
+		// Terminal: a response was committed (success or a non-dial 502).
+		return true
+	}
+	// Chain exhausted: every CLOSED candidate dial-failed (or none CLOSED).
+	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+		"service_unavailable", "upstream_unavailable",
+		"All inference upstreams are unavailable.")
+	return false
 }
 
 // dispatchOverride routes to a specific upstream when the schedule
@@ -335,13 +466,26 @@ func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Requ
 // dispatchTo invokes the named upstream's proxy handler. Logs the
 // dispatch decision so operators can correlate request_id with the
 // chosen upstream.
-func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, name string, streaming bool, log *slog.Logger) {
+//
+// RES-13 / Plan 12-03: dispatchTo installs a fresh *dispatchResult into the
+// request context BEFORE proxy.ServeHTTP. The sentinel-aware ErrorHandler
+// (errors.go) records fallthrough_/wrote on it. dispatchTo returns the result
+// so the dispatch decision can re-route into the tier-1 cascade on a pre-byte
+// dial failure (fallthrough_ && !wrote). A "proxy not registered" miss returns
+// wrote=true (terminal) — that 503 envelope is final.
+//
+// replayBody, when non-nil, is restored as a fresh r.Body before ServeHTTP so
+// the same bytes can be resent on the next cascade hop (the caller restores it
+// again before each subsequent attempt).
+func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, name string, streaming bool, log *slog.Logger) dispatchResult {
+	res := &dispatchResult{}
 	proxy, ok := cfg.Proxies[name]
 	if !ok {
 		httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 			"service_unavailable", "upstream_unavailable",
 			"Upstream proxy not registered.")
-		return
+		res.wrote = true
+		return *res
 	}
 	log.Debug("dispatching",
 		"upstream", name,
@@ -353,6 +497,9 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// Flush time (the interceptor runs inside ModifyResponse where the
 	// dispatch decision is otherwise opaque).
 	r = r.WithContext(auditctx.WithBillingUpstream(r.Context(), name))
+	// RES-13 / Plan 12-03: install the request-scoped dispatchResult so the
+	// sentinel-aware ErrorHandler can carry the fallthrough signal back.
+	r = r.WithContext(withDispatchResult(r.Context(), res))
 	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): also stamp the
 	// FACTUAL upstream into the request-id-keyed registry so the audit
 	// middleware (which sits OUTSIDE http.TimeoutHandler and therefore
@@ -367,6 +514,70 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// ResponseWriter — backoff retry would require a buffering layer
 	// (see retry.go godoc). Phase 3 relies on breaker fallback instead.
 	proxy.ServeHTTP(w, r)
+	// If the ErrorHandler did not run (successful proxy) the response was
+	// committed by ReverseProxy — record wrote=true so callers treat it as
+	// terminal.
+	if !res.fallthrough_ {
+		res.wrote = true
+	}
+	return *res
+}
+
+// recordDialFailure records a single failure on the named tier-0 breaker so
+// it opens naturally after N dials (D-09). breaker.Set exposes no direct
+// "record failure" API; we drive one failure through Execute with a non-4xx
+// error that IsSuccessful classifies as a failure. The fn never makes a real
+// network call — it returns the synthetic error immediately.
+func (cfg DispatcherConfig) recordDialFailure(name string) {
+	_, _ = cfg.Breaker.Execute(name, func() (*http.Response, error) {
+		return nil, &breaker.HTTPError{Status: http.StatusBadGateway, Msg: "tier-0 dial failed (fallthrough)"}
+	})
+}
+
+// prepareReplayBody makes r's body replayable across cascade hops. Returns a
+// restore closure that resets r.Body to a fresh reader, and replayable=true
+// when the body can be safely resent. When the body is over the cap, missing,
+// or non-replayable, replayable=false and the caller MUST skip fallthrough
+// (normal 502/503 path) — guaranteeing no unbounded buffering (T-12-10).
+func prepareReplayBody(r *http.Request) (func(), bool) {
+	// No body → nothing to replay; a bodyless request is trivially replayable.
+	if r.Body == nil || r.Body == http.NoBody {
+		return func() {}, true
+	}
+	// Over-cap by declared Content-Length → exempt from buffering + fallthrough.
+	if r.ContentLength > maxSTTBodyBuffer {
+		return func() {}, false
+	}
+	// Common case: the HTTP server / middleware already set GetBody. Use it.
+	if r.GetBody != nil {
+		restore := func() {
+			if b, err := r.GetBody(); err == nil {
+				r.Body = b
+			}
+		}
+		restore() // prime before the first dispatch
+		return restore, true
+	}
+	// GetBody == nil but Body != nil: buffer ONCE (bounded) and set GetBody.
+	buf, err := io.ReadAll(io.LimitReader(r.Body, maxSTTBodyBuffer+1))
+	_ = r.Body.Close()
+	if err != nil {
+		return func() {}, false
+	}
+	if int64(len(buf)) > maxSTTBodyBuffer {
+		// Streamed body exceeded the cap mid-read → non-replayable.
+		r.Body = io.NopCloser(bytes.NewReader(buf))
+		return func() {}, false
+	}
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(buf)), nil
+	}
+	restore := func() {
+		b, _ := r.GetBody()
+		r.Body = b
+	}
+	restore() // prime before the first dispatch
+	return restore, true
 }
 
 // writeSensitiveBlock writes the standardized 503 envelope for sensitive

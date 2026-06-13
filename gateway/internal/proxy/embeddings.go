@@ -25,12 +25,15 @@ func NewEmbeddingsProxy(upstreamURL string, log *slog.Logger, interceptors ...Pr
 	rp := &httputil.ReverseProxy{
 		Director: BuildDirector(u),
 		// FlushInterval deliberately omitted (default 0 = buffered)
-		Transport: &http.Transport{
+		// RES-13 / Plan 12-03: fallthroughRoundTripper surfaces pre-byte
+		// dial failures as the sentinel the ErrorHandler suppresses so the
+		// dispatcher re-routes to tier-1.
+		Transport: fallthroughRoundTripper{base: &http.Transport{
 			MaxIdleConns:          50,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 10 * time.Second,
-		},
+		}},
 		ErrorHandler:   ErrorHandler("embed", log),
 		ModifyResponse: ComposeInterceptors(interceptors...),
 	}
