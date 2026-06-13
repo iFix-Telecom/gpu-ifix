@@ -30,6 +30,19 @@ var ErrToolCallPartialStream = errors.New("proxy: tool call partial stream")
 // Maps to HTTP 400 with envelope code "context_length_exceeded" per RES-07.
 var ErrContextLengthExceeded = errors.New("proxy: context length exceeded")
 
+// errDialFailedFallthrough is the typed sentinel that fallthroughRoundTripper
+// (transport.go) substitutes for a pre-byte connection-class dial error
+// (connection-refused, no route, DNS, dial-phase timeout) so the dispatcher
+// can re-route into the tier-1 cascade instead of writing a 502 (RES-13).
+//
+// It is NEVER written to the client. The sentinel-aware ErrorHandler below
+// detects it, suppresses ALL writes, and records the fallthrough signal in a
+// request-scoped dispatchResult so dispatchTo can re-dispatch after
+// ReverseProxy.ServeHTTP returns. Every OTHER error keeps the normal 502
+// write path. The sentinel is lowercase/unexported because no caller outside
+// this package needs it.
+var errDialFailedFallthrough = errors.New("proxy: dial failed, fall through to tier-1")
+
 // ErrorHandler returns a ReverseProxy ErrorHandler that emits a 502
 // with the OpenAI error envelope and logs the cause + request id.
 func ErrorHandler(upstreamName string, log *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
