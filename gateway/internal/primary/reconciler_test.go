@@ -48,14 +48,30 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
+
+// breakerReadForce reads a breaker force-override key for assertions.
+func breakerReadForce(t *testing.T, rdb *redis.Client, name string) (string, time.Duration, bool, error) {
+	t.Helper()
+	return breaker.ReadForceOverride(context.Background(), rdb, name)
+}
+
+// deathCount returns the current PrimaryDeathDetectedTotal counter value for a
+// cause label.
+func deathCount(t *testing.T, cause string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(obs.PrimaryDeathDetectedTotal.WithLabelValues(cause))
+}
 
 // ===========================================================================
 // Fakes
@@ -2172,4 +2188,482 @@ func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
 		"closeLifecycle MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
 	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
 		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 1 — Ready-tick death poll (RES-11)
+//
+// evaluateReady polls Vast for the tracked instance every Ready tick, confirms
+// death via a 3-strike confirm on both IsTerminal() and ErrInstanceNotFound,
+// classifies the cause, reconciles an empty trackedID from the open lifecycle
+// row (D-05), and resets the strike counters on enter-Ready (markReady). Task 1
+// does NOT wire drain/alert (that is Task 2) — the poll + strike + classify
+// must be complete and isolated.
+// ===========================================================================
+
+// deathPollReady is a Ready-state reconciler whose evaluateReady runs only the
+// death poll (DISABLED short-circuits the schedule drain trigger, the re-assert
+// loop is a no-op because all slots are set). Tracked instance + active pod
+// URLs are populated so the death poll has an id to poll.
+func deathPollReady(t *testing.T, vastFn func(ctx context.Context, id int64) (vast.Instance, error)) (*Reconciler, *fakeVast, *fakeLoader) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true // keep the schedule drain trigger off; death poll still runs
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	// Slots set so the Pitfall #11 re-assert loop does not fire.
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	fv := &fakeVast{getInstanceFn: vastFn}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Vast:   fv,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(42)
+	urls := primaryPodURLs{
+		LLM:  "http://203.0.113.7:33000/v1/models",
+		STT:  "http://203.0.113.7:33001/health",
+		TTS:  "http://203.0.113.7:33003/health",
+		DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+	return r, fv, loader
+}
+
+func terminalInstance(id int64) vast.Instance {
+	return vast.Instance{ID: id, ActualStatus: "exited"}
+}
+
+// TestEvaluateReady_EmptyTrackedIDReconciles — D-05: when activeInstanceID==0
+// but an open primary_lifecycles row carries the id and a pod is routing, the
+// death poll reconciles the id from the open row and polls it (no silent no-op).
+func TestEvaluateReady_EmptyTrackedIDReconciles(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	polled := atomic.Int64{}
+	fv := &fakeVast{getInstanceFn: func(_ context.Context, id int64) (vast.Instance, error) {
+		polled.Store(id)
+		return runningInstanceNoPorts(id), nil
+	}}
+	// GetOpenPrimaryLifecycle returns a row carrying vast_instance_id=55.
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+			return openLifecycleRow{id: 7, vastInstanceID: pgtype.Int8{Int64: 55, Valid: true}}
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Vast:   fv,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	// activeInstanceID intentionally 0 (lost on a force-up); a pod is routing.
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(0)
+	urls := primaryPodURLs{
+		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
+		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+
+	r.evaluateReady(context.Background(), time.Now(), testLogger())
+
+	require.Equal(t, int64(55), polled.Load(),
+		"death poll must reconcile the tracked id from the open lifecycle row and poll it")
+	require.Equal(t, int64(55), r.activeInstanceID.Load(),
+		"D-05: activeInstanceID must be repaired from the open row")
+}
+
+// TestEvaluateReady_DeathDetection — a tracked instance returning
+// IsTerminal()==true for 3 consecutive ticks confirms death; the cause is
+// classified host_death (plain exited, no stopped/credit signal). Task 1 only
+// requires the poll+strike+classify (drain/breakers are Task 2).
+func TestEvaluateReady_DeathDetection(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return terminalInstance(id), nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"strike 1 must not confirm death")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"strike 2 must not confirm death")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "3 consecutive terminal observations must confirm death")
+	require.True(t, got.dead)
+	require.Equal(t, "host_death", got.cause,
+		"plain exited with no stopped/credit signal → host_death")
+}
+
+// TestEvaluateReady_TransientExitedDoesNotDrain — IsTerminal()==true for 1-2
+// ticks then a non-terminal observation resets the strike counter; the FSM
+// stays Ready and no death is confirmed. The strike counter MUST survive
+// across separate evaluateReady calls (struct field, not a function local).
+func TestEvaluateReady_TransientExitedDoesNotDrain(t *testing.T) {
+	var status atomic.Value
+	status.Store("exited")
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return vast.Instance{ID: id, ActualStatus: status.Load().(string)}, nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	status.Store("running")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"non-terminal observation must not confirm")
+	status.Store("exited")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "strike 1 after reset")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "strike 2 after reset")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "strike 3 after reset confirms death")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"Task 1 classify does not itself transition the FSM (Task 2 wires drain)")
+}
+
+// TestEvaluateReady_NotFound3StrikeDrains — ErrInstanceNotFound for 3
+// consecutive ticks confirms death with cause=not_found.
+func TestEvaluateReady_NotFound3StrikeDrains(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, _ int64) (vast.Instance, error) {
+		return vast.Instance{}, vast.ErrInstanceNotFound
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "not-found strike 1")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "not-found strike 2")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "3 consecutive ErrInstanceNotFound must confirm death")
+	require.True(t, got.dead)
+	require.Equal(t, "not_found", got.cause,
+		"ErrInstanceNotFound death classifies cause=not_found")
+}
+
+// TestEvaluateReady_HealthyNoop — a healthy (non-terminal, found) instance
+// accumulates no strikes and confirms no death across many ticks.
+func TestEvaluateReady_HealthyNoop(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return runningInstanceNoPorts(id), nil
+	})
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+			"healthy instance must never confirm death")
+	}
+	require.Equal(t, StateReady, r.deps.FSM.State())
+}
+
+// TestEvaluateReady_StrikesResetOnEnterReady — strike counters carried > 0 from
+// a prior lifecycle are reset to 0 on the Provisioning→Ready transition
+// (markReady), so a freshly-Ready pod starts with a clean strike count.
+func TestEvaluateReady_StrikesResetOnEnterReady(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return terminalInstance(id), nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Equal(t, 2, r.terminalStrikesForTest(), "2 strikes carried")
+
+	r.deps.FSM.SetState(StateProvisioning, time.Now(), "new_pod")
+	dcgm := &fakeDCGMScraper{}
+	r.deps.DCGMScraper = dcgm
+	urls := primaryPodURLs{
+		LLM: "http://1.2.3.4:33000/v1/models", STT: "http://1.2.3.4:33001/health",
+		TTS: "http://1.2.3.4:33003/health", DCGM: "http://1.2.3.4:33400/metrics",
+	}
+	require.NoError(t, r.markReady(ctx, 8, urls, 0.30, testLogger()))
+	require.Equal(t, 0, r.terminalStrikesForTest(),
+		"markReady (enter-Ready) must reset the terminal strike counter")
+	require.Equal(t, 0, r.notFoundStrikesForTest(),
+		"markReady (enter-Ready) must reset the not-found strike counter")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 2 — death-confirmed path (D-01/D-03/D-04)
+//
+// On a confirmed death evaluateReady → handleConfirmedDeath:
+//   (1) startDrain (Ready→Draining + RestoreTier0)
+//   (2) D-04 force-open local-llm/local-stt/local-tts BEFORE destroy
+//   (3) D-01 billing-stop suppression marker (host-yank records none)
+//   (4) D-03 distinct primary_death_confirmed event (cause-tagged)
+//   (5) PrimaryDeathDetectedTotal{cause}.Inc()
+// ===========================================================================
+
+// readyReconcilerWithRedis builds a Ready-state reconciler wired to a miniredis
+// client so the death path's WriteForceOverride + publishPrimaryEvent observe a
+// real Redis. The death poll is driven directly via handleConfirmedDeath so the
+// test controls the cause without 3 strike ticks.
+func readyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	rdb, _ := miniredisClient(t)
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Redis:  rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(42)
+	urls := primaryPodURLs{
+		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
+		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+	return r, loader, rdb
+}
+
+func forceOverrideState(t *testing.T, rdb *redis.Client, name string) (string, bool) {
+	t.Helper()
+	state, _, set, err := breakerReadForce(t, rdb, name)
+	require.NoError(t, err)
+	return state, set
+}
+
+// TestDeath_HostYankDrainsAndForceOpens — confirmed host-yank death drains the
+// FSM, force-opens the 3 local-* breakers, publishes a host_death event, and
+// records NO billing-stop suppression marker.
+func TestDeath_HostYankDrainsAndForceOpens(t *testing.T) {
+	r, loader, rdb := readyReconcilerWithRedis(t)
+	startDeaths := deathCount(t, "host_death")
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"confirmed death must startDrain (Ready→Draining)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, loader.restoredRoles(),
+		"startDrain RestoreTier0s the 3 dynamic roles")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s must be force-overridden", name)
+		require.Equal(t, "open", state, "breaker %s must be force-OPEN", name)
+	}
+	require.Nil(t, r.billingSuppressionActiveForTest(),
+		"host-yank death must NOT record a billing-stop suppression marker")
+	require.InDelta(t, startDeaths+1, deathCount(t, "host_death"), 0.001,
+		"PrimaryDeathDetectedTotal{cause=host_death} must increment")
+}
+
+// TestDeath_BillingStopRecordsSuppression — confirmed billing-stop death drains
+// + force-opens + publishes a billing_stopped event AND records a durable
+// suppression marker.
+func TestDeath_BillingStopRecordsSuppression(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "billing_stopped"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State())
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set)
+		require.Equal(t, "open", state)
+	}
+	require.NotNil(t, r.billingSuppressionActiveForTest(),
+		"billing-stop death MUST record a durable suppression marker")
+}
+
+// TestEvaluateAsleep_BillingStopSuppressesReprovision — full path: after a
+// billing-stop suppression marker is active, evaluateAsleep inside the peak
+// window does NOT spawn provisioning. Host-yank (no marker) re-provisions.
+func TestEvaluateAsleep_BillingStopSuppressesReprovision(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil) // StateAsleep
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+			return insertReturningRow{id: 7, startedAt: time.Now()}
+		},
+	}
+	// Block SearchOffers so the spawnProvisioning goroutine cannot reach the
+	// error branch + FSM.SetState(Asleep) before this test asserts Provisioning.
+	stopBlock := make(chan struct{})
+	t.Cleanup(func() { close(stopBlock) })
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Rule: alwaysInPeakRule(), // in peak → ShouldBeProvisioned true
+		Vast: &fakeVast{
+			searchOffersFn: func(_ context.Context, _ vast.SearchFilter) ([]vast.Offer, error) {
+				<-stopBlock
+				return nil, errors.New("test teardown")
+			},
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	// Arm the billing-stop suppression marker.
+	r.armBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateAsleep, r.deps.FSM.State(),
+		"billing-stop suppression must make evaluateAsleep SKIP re-provision (no provision-fail loop)")
+
+	// Clear suppression → schedule loop re-provisions normally inside peak.
+	r.clearBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateProvisioning, r.deps.FSM.State(),
+		"with no suppression marker the schedule loop re-provisions normally inside peak (host-yank path)")
+}
+
+// TestDeath_BreakersForceOpenedBeforeDestroy — force-open is written at
+// drain-start (handleConfirmedDeath calls startDrain + force-open together),
+// well before evaluateDestroying's BestEffortDestroy runs. We assert the keys
+// exist immediately after handleConfirmedDeath, while the FSM is still Draining
+// (BestEffortDestroy has not yet been reached).
+func TestDeath_BreakersForceOpenedBeforeDestroy(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"after handleConfirmedDeath the FSM is Draining — destroy has NOT yet run")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		_, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s force-open must be written before destroy", name)
+	}
+}
+
+// TestDeath_BillingStopFallbackSignal — IntendedStatus empty but
+// ActualStatus==exited && StatusMsg has a credit/account marker → billing_stopped.
+func TestDeath_BillingStopFallbackSignal(t *testing.T) {
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "instance stopped: account out of credit"}),
+		"exited + credit StatusMsg must classify billing_stopped (A1 fallback)")
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{IntendedStatus: "stopped", ActualStatus: "exited"}),
+		"IntendedStatus==stopped is the primary billing signal")
+	require.Equal(t, "host_death",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "container crashed"}),
+		"exited with no credit/account marker is host_death")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 4 — D-13 markReady force-CLOSE (symmetric to D-04)
+//
+// markReady force-CLOSES the stale local-llm/local-stt/local-tts breakers
+// (short TTL) when a new pod goes Ready, so a re-provisioned pod never inherits
+// an OPEN breaker left over from probing the previous dead URL.
+// ===========================================================================
+
+// markReadyReconcilerWithRedis builds a Provisioning-state reconciler wired to
+// miniredis so markReady's force-CLOSE write is observable.
+func markReadyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	rdb, _ := miniredisClient(t)
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	return r, loader, rdb
+}
+
+func markReadyURLs() primaryPodURLs {
+	return primaryPodURLs{
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
+	}
+}
+
+// TestMarkReady_ResetsStaleBreakers — markReady force-CLOSEs each of the 3
+// local-* breakers (state="closed") so a breaker left OPEN by the previous dead
+// pod's probing is reset and traffic returns to the live pod.
+func TestMarkReady_ResetsStaleBreakers(t *testing.T) {
+	r, _, rdb := markReadyReconcilerWithRedis(t)
+	// Simulate a stale OPEN inherited from the previous dead pod's death path.
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		require.NoError(t, breaker.WriteForceOverride(context.Background(), rdb, name, "open", 10*time.Minute, "prev_death"))
+	}
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set, "breaker %s must still be force-overridden (now closed)", name)
+		require.Equal(t, "closed", state,
+			"markReady must force-CLOSE the stale %s breaker (D-13)", name)
+	}
+}
+
+// TestMarkReady_ForceCloseAfterOverrideTier0 — the force-close write lands AFTER
+// the OverrideTier0 block, so the pod URL slot is set before the breaker is
+// reset (no request hits a closed breaker pointing at a not-yet-overridden slot).
+func TestMarkReady_ForceCloseAfterOverrideTier0(t *testing.T) {
+	r, loader, rdb := markReadyReconcilerWithRedis(t)
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	// OverrideTier0 fired for the 3 roles (slots set) ...
+	snap := loader.snapshot()
+	require.Equal(t, "http://1.2.3.4:33000", snap["llm"])
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"])
+	require.Equal(t, "http://1.2.3.4:33003", snap["tts"])
+	// ... and the force-close keys are present (written after the slots).
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set)
+		require.Equal(t, "closed", state)
+	}
+}
+
+// TestMarkReady_ForceCloseBestEffort — a Redis write error in the force-close
+// path is logged but does NOT fail markReady (best-effort, mirroring
+// publishPrimaryEvent's nil-Redis safety): the pod still reaches Ready. We
+// model the Redis-unavailable case by passing a nil Redis client.
+func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       nil, // Redis not wired — force-close is skipped, markReady still completes
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()),
+		"a missing/failing Redis must NOT block markReady from reaching Ready")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"markReady completes the Provisioning→Ready transition despite no Redis")
 }

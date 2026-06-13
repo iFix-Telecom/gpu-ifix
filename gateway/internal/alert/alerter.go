@@ -140,6 +140,11 @@ func (a *Alerter) Run(ctx context.Context) {
 			redisx.BreakerEventsChannel(),
 			redisx.ShedEventsChannel,
 			redisx.EmergEventsChannel,
+			// Phase 12 Plan 02 (D-03 / FINDING 1): PrimaryEvents was subscribed
+			// by nobody before this plan — a primary_death_confirmed event was
+			// published but never fanned out to an operator. Adding it here wires
+			// the distinct billing-stop vs host-death critical alert.
+			redisx.PrimaryEventsChannel,
 		)
 		ch := ps.Channel()
 		drained := false

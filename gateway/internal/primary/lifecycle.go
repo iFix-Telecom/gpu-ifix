@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -258,6 +259,29 @@ type Reconciler struct {
 	// *gen.Queries via SetQueriesForTest so the reconciler can exercise
 	// the SQL paths without standing up a real *pgxpool.Pool.
 	queriesOverride atomic.Pointer[gen.Queries]
+
+	// Phase 12 Plan 02 (RES-11): Ready-tick death-poll strike counters. The
+	// reconciler polls Vast for the tracked instance on EVERY Ready tick
+	// (evaluateReady) and confirms a dead pod via the same 3-strike pattern
+	// waitForReadyOrDestroy uses during provisioning. Unlike that in-loop
+	// counter (a function local — the loop is ONE call), each Ready tick is a
+	// SEPARATE evaluateReady call, so the strike counters MUST persist across
+	// ticks on the struct. Guarded by deathStrikeMu because evaluateReady runs
+	// on the schedule-loop goroutine and markReady (which resets them on the
+	// Provisioning→Ready transition) runs on the provisioning goroutine.
+	deathStrikeMu   sync.Mutex
+	terminalStrikes int
+	notFoundStrikes int
+
+	// billingSuppressedAt is the wall-clock time of the most-recent
+	// CONFIRMED billing-stop death (Phase 12 Plan 02, D-01). evaluateAsleep
+	// checks it: while the suppression window is active (set by a billing-stop
+	// death, cleared by a successful provision / operator force-up), the
+	// schedule loop SKIPS re-provision so a zero-credit pod does not enter a
+	// provision-fail loop. nil = no active suppression. This is a SUPPRESSION
+	// FLAG checked by the existing schedule evaluator — NOT new retry
+	// machinery (D-01: a flag is allowed, retry logic is not).
+	billingSuppressedAt atomic.Pointer[time.Time]
 }
 
 // NewReconciler constructs a Reconciler with the given Deps. cfg is

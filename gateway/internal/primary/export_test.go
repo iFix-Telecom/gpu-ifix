@@ -13,7 +13,12 @@
 // setter, preserving the immutability contract.
 package primary
 
-import "testing"
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+)
 
 // SetScheduleRuleForTest replaces the Reconciler's ScheduleRule with the
 // given value. test-only — ScheduleRule is immutable in production
@@ -29,4 +34,47 @@ import "testing"
 func SetScheduleRuleForTest(t *testing.T, r *Reconciler, rule ScheduleRule) {
 	t.Helper()
 	r.rule = rule
+}
+
+// classifyDeathOnReadyTickForTest exposes pollDeathOnReadyTick to the unit
+// tests (Phase 12 Plan 02). Returns nil unless a death is CONFIRMED on this
+// tick; otherwise the (dead, cause) pair. Test-only — the production caller is
+// evaluateReady.
+func (r *Reconciler) classifyDeathOnReadyTickForTest(ctx context.Context, log *slog.Logger) *deathClassification {
+	return r.pollDeathOnReadyTick(ctx, log)
+}
+
+// terminalStrikesForTest / notFoundStrikesForTest expose the persisted
+// Ready-tick strike counters so tests can assert they survive across ticks and
+// reset on enter-Ready (markReady).
+func (r *Reconciler) terminalStrikesForTest() int {
+	r.deathStrikeMu.Lock()
+	defer r.deathStrikeMu.Unlock()
+	return r.terminalStrikes
+}
+
+func (r *Reconciler) notFoundStrikesForTest() int {
+	r.deathStrikeMu.Lock()
+	defer r.deathStrikeMu.Unlock()
+	return r.notFoundStrikes
+}
+
+// billingSuppressionActiveForTest returns the suppression marker timestamp (nil
+// when no active billing-stop suppression). Test-only (Phase 12 Plan 02 D-01).
+func (r *Reconciler) billingSuppressionActiveForTest() *time.Time {
+	if r.billingSuppressionActive(time.Now()) {
+		return r.billingSuppressedAt.Load()
+	}
+	return nil
+}
+
+// armBillingSuppressionForTest sets the suppression marker to now.
+func (r *Reconciler) armBillingSuppressionForTest() {
+	now := time.Now()
+	r.billingSuppressedAt.Store(&now)
+}
+
+// clearBillingSuppressionForTest clears the suppression marker.
+func (r *Reconciler) clearBillingSuppressionForTest() {
+	r.billingSuppressedAt.Store(nil)
 }
