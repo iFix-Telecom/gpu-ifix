@@ -173,7 +173,7 @@ Plans:
 **Depends on:** Phase 11 (11-06/11-07 evidence + seeds SEED-011/SEED-012); Phase 06.9 (tier-1 model rewrite working — failover target must actually serve)
 **Blocks:** continuous prod primary operation (24/7 tier-0 unsafe until RES-11+RES-13 land)
 **Mode:** sequential (not MVP)
-**Plans:** 1/5 plans executed
+**Plans:** 3/5 plans executed
 **Cost:** chaos re-validation UAT ~$0.50-1.00 Vast spend (re-run 11-07 recipe expecting zero-502); dev-stack testing otherwise
 
 Plans:
@@ -183,8 +183,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 12-02-PLAN.md — RES-11 Ready-tick death detection + D-05 trackedID repair + D-04 force-open + D-03 distinct billing-stop alert
-- [ ] 12-03-PLAN.md — RES-13 connection-class dial-failure fallthrough to tier-1 cascade (sensitive 503 preserved)
+- [x] 12-02-PLAN.md — RES-11 Ready-tick death detection + D-05 trackedID repair + D-04 force-open + D-03 distinct billing-stop alert
+- [x] 12-03-PLAN.md — RES-13 connection-class dial-failure fallthrough to tier-1 cascade (sensitive 503 preserved)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
