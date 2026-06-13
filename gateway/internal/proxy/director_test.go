@@ -74,6 +74,25 @@ func TestBuildDirector_StripsAuthHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildDirector_StripsClientAcceptEncoding(t *testing.T) {
+	// Regression: client-supplied Accept-Encoding survived BuildDirector
+	// and reached the upstream, which caused http.Transport to pass the
+	// gzipped response body through unchanged. The audit middleware's
+	// jsonb capture choked on gzip magic byte 0x8b, rolling back the entire
+	// audit_log row (SQLSTATE 22021). Stripping the header lets the Transport
+	// negotiate compression on its own and auto-decompress before the body
+	// reaches downstream consumers.
+	up, _ := url.Parse("http://up")
+	d := BuildDirector(up)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req = req.WithContext(ctxWithRequestID(t, ""))
+	d(req)
+	if v := req.Header.Get("Accept-Encoding"); v != "" {
+		t.Errorf("Accept-Encoding got %q, expected empty (stripped so Transport can negotiate + auto-decompress)", v)
+	}
+}
+
 func TestBuildDirector_PropagatesGatewayRequestID(t *testing.T) {
 	up, _ := url.Parse("http://up")
 	d := BuildDirector(up)

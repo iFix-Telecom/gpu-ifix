@@ -9,6 +9,8 @@ re_verification:
   previous_score: "32/33 must-haves; SC-1 PARTIAL (integration test 207ms; live Vast.ai pod-kill deferred)"
   gaps_closed_2026_05_25:
     - "SC-1 LIVE — re-verified on 2026-05-25 against ai-gateway-dev (image develop-560aa2a). 2 consecutive chat probes with local-llm FORCED_OPEN both returned HTTP 200 + DeepSeek v4 Flash via OpenRouter; audit_log shows upstream=openrouter-chat for each request_id. Sustained failover proven without real Vast pod-kill (functionally equivalent — breaker FORCED_OPEN drives dispatcher to tier-1 exactly as Vast pod-kill would). Phase 06.9 (PR #1-#5) closed every link of the dispatcher → tier-1 chain: model rewrite per-upstream, deepseek target, BuildDirector path-join, EffectiveState force-override, HasSuffix chat-path. See 06.9-HUMAN-UAT.md S4 + 06.9-VERIFICATION.md."
+  gaps_closed_phase_10_2026_05_26:
+    - "SC-1 LIVE re-verified under PROD URL 2026-05-26 (image sha256:17e9873ec810) — 2 consecutive chat probes with local-llm FORCED_OPEN against https://ai-gateway.converse-ai.app/v1/chat/completions both returned HTTP 200 (RIDs 019e6505-e1a5-77a9-80f1-6012e42e5b78 + 019e6505-ea0a-73c9-8117-6c5e9d689824). Implicit tier-1 routing: with local-llm FORCED_OPEN, HTTP 200 only possible via openrouter-chat (else 503). audit_log evidence blocked by separate audit-flush UTF8 bug (see 10-VERIFICATION.md tech-debt log) — but gateway logs + breaker state confirm both probes succeeded with primary forced OPEN. See 10-HUMAN-UAT.md S4."
   regressions: []
 success_criteria:
   SC-1: PASS     # live cascade re-verified 2026-05-25; 2/2 probes HTTP 200 via openrouter-chat after Phase 06.9 closed the model-rewrite + URL + force-override gaps

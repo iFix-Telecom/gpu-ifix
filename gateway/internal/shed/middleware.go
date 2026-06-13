@@ -147,7 +147,13 @@ func Middleware(d MiddlewareDeps, log *slog.Logger) func(http.Handler) http.Hand
 			if auditctx.UpstreamOverrideFromContext(r.Context()) != "" {
 				ctx := auditctx.WithShedDecision(r.Context(), "skipped_peak_offhours")
 				obs.GatewayShedDecisions.WithLabelValues("", "skipped_peak_offhours").Inc()
-				next.ServeHTTP(w, r.WithContext(ctx))
+				// Mutate the request in-place so dispatcher-side context
+				// stamps remain observable by audit.Middleware (which
+				// captured r upstream). Same pattern as trackAndPass +
+				// schedule.Middleware — see HIGH-02 fragility note in
+				// .planning/debug/audit-blocked-sensitive-override-not-propagated.md.
+				*r = *r.WithContext(ctx)
+				next.ServeHTTP(w, r)
 				return
 			}
 
@@ -268,7 +274,15 @@ func (d MiddlewareDeps) trackAndPass(w http.ResponseWriter, r *http.Request, nex
 	}()
 	ctx := auditctx.WithShedDecision(r.Context(), "passed")
 	obs.GatewayShedDecisions.WithLabelValues(upstream, "passed").Inc()
-	next.ServeHTTP(w, r.WithContext(ctx))
+	// Mutate the request in place so the audit middleware (which reads
+	// r.Context() AFTER next returns, using the same *http.Request
+	// pointer it captured upstream) observes any downstream context
+	// stamps — most importantly the proxy.dispatcher.writeSensitiveBlock
+	// upstream_override="blocked_sensitive". Using r.WithContext(ctx)
+	// here creates a new *http.Request and breaks that chain. Same
+	// pattern as Branches 10a/10b above and dispatcher.writeSensitiveBlock.
+	*r = *r.WithContext(ctx)
+	next.ServeHTTP(w, r)
 }
 
 // resolveCapForRole reads the role-specific cap from TenantConfig.

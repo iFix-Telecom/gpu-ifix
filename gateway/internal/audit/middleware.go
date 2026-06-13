@@ -70,11 +70,23 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 
 			next.ServeHTTP(aw, r)
 
-			// Build Event from the captured state. Upstream defaults to
-			// the route-derived value (llm/embed/stt); handlers may
-			// override via audit.WithUpstreamOverride (e.g. dispatcher's
-			// sensitive-block path → "blocked_sensitive" per D-B3).
+			// Build Event from the captured state. Upstream resolution
+			// has 3 layers (last-wins precedence):
+			//   1. route-derived default ("stt"/"llm"/"embed")
+			//   2. dispatched-upstream registry (Phase 11.2 Plan 08
+			//      D-B13 fix): records the FACTUAL upstream name the
+			//      dispatcher chose (local-stt, gemini-stt, etc.). Uses
+			//      a request-id-keyed registry instead of ctx because
+			//      http.TimeoutHandler clones the request before passing
+			//      to the inner handler, breaking ctx propagation back
+			//      to this middleware. TakeDispatchedUpstream removes
+			//      the entry on read so the registry stays bounded.
+			//   3. UpstreamOverride (explicit intent: blocked_sensitive,
+			//      off_hours, shed_*) — wins over registry.
 			upstream := upstreamForRoute(r.URL.Path)
+			if dispatched := auditctx.TakeDispatchedUpstream(httpx.RequestIDFrom(r.Context())); dispatched != "" {
+				upstream = dispatched
+			}
 			if override := auditctx.UpstreamOverrideFrom(r.Context()); override != "" {
 				upstream = override
 			}
@@ -94,9 +106,26 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 			}
 			if isNormal {
 				event.Prompt = reqBody
-				event.Response = append([]byte(nil), aw.buf.Bytes()...)
-				if len(event.Response) == 0 {
-					event.Response = nil
+				if aw.sawSSE {
+					// SSE responses cannot be stored verbatim in the
+					// audit_log_content.response JSONB column — the wire
+					// format is `data: {...}\n\ndata: {...}\n\n...data: [DONE]`,
+					// which postgres rejects with SQLSTATE 22P02 and rolls
+					// back the entire flush batch (taking the audit_log
+					// envelope rows with it). Extract the LAST `data: {...}`
+					// chunk before `[DONE]` — for streams that opt into
+					// `stream_options.include_usage=true` (openrouter_director
+					// injects this by default) that chunk carries the usage
+					// totals + finish_reason, which is the highest-value
+					// per-row summary we can preserve without aggregating
+					// every delta. Falls back to nil if no parseable chunk
+					// is found.
+					event.Response = extractLastSSEChunk(aw.buf.Bytes())
+				} else {
+					event.Response = append([]byte(nil), aw.buf.Bytes()...)
+					if len(event.Response) == 0 {
+						event.Response = nil
+					}
 				}
 				if len(event.Prompt) == 0 {
 					event.Prompt = nil
@@ -226,6 +255,59 @@ func populateAudioMetadata(e *Event, r *http.Request, aw *auditResponseWriter) {
 		// Truncated bodies fail json.Unmarshal; that's acceptable — we keep
 		// metadata partially populated rather than guess with substring scans.
 	}
+}
+
+// extractLastSSEChunk scans an SSE response body and returns the JSON payload
+// of the LAST `data: {...}` line before `data: [DONE]` (or the LAST `data:`
+// line at all if [DONE] was not emitted). Returns nil when no JSON-parseable
+// payload is found. The caller is expected to write the result into
+// audit_log_content.response (a JSONB column) — a nil result causes the row
+// to be skipped (per Flush's len-zero short-circuit), avoiding the
+// SQLSTATE 22P02 rollback that would otherwise lose the entire batch.
+//
+// Why the LAST chunk: openrouter_director injects
+// `stream_options.include_usage=true` so the final non-DONE chunk carries the
+// usage totals + finish_reason — the highest-value single-row summary we can
+// keep without aggregating every delta.
+func extractLastSSEChunk(buf []byte) []byte {
+	if len(buf) == 0 {
+		return nil
+	}
+	// Scan lines from the END so we find the last `data: {...}` cheaply.
+	// SSE wire format separates events with `\n\n`; each event is one or
+	// more `field: value\n` lines. We accept either `\n` or `\r\n`.
+	const dataPrefix = "data: "
+	var lastJSON []byte
+	start := 0
+	for start < len(buf) {
+		end := bytes.IndexByte(buf[start:], '\n')
+		var line []byte
+		if end < 0 {
+			line = buf[start:]
+			start = len(buf)
+		} else {
+			line = buf[start : start+end]
+			start = start + end + 1
+		}
+		// Trim trailing \r.
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
+		if !bytes.HasPrefix(line, []byte(dataPrefix)) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len(dataPrefix):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		// Cheap JSON-validity check — anything else postgres will reject.
+		if !json.Valid(payload) {
+			continue
+		}
+		// Copy out so the returned slice is independent of buf's lifetime.
+		lastJSON = append(lastJSON[:0], payload...)
+	}
+	return lastJSON
 }
 
 // --- auditResponseWriter ---

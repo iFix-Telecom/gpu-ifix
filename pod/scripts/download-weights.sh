@@ -7,9 +7,10 @@
 #
 # Env vars required:
 #   MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET
-#   WEIGHTS_QWEN_KEY,   WEIGHTS_QWEN_SHA256
+#   WEIGHTS_QWEN_KEY,    WEIGHTS_QWEN_SHA256
 #   WEIGHTS_WHISPER_KEY, WEIGHTS_WHISPER_SHA256
 #   WEIGHTS_BGE_M3_KEY,  WEIGHTS_BGE_M3_SHA256
+# (Phase 11.2 restored WEIGHTS_WHISPER_* after Phase 11.1 stripped it.)
 #
 # Exit codes:
 #   0 — all weights downloaded, verified, extracted
@@ -95,6 +96,10 @@ if [[ "$FAIL" -ne 0 ]]; then
 fi
 
 # --- extract tarballs (Whisper + BGE-M3) ----------------------------------
+# Phase 06.8 fix-iii / Pitfall 4: extract target MUST be /weights/whisper
+# so it aligns with HF_HUB_CACHE in pod/primary/supervisord.conf
+# [program:speaches] environment. The tarball is pre-shaped HF cache
+# (models--Systran--faster-whisper-large-v3/{refs,snapshots/<hash>/}).
 log "extracting whisper tarball"
 tar -xzf "${WHISPER_DEST}" -C "${WEIGHTS_DIR}/whisper" || exit 4
 

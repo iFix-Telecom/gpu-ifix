@@ -64,7 +64,9 @@ Plataforma central de IA da Ifix Telecom: um gateway HTTP que serve LLM, transcr
 - Vast.ai 2×RTX 3090 (primary final shape Phase 06.8): cap $0.60/h
 - Vast.ai 5090 (alternate, validado UAT 06.6 #18): ~$0.33-0.77/h observado EU
 - OpenRouter Qwen 3.5 27B via Fireworks: pay-per-token (tier-1 fallback; minor drift vs primary Qwen 3.6 — see Out of Scope)
-- OpenAI Whisper API: ~$0,006/min de áudio (tier-1 fallback)
+- Gemini 2.5 Flash Lite (Phase 11.2 primary tier-1 STT): ~$0.05/h batch (~$0,00083/min) — cheapest tier-1 STT, breaker cooldown 120s
+- Groq Whisper-large-v3 (Phase 11.2 second tier-1 STT): ~$0.111/h (~$0,00185/min) — second fallback when Gemini breaker is OPEN
+- OpenAI Whisper API (tier-1 safety net): ~$0,006/min de áudio (~$0.36/h)
 - Infinity multilingual-e5-large CPU n8n-ia-vm: $0 (host compartilhado)
 
 **Justificativa Vast.ai como primária (não RunPod Secure):**
@@ -94,7 +96,9 @@ Per-upstream model targets (post-Phase-06.9, schema-driven via `ai_gateway.model
 | `local-llm` | llm | 0 | own pod (llama.cpp) | `qwen` (passthrough alias) | tier-0 proxies pass body byte-identical; resolver not consulted |
 | `openrouter-chat` | llm | 1 | OpenRouter | `deepseek/deepseek-v4-flash:nitro` (canonical `deepseek/deepseek-v4-flash-20260423`; updated by migration 0027 — was `qwen/qwen3.5-27b`) | provider chosen by OpenRouter (no pin; was Novita-pinned for Qwen); SiliconFlow observed in initial probe; `:nitro` = OpenRouter high-perf routing variant |
 | `local-stt` | stt | 0 | own pod (Speaches) | `whisper` (passthrough alias) | tier-0 pass-through |
-| `openai-whisper` | stt | 1 | OpenAI | `whisper-1` | multipart/form-data; director rewrites `model` part value byte-identical to audio file part |
+| `gemini-stt` | stt | 1 (prio=10) | Google AI Studio | `gemini-2.5-flash-lite` | **Phase 11.2 primary tier-1 STT fallback** (~$0.05/h batch); dedicated `gemini_stt_director.go` (multipart→JSON + `x-goog-api-key`); `circuit_config.cooldown_s=120` (D-B11); env-override `UPSTREAM_STT_FALLBACK_1_MODEL` |
+| `groq-whisper` | stt | 1 (prio=15) | Groq Cloud | `whisper-large-v3` | **Phase 11.2 second tier-1 STT fallback** (~$0.111/h); REUSES `BuildOpenAIWhisperDirector` (D-B8 — Groq endpoint is OpenAI-compatible, zero new adapter code); env-override `UPSTREAM_STT_FALLBACK_2_MODEL` |
+| `openai-whisper` | stt | 1 (prio=20) | OpenAI | `whisper-1` | tier-1 safety net (~$0.36/h); multipart/form-data; director rewrites `model` part value byte-identical to audio file part |
 | `local-embed` | embed | 0 | Infinity (n8n-ia-vm CPU 24/7 off-pod) | `bge-m3` (passthrough alias) | tier-0 pass-through |
 | `openai-embed` | embed | 1 | OpenAI | `text-embedding-3-small` + `dimensions=1024` (BGE-M3 parity invariant) | director injects `dimensions` |
 
@@ -151,4 +155,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-20 after Phase 3 (resilience + fallback chain) complete*
+*Last updated: 2026-06-11 after Phase 6.6.Y (pod cold-start fix + env precedence canonical) complete — VERIFICATION passed 2/2*

@@ -1,150 +1,145 @@
-# Ifix AI Gateway — Portainer stack template (Docker Swarm).
+# ============================================================
+# ifix-ai-gateway — Portainer stack template (Compose v2)
+# ============================================================
 #
-# Deploy target: Portainer stack `ai-gateway-dev` / `ai-gateway-prod`
-# managed at portainer3.ifixtelecom.com.br.
+# Pattern: matches converseai-v4-dev (Portainer stack 15 on vps-ifix-vm).
+# Env vars come from the Portainer stack "Environment variables" section
+# (stack.env file in /data/compose/<STACK_ID>/) — this file uses ${VAR}
+# interpolation ONLY. NO literal secrets here.
 #
-# Target host runs Docker Swarm; this file uses the Compose v3.x schema
-# with the `deploy:` section (Swarm-native) instead of `restart:` /
-# `container_name:` (Compose-only). Env vars come from the Portainer
-# stack UI — this file uses ${VAR} interpolation ONLY.
+# Deploy target:
+#   - host: vps-ifix-vm (10.10.10.30) — Portainer @ portainer3.ifixtelecom.com.br
+#   - network: `traefik-public` (external bridge, shared with edge Traefik)
+#   - traefik certresolver: `letsencrypt`
 #
-# Network model:
-#   - `worker_intra` is the shared overlay network where Traefik discovers
-#     services (--providers.docker.network=worker_intra) and where the
-#     stack's Postgres/Redis live. Mark it `external: true` because
-#     Portainer doesn't recreate shared overlay networks on stack deploy.
+# GHA workflow `.github/workflows/build-gateway.yml`:
+#   - On push to develop: build+push ghcr.io/ifixtelecom/ifix-ai-gateway:latest-dev
+#   - Sync this file into /data/compose/<STACK_ID>/docker-compose.yml
+#   - Run `docker compose pull && docker compose up -d` against Portainer's stack.env
+#   - See converseai-v4/.github/workflows/deploy-dev.yml for the canonical recipe.
 #
-# TLS / public exposure:
-#   - Traefik labels publish ${GATEWAY_DOMAIN} via websecure (443) with
-#     letsencryptresolver. Set GATEWAY_DOMAIN to e.g. ai-gateway-dev.ifixtelecom.com.br
-#     and create a DNS A/AAAA record pointing at the worker host before deploy.
-#
-# Schema migrations: the gateway binary runs goose.Up on boot when
-# AI_GATEWAY_MIGRATE_ON_BOOT=true (CONTEXT.md D-D1). Flip to false after
-# the first successful deploy to save ~100ms of startup and avoid drift
-# during rolling restarts.
+# Schema migrations: gateway runs goose.Up on boot when
+# AI_GATEWAY_MIGRATE_ON_BOOT=true. Flip to false after first deploy to skip
+# startup migration check (~100ms) and avoid drift during rolling restarts.
 
 services:
   gateway:
     image: ghcr.io/ifixtelecom/ifix-ai-gateway:${TAG:-latest-dev}
+    container_name: ai-gateway-dev
+    restart: unless-stopped
     environment:
       TZ: America/Sao_Paulo
       GATEWAY_PORT: 8080
-      ENV: ${ENV:-production}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Data layer (shared DO Postgres + shared in-cluster Redis)
+      ENV: ${ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      # Data layer
       AI_GATEWAY_PG_DSN: ${AI_GATEWAY_PG_DSN}
       AI_GATEWAY_PG_MAX_CONNS: ${AI_GATEWAY_PG_MAX_CONNS:-10}
       AI_GATEWAY_REDIS_ADDR: ${AI_GATEWAY_REDIS_ADDR}
       AI_GATEWAY_REDIS_PASSWORD: ${AI_GATEWAY_REDIS_PASSWORD:-}
       AI_GATEWAY_REDIS_DB: ${AI_GATEWAY_REDIS_DB:-0}
-      # Upstreams (Phase 1 pod)
+      # Upstreams
       UPSTREAM_LLM_URL: ${UPSTREAM_LLM_URL}
-      UPSTREAM_STT_URL: ${UPSTREAM_STT_URL}
+      UPSTREAM_STT_URL: ${UPSTREAM_STT_URL:-}
       UPSTREAM_EMBED_URL: ${UPSTREAM_EMBED_URL}
       UPSTREAM_HEALTH_BRIDGE_URL: ${UPSTREAM_HEALTH_BRIDGE_URL}
+      UPSTREAM_TTS_URL: ${UPSTREAM_TTS_URL:-}
+      UPSTREAM_TTS_PIPER_URL: ${UPSTREAM_TTS_PIPER_URL:-}
+      # Phase 3 tier-1 fallback (OpenRouter + OpenAI Whisper/Embed)
+      UPSTREAM_LLM_OPENROUTER_URL: ${UPSTREAM_LLM_OPENROUTER_URL:-}
+      UPSTREAM_LLM_OPENROUTER_AUTH_BEARER: ${UPSTREAM_LLM_OPENROUTER_AUTH_BEARER:-}
+      UPSTREAM_LLM_OPENROUTER_MODEL: ${UPSTREAM_LLM_OPENROUTER_MODEL:-}
+      UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER: ${UPSTREAM_LLM_OPENROUTER_PROVIDER_ORDER:-}
+      UPSTREAM_STT_OPENAI_URL: ${UPSTREAM_STT_OPENAI_URL:-}
+      UPSTREAM_STT_OPENAI_AUTH_BEARER: ${UPSTREAM_STT_OPENAI_AUTH_BEARER:-}
+      UPSTREAM_EMBED_OPENAI_URL: ${UPSTREAM_EMBED_OPENAI_URL:-}
+      UPSTREAM_EMBED_OPENAI_AUTH_BEARER: ${UPSTREAM_EMBED_OPENAI_AUTH_BEARER:-}
+      # Phase 11.2 — STT tier-1 cascade slots (slot 1 = Gemini, slot 2 = Groq Whisper)
+      UPSTREAM_STT_FALLBACK_1_URL: ${UPSTREAM_STT_FALLBACK_1_URL:-}
+      UPSTREAM_STT_FALLBACK_1_AUTH_BEARER: ${UPSTREAM_STT_FALLBACK_1_AUTH_BEARER:-}
+      UPSTREAM_STT_FALLBACK_1_MODEL: ${UPSTREAM_STT_FALLBACK_1_MODEL:-}
+      UPSTREAM_STT_FALLBACK_2_URL: ${UPSTREAM_STT_FALLBACK_2_URL:-}
+      UPSTREAM_STT_FALLBACK_2_AUTH_BEARER: ${UPSTREAM_STT_FALLBACK_2_AUTH_BEARER:-}
+      UPSTREAM_STT_FALLBACK_2_MODEL: ${UPSTREAM_STT_FALLBACK_2_MODEL:-}
       # Observability
+      DCGM_EXPORTER_URL: ${DCGM_EXPORTER_URL:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       # Bootstrap
       BOOTSTRAP_TENANT_SLUG: ${BOOTSTRAP_TENANT_SLUG:-converseai}
-      # Boot-time migrations (flip off after first prod deploy)
       AI_GATEWAY_MIGRATE_ON_BOOT: ${AI_GATEWAY_MIGRATE_ON_BOOT:-true}
+      BREAKER_COOLDOWN_SECONDS: ${BREAKER_COOLDOWN_SECONDS:-30}
+      # Phase 6 — emergency pod auto-provisioning
+      VAST_AI_API_KEY: ${VAST_AI_API_KEY}
+      VAST_PRICE_CAP_DPH: ${VAST_PRICE_CAP_DPH:-0.40}
+      VAST_API_QPS_LIMIT: ${VAST_API_QPS_LIMIT:-1}
+      MONTHLY_EMERGENCY_BUDGET_BRL: ${MONTHLY_EMERGENCY_BUDGET_BRL:-200}
+      MONTHLY_PRIMARY_BUDGET_BRL: ${MONTHLY_PRIMARY_BUDGET_BRL:-800}
+      USD_TO_BRL_RATE: ${USD_TO_BRL_RATE:-5.0}
+      EMERGENCY_POD_IMAGE_TAG: ${EMERGENCY_POD_IMAGE_TAG:-latest-dev}
+      EMERGENCY_TEMPLATE_IMAGE: ${EMERGENCY_TEMPLATE_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9128}
+      EMERGENCY_JINJA_TEMPLATE_KEY: ${EMERGENCY_JINJA_TEMPLATE_KEY:-}
+      EMERGENCY_JINJA_TEMPLATE_SHA256: ${EMERGENCY_JINJA_TEMPLATE_SHA256:-}
+      EMERGENCY_LLAMA_ARGS: ${EMERGENCY_LLAMA_ARGS:-}
+      POD_DEBUG_SSH_PUBLIC_KEY: ${POD_DEBUG_SSH_PUBLIC_KEY:-}
+      PROVISION_HEALTHY_DURATION_SECONDS: ${PROVISION_HEALTHY_DURATION_SECONDS:-300}
+      PROVISION_IDLE_GRACE_SECONDS: ${PROVISION_IDLE_GRACE_SECONDS:-300}
+      PROVISION_FAILURE_COOLDOWN_SECONDS: ${PROVISION_FAILURE_COOLDOWN_SECONDS:-60}
+      PROVISION_COLDSTART_BUDGET_SECONDS: ${PROVISION_COLDSTART_BUDGET_SECONDS:-600}
+      PROVISION_TRIGGER_FAILED_OVER_SECONDS: ${PROVISION_TRIGGER_FAILED_OVER_SECONDS:-120}
+      PRIMARY_HOST_ID: ${PRIMARY_HOST_ID:-0}
+      # Phase 6 — pod-side secrets
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_BUCKET: ${MINIO_BUCKET:-ai-gateway}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      WEIGHTS_QWEN_KEY: ${WEIGHTS_QWEN_KEY:-qwen3.5-27b-Q4_K_M/v1.0.0/model.gguf}
+      WEIGHTS_QWEN_SHA256: ${WEIGHTS_QWEN_SHA256}
+      WEIGHTS_WHISPER_KEY: ${WEIGHTS_WHISPER_KEY:-whisper-large-v3/v1.0.0/model.tar.gz}
+      WEIGHTS_WHISPER_SHA256: ${WEIGHTS_WHISPER_SHA256}
+      WEIGHTS_BGE_M3_KEY: ${WEIGHTS_BGE_M3_KEY:-bge-m3/v1.0.0/model.tar.gz}
+      WEIGHTS_BGE_M3_SHA256: ${WEIGHTS_BGE_M3_SHA256}
+      # Phase 6.6 — primary pod (schedule-driven)
+      PRIMARY_POD_SCHEDULE_DISABLED: ${PRIMARY_POD_SCHEDULE_DISABLED:-true}
+      PRIMARY_TEMPLATE_IMAGE: ${PRIMARY_TEMPLATE_IMAGE:-ghcr.io/ifixtelecom/converseai-primary-pod:develop}
+      PRIMARY_QWEN_WEIGHTS_SHA256: ${PRIMARY_QWEN_WEIGHTS_SHA256:-}
+      PRIMARY_WHISPER_WEIGHTS_SHA256: ${PRIMARY_WHISPER_WEIGHTS_SHA256:-}
+      PRIMARY_BGEM3_WEIGHTS_SHA256: ${PRIMARY_BGEM3_WEIGHTS_SHA256:-}
+      # Chatterbox TTS model (pre-provisioned HF-cache snapshot in MinIO)
+      PRIMARY_CHATTERBOX_WEIGHTS_KEY: ${PRIMARY_CHATTERBOX_WEIGHTS_KEY:-chatterbox-mtl-v2/v1.0.0/cache.tar.gz}
+      PRIMARY_CHATTERBOX_WEIGHTS_SHA256: ${PRIMARY_CHATTERBOX_WEIGHTS_SHA256:-}
+      # Phase 11.1 — Primary GPU shape (1×3090 + 2×3090 cascade after Wave 0 pivot)
+      PRIMARY_VAST_GPU_NAME_PRIMARY: ${PRIMARY_VAST_GPU_NAME_PRIMARY:-RTX 3090}
+      PRIMARY_VAST_GPU_NAME_FALLBACK: ${PRIMARY_VAST_GPU_NAME_FALLBACK:-RTX 3090}
+      PRIMARY_VAST_PRICE_CAP_PRIMARY: ${PRIMARY_VAST_PRICE_CAP_PRIMARY:-0.30}
+      PRIMARY_VAST_PRICE_CAP_FALLBACK: ${PRIMARY_VAST_PRICE_CAP_FALLBACK:-0.60}
+      PRIMARY_VAST_NUM_GPUS_PRIMARY: ${PRIMARY_VAST_NUM_GPUS_PRIMARY:-1}
+      PRIMARY_VAST_NUM_GPUS_FALLBACK: ${PRIMARY_VAST_NUM_GPUS_FALLBACK:-2}
+      # Phase 6.6.Y — cold-start hardening (Option A offer-time RFC1918 guard + Option B runtime fail-fast)
+      PRIMARY_VAST_REJECT_PRIVATE_IP: ${PRIMARY_VAST_REJECT_PRIVATE_IP:-true}
+      PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS: ${PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS:-120}
+      # Cold-start /health poll budget (default 2400=40min). Slow-inet hosts
+      # (e.g. US→Hetzner DE at ~1 MiB/s) need 16GB Qwen + bge + whisper download
+      # + extraction + llama GPU load to fit; raise to 3600 for such hosts.
+      PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS: ${PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS:-2400}
+      PRIMARY_VAST_MACHINE_ALLOWLIST: ${PRIMARY_VAST_MACHINE_ALLOWLIST:-}
+      PRIMARY_VAST_MACHINE_BLOCKLIST: ${PRIMARY_VAST_MACHINE_BLOCKLIST:-}
     networks:
-      - worker_intra
+      - traefik-public
     healthcheck:
-      # /gateway --self-check is a free syscall-ish check; /health needs
-      # DB + Redis reachable which is validated on first real request.
       test: ["CMD", "/gateway", "--self-check"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 40s
-    deploy:
-      mode: replicated
-      replicas: 1
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 0
-        window: 60s
-      update_config:
-        parallelism: 1
-        order: start-first
-        failure_action: rollback
-        monitor: 30s
-      rollback_config:
-        parallelism: 1
-        order: stop-first
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 1G
-        reservations:
-          cpus: "0.25"
-          memory: 128M
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.ai_gateway.rule=Host(`${GATEWAY_DOMAIN}`)"
-        - "traefik.http.routers.ai_gateway.entrypoints=websecure"
-        - "traefik.http.routers.ai_gateway.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.ai_gateway.loadbalancer.server.port=8080"
-        - "traefik.http.services.ai_gateway.loadbalancer.passHostHeader=true"
-
-  # ifix-ai-dashboard — the Next.js 15 operator observability dashboard
-  # (Phase 7). Standalone Better Auth + a server-side proxy to the gateway's
-  # /admin API; deployed in the same Portainer stack, single GitHub webhook.
-  #
-  # All five env vars are SERVER-SIDE ONLY (no NEXT_PUBLIC_ prefix) — see
-  # dashboard/.env.example. GATEWAY_BASE_URL points at the gateway service on
-  # the shared `worker_intra` overlay (e.g. http://gateway:8080).
-  # DASHBOARD_DATABASE_URL is the dashboard's OWN Postgres schema/db, isolated
-  # from the gateway's ai_gateway schema (RESEARCH.md Pitfall 7).
-  dashboard:
-    image: ghcr.io/ifixtelecom/ifix-ai-dashboard:${DASHBOARD_TAG:-develop}
-    environment:
-      TZ: America/Sao_Paulo
-      NODE_ENV: production
-      PORT: 3001
-      # Better Auth (standalone instance)
-      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
-      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
-      DASHBOARD_DATABASE_URL: ${DASHBOARD_DATABASE_URL}
-      # Server-side gateway proxy
-      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-http://gateway:8080}
-      GATEWAY_ADMIN_KEY: ${GATEWAY_ADMIN_KEY}
-    networks:
-      - worker_intra
-    deploy:
-      mode: replicated
-      replicas: 1
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 0
-        window: 60s
-      update_config:
-        parallelism: 1
-        order: start-first
-        failure_action: rollback
-        monitor: 30s
-      rollback_config:
-        parallelism: 1
-        order: stop-first
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-        reservations:
-          cpus: "0.1"
-          memory: 64M
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.ai_dashboard.rule=Host(`${DASHBOARD_DOMAIN}`)"
-        - "traefik.http.routers.ai_dashboard.entrypoints=websecure"
-        - "traefik.http.routers.ai_dashboard.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.ai_dashboard.loadbalancer.server.port=3001"
-        - "traefik.http.services.ai_dashboard.loadbalancer.passHostHeader=true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.ai-gateway-dev.rule=Host(`${GATEWAY_DOMAIN:-ai-gateway-dev.converse-ai.app}`)"
+      - "traefik.http.routers.ai-gateway-dev.entrypoints=websecure"
+      - "traefik.http.routers.ai-gateway-dev.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ai-gateway-dev.loadbalancer.server.port=8080"
+      - "traefik.http.services.ai-gateway-dev.loadbalancer.passHostHeader=true"
 
 networks:
-  worker_intra:
+  traefik-public:
     external: true

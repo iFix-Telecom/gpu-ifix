@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,8 +33,10 @@ type VastAPI interface {
 // upstreams.Loader. Plan 06.6-06b satisfied this interface on the real
 // *upstreams.Loader for OverrideTier0/RestoreTier0; Phase 06.7 Plan 03
 // added Tier0OverrideURL (the Pitfall #11 re-assert getter) and swapped the
-// dynamic primary roster to "llm", "stt", "tts" ("embed" left the pod per
-// D-03 and is now a static tier-0 row).
+// dynamic primary roster to "llm", "tts" ("embed" left the pod per
+// D-03 and is now a static tier-0 row; "stt" left the pod per Phase 11.1
+// D-A4 — Whisper deleted, /v1/audio/transcriptions routes to tier-1
+// OpenAI-Whisper static row only).
 //
 // The OverrideTier0 / RestoreTier0 signatures are deliberately void
 // (no error return) to match the existing upstreams.Loader.OverrideTier0
@@ -62,7 +65,8 @@ type DCGMScraperAdapter interface {
 // InflightAdapter is the minimal surface the primary reconciler needs
 // from the shed.InflightRegistry. Plan 06.6-06b's job is to add Count on
 // the real *shed.InflightRegistry (wrapping the existing GlobalInflight)
-// so the reconciler can sum local-llm + local-stt + local-embed inflight
+// so the reconciler can sum local-llm + local-embed inflight (Phase 11.1
+// D-A4: local-stt term removed — Whisper deleted from pod and DB)
 // during evaluateDraining (drain-complete gate: inflight==0 OR grace
 // elapsed → transition Draining→Destroying).
 type InflightAdapter interface {
@@ -80,11 +84,16 @@ var (
 	ErrMissingQwenSHA = errors.New(
 		"primary: PRIMARY_QWEN_WEIGHTS_SHA256 is empty — refusing to build pod request",
 	)
+	// Phase 11.2 D-B5′: ErrMissingWhisperSHA restored (revert 11.1 D-A4 —
+	// tier-0 Speaches/Whisper STT is back on the primary pod).
 	ErrMissingWhisperSHA = errors.New(
 		"primary: PRIMARY_WHISPER_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
 	ErrMissingBGEM3SHA = errors.New(
 		"primary: PRIMARY_BGEM3_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
+	)
+	ErrMissingChatterboxSHA = errors.New(
+		"primary: PRIMARY_CHATTERBOX_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
 )
 
@@ -102,7 +111,7 @@ var (
 // {llm,stt,tts}.
 type primaryPodURLs struct {
 	LLM  string
-	STT  string
+	STT  string // Phase 11.2 D-B5′: restored (revert 11.1 D-A4 — speaches back on pod)
 	TTS  string
 	DCGM string
 }
@@ -134,6 +143,28 @@ type Deps struct {
 	// scriptable bool-returning closure (so the 4-endpoint health gate in
 	// evaluateProvisioning can be exercised deterministically).
 	HealthCheck func(ctx context.Context, url string) bool
+
+	// Reachable is the connection-LEVEL reachability probe for Option B
+	// (CR-01 6.6.Y review). Given a pod URL it performs a cheap TCP dial to
+	// the URL's host:port and returns:
+	//
+	//   - true  → the host accepted the connection OR refused it (the host
+	//             is NAT-published and responding; services may still be
+	//             booting — a legitimate cold start, keep polling).
+	//   - false → connection-level failure (dial timeout / no route): the
+	//             host never NAT-published its port. This is the EXACT spike
+	//             signature (running + populated Vast ports map yet TCP
+	//             timeout from external vantage points for 40+ min).
+	//
+	// This is the gate Option B MUST key on — NOT buildPodURLs / the Vast
+	// ports map (6.6.Y-01 spike DIRECTIVE), and NOT the HTTP HealthCheck
+	// (which cannot distinguish "host unreachable" from "host up, service
+	// not ready yet" — killing the latter would defeat the cold-start
+	// budget that intentionally allows slow post-reachability weight
+	// downloads). When nil the port-bind budget gate is skipped (no
+	// false-positive destroys); the cold-start budget remains the backstop.
+	// Tests inject a scriptable closure.
+	Reachable func(ctx context.Context, url string) bool
 
 	// Loader is the upstream loader (3-role tier-0 override target). Plan
 	// 06.6-06b satisfies LoaderAdapter on the real *upstreams.Loader.
@@ -231,6 +262,29 @@ type Reconciler struct {
 	// *gen.Queries via SetQueriesForTest so the reconciler can exercise
 	// the SQL paths without standing up a real *pgxpool.Pool.
 	queriesOverride atomic.Pointer[gen.Queries]
+
+	// Phase 12 Plan 02 (RES-11): Ready-tick death-poll strike counters. The
+	// reconciler polls Vast for the tracked instance on EVERY Ready tick
+	// (evaluateReady) and confirms a dead pod via the same 3-strike pattern
+	// waitForReadyOrDestroy uses during provisioning. Unlike that in-loop
+	// counter (a function local — the loop is ONE call), each Ready tick is a
+	// SEPARATE evaluateReady call, so the strike counters MUST persist across
+	// ticks on the struct. Guarded by deathStrikeMu because evaluateReady runs
+	// on the schedule-loop goroutine and markReady (which resets them on the
+	// Provisioning→Ready transition) runs on the provisioning goroutine.
+	deathStrikeMu   sync.Mutex
+	terminalStrikes int
+	notFoundStrikes int
+
+	// billingSuppressedAt is the wall-clock time of the most-recent
+	// CONFIRMED billing-stop death (Phase 12 Plan 02, D-01). evaluateAsleep
+	// checks it: while the suppression window is active (set by a billing-stop
+	// death, cleared by a successful provision / operator force-up), the
+	// schedule loop SKIPS re-provision so a zero-credit pod does not enter a
+	// provision-fail loop. nil = no active suppression. This is a SUPPRESSION
+	// FLAG checked by the existing schedule evaluator — NOT new retry
+	// machinery (D-01: a flag is allowed, retry logic is not).
+	billingSuppressedAt atomic.Pointer[time.Time]
 }
 
 // NewReconciler constructs a Reconciler with the given Deps. cfg is
@@ -297,11 +351,15 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	if cfg.PrimaryQwenWeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingQwenSHA
 	}
+	// Phase 11.2 D-B5′: whisper SHA gate restored (revert 11.1 D-A4).
 	if cfg.PrimaryWhisperWeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingWhisperSHA
 	}
 	if cfg.PrimaryBGEM3WeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingBGEM3SHA
+	}
+	if cfg.PrimaryChatterboxWeightsSHA256 == "" {
+		return vast.CreateRequest{}, ErrMissingChatterboxSHA
 	}
 
 	llamaArgs := primaryLlamaArgsDefault
@@ -338,12 +396,21 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// sha256s drive in-pod sha256sum -c verify (T-06.6-02
 		// mitigation). All 3 SHA256s are guaranteed non-empty here
 		// because the precondition gate above bails out otherwise.
-		"PRIMARY_QWEN_WEIGHTS_KEY":       cfg.PrimaryQwenWeightsKey,
-		"PRIMARY_QWEN_WEIGHTS_SHA256":    cfg.PrimaryQwenWeightsSHA256,
+		"PRIMARY_QWEN_WEIGHTS_KEY":    cfg.PrimaryQwenWeightsKey,
+		"PRIMARY_QWEN_WEIGHTS_SHA256": cfg.PrimaryQwenWeightsSHA256,
+		// Phase 11.2 D-B5′: PRIMARY_WHISPER_WEIGHTS_* restored (revert 11.1 D-A4 —
+		// tier-0 Speaches/Whisper STT is back on the primary pod, consumed by
+		// pod/scripts/download-weights.sh + pod/primary/supervisord.conf
+		// [program:speaches].
 		"PRIMARY_WHISPER_WEIGHTS_KEY":    cfg.PrimaryWhisperWeightsKey,
 		"PRIMARY_WHISPER_WEIGHTS_SHA256": cfg.PrimaryWhisperWeightsSHA256,
 		"PRIMARY_BGEM3_WEIGHTS_KEY":      cfg.PrimaryBGEM3WeightsKey,
 		"PRIMARY_BGEM3_WEIGHTS_SHA256":   cfg.PrimaryBGEM3WeightsSHA256,
+		// Chatterbox TTS HF-cache snapshot — pre-provisioned to MinIO so the
+		// pod loads the model offline (HF_HUB_OFFLINE=1) instead of hitting
+		// huggingface.co at boot (crash-loops on hosts without an HF route).
+		"PRIMARY_CHATTERBOX_WEIGHTS_KEY":    cfg.PrimaryChatterboxWeightsKey,
+		"PRIMARY_CHATTERBOX_WEIGHTS_SHA256": cfg.PrimaryChatterboxWeightsSHA256,
 	}
 
 	if cfg.PrimaryQwenJinjaKey != "" {
@@ -439,7 +506,9 @@ func (r *Reconciler) podDCGMURL(inst vast.Instance) string {
 // per-service URL (with readiness suffix) from a primaryPodURLs snapshot.
 // Used by the evaluateReady Pitfall #11 re-assert loop (D-13) to recover
 // the pod URL for a tier-0 slot an emerg cutback cleared. "embed" is NOT a
-// dynamic primary role post-Phase-06.7 (D-03) and returns "".
+// dynamic primary role post-Phase-06.7 (D-03) and returns "". Phase 11.2
+// (D-B5′) restored "stt" to the dynamic roster after Phase 11.1 D-A4
+// dropped it.
 func roleURL(urls primaryPodURLs, role string) string {
 	switch role {
 	case "llm":

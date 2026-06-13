@@ -1,0 +1,32 @@
+# Phase 11 Plan 11-02 — slopcheck evidence
+#
+# Run: 2026-05-27 via slopcheck (https://github.com/SAP/slopcheck or
+#       /home/pedro/.local/bin/slopcheck — version reported by
+#       `slopcheck --version` at audit time)
+#
+# Packages flagged INSTALL_NEW in 11-02-ui-inventory.md were audited
+# individually via `slopcheck scan --pkg npm <name>`. Acceptance per
+# Task 11-02-04 Step 1: every audited package returns [OK]. If any
+# returned [ASSUMED] or [SUS] a checkpoint:human-verify gate against
+# npmjs.com/package/<name> would be inserted; if any returned [SLOP]
+# the task aborts.
+#
+# Result: 3/3 [OK]. Proceeding to install.
+
+# --- qrcode ---
+slopcheck checking qrcode on npm...
+  [OK] qrcode (npm)
+
+# --- @types/qrcode ---
+slopcheck checking @types/qrcode on npm...
+  [OK] @types/qrcode (npm)
+
+# --- @playwright/test ---
+slopcheck checking @playwright/test on npm...
+  [OK] @playwright/test (npm)
+
+# Summary
+#   3/3 [OK]
+#   0/3 [ASSUMED]
+#   0/3 [SUS]
+#   0/3 [SLOP]

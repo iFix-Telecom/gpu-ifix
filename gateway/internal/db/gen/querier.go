@@ -75,7 +75,7 @@ type Querier interface {
 	GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantConfigRow, error)
 	// Used by gatewayctl upstreams update/enable/disable to verify the name
 	// exists before mutating.
-	GetUpstreamByName(ctx context.Context, name string) (AiGatewayUpstream, error)
+	GetUpstreamByName(ctx context.Context, name string) (GetUpstreamByNameRow, error)
 	// Monthly quota check: SUM rows for the calendar month containing today
 	// in America/Sao_Paulo.
 	GetUsageCountersMonth(ctx context.Context, tenantID uuid.UUID) (GetUsageCountersMonthRow, error)
@@ -126,10 +126,27 @@ type Querier interface {
 	// gets corrupted. MUST NOT be called on the request hot path — 02-03 Verify
 	// uses GetActiveKeyByLookupHash exclusively.
 	ListActiveKeysAll(ctx context.Context) ([]ListActiveKeysAllRow, error)
+	// Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+	// `gatewayctl key list` (no tenant filter). NOT used on the request hot
+	// path; the hot path remains GetActiveKeyByLookupHash. Projects only
+	// operator-safe metadata columns: never key_hash and never
+	// key_lookup_hash, so a captured stdout cannot leak secret material
+	// (threat T-11-OPS-02). The JOIN against ai_gateway.tenants exposes the
+	// human-readable slug so operators can read the table without UUID
+	// lookups during incident triage. Ordered by (slug, last_used_at DESC)
+	// so the most recently active keys per tenant surface at the top of
+	// each tenant group.
+	ListActiveKeysAllWithMeta(ctx context.Context) ([]ListActiveKeysAllWithMetaRow, error)
 	// Diagnostic / admin-surface query. NOT used on the hot request path — hot
 	// path uses GetActiveKeyByLookupHash, which hits the UNIQUE index and returns
 	// at most one row (Codex review [HIGH] 02-03).
 	ListActiveKeysByTenant(ctx context.Context, tenantID uuid.UUID) ([]ListActiveKeysByTenantRow, error)
+	// Phase 11 Plan 04 D-18.3 — diagnostic-only operator surface for
+	// `gatewayctl key list --tenant <uuid>`. Tenant-filtered companion of
+	// ListActiveKeysAllWithMeta with the same operator-safe projection
+	// (never key_hash, never key_lookup_hash). NOT used on the request hot
+	// path.
+	ListActiveKeysByTenantWithMeta(ctx context.Context, tenantID uuid.UUID) ([]ListActiveKeysByTenantWithMetaRow, error)
 	// Hot-path: load all currently-active prices at boot and on NOTIFY prices_changed.
 	ListActivePrices(ctx context.Context) ([]AiGatewayPrice, error)
 	ListAdminKeys(ctx context.Context) ([]ListAdminKeysRow, error)
@@ -138,7 +155,7 @@ type Querier interface {
 	ListAllPrices(ctx context.Context) ([]AiGatewayPrice, error)
 	// Admin surface (gatewayctl upstreams list). Returns every row regardless
 	// of enabled state so the operator can re-enable disabled upstreams.
-	ListAllUpstreams(ctx context.Context) ([]AiGatewayUpstream, error)
+	ListAllUpstreams(ctx context.Context) ([]ListAllUpstreamsRow, error)
 	// Phase 7 — paginated read for the observability dashboard's state-change
 	// feed (consumed by the admin handler in plan 07-03). Returns only rows
 	// tagged with a non-NULL event_kind (FSM/state-change audit rows added by
@@ -153,9 +170,11 @@ type Querier interface {
 	// compact for tabwriter rendering.
 	ListEmergencyLifecycles(ctx context.Context, arg ListEmergencyLifecyclesParams) ([]ListEmergencyLifecyclesRow, error)
 	// Hot-path load at boot and on LISTEN/NOTIFY (CONTEXT.md D-D2). Returns
-	// all enabled rows ordered by (role, tier) so the Loader can
-	// deterministically build tier-0/tier-1 maps.
-	ListEnabledUpstreams(ctx context.Context) ([]AiGatewayUpstream, error)
+	// all enabled rows ordered by (role, tier, tier_priority) so the Loader
+	// can deterministically build tier-0/tier-1 maps.
+	// Phase 11.2 (D-B5′/D-B6′): tier_priority widens (role,tier) for the STT
+	// multi-tier-1 cascade.
+	ListEnabledUpstreams(ctx context.Context) ([]ListEnabledUpstreamsRow, error)
 	// Used by leader recovery (D-D5) on leader acquisition. The partial unique
 	// index `emergency_live_singleton` guarantees ≤1 row is returned. Returns
 	// enough state for recovery: vast IDs (to GetInstance) + events (to resume FSM).

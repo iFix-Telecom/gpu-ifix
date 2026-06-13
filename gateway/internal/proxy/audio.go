@@ -27,12 +27,17 @@ func NewAudioProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyRe
 	rp := &httputil.ReverseProxy{
 		Director: BuildDirector(u),
 		// FlushInterval deliberately omitted (default 0 = buffered)
-		Transport: &http.Transport{
+		// RES-13 / Plan 12-03: wrap the base Transport with
+		// fallthroughRoundTripper so a pre-byte connection-class dial failure
+		// surfaces errDialFailedFallthrough, which the sentinel-aware
+		// ErrorHandler suppresses → the dispatcher re-routes to tier-1
+		// (over-cap STT bodies are exempt from fallthrough — see dispatcher).
+		Transport: fallthroughRoundTripper{base: &http.Transport{
 			MaxIdleConns:          20,
 			MaxIdleConnsPerHost:   4,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
-		},
+		}},
 		ErrorHandler:   ErrorHandler("stt", log),
 		ModifyResponse: ComposeInterceptors(interceptors...),
 	}

@@ -1,4 +1,12 @@
-# pod/primary/Dockerfile — Phase 6.6 Strategy α LOCKED (Wave 0).
+# pod/primary/Dockerfile — Phase 11.2 re-add Whisper local (tier-0 STT restored).
+#
+# Phase 11.2 (2026-06-07) RESTORES the [program:speaches] venv stage removed
+# by Phase 11.1 (commit 8acb991). Tier-0 local STT is back (Speaches +
+# faster-whisper-large-v3) alongside the tier-1 cascade (gemini-stt →
+# groq-whisper → openai-whisper). The Phase 11.1 embed venv removal (D-A2)
+# stays — embed remains off-pod per Phase 06.7 D-03 (Infinity venv NOT
+# restored). Pre-shrink commentary on the prior venv layout and pip pinning
+# is preserved in git history (commit 8acb991^).
 #
 # DinD REJECTED per 06.6-SPIKE-dind-privileged.md — overlayfs in nested
 # namespace fails on Vast.ai 4090 hosts (Linux kernel limit, not bypassable
@@ -8,15 +16,15 @@
 # Hybrid build:
 #   - llama.cpp + dcgm-exporter SHA-pinned upstream (binaries portable,
 #     multi-stage COPY safe).
-#   - Speaches + Infinity installed via pip into dedicated venvs at
-#     /opt/{speaches,infinity}-venv. Plan 04 originally specified multi-stage
-#     COPY of /app from upstream speaches/infinity images, but (a) speaches
-#     payload lives at /home/ubuntu/speaches/ (no /app), and (b) Python venvs
-#     have absolute paths baked into shebangs + pyvenv.cfg + *.dist-info/RECORD
-#     manifests, so naive relocation breaks runtime. pip install in the final
-#     stage is the canonical install path. SHA-pin invariant is preserved for
-#     the non-substitutable component (llama.cpp b9191 — required for Qwen3.6
-#     SSM tensor support per Wave 0 spike Round 3).
+#   - Speaches installed via pip into a dedicated venv at /opt/speaches-venv
+#     (faster-whisper==1.1.1 pinned + silero v5 ONNX vendored from upstream
+#     speaches image via multi-stage COPY). D-B1 LOCKED image tag for the
+#     silero-asset source: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3.
+#   - Chatterbox TTS installed via pip into a dedicated venv at
+#     /opt/chatterbox-venv (torch 2.7.1 cu128 trio + chatterbox-tts 0.1.7).
+#     SHA-pin invariant is preserved for the non-substitutable component
+#     (llama.cpp b9191 — required for Qwen3.6 SSM tensor support per Wave 0
+#     spike Round 3).
 #
 # All SHA-pinned FROM digests are LITERAL per WAVE0-GATES.md Decision 1
 # captured 2026-05-17. Dockerfile FROM does not support env substitution,
@@ -40,7 +48,7 @@ FROM nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless@sha256:60d3b00ac80b
 # than fetch from a public URL because the Silero VAD repo removed the v5
 # files from src/silero_vad/data/ (only v4 + v6 remain). UAT 15 (2026-05-19)
 # /v1/audio/transcriptions crashed with `onnxruntime.NoSuchFile` until
-# these were vendored.
+# these were vendored. D-B1 LOCKED — do NOT bump tag without phase amendment.
 FROM ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3 AS speaches-assets
 
 # Stage 2: Final image — llama.cpp:server-cuda-b9191 carries Qwen3.6 SSM
@@ -50,32 +58,33 @@ FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840
 
 # Install supervisord (PID 1) + aria2 (multi-stream weight download from
 # MinIO — single-stream mc cp empirically failed Wave 0 spike Round 1
-# with EOF on 16GB GGUF) + curl/ca-certificates (mc client download from
-# https://dl.min.io/ at onstart time) + Python 3.11 (for Speaches/Infinity
-# pip install below) + build-essential (some PyTorch wheels need it).
+# with EOF on 16GB GGUF) + curl/ca-certificates + Python 3.11 (for
+# Speaches/Chatterbox TTS venvs installed below) + build-essential (some
+# PyTorch wheels need it) + openssh-server (debug SSH during cold-start —
+# baked in so onstart skips the ~3min apt-get install on every boot).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        supervisor aria2 ca-certificates curl \
+        supervisor aria2 ca-certificates curl openssh-server \
         python3 python3-venv python3-pip git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Speaches + Infinity into dedicated venvs. Versions track the
-# upstream image tags previously SHA-pinned in Plan 04: Speaches 0.9.0rc3
-# (was ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3) and Infinity
-# 0.0.77 (was michaelf34/infinity:0.0.77). Base image is Ubuntu 24.04 Noble
-# so python3 resolves to python3.12 (both wheels support 3.10+).
+# Bake the MinIO client (mc) into the image. Previously onstart.sh fetched it
+# from https://dl.min.io/ at boot, but that host is throttled (~45 KB/s for the
+# ~28MB binary as of 2026-06-13) and the onstart curl had no timeout/fallback —
+# so the pod hung in "installing mc" forever, supervisord never exec'd, llama
+# never came up, and the gateway killed the pod on health_timeout (every
+# cold-start failed). Baking mc removes the runtime download + single point of
+# failure. Pinned release for reproducibility; verified executable at build.
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-amd64/mc.${MC_RELEASE}" \
+        -o /usr/local/bin/mc \
+    && chmod +x /usr/local/bin/mc \
+    && /usr/local/bin/mc --version
+
+# Speaches STT — Phase 11.2 RESTORED (re-add tier-0 local STT).
 #
-# Pin notes (UAT 2026-05-18 attempt 11 root causes):
+# Pin notes (UAT 2026-05-18 attempt 11 root causes — preserved verbatim):
 #  - onnx-asr<0.10 — speaches 0.9.0rc3 imports `NemoConformerTdt` from
 #    `onnx_asr.models`, removed in onnx-asr 0.10+ (attempt 10).
-#  - optimum<2.0 — infinity-emb 0.0.77 imports `optimum.bettertransformer`
-#    which was REMOVED in optimum 2.0+. The previous form
-#    `optimum[bettertransformer]` was a no-op because that extras key does
-#    not exist; pip silently fell back to plain optimum at the latest
-#    version (2.1.0 today) and Infinity crash-looped on import (attempt 11).
-#  - transformers<4.49 — optimum 1.x bettertransformer imports gate at
-#    `transformers<4.49`; attempt 12 surfaced
-#    `RuntimeError: BetterTransformer requires transformers<4.49 but found
-#    4.57.6`. infinity-emb[all] doesn't cap transformers, so we pin it here.
 #  - gradio<6.0 — speaches 0.9.0rc3 builds its UI with Gradio 5.x API
 #    (`ChatInterface(type=...)`); Gradio 6.0 removed that keyword and the
 #    factory crashed with
@@ -101,12 +110,42 @@ RUN python3 -m venv /opt/speaches-venv \
     && /opt/speaches-venv/bin/pip install --no-cache-dir \
          "onnx-asr<0.10.0" "gradio<6.0" "faster-whisper==1.1.1"
 
+# Pre-create the realtime-console stub directory speaches 0.9.0rc3 mounts
+# at /v1/realtime via StaticFiles(directory="realtime-console/dist",
+# html=True). The path is RELATIVE to the process working directory, so
+# supervisord [program:speaches] is launched with `directory=/opt/speaches-data`
+# (see supervisord.conf). Without this dir + an index.html the speaches
+# app errors at boot with `RuntimeError: Directory 'realtime-console/dist'
+# does not exist` (UAT 2026-05-18 attempt 11 speaches crash-loop root cause).
+# The stub satisfies the StaticFiles invariant; we do NOT expose the
+# realtime console — gateway routes only /v1/audio/transcriptions to STT.
+RUN mkdir -p /opt/speaches-data/realtime-console/dist \
+    && echo '<!DOCTYPE html><html><body>realtime-console stub (not served)</body></html>' \
+       > /opt/speaches-data/realtime-console/dist/index.html \
+    && echo '{}' > /opt/speaches-data/model_aliases.json
+
+# Vendor silero v5 encoder + decoder ONNX assets from upstream speaches
+# image. speaches/executors/silero_vad_v5.py loads these from
+# `faster_whisper.utils.get_assets_path()` (which resolves to
+# /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/).
+# faster-whisper 1.0.x ships silero_vad.onnx and 1.1.x ships
+# silero_vad_v6.onnx — NEITHER ships the v5 split files speaches needs at
+# transcription time. UAT 15 (2026-05-19) confirmed this is the root
+# cause of `Internal Server Error` on POST /v1/audio/transcriptions.
+COPY --from=speaches-assets \
+    /home/ubuntu/speaches/.venv/lib/python3.12/site-packages/faster_whisper/assets/silero_encoder_v5.onnx \
+    /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/silero_encoder_v5.onnx
+COPY --from=speaches-assets \
+    /home/ubuntu/speaches/.venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx \
+    /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx
+
 # Chatterbox Multilingual TTS — Phase 06.7 Plan 05 (Wave 1).
 #
 # Isolated /opt/chatterbox-venv per GATE 2: chatterbox-tts==0.1.7 pins
-# torch==2.6.0 + transformers==5.2.0, which CANNOT share the speaches/infinity
-# torch stacks (those gate transformers<4.49 for optimum.bettertransformer).
-# A dedicated venv keeps the torch stack fully isolated.
+# torch==2.6.0 + transformers==5.2.0, which CANNOT share the speaches torch
+# stack (speaches gates transformers<4.49 for optimum.bettertransformer
+# compatibility carried in via faster-whisper deps). A dedicated venv keeps
+# the torch stack fully isolated.
 #
 # RTX 5090 (Blackwell, sm_120) fix: chatterbox-tts pins torch==2.6.0+cu124, but
 # cu124 ships NO sm_120 kernels — the model load crashes with "no kernel image
@@ -141,46 +180,6 @@ RUN python3 -m venv /opt/chatterbox-venv \
     # is None and chatterbox load crashes with "NoneType object is not callable".
     && /opt/chatterbox-venv/bin/pip install --no-cache-dir "setuptools<81"
 
-# Install Infinity into a dedicated venv. Versions track the upstream image
-# tags previously SHA-pinned in Plan 04: Infinity 0.0.77.
-# (Kept for Tier-0 rollback per GATE 4 — embed now relocates off-pod to
-# n8n-ia-vm per D-03; supervisord no longer launches it. Remove this stage in a
-# follow-up once the CPU embed host is confirmed stable.)
-RUN python3 -m venv /opt/infinity-venv \
-    && /opt/infinity-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/infinity-venv/bin/pip install --no-cache-dir "infinity-emb[all]==0.0.77" \
-    && /opt/infinity-venv/bin/pip install --no-cache-dir \
-         "optimum<2.0" "transformers<4.49" "click<8.2"
-
-# Pre-create the realtime-console stub directory speaches 0.9.0rc3 mounts
-# at /v1/realtime via StaticFiles(directory="realtime-console/dist",
-# html=True). The path is RELATIVE to the process working directory, so
-# supervisord [program:speaches] is launched with `directory=/opt/speaches-data`
-# (see supervisord.conf). Without this dir + an index.html the speaches
-# app errors at boot with `RuntimeError: Directory 'realtime-console/dist'
-# does not exist` (UAT 2026-05-18 attempt 11 speaches crash-loop root cause).
-# The stub satisfies the StaticFiles invariant; we do NOT expose the
-# realtime console — gateway routes only /v1/audio/transcriptions to STT.
-RUN mkdir -p /opt/speaches-data/realtime-console/dist \
-    && echo '<!DOCTYPE html><html><body>realtime-console stub (not served)</body></html>' \
-       > /opt/speaches-data/realtime-console/dist/index.html \
-    && echo '{}' > /opt/speaches-data/model_aliases.json
-
-# Vendor silero v5 encoder + decoder ONNX assets from upstream speaches
-# image. speaches/executors/silero_vad_v5.py loads these from
-# `faster_whisper.utils.get_assets_path()` (which resolves to
-# /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/).
-# faster-whisper 1.0.x ships silero_vad.onnx and 1.1.x ships
-# silero_vad_v6.onnx — NEITHER ships the v5 split files speaches needs at
-# transcription time. UAT 15 (2026-05-19) confirmed this is the root
-# cause of `Internal Server Error` on POST /v1/audio/transcriptions.
-COPY --from=speaches-assets \
-    /home/ubuntu/speaches/.venv/lib/python3.12/site-packages/faster_whisper/assets/silero_encoder_v5.onnx \
-    /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/silero_encoder_v5.onnx
-COPY --from=speaches-assets \
-    /home/ubuntu/speaches/.venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx \
-    /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx
-
 # Copy dcgm-exporter binary AND the libdcgm.so.4 family + metric configs
 # from stage 1. The distroless dcgm-exporter image bundles libdcgm under
 # /usr/lib/x86_64-linux-gnu/. Copying only the binary leaves it unable to
@@ -206,15 +205,21 @@ COPY pod/primary/supervisord.conf /etc/supervisor/conf.d/services.conf
 COPY pod/primary/chatterbox_server.py /opt/chatterbox-data/chatterbox_server.py
 
 # Pre-create runtime directories referenced by supervisord.conf + onstart.
-# /weights/* are mount-targets for aria2c-downloaded GGUF/tarball artifacts;
+# /weights/qwen is the mount-target for the aria2c-downloaded GGUF artifact;
+# /weights/whisper is the extract target for the speaches HF-cache-shaped
+# tarball (Phase 06.8 fix-iii — HF_HUB_CACHE in supervisord.conf MUST equal
+# this path; see Pitfall 4 in 11.2-RESEARCH.md).
 # /app/templates is the optional B2 Jinja fallback mount target (default
-# empty per WAVE0-GATES Decision 3 B1 embedded).
-RUN mkdir -p /var/log /weights/qwen /weights/whisper /weights/bge-m3 /app/templates \
+# empty per WAVE0-GATES Decision 3 B1 embedded). Phase 11.1: /weights/bge-m3
+# pre-create removed — BGE-M3 embed is off-pod (Phase 06.7 D-03) and the
+# pod's onstart `mkdir -p` recreates the directory at runtime if a future
+# config re-enables on-pod BGE-M3 downloads.
+RUN mkdir -p /var/log /weights/qwen /weights/whisper /app/templates \
         /opt/chatterbox-data/models /opt/chatterbox-data/voices
 
 # Disable inherited HEALTHCHECK from llama.cpp base (which curls :8080/health,
-# but our supervisord-managed services bind to :8000/:8001/:8002/:9400 — never
-# :8080). Continuous healthcheck failure caused Vast.ai's worker agent to reap
+# but our supervisord-managed services bind to :8000/:8001/:8003/:9100/:9400 —
+# never :8080). Continuous healthcheck failure caused Vast.ai's worker agent to reap
 # the container as exited within 30-60s of start across all 8 UAT attempts on
 # 2026-05-18 (gsd-debug session primary-uat-custom-image-vast-runtype-args).
 # The gateway reconciler does the real 4-endpoint health-poll via Vast-exposed
@@ -222,7 +227,7 @@ RUN mkdir -p /var/log /weights/qwen /weights/whisper /weights/bge-m3 /app/templa
 HEALTHCHECK NONE
 
 LABEL org.opencontainers.image.source="https://github.com/IfixTelecom/gpu-ifix"
-LABEL org.opencontainers.image.description="Phase 6.7 primary pod — supervisord + llama.cpp b9191 + speaches + chatterbox-tts + dcgm (embed relocated off-pod per D-03)"
+LABEL org.opencontainers.image.description="Phase 11.2 primary pod — supervisord + llama.cpp b9191 + speaches + chatterbox-tts + dcgm (STT tier-0 restored; tier-1 cascade gemini->groq->openai-whisper; embed off-pod per Phase 06.7 D-03)"
 
 # Override inherited ENTRYPOINT from llama.cpp base (which is `/app/llama-server`)
 # with `/bin/bash` so the supervisord-driven primary pod boots via the bash

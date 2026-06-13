@@ -169,6 +169,20 @@ func (s *Set) CheckForceOverride(name string) bool {
 	return e.set && e.state == "open"
 }
 
+// CheckForceClose returns TRUE when a programmatic force-override with
+// State=="closed" is currently in effect for the named upstream (Phase 12
+// D-13). Symmetric to CheckForceOverride (which gates the "open" direction);
+// pure cache read, safe on the hot path. EffectiveState / EffectiveStateSnapshot
+// consult this to short-circuit a stale observation-driven OPEN back to
+// CLOSED when the reconciler has force-CLOSEd a freshly-Ready upstream.
+func (s *Set) CheckForceClose(name string) bool {
+	e, ok := s.forceCache.get(name)
+	if !ok {
+		return false
+	}
+	return e.set && e.state == "closed"
+}
+
 // RefreshForceOverride forces a Redis read for the named upstream and
 // updates the cache. Used by:
 //   - maybeRefreshForceOverride during normal Execute (debounced).
@@ -219,15 +233,19 @@ func (s *Set) maybeRefreshForceOverride(name string) {
 }
 
 // EffectiveState returns the routing-relevant breaker state for the named
-// upstream, combining operator force-override (Phase 06.9 Plan 04) with the
-// observation-driven gobreaker state. When a force-override is in effect,
-// EffectiveState returns gobreaker.StateOpen regardless of the observed
-// state — this is the read-path counterpart to Set.Execute's force-override
-// check, intended for callers (e.g. proxy/dispatcher.go) that decide which
-// tier to dispatch to BEFORE invoking Execute. The freshness of the override
-// matches CheckForceOverride (cached map read; refresh via Execute or a
-// caller-driven RefreshForceOverride). Unknown upstream → StateClosed to
-// match `cb, ok := Get(name)` callers that treat "ok=false" as no-breaker.
+// upstream, combining operator/reconciler force-override (Phase 06.9 Plan 04
+// force-OPEN + Phase 12 D-13 force-CLOSE) with the observation-driven
+// gobreaker state. When a force-OPEN override is in effect, EffectiveState
+// returns gobreaker.StateOpen regardless of the observed state; when a
+// force-CLOSE override is in effect, it returns gobreaker.StateClosed
+// regardless of a stale observed OPEN (D-13 — the reconciler's markReady
+// forces a freshly-Ready upstream live before its own probe catches up).
+// This is the read-path counterpart to Set.Execute's force-override check,
+// intended for callers (e.g. proxy/dispatcher.go) that decide which tier to
+// dispatch to BEFORE invoking Execute. The freshness matches
+// CheckForceOverride (cached map read; refresh via Execute or a caller-driven
+// RefreshForceOverride). Unknown upstream → StateClosed to match
+// `cb, ok := Get(name)` callers that treat "ok=false" as no-breaker.
 func (s *Set) EffectiveState(name string) gobreaker.State {
 	// Refresh the force-override cache once per freshness window so callers
 	// that exclusively use EffectiveState (and never call Execute) still see
@@ -235,6 +253,9 @@ func (s *Set) EffectiveState(name string) gobreaker.State {
 	s.maybeRefreshForceOverride(name)
 	if s.CheckForceOverride(name) {
 		return gobreaker.StateOpen
+	}
+	if s.CheckForceClose(name) {
+		return gobreaker.StateClosed
 	}
 	cb, ok := s.Get(name)
 	if !ok || cb == nil {
@@ -245,11 +266,72 @@ func (s *Set) EffectiveState(name string) gobreaker.State {
 
 // Snapshot returns a name→state-string map suitable for /v1/health/upstreams.
 // Values are one of "closed", "half-open", "open".
+//
+// LEGACY: Snapshot reads the raw gobreaker FSM state ONLY and ignores any
+// operator force-override at gw:breaker:force:{name}. Use this ONLY when
+// you explicitly want to inspect the natural FSM (e.g. debugging why a
+// breaker tripped). Callers that decide routing or report operational
+// state to operators/dashboards MUST use EffectiveStateSnapshot instead —
+// see SEED-005 for the contract distinction.
 func (s *Set) Snapshot() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]string, len(s.cbs))
 	for n, cb := range s.cbs {
+		out[n] = cb.State().String()
+	}
+	return out
+}
+
+// EffectiveStateSnapshot returns a name→state-string map with operator
+// force-override honored (Phase 06.9, SEED-005). Values are one of
+// "closed", "half-open", "open", or "forced-open". This is the snapshot
+// counterpart to EffectiveState — use it for any caller that decides
+// routing or reports operational state (dashboard, /v1/health/upstreams,
+// smoke pre-condition gates). The legacy Snapshot() returns raw FSM
+// state only; use it ONLY when you explicitly want to ignore force-
+// override (e.g. debugging the natural FSM).
+//
+// Freshness: each known upstream's force-override cache is refreshed via
+// the same debounced helper Execute uses (maybeRefreshForceOverride),
+// so the per-request cost is amortized over forceCacheFreshness (1s).
+// The refresh pass runs BEFORE acquiring s.mu so we never hold the
+// breaker RLock across a Redis GET — forceCache has its own mutex.
+func (s *Set) EffectiveStateSnapshot() map[string]string {
+	// 1. Snapshot the name set under a brief RLock so we don't hold the
+	//    lock across Redis calls during the refresh pass.
+	s.mu.RLock()
+	names := make([]string, 0, len(s.cbs))
+	for n := range s.cbs {
+		names = append(names, n)
+	}
+	s.mu.RUnlock()
+
+	// 2. Refresh force-override cache for each name (debounced — cheap
+	//    in steady state, one Redis GET per name at most once per
+	//    freshness window).
+	for _, n := range names {
+		s.maybeRefreshForceOverride(n)
+	}
+
+	// 3. Re-acquire RLock for the actual snapshot loop. CheckForceOverride
+	//    is safe under RLock — forceCache has its own mutex.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.cbs))
+	for n, cb := range s.cbs {
+		if s.CheckForceOverride(n) {
+			out[n] = "forced-open"
+			continue
+		}
+		// Phase 12 D-13 — a force-CLOSE short-circuits a stale observed OPEN
+		// back to CLOSED so the health endpoint reports routing-layer reality
+		// (the upstream is being dispatched to). Reported as plain "closed"
+		// (additive marker semantics live in the health payload, not here).
+		if s.CheckForceClose(n) {
+			out[n] = "closed"
+			continue
+		}
 		out[n] = cb.State().String()
 	}
 	return out

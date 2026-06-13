@@ -1,0 +1,75 @@
+time=2026-06-09T13:27:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:27:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:27:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:28:35.972-03:00 level=INFO msg="primary force-up: provisioning by operator request" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af reason=manual_gatewayctl by_replica=gatewayctl-cli
+time=2026-06-09T13:28:36.885-03:00 level=INFO msg="primary allowlist exhausted for shape; broadening to full qualified search" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af allowlist="[43803 55158]" shape=0 gpu_shape="1xRTX 3090"
+time=2026-06-09T13:28:37.352-03:00 level=INFO msg="primary offers found for shape" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af shape=0 offer_count=20 cap=0.3 gpu_shape="1xRTX 3090"
+time=2026-06-09T13:28:37.352-03:00 level=INFO msg="primary offer picked" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af offer_id=40097654 machine_id=51096 host_id=348505 dph=0.13037037037037036 geo="Brazil, BR" shape=0 gpu_shape="1xRTX 3090"
+time=2026-06-09T13:28:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:28:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:28:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:29:55.269-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:29:55.269-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:29:55.269-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:30:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:30:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:30:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:31:55.269-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:31:55.269-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:31:55.269-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:32:55.281-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:32:55.281-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:32:55.281-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:33:55.271-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:33:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:33:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:34:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:34:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:34:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:35:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:35:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:35:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:36:55.271-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:36:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:36:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:37:55.271-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:37:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:37:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:38:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:38:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:38:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:39:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:39:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:39:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:40:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:40:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:40:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:41:55.278-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:41:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:41:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:42:55.279-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:42:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:42:55.279-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:43:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:43:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:43:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:44:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:44:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:44:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:45:55.271-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:45:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:45:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:46:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:46:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:46:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:46:59.438-03:00 level=INFO msg="primary force-down: cancelling in-flight provisioning lifecycle" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af reason=manual_gatewayctl by_replica=gatewayctl-cli
+time=2026-06-09T13:47:00.084-03:00 level=INFO msg="tier-0 override cleared (cutback)" module=GATEWAY module=UPSTREAMS role=llm
+time=2026-06-09T13:47:00.084-03:00 level=INFO msg="tier-0 override cleared (cutback)" module=GATEWAY module=UPSTREAMS role=stt
+time=2026-06-09T13:47:00.084-03:00 level=INFO msg="tier-0 override cleared (cutback)" module=GATEWAY module=UPSTREAMS role=tts
+time=2026-06-09T13:47:00.084-03:00 level=ERROR msg="primary provisionLifecycle returned error" module=GATEWAY subsys=primary subsystem=primary.reconciler replica=0a371d6ed6af lifecycle_id=101 err="context canceled"
+time=2026-06-09T13:47:55.271-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:47:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:47:55.271-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL
+time=2026-06-09T13:48:55.270-03:00 level=INFO msg="model aliases refreshed" module=GATEWAY module=MODELS count=8
+time=2026-06-09T13:48:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=gemini-stt env_var=UPSTREAM_STT_FALLBACK_1_MODEL
+time=2026-06-09T13:48:55.270-03:00 level=INFO msg="env override active for upstream" module=GATEWAY module=MODELS upstream=groq-whisper env_var=UPSTREAM_STT_FALLBACK_2_MODEL

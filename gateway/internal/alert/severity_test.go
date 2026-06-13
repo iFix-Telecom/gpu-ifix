@@ -7,6 +7,7 @@ package alert
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
@@ -243,5 +244,69 @@ func TestSeverityFor_FingerprintStable(t *testing.T) {
 	}
 	if m1.Fingerprint == m4.Fingerprint {
 		t.Errorf("distinct incidents share a fingerprint: %q", m1.Fingerprint)
+	}
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 3 — severityForPrimary (D-03, FINDING 1)
+//
+// The Alerter consumes PrimaryEventsChannel and maps primary_death_confirmed
+// events to SeverityCritical with a DISTINCT billing-stop vs host-death title.
+// ===========================================================================
+
+func TestSeverityForPrimary_BillingStopCritical(t *testing.T) {
+	payload := mustJSON(t, redisx.PrimaryEvent{
+		Type: "primary_death_confirmed", State: "draining",
+		LifecycleID: 42, Reason: "billing_stopped",
+	})
+	sev, msg, err := severityForPrimary(payload)
+	if err != nil {
+		t.Fatalf("severityForPrimary: %v", err)
+	}
+	if sev != SeverityCritical {
+		t.Errorf("billing-stop death severity = %q, want critical", sev)
+	}
+	if !strings.Contains(msg.Title, "Vast account sem crédito") {
+		t.Errorf("billing-stop title = %q, want it to contain %q", msg.Title, "Vast account sem crédito")
+	}
+}
+
+func TestSeverityForPrimary_HostDeathCritical(t *testing.T) {
+	payload := mustJSON(t, redisx.PrimaryEvent{
+		Type: "primary_death_confirmed", State: "draining",
+		LifecycleID: 7, Reason: "host_death",
+	})
+	sev, msg, err := severityForPrimary(payload)
+	if err != nil {
+		t.Fatalf("severityForPrimary: %v", err)
+	}
+	if sev != SeverityCritical {
+		t.Errorf("host-death severity = %q, want critical", sev)
+	}
+	if strings.Contains(msg.Title, "Vast account sem crédito") {
+		t.Errorf("host-death title must NOT be the billing-stop title: %q", msg.Title)
+	}
+	if msg.Title == "" {
+		t.Errorf("host-death title must be non-empty")
+	}
+}
+
+func TestSeverityForPrimary_Malformed(t *testing.T) {
+	_, _, err := severityForPrimary([]byte("{not json"))
+	if err == nil {
+		t.Errorf("malformed primary payload must return an error, not panic")
+	}
+}
+
+func TestSeverityFor_RoutesPrimaryChannel(t *testing.T) {
+	payload := mustJSON(t, redisx.PrimaryEvent{
+		Type: "primary_death_confirmed", State: "draining", Reason: "billing_stopped",
+	})
+	sev, _, err := severityFor(redisx.PrimaryEventsChannel, payload)
+	if err != nil {
+		t.Fatalf("severityFor(PrimaryEventsChannel): %v", err)
+	}
+	if sev != SeverityCritical {
+		t.Errorf("severityFor must route PrimaryEventsChannel to severityForPrimary (critical); got %q", sev)
 	}
 }

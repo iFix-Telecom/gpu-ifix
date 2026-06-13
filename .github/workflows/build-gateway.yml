@@ -233,7 +233,7 @@ jobs:
             exit 0
           fi
           curl -X POST "${WEBHOOK}" --fail --silent --show-error
-          echo "Portainer dev webhook triggered — ai-gateway-dev will recreate"
+          echo "Portainer dev webhook triggered — ai-gateway-dev will re-fetch repo + recreate"
 
   deploy-prod:
     name: Trigger Portainer redeploy (prod)

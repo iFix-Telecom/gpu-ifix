@@ -1,0 +1,59 @@
+{
+  "errors": [
+    {
+      "count": 33,
+      "error_class": "upstream_5xx"
+    }
+  ],
+  "finished_at": "2026-06-12T12:00:42Z",
+  "gates": {
+    "all_passed": false,
+    "error_rate_lt_1pct": false,
+    "p95_chat_ms_le_5000": false,
+    "p95_embed_ms_le_1000": false,
+    "p95_stt_ms_le_10000": true,
+    "zero_5xx_panic": true
+  },
+  "gates_external_inputs": {
+    "log_grep_command": "docker logs ifix-ai-gateway --since 2026-06-12T11:46:44Z --until 2026-06-12T12:00:42Z | grep -c \"^panic:\"",
+    "sentry_query_url": "https://ifix.sentry.io/issues/?project=ifix-ai-gateway-prod&level=fatal&statsPeriod=custom&start=2026-06-12T11:46:44Z&end=2026-06-12T12:00:42Z",
+    "verified_at": "2026-06-12T12:01:42Z"
+  },
+  "git_sha": "e9d04afbcea0",
+  "schema_version": "1.0.0",
+  "started_at": "2026-06-12T11:46:44Z",
+  "summary": {
+    "error_count": 33,
+    "routes": {
+      "/v1/audio/transcriptions": {
+        "n": 101,
+        "p50_ms": 1601,
+        "p95_ms": 2800,
+        "p99_ms": 2825
+      },
+      "/v1/chat/completions": {
+        "n": 704,
+        "p50_ms": 8877,
+        "p95_ms": 21680,
+        "p99_ms": 22084
+      },
+      "/v1/embeddings": {
+        "n": 401,
+        "p50_ms": 1720,
+        "p95_ms": 2662,
+        "p99_ms": 3064
+      },
+      "/v1/health/upstreams": {
+        "n": 1,
+        "p50_ms": 523,
+        "p95_ms": 523,
+        "p99_ms": 523
+      }
+    },
+    "total_requests": 1207
+  },
+  "target": {
+    "gateway_url": "https://ai-gateway.converse-ai.app",
+    "tenant": "multi"
+  }
+}

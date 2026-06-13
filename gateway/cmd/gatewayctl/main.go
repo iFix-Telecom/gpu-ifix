@@ -40,8 +40,13 @@ Commands:
   breaker           Phase 06.9: operator-driven circuit-breaker control (force-open, force-close, list). TTL mandatory; max 300s. Operator-only access.
   model-alias       Phase 06.9: operator CRUD for ai_gateway.model_aliases (list, get, set, delete). Coequal with UPSTREAM_<U>_MODEL env var per D-06.
   audit             Export audit-log partitions to MinIO cold storage (Plan 02-09).
+  debug             Phase 11: operator-only debug surface (emit-error -> Sentry panic-path proof).
 
 Use "gatewayctl <command> --help" for subcommand flags.
+
+Notes:
+  gatewayctl key supports create|revoke|list (Phase 11 added list).
+  gatewayctl debug emit-error POSTs /admin/debug/panic; expects HTTP 500.
 `)
 }
 
@@ -90,6 +95,8 @@ func main() {
 	case "audit":
 		fmt.Fprintln(os.Stderr, "gatewayctl audit: not yet implemented (Plan 02-09)")
 		os.Exit(1)
+	case "debug":
+		os.Exit(runDebug(ctx, args, log))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)

@@ -31,13 +31,17 @@ func NewChatProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyRes
 	rp := &httputil.ReverseProxy{
 		Director:      BuildDirector(u),
 		FlushInterval: -1, // per-chunk flush for SSE (chat-only)
-		Transport: &http.Transport{
+		// RES-13 / Plan 12-03: wrap the base Transport with
+		// fallthroughRoundTripper so a pre-byte connection-class dial failure
+		// surfaces errDialFailedFallthrough, which the sentinel-aware
+		// ErrorHandler suppresses → the dispatcher re-routes to tier-1.
+		Transport: fallthroughRoundTripper{base: &http.Transport{
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second, // cold first-token <=20s
 			// No ReadTimeout on transport — SSE streams are open-ended.
-		},
+		}},
 		ErrorHandler:   ErrorHandler("llm", log),
 		ModifyResponse: ComposeInterceptors(interceptors...), // Codex [HIGH/MEDIUM] 02-05
 	}

@@ -60,9 +60,66 @@ func severityFor(channel string, payload []byte) (Severity, Message, error) {
 		return severityForShed(payload)
 	case redisx.EmergEventsChannel:
 		return severityForEmerg(payload)
+	case redisx.PrimaryEventsChannel:
+		return severityForPrimary(payload)
 	default:
 		return "", Message{}, fmt.Errorf("alert: unknown event channel %q", channel)
 	}
+}
+
+// severityForPrimary classifies a gw:primary:events payload (Phase 12 Plan 02,
+// D-03 / FINDING 1 — PrimaryEvents was consumed by NOBODY before this plan).
+//
+// Only "primary_death_confirmed" events page the operator. The death cause
+// drives a DISTINCT, operator-actionable title:
+//
+//   - Reason="billing_stopped" → critical, a distinct no-credit title — the
+//     operator action is ADD CREDIT, not debug a pod. The primary reconciler
+//     has armed a suppression marker (D-01) so the gateway will NOT re-bid until
+//     credit is restored + an operator force-up.
+//   - Reason="host_death" / "not_found" / default → critical, "Primary pod
+//     morto …" — the host yanked the pod; the schedule loop re-provisions
+//     naturally.
+//
+// Non-death event types (provisioning_started, primary_ready, draining_started,
+// destroyed, force_*_request, cancel_in_flight) are informational here and
+// classify as info (logged, never paged). The body carries ONLY the cause +
+// lifecycle id — no tenant payload, no secrets (V7 / T-12-06).
+func severityForPrimary(payload []byte) (Severity, Message, error) {
+	var ev redisx.PrimaryEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return "", Message{}, fmt.Errorf("alert: malformed primary event: %w", err)
+	}
+	if ev.Type != "primary_death_confirmed" {
+		// Informational primary FSM event — log only, never page.
+		return SeverityInfo, Message{
+			Severity:    SeverityInfo,
+			Title:       fmt.Sprintf("Primary pod FSM → %s", ev.State),
+			Body:        fmt.Sprintf("Primary-pod FSM event %q, state %q.", ev.Type, ev.State),
+			Fingerprint: fmt.Sprintf("primary:%s:%s", ev.Type, ev.State),
+		}, nil
+	}
+	var title, body string
+	switch ev.Reason {
+	case "billing_stopped":
+		title = "Vast account sem crédito — primary billing-stopped"
+		body = "O primary pod foi parado pela Vast por falta de crédito (billing-stop). " +
+			"Ação: ADICIONAR CRÉDITO na conta Vast.ai e fazer force-up. " +
+			"O gateway suspendeu o re-provisionamento automático até lá (failover tier-1 ativo)."
+	default: // "host_death", "not_found", or any unexpected value
+		title = "Primary pod morto (host-yank/404)"
+		body = "O primary pod morreu (host-yank ou 404 na Vast). " +
+			"O failover tier-1 está ativo; o schedule loop irá re-provisionar automaticamente."
+	}
+	if ev.LifecycleID != 0 {
+		body += fmt.Sprintf(" Lifecycle #%d.", ev.LifecycleID)
+	}
+	return SeverityCritical, Message{
+		Severity:    SeverityCritical,
+		Title:       title,
+		Body:        body,
+		Fingerprint: "primary:death:" + ev.Reason,
+	}, nil
 }
 
 // severityForBreaker classifies a gw:breaker:events payload.

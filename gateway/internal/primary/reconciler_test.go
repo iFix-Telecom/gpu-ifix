@@ -48,14 +48,30 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
+
+// breakerReadForce reads a breaker force-override key for assertions.
+func breakerReadForce(t *testing.T, rdb *redis.Client, name string) (string, time.Duration, bool, error) {
+	t.Helper()
+	return breaker.ReadForceOverride(context.Background(), rdb, name)
+}
+
+// deathCount returns the current PrimaryDeathDetectedTotal counter value for a
+// cause label.
+func deathCount(t *testing.T, cause string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(obs.PrimaryDeathDetectedTotal.WithLabelValues(cause))
+}
 
 // ===========================================================================
 // Fakes
@@ -333,7 +349,14 @@ func testCfg(t *testing.T) config.Config {
 	c.PrimaryProvisionColdStartBudgetSeconds = 60 // shorter for tests
 	c.PrimaryPodScheduleGraceRampDownSeconds = 5
 	c.PrimaryPodScheduleProvisionLeadSeconds = 1800
-	c.PrimaryVastPriceCapDPH = 0.40
+	// Phase 6.6.Y: c.PrimaryVastPriceCapDPH deleted — per-shape caps below.
+	// Phase 11.1 D-A6 primary+fallback shape (Wave 0 EVIDENCE-00 locked).
+	c.PrimaryVastGPUNamePrimary = "RTX 3090"
+	c.PrimaryVastGPUNameFallback = "RTX 3090"
+	c.PrimaryVastPriceCapPrimary = 0.30
+	c.PrimaryVastPriceCapFallback = 0.60
+	c.PrimaryVastNumGPUsPrimary = 1
+	c.PrimaryVastNumGPUsFallback = 2
 	c.USDToBRLRate = 5.0
 	return c
 }
@@ -610,7 +633,7 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 		"all 4 endpoints healthy + running + ports populated → markReady fires + FSM → Ready")
 	snap := loader.snapshot()
 	require.Contains(t, snap, "llm", "OverrideTier0('llm', URL) must fire")
-	require.Contains(t, snap, "stt", "OverrideTier0('stt', URL) must fire")
+	require.Contains(t, snap, "stt", "OverrideTier0('stt', URL) must fire (Phase 11.2 D-B5′ — restored)")
 	require.Contains(t, snap, "tts", "OverrideTier0('tts', URL) must fire")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the 9400 host mapping")
@@ -656,6 +679,206 @@ func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) 
 		"no OverrideTier0 fires when health check fails")
 }
 
+// TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap asserts the
+// 3-strike confirmation for ErrInstanceNotFound: a single transient
+// {"instances": null} response from Vast (which the upstream client maps to
+// ErrInstanceNotFound) MUST NOT close the lifecycle on its own — the
+// instance may still be alive on the host (Vast state-transition flap /
+// eventual consistency). UAT 2026-05-27 lifecycle 2 captured this: a 4m24s
+// window of successful polls then a single null response silently closed the
+// DB row and left a $0.04 Vast orphan because the close path also missed
+// BestEffortDestroy. The fix mirrors the existing terminalConfirmStrikes=3
+// pattern used for IsTerminal observations: require 3 consecutive
+// ErrInstanceNotFound responses before declaring the instance terminal +
+// firing BestEffortDestroy + closing the lifecycle.
+//
+// Source: .planning/debug/primary-reconciler-silent-hang.md.
+//
+// Two interleaved scenarios in one test (avoid flake of two-test ordering):
+//
+//  1. After 1 ErrInstanceNotFound followed by a healthy "running" response
+//     with 4 endpoints up, the lifecycle promotes to Ready (the single
+//     transient null was tolerated, strike counter reset on the healthy
+//     poll).
+//  2. A separate run where Vast returns ErrInstanceNotFound on EVERY poll:
+//     after the 3rd strike, BestEffortDestroy fires AND closeLifecycle is
+//     called with shutdown_reason="instance_terminal_state_confirmed".
+func TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap(t *testing.T) {
+	t.Run("transient_null_followed_by_running_promotes_to_ready", func(t *testing.T) {
+		cfg := testCfg(t)
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		var callCount atomic.Int32
+		fakeV := &fakeVast{
+			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+				n := callCount.Add(1)
+				if n == 1 {
+					// First poll: transient {"instances": null} flap.
+					return vast.Instance{}, vast.ErrInstanceNotFound
+				}
+				// Subsequent polls: healthy running with all 4 ports.
+				return runningInstanceWithAllPorts(42), nil
+			},
+		}
+		loader := newFakeLoader()
+		dcgm := &fakeDCGMScraper{}
+		dbtx := &fakeDBTX{}
+		r := buildReconciler(t, Deps{
+			Cfg:         cfg,
+			FSM:         fsm,
+			Loader:      loader,
+			DCGMScraper: dcgm,
+			Rule:        alwaysInPeakRule(),
+			HealthCheck: func(_ context.Context, _ string) bool { return true },
+			Vast:        fakeV,
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+		r.activeLifecycleID.Store(99)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 25*time.Millisecond)
+		require.NoError(t, err,
+			"a single transient ErrInstanceNotFound followed by a healthy running response MUST NOT close the lifecycle")
+		require.Equal(t, StateReady, r.deps.FSM.State(),
+			"after the transient flap is tolerated, the lifecycle must promote to Ready")
+		require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+			"BestEffortDestroy must NOT fire when only 1 ErrInstanceNotFound was observed (below 3-strike threshold)")
+	})
+
+	t.Run("three_consecutive_not_found_confirms_terminal_and_destroys", func(t *testing.T) {
+		cfg := testCfg(t)
+		cfg.PrimaryProvisionColdStartBudgetSeconds = 30 // plenty of room for 3 polls
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		var callCount atomic.Int32
+		fakeV := &fakeVast{
+			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+				callCount.Add(1)
+				return vast.Instance{}, vast.ErrInstanceNotFound
+			},
+		}
+		closeReasons := []string{}
+		var closeMu sync.Mutex
+		dbtx := &fakeDBTX{
+			execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+				if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+					if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+						closeMu.Lock()
+						closeReasons = append(closeReasons, reason.String)
+						closeMu.Unlock()
+					}
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}
+		r := buildReconciler(t, Deps{
+			Cfg:  cfg,
+			FSM:  fsm,
+			Rule: alwaysInPeakRule(),
+			Vast: fakeV,
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+		r.activeLifecycleID.Store(99)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 25*time.Millisecond)
+		require.Error(t, err,
+			"3 consecutive ErrInstanceNotFound observations must close the lifecycle as terminal")
+		require.Contains(t, err.Error(), "3-strike confirm via ErrInstanceNotFound",
+			"error must identify the 3-strike ErrInstanceNotFound path (not the generic IsTerminal close)")
+		require.GreaterOrEqual(t, callCount.Load(), int32(3),
+			"must have observed at least 3 ErrInstanceNotFound polls before declaring terminal")
+		require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+			"BestEffortDestroy must fire EXACTLY once after 3-strike confirmation (orphan-prevention contract)")
+
+		closeMu.Lock()
+		defer closeMu.Unlock()
+		require.Contains(t, closeReasons, "instance_terminal_state_confirmed",
+			"closeLifecycle must record shutdown_reason='instance_terminal_state_confirmed' (distinguishes from IsTerminal-driven 'instance_terminal_state')")
+	})
+}
+
+// TestReconcilerVastFallback exercises the Phase 11.1 D-A6 primary+fallback
+// search dispatch (Wave 0 EVIDENCE-00). When the primary 1×3090 @ $0.30
+// filter returns zero offers, the reconciler must iterate to the fallback
+// 2×3090 @ $0.60 filter, pick its offer, and call CreateInstance with the
+// fallback offer's ID (proving the loop break-on-non-empty + fallback shape
+// took effect).
+func TestReconcilerVastFallback(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.PrimaryVastMachineAllowlist = nil // disable the allowlist short-circuit
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var (
+		searchCalls atomic.Int32
+		createdFor  atomic.Int64 // offer_id passed to CreateInstance
+	)
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			n := searchCalls.Add(1)
+			// Inspect num_gpus to identify the shape.
+			ng, _ := filter["num_gpus"].(map[string]any)
+			gpus, _ := ng["eq"].(int)
+			switch n {
+			case 1: // primary shape (1×3090) — empty
+				require.Equal(t, 1, gpus, "first call must use primary shape (1 GPU)")
+				return nil, nil
+			case 2: // fallback shape (2×3090) — one offer
+				require.Equal(t, 2, gpus, "second call must use fallback shape (2 GPUs)")
+				return []vast.Offer{{
+					ID:        7777,
+					MachineID: 43803,
+					HostID:    99001,
+					DphTotal:  0.42,
+				}}, nil
+			default:
+				return nil, errors.New("unexpected extra SearchOffers call")
+			}
+		},
+		createInstanceFn: func(_ context.Context, offerID int64, _ vast.CreateRequest) (vast.Instance, error) {
+			createdFor.Store(offerID)
+			// Return a non-running instance so waitForReadyOrDestroy bails
+			// quickly (cold-start budget 60s in testCfg, but health check
+			// returns false instantly so the budget never triggers — the
+			// goroutine returns via destroy on cancellation).
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+	}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Vast: fakeV,
+		Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool {
+			return false
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	// Drive provisionLifecycle directly (unexported but same package).
+	// waitForReadyOrDestroy will spin until the cold-start budget elapses;
+	// short-circuit via ctx timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	// Assertions: BOTH shape filters consulted; create issued for the
+	// fallback offer.
+	require.GreaterOrEqual(t, searchCalls.Load(), int32(2),
+		"reconciler must call SearchOffers for both [primary, fallback] shapes")
+	require.Equal(t, int64(7777), createdFor.Load(),
+		"CreateInstance must receive the fallback offer's ID (7777)")
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {
@@ -694,7 +917,7 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated")
 	roles := loader.restoredRoles()
 	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
-		"startDrain must RestoreTier0 for all 3 primary roles in order")
+		"startDrain must RestoreTier0 for the 3 primary roles (llm+stt+tts) in order — Phase 11.2 D-B5′ restored stt")
 }
 
 // UAT 14 follow-up (2026-05-19): under DISABLED, evaluateReady must
@@ -790,7 +1013,7 @@ func TestEvaluateDraining_WaitsIfInflightAndWithinGrace(t *testing.T) {
 // markReady tests
 // ===========================================================================
 
-func TestMarkReady_OverridesTier0_3Roles(t *testing.T) {
+func TestMarkReady_OverridesTier0_2Roles(t *testing.T) {
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
@@ -815,7 +1038,7 @@ func TestMarkReady_OverridesTier0_3Roles(t *testing.T) {
 	err := r.markReady(context.Background(), 5, urls, 0.30, testLogger())
 	require.NoError(t, err)
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (one per role)")
+	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
 	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
@@ -838,7 +1061,6 @@ func TestMarkReady_SetsDCGMScraperURL(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 	urls := primaryPodURLs{
 		LLM:  "http://1.2.3.4:33000/v1/models",
-		STT:  "http://1.2.3.4:33001/health",
 		TTS:  "http://1.2.3.4:33003/health",
 		DCGM: "http://1.2.3.4:33400/metrics",
 	}
@@ -884,7 +1106,7 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	// closeLifecycle in evaluateDestroying also defensively RestoresTier0.
 	restored := loader.restoredRoles()
 	require.GreaterOrEqual(t, len(restored), 3,
-		"closeLifecycle must defensively RestoreTier0 for the 3 roles")
+		"closeLifecycle must defensively RestoreTier0 for the 3 roles (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 }
 
 // ===========================================================================
@@ -1224,7 +1446,7 @@ func TestRecoverOpenLifecycle_HealthyInstanceRestoresReady(t *testing.T) {
 	require.Equal(t, int64(100), r.activeLifecycleID.Load())
 	require.Equal(t, int64(42), r.activeInstanceID.Load())
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "3-role OverrideTier0 must fire on recovery")
+	require.Len(t, snap, 3, "3-role OverrideTier0 must fire on recovery (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the recovered pod's DCGM endpoint")
 }
@@ -1393,6 +1615,269 @@ func TestLeaderElection_OnlyOneLeaderEvaluatesTick(t *testing.T) {
 }
 
 // ===========================================================================
+// Plan 6.6.Y-03 Task 2 — Option B: port-bind health-gate fail-fast.
+// These tests drive the PRODUCTION waitForReadyOrDestroy (where the Option B
+// logic lives), overriding the package poll interval to 5ms so the loop runs
+// deterministically and fast (finding #7). PrimaryPublicPortBindBudgetSeconds
+// is set to 0 so the fail-fast fires on the FIRST running observation.
+// ===========================================================================
+
+// runningInstanceNoPorts returns a vast.Instance reporting actual_status=running
+// with NO published ports — i.e. buildPodURLs returns all-empty URLs. This is
+// the exact lie the 6.6.Y-01 spike characterized: running + populated/empty
+// ports map yet never externally reachable.
+func runningInstanceNoPorts(id int64) vast.Instance {
+	return vast.Instance{
+		ID:           id,
+		ActualStatus: "running",
+		SshHost:      "", // spike: ssh_host stayed null the entire lifetime
+		PublicIPAddr: "203.0.113.7",
+		Ports:        map[string][]vast.PortBinding{}, // empty → buildPodURLs empty
+	}
+}
+
+// withTestPollInterval overrides primaryInstancePollIntervalForTest for the
+// duration of a test and restores it on cleanup.
+func withTestPollInterval(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := primaryInstancePollIntervalForTest
+	primaryInstancePollIntervalForTest = d
+	t.Cleanup(func() { primaryInstancePollIntervalForTest = orig })
+}
+
+// TestWaitForReady_PublicPortBindTimeout asserts Option B: when the instance
+// reports actual_status=running but pod URLs stay empty past
+// PrimaryPublicPortBindBudgetSeconds (set to 0 for determinism), the
+// reconciler fails fast — BestEffortDestroy fires AND closeLifecycle records
+// closure_reason public_port_bind_timeout AND a non-nil error is returned.
+func TestWaitForReady_PublicPortBindTimeout(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // fail-fast on first running poll
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceNoPorts(42), nil
+		},
+	}
+	closeReasons := []string{}
+	var closeMu sync.Mutex
+	dbtx := &fakeDBTX{
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+				if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+					closeMu.Lock()
+					closeReasons = append(closeReasons, reason.String)
+					closeMu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Rule:        alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "running-but-unbound-ports past budget MUST return a non-nil error")
+	require.Contains(t, err.Error(), "public port bind timeout",
+		"error must identify the port-bind fail-fast path")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST fire exactly once on the port-bind timeout (orphan-prevention contract T-6.6.Y-03-02)")
+
+	closeMu.Lock()
+	defer closeMu.Unlock()
+	require.Contains(t, closeReasons, "public_port_bind_timeout",
+		"closeLifecycle must record the distinct closure_reason public_port_bind_timeout")
+}
+
+// TestWaitForReady_BindsBeforeBudget_NoFalseClose asserts no regression: a pod
+// that binds all 4 URLs before the budget proceeds to the existing 4-endpoint
+// health check and promotes to Ready — the port-bind branch must NOT fire a
+// false public_port_bind_timeout close. Budget is 0 here too; because the very
+// first poll already has all 4 URLs, the empty-URLs branch (and thus the
+// fail-fast) is never entered.
+func TestWaitForReady_BindsBeforeBudget_NoFalseClose(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceWithAllPorts(42), nil // all 4 ports bound immediately
+		},
+	}
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.NoError(t, err,
+		"a pod that binds all 4 URLs before budget MUST promote to Ready, not false-close on port-bind timeout")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"the bound-before-budget pod must reach Ready")
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST NOT fire when ports bind before the budget")
+}
+
+// TestWaitForReady_RunningPortsBoundButTCPUnreachable_DestroysWithinBudget is
+// the CR-01 (6.6.Y review) regression test for the ACTUAL observed spike
+// failure: the instance reports actual_status=running WITH a fully populated
+// Vast ports map (buildPodURLs returns 4 non-empty URLs) — yet the host is
+// externally TCP-unreachable (Deps.Reachable returns false, the dial-timeout
+// signature). The empty-URLs branch can NEVER catch this (URLs are non-empty);
+// only the connection-level reachability gate does. With budget=0 the fail-fast
+// must fire on the first running poll: BestEffortDestroy + closure_reason
+// public_port_bind_timeout + non-nil error.
+func TestWaitForReady_RunningPortsBoundButTCPUnreachable_DestroysWithinBudget(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // fail-fast on first running poll
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			// populated ports map — the exact spike "lie": running + ports
+			// bound in the Vast API, yet unreachable from outside.
+			return runningInstanceWithAllPorts(42), nil
+		},
+	}
+	closeReasons := []string{}
+	var closeMu sync.Mutex
+	dbtx := &fakeDBTX{
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+				if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+					closeMu.Lock()
+					closeReasons = append(closeReasons, reason.String)
+					closeMu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Rule: alwaysInPeakRule(),
+		// HealthCheck would PASS — proving the kill is driven by the
+		// connection-level Reachable gate, not the HTTP health gate.
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		// connection-level dial times out: host never NAT-published.
+		Reachable: func(_ context.Context, _ string) bool { return false },
+		Vast:      fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err,
+		"running + ports-bound + TCP-unreachable past budget MUST return a non-nil error")
+	require.Contains(t, err.Error(), "public port bind timeout",
+		"error must identify the port-bind fail-fast path even when URLs are non-empty")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST fire exactly once on the TCP-unreachable port-bind timeout")
+
+	closeMu.Lock()
+	defer closeMu.Unlock()
+	require.Contains(t, closeReasons, "public_port_bind_timeout",
+		"closeLifecycle must record public_port_bind_timeout for the unreachable-but-ports-bound path")
+}
+
+// TestWaitForReady_ReachableButNotReady_NoFalseClose asserts the design-note
+// invariant (CR-01): a host that is TCP-reachable (Reachable == true) but whose
+// services are still warming (HealthCheck failing while onstart downloads
+// weights) is a LEGITIMATE cold start and MUST NOT be killed by the port-bind
+// fail-fast — even with budget=0. The connection-level gate is satisfied, so
+// the loop falls through to the HTTP health checks and keeps polling under the
+// cold-start budget. Here we let it eventually pass health and promote.
+func TestWaitForReady_ReachableButNotReady_NoFalseClose(t *testing.T) {
+	withTestPollInterval(t, 5*time.Millisecond)
+
+	cfg := testCfg(t)
+	cfg.PrimaryPublicPortBindBudgetSeconds = 0 // would fire immediately IF gated on Reachable==false
+	cfg.PrimaryProvisionColdStartBudgetSeconds = 30
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceWithAllPorts(42), nil
+		},
+	}
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	// HealthCheck fails for the first few polls (services warming) then passes.
+	var healthCalls atomic.Int32
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		// host is reachable the whole time — NOT the spike failure signature.
+		Reachable: func(_ context.Context, _ string) bool { return true },
+		HealthCheck: func(_ context.Context, _ string) bool {
+			// first 4 calls (one full poll's worth across LLM URL) fail to
+			// simulate warming, then everything passes.
+			return healthCalls.Add(1) > 1
+		},
+		Vast: fakeV,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(99)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+
+	require.NoError(t, err,
+		"a TCP-reachable but still-warming pod MUST NOT false-close on port-bind timeout; it keeps polling and promotes")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"the reachable-but-warming pod must eventually reach Ready")
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"BestEffortDestroy MUST NOT fire when the host is TCP-reachable (cold-start budget owns the warming window)")
+}
+
+// ===========================================================================
 // Helpers for tests — waitForReadyOrDestroyForTest exposes the poll
 // interval so tests can drive the loop in milliseconds.
 // ===========================================================================
@@ -1416,6 +1901,10 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 		now := time.Now()
 		r.lastProvisionFailureAt.Store(&now)
 	}
+	// Mirror the production 3-strike confirmation for both terminal
+	// signals (IsTerminal status + ErrInstanceNotFound).
+	notFoundStrikes := 0
+	const terminalConfirmStrikes = 3
 	for {
 		select {
 		case <-ctx.Done():
@@ -1429,12 +1918,21 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
 				if errors.Is(err, vast.ErrInstanceNotFound) {
-					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					stampFailure()
-					return errors.New("primary: instance terminal")
+					notFoundStrikes++
+					if notFoundStrikes >= terminalConfirmStrikes {
+						if r.deps.Vast != nil {
+							_ = r.deps.Vast.DestroyInstance(context.Background(), instanceID)
+						}
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
+						stampFailure()
+						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+					}
+					continue
 				}
+				notFoundStrikes = 0
 				continue
 			}
+			notFoundStrikes = 0
 			if msg := inst.StatusMsg; msg != "" {
 				if contains(msg, "Error") || contains(msg, "error") {
 					trunc := msg
@@ -1456,14 +1954,13 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
 				continue
 			}
 			if r.deps.HealthCheck == nil {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.LLM) ||
-				!r.deps.HealthCheck(ctx, urls.STT) ||
 				!r.deps.HealthCheck(ctx, urls.TTS) ||
 				!r.deps.HealthCheck(ctx, urls.DCGM) {
 				continue
@@ -1511,10 +2008,10 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
 	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
 	loader := newFakeLoader()
-	// Primary had previously written all 3 dynamic roles; an emerg cutback
-	// then cleared the tts slot (RestoreTier0 transitively wiped it).
+	// Primary had previously written the 2 dynamic roles (llm+tts post
+	// Phase 11.1 D-A4); an emerg cutback then cleared the tts slot
+	// (RestoreTier0 transitively wiped it).
 	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
-	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
 	// tts intentionally NOT set → the cleared-slot vector.
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
@@ -1539,10 +2036,10 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	snap := loader.snapshot()
 	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
 		"evaluateReady must re-assert the cleared tts slot (stripped /health)")
+	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
+		"evaluateReady must re-assert the cleared stt slot (Phase 11.2 D-B5′ restored)")
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
 		"llm slot stays set")
-	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
-		"stt slot stays set")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "embed must NEVER be re-asserted by the primary reconciler (D-03)")
 }
@@ -1580,11 +2077,593 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
 
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm/stt/tts)")
+	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm/stt/tts; Phase 11.2 D-B5′ restored stt)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
 	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "markReady must NOT override embed (D-03 — embed is static off-pod)")
 	require.Equal(t, StateReady, r.deps.FSM.State())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.2 Plan 01 — Wave 0 RED stubs for primary STT lifecycle hooks
+// (D-B5′ revert of 11.1-01). OWNER: Plan 03 — restores
+// OverrideTier0("stt")/RestoreTier0("stt") calls at reconciler.go
+// :527/:571/:636 per PATTERNS.md lines 319-337.
+// ---------------------------------------------------------------------------
+
+// TestStartDrain_RestoreTier0_CalledFor_STT — reconciler.go startDrain
+// restoration (Phase 11.2 D-B5′ revert of 11.1-01). When evaluateReady
+// fires startDrain on a Ready→Draining transition, the fake loader MUST
+// record a RestoreTier0 call for role="stt" alongside llm and tts.
+func TestStartDrain_RestoreTier0_CalledFor_STT(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(42)
+
+	r.evaluateReady(context.Background(), time.Now(), testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State())
+	roles := loader.restoredRoles()
+	require.Contains(t, roles, "stt",
+		"startDrain MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
+}
+
+// TestMarkReady_OverrideTier0_CalledFor_STT — reconciler.go markReady
+// restoration (Phase 11.2 D-B5′). When markReady transitions
+// Provisioning→Ready with a populated urls.STT, the loader MUST record
+// an OverrideTier0("stt", strippedURL) call with the /health suffix
+// stripped (parity with llm/tts).
+func TestMarkReady_OverrideTier0_CalledFor_STT(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	urls := primaryPodURLs{
+		LLM:  "http://primary:33000/v1/models",
+		STT:  "http://primary:33001/health",
+		TTS:  "http://primary:33003/health",
+		DCGM: "http://primary:33400/metrics",
+	}
+	require.NoError(t, r.markReady(context.Background(), 7, urls, 0.30, testLogger()))
+
+	snap := loader.snapshot()
+	require.Equal(t, "http://primary:33001", snap["stt"],
+		"markReady MUST OverrideTier0(stt, strippedURL) — /health suffix stripped (Phase 11.2 D-B5′)")
+}
+
+// TestCloseLifecycle_RestoreTier0_CalledFor_STT — reconciler.go
+// closeLifecycle defensive restoration (Phase 11.2 D-B5′). The fake
+// loader MUST record a RestoreTier0 call for role="stt" inside the
+// 3-role defensive cleanup that closeLifecycle runs.
+func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	fsm.SetState(StateDraining, time.Now(), "setup")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	require.NoError(t, r.closeLifecycle(context.Background(), 99, "test_close", 0.30))
+
+	roles := loader.restoredRoles()
+	require.Contains(t, roles, "stt",
+		"closeLifecycle MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 1 — Ready-tick death poll (RES-11)
+//
+// evaluateReady polls Vast for the tracked instance every Ready tick, confirms
+// death via a 3-strike confirm on both IsTerminal() and ErrInstanceNotFound,
+// classifies the cause, reconciles an empty trackedID from the open lifecycle
+// row (D-05), and resets the strike counters on enter-Ready (markReady). Task 1
+// does NOT wire drain/alert (that is Task 2) — the poll + strike + classify
+// must be complete and isolated.
+// ===========================================================================
+
+// deathPollReady is a Ready-state reconciler whose evaluateReady runs only the
+// death poll (DISABLED short-circuits the schedule drain trigger, the re-assert
+// loop is a no-op because all slots are set). Tracked instance + active pod
+// URLs are populated so the death poll has an id to poll.
+func deathPollReady(t *testing.T, vastFn func(ctx context.Context, id int64) (vast.Instance, error)) (*Reconciler, *fakeVast, *fakeLoader) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true // keep the schedule drain trigger off; death poll still runs
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	// Slots set so the Pitfall #11 re-assert loop does not fire.
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	fv := &fakeVast{getInstanceFn: vastFn}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Vast:   fv,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(42)
+	urls := primaryPodURLs{
+		LLM:  "http://203.0.113.7:33000/v1/models",
+		STT:  "http://203.0.113.7:33001/health",
+		TTS:  "http://203.0.113.7:33003/health",
+		DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+	return r, fv, loader
+}
+
+func terminalInstance(id int64) vast.Instance {
+	return vast.Instance{ID: id, ActualStatus: "exited"}
+}
+
+// TestEvaluateReady_EmptyTrackedIDReconciles — D-05: when activeInstanceID==0
+// but an open primary_lifecycles row carries the id and a pod is routing, the
+// death poll reconciles the id from the open row and polls it (no silent no-op).
+func TestEvaluateReady_EmptyTrackedIDReconciles(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	polled := atomic.Int64{}
+	fv := &fakeVast{getInstanceFn: func(_ context.Context, id int64) (vast.Instance, error) {
+		polled.Store(id)
+		return runningInstanceNoPorts(id), nil
+	}}
+	// GetOpenPrimaryLifecycle returns a row carrying vast_instance_id=55.
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+			return openLifecycleRow{id: 7, vastInstanceID: pgtype.Int8{Int64: 55, Valid: true}}
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Vast:   fv,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	// activeInstanceID intentionally 0 (lost on a force-up); a pod is routing.
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(0)
+	urls := primaryPodURLs{
+		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
+		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+
+	r.evaluateReady(context.Background(), time.Now(), testLogger())
+
+	require.Equal(t, int64(55), polled.Load(),
+		"death poll must reconcile the tracked id from the open lifecycle row and poll it")
+	require.Equal(t, int64(55), r.activeInstanceID.Load(),
+		"D-05: activeInstanceID must be repaired from the open row")
+}
+
+// TestEvaluateReady_DeathDetection — a tracked instance returning
+// IsTerminal()==true for 3 consecutive ticks confirms death; the cause is
+// classified host_death (plain exited, no stopped/credit signal). Task 1 only
+// requires the poll+strike+classify (drain/breakers are Task 2).
+func TestEvaluateReady_DeathDetection(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return terminalInstance(id), nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"strike 1 must not confirm death")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"strike 2 must not confirm death")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "3 consecutive terminal observations must confirm death")
+	require.True(t, got.dead)
+	require.Equal(t, "host_death", got.cause,
+		"plain exited with no stopped/credit signal → host_death")
+}
+
+// TestEvaluateReady_TransientExitedDoesNotDrain — IsTerminal()==true for 1-2
+// ticks then a non-terminal observation resets the strike counter; the FSM
+// stays Ready and no death is confirmed. The strike counter MUST survive
+// across separate evaluateReady calls (struct field, not a function local).
+func TestEvaluateReady_TransientExitedDoesNotDrain(t *testing.T) {
+	var status atomic.Value
+	status.Store("exited")
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return vast.Instance{ID: id, ActualStatus: status.Load().(string)}, nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	status.Store("running")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+		"non-terminal observation must not confirm")
+	status.Store("exited")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "strike 1 after reset")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "strike 2 after reset")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "strike 3 after reset confirms death")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"Task 1 classify does not itself transition the FSM (Task 2 wires drain)")
+}
+
+// TestEvaluateReady_NotFound3StrikeDrains — ErrInstanceNotFound for 3
+// consecutive ticks confirms death with cause=not_found.
+func TestEvaluateReady_NotFound3StrikeDrains(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, _ int64) (vast.Instance, error) {
+		return vast.Instance{}, vast.ErrInstanceNotFound
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "not-found strike 1")
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()), "not-found strike 2")
+	got := r.classifyDeathOnReadyTickForTest(ctx, testLogger())
+	require.NotNil(t, got, "3 consecutive ErrInstanceNotFound must confirm death")
+	require.True(t, got.dead)
+	require.Equal(t, "not_found", got.cause,
+		"ErrInstanceNotFound death classifies cause=not_found")
+}
+
+// TestEvaluateReady_HealthyNoop — a healthy (non-terminal, found) instance
+// accumulates no strikes and confirms no death across many ticks.
+func TestEvaluateReady_HealthyNoop(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return runningInstanceNoPorts(id), nil
+	})
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()),
+			"healthy instance must never confirm death")
+	}
+	require.Equal(t, StateReady, r.deps.FSM.State())
+}
+
+// TestEvaluateReady_StrikesResetOnEnterReady — strike counters carried > 0 from
+// a prior lifecycle are reset to 0 on the Provisioning→Ready transition
+// (markReady), so a freshly-Ready pod starts with a clean strike count.
+func TestEvaluateReady_StrikesResetOnEnterReady(t *testing.T) {
+	r, _, _ := deathPollReady(t, func(_ context.Context, id int64) (vast.Instance, error) {
+		return terminalInstance(id), nil
+	})
+	ctx := context.Background()
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Nil(t, r.classifyDeathOnReadyTickForTest(ctx, testLogger()))
+	require.Equal(t, 2, r.terminalStrikesForTest(), "2 strikes carried")
+
+	r.deps.FSM.SetState(StateProvisioning, time.Now(), "new_pod")
+	dcgm := &fakeDCGMScraper{}
+	r.deps.DCGMScraper = dcgm
+	urls := primaryPodURLs{
+		LLM: "http://1.2.3.4:33000/v1/models", STT: "http://1.2.3.4:33001/health",
+		TTS: "http://1.2.3.4:33003/health", DCGM: "http://1.2.3.4:33400/metrics",
+	}
+	require.NoError(t, r.markReady(ctx, 8, urls, 0.30, testLogger()))
+	require.Equal(t, 0, r.terminalStrikesForTest(),
+		"markReady (enter-Ready) must reset the terminal strike counter")
+	require.Equal(t, 0, r.notFoundStrikesForTest(),
+		"markReady (enter-Ready) must reset the not-found strike counter")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 2 — death-confirmed path (D-01/D-03/D-04)
+//
+// On a confirmed death evaluateReady → handleConfirmedDeath:
+//   (1) startDrain (Ready→Draining + RestoreTier0)
+//   (2) D-04 force-open local-llm/local-stt/local-tts BEFORE destroy
+//   (3) D-01 billing-stop suppression marker (host-yank records none)
+//   (4) D-03 distinct primary_death_confirmed event (cause-tagged)
+//   (5) PrimaryDeathDetectedTotal{cause}.Inc()
+// ===========================================================================
+
+// readyReconcilerWithRedis builds a Ready-state reconciler wired to a miniredis
+// client so the death path's WriteForceOverride + publishPrimaryEvent observe a
+// real Redis. The death poll is driven directly via handleConfirmedDeath so the
+// test controls the cause without 3 strike ticks.
+func readyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryPodScheduleDisabled = true
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
+	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
+	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
+	rdb, _ := miniredisClient(t)
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   neverInPeakRule(),
+		Redis:  rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+	r.activeInstanceID.Store(42)
+	urls := primaryPodURLs{
+		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
+		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+	}
+	r.activePodURLs.Store(&urls)
+	return r, loader, rdb
+}
+
+func forceOverrideState(t *testing.T, rdb *redis.Client, name string) (string, bool) {
+	t.Helper()
+	state, _, set, err := breakerReadForce(t, rdb, name)
+	require.NoError(t, err)
+	return state, set
+}
+
+// TestDeath_HostYankDrainsAndForceOpens — confirmed host-yank death drains the
+// FSM, force-opens the 3 local-* breakers, publishes a host_death event, and
+// records NO billing-stop suppression marker.
+func TestDeath_HostYankDrainsAndForceOpens(t *testing.T) {
+	r, loader, rdb := readyReconcilerWithRedis(t)
+	startDeaths := deathCount(t, "host_death")
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"confirmed death must startDrain (Ready→Draining)")
+	require.Equal(t, []string{"llm", "stt", "tts"}, loader.restoredRoles(),
+		"startDrain RestoreTier0s the 3 dynamic roles")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s must be force-overridden", name)
+		require.Equal(t, "open", state, "breaker %s must be force-OPEN", name)
+	}
+	require.Nil(t, r.billingSuppressionActiveForTest(),
+		"host-yank death must NOT record a billing-stop suppression marker")
+	require.InDelta(t, startDeaths+1, deathCount(t, "host_death"), 0.001,
+		"PrimaryDeathDetectedTotal{cause=host_death} must increment")
+}
+
+// TestDeath_BillingStopRecordsSuppression — confirmed billing-stop death drains
+// + force-opens + publishes a billing_stopped event AND records a durable
+// suppression marker.
+func TestDeath_BillingStopRecordsSuppression(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "billing_stopped"}, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State())
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, set := forceOverrideState(t, rdb, name)
+		require.True(t, set)
+		require.Equal(t, "open", state)
+	}
+	require.NotNil(t, r.billingSuppressionActiveForTest(),
+		"billing-stop death MUST record a durable suppression marker")
+}
+
+// TestEvaluateAsleep_BillingStopSuppressesReprovision — full path: after a
+// billing-stop suppression marker is active, evaluateAsleep inside the peak
+// window does NOT spawn provisioning. Host-yank (no marker) re-provisions.
+func TestEvaluateAsleep_BillingStopSuppressesReprovision(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil) // StateAsleep
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+			return insertReturningRow{id: 7, startedAt: time.Now()}
+		},
+	}
+	// Block SearchOffers so the spawnProvisioning goroutine cannot reach the
+	// error branch + FSM.SetState(Asleep) before this test asserts Provisioning.
+	stopBlock := make(chan struct{})
+	t.Cleanup(func() { close(stopBlock) })
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Rule: alwaysInPeakRule(), // in peak → ShouldBeProvisioned true
+		Vast: &fakeVast{
+			searchOffersFn: func(_ context.Context, _ vast.SearchFilter) ([]vast.Offer, error) {
+				<-stopBlock
+				return nil, errors.New("test teardown")
+			},
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	// Arm the billing-stop suppression marker.
+	r.armBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateAsleep, r.deps.FSM.State(),
+		"billing-stop suppression must make evaluateAsleep SKIP re-provision (no provision-fail loop)")
+
+	// Clear suppression → schedule loop re-provisions normally inside peak.
+	r.clearBillingSuppressionForTest()
+	r.evaluateAsleep(context.Background(), time.Now(), testLogger())
+	require.Equal(t, StateProvisioning, r.deps.FSM.State(),
+		"with no suppression marker the schedule loop re-provisions normally inside peak (host-yank path)")
+}
+
+// TestDeath_BreakersForceOpenedBeforeDestroy — force-open is written at
+// drain-start (handleConfirmedDeath calls startDrain + force-open together),
+// well before evaluateDestroying's BestEffortDestroy runs. We assert the keys
+// exist immediately after handleConfirmedDeath, while the FSM is still Draining
+// (BestEffortDestroy has not yet been reached).
+func TestDeath_BreakersForceOpenedBeforeDestroy(t *testing.T) {
+	r, _, rdb := readyReconcilerWithRedis(t)
+	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"after handleConfirmedDeath the FSM is Draining — destroy has NOT yet run")
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		_, set := forceOverrideState(t, rdb, name)
+		require.True(t, set, "breaker %s force-open must be written before destroy", name)
+	}
+}
+
+// TestDeath_BillingStopFallbackSignal — IntendedStatus empty but
+// ActualStatus==exited && StatusMsg has a credit/account marker → billing_stopped.
+func TestDeath_BillingStopFallbackSignal(t *testing.T) {
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "instance stopped: account out of credit"}),
+		"exited + credit StatusMsg must classify billing_stopped (A1 fallback)")
+	require.Equal(t, "billing_stopped",
+		classifyDeath(vast.Instance{IntendedStatus: "stopped", ActualStatus: "exited"}),
+		"IntendedStatus==stopped is the primary billing signal")
+	require.Equal(t, "host_death",
+		classifyDeath(vast.Instance{ActualStatus: "exited", StatusMsg: "container crashed"}),
+		"exited with no credit/account marker is host_death")
+}
+
+// ===========================================================================
+// Phase 12 Plan 02 Task 4 — D-13 markReady force-CLOSE (symmetric to D-04)
+//
+// markReady force-CLOSES the stale local-llm/local-stt/local-tts breakers
+// (short TTL) when a new pod goes Ready, so a re-provisioned pod never inherits
+// an OPEN breaker left over from probing the previous dead URL.
+// ===========================================================================
+
+// markReadyReconcilerWithRedis builds a Provisioning-state reconciler wired to
+// miniredis so markReady's force-CLOSE write is observable.
+func markReadyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Client) {
+	t.Helper()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	rdb, _ := miniredisClient(t)
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       rdb,
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	return r, loader, rdb
+}
+
+func markReadyURLs() primaryPodURLs {
+	return primaryPodURLs{
+		LLM:  "http://1.2.3.4:33000/v1/models",
+		STT:  "http://1.2.3.4:33001/health",
+		TTS:  "http://1.2.3.4:33003/health",
+		DCGM: "http://1.2.3.4:33400/metrics",
+	}
+}
+
+// TestMarkReady_ResetsStaleBreakers — markReady force-CLOSEs each of the 3
+// local-* breakers (state="closed") so a breaker left OPEN by the previous dead
+// pod's probing is reset and traffic returns to the live pod.
+func TestMarkReady_ResetsStaleBreakers(t *testing.T) {
+	r, _, rdb := markReadyReconcilerWithRedis(t)
+	// Simulate a stale OPEN inherited from the previous dead pod's death path.
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		require.NoError(t, breaker.WriteForceOverride(context.Background(), rdb, name, "open", 10*time.Minute, "prev_death"))
+	}
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set, "breaker %s must still be force-overridden (now closed)", name)
+		require.Equal(t, "closed", state,
+			"markReady must force-CLOSE the stale %s breaker (D-13)", name)
+	}
+}
+
+// TestMarkReady_ForceCloseAfterOverrideTier0 — the force-close write lands AFTER
+// the OverrideTier0 block, so the pod URL slot is set before the breaker is
+// reset (no request hits a closed breaker pointing at a not-yet-overridden slot).
+func TestMarkReady_ForceCloseAfterOverrideTier0(t *testing.T) {
+	r, loader, rdb := markReadyReconcilerWithRedis(t)
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
+
+	// OverrideTier0 fired for the 3 roles (slots set) ...
+	snap := loader.snapshot()
+	require.Equal(t, "http://1.2.3.4:33000", snap["llm"])
+	require.Equal(t, "http://1.2.3.4:33001", snap["stt"])
+	require.Equal(t, "http://1.2.3.4:33003", snap["tts"])
+	// ... and the force-close keys are present (written after the slots).
+	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+		state, _, set, err := breakerReadForce(t, rdb, name)
+		require.NoError(t, err)
+		require.True(t, set)
+		require.Equal(t, "closed", state)
+	}
+}
+
+// TestMarkReady_ForceCloseBestEffort — a Redis write error in the force-close
+// path is logged but does NOT fail markReady (best-effort, mirroring
+// publishPrimaryEvent's nil-Redis safety): the pod still reaches Ready. We
+// model the Redis-unavailable case by passing a nil Redis client.
+func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	loader := newFakeLoader()
+	dcgm := &fakeDCGMScraper{}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:         cfg,
+		FSM:         fsm,
+		Loader:      loader,
+		DCGMScraper: dcgm,
+		Rule:        alwaysInPeakRule(),
+		Redis:       nil, // Redis not wired — force-close is skipped, markReady still completes
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()),
+		"a missing/failing Redis must NOT block markReady from reaching Ready")
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"markReady completes the Provisioning→Ready transition despite no Redis")
 }

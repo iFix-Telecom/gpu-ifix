@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -566,11 +567,17 @@ func main() {
 		log.Error("build embeddings proxy", "err", err)
 		os.Exit(2)
 	}
-	// Phase 06.9 R4: local-tier proxies pass-through — see comment above.
-	audioRP, err := proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
-	if err != nil {
-		log.Error("build audio proxy", "err", err)
-		os.Exit(2)
+	// Phase 11.1: local-stt tier-0 was removed (D-A4). audioRP is now built
+	// only when UPSTREAM_STT_URL is still set (transitional compat for stale
+	// .env files); otherwise the local-stt entry in sttRoleProxies is omitted
+	// and STT routes exclusively through the openai-whisper tier-1 fallback.
+	var audioRP http.Handler
+	if cfg.UpstreamSTTURL != "" {
+		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
+		if err != nil {
+			log.Error("build audio proxy", "err", err)
+			os.Exit(2)
+		}
 	}
 	// Phase 06.7 — tier-0 TTS proxy (POST /v1/audio/speech). UpstreamTTSURL is
 	// a placeholder the primary-pod reconciler overrides at runtime (D-11), so
@@ -658,13 +665,18 @@ func main() {
 		}
 	}
 	sttRoleProxies := map[string]http.Handler{
-		"local-stt": audioRP,
 		// Dynamic primary/emergency pod override (loader.Resolve → "emergency_pod_stt").
 		// Buffered (transcription is a single JSON body); no interceptors (parity with audioRP).
 		"emergency_pod_stt": proxy.NewDynamicOverrideProxy("stt",
 			func() (string, bool) { return loader.Tier0OverrideURL("stt") },
 			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
 			log),
+	}
+	// Phase 11.1: local-stt is registered ONLY if UPSTREAM_STT_URL still set
+	// (transitional compat). New deployments leave it unset and STT routes via
+	// the openai-whisper tier-1 fallback below.
+	if audioRP != nil {
+		sttRoleProxies["local-stt"] = audioRP
 	}
 	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
 		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log, resolver)
@@ -679,6 +691,40 @@ func main() {
 				oaWhisperProxy, resolver, "openai-whisper", log,
 			)
 		}
+	}
+	// Phase 11.2 D-B4 — gemini-stt tier-1 primary fallback. Wired ONLY when
+	// the upstream row exists in the loader (migration 0029) AND the URL +
+	// API key env vars are populated. Without the key the proxy is omitted
+	// and the dispatcher cascade simply skips gemini-stt (D-B5′ behavior).
+	if u, ok := loader.Get("gemini-stt"); ok && cfg.UpstreamSTTFallback1URL != "" && cfg.UpstreamSTTFallback1AuthBearer != "" {
+		geminiProxy, perr := buildGeminiSTTProxy(cfg.UpstreamSTTFallback1URL, cfg.UpstreamSTTFallback1AuthBearer, resolver, log)
+		if perr != nil {
+			log.Warn("build gemini-stt proxy", "err", perr)
+		} else {
+			sttRoleProxies["gemini-stt"] = geminiProxy
+		}
+		_ = u
+	}
+	// Phase 11.2 D-B8 — groq-whisper tier-1 fallback (REUSES openai-whisper
+	// director — Groq endpoint is OpenAI-compatible). Loader row carries
+	// the schema URL; the director takes URL + bearer from env config so
+	// operators can hot-swap without a migration. WhisperAbortGuard wraps
+	// it for consistent duplicate-model handling.
+	if u, ok := loader.Get("groq-whisper"); ok && cfg.UpstreamSTTFallback2URL != "" && cfg.UpstreamSTTFallback2AuthBearer != "" {
+		groqUpstream := upstreams.UpstreamConfig{
+			Name:       "groq-whisper",
+			URL:        cfg.UpstreamSTTFallback2URL,
+			AuthBearer: cfg.UpstreamSTTFallback2AuthBearer,
+		}
+		groqRP, perr := buildGroqWhisperProxy(groqUpstream, log, resolver)
+		if perr != nil {
+			log.Warn("build groq-whisper proxy", "err", perr)
+		} else {
+			sttRoleProxies["groq-whisper"] = proxy.WhisperAbortGuard(
+				groqRP, resolver, "groq-whisper", log,
+			)
+		}
+		_ = u
 	}
 	// Phase 06.7 — tts role proxies. tier-0 (local-tts) = the JSON->binary
 	// reverse proxy whose upstream the reconciler overrides; tier-1
@@ -905,11 +951,46 @@ func main() {
 			return resp.StatusCode >= 200 && resp.StatusCode < 300
 		}
 
+		// CR-01 (6.6.Y): connection-LEVEL reachability probe for Option B.
+		// Distinguishes the observed spike failure (running + published Vast
+		// ports yet TCP-unreachable: dial TIMEOUT) from a legitimately-warming
+		// cold start (host up, service not ready: connect SUCCESS or REFUSED).
+		// Returns true if the TCP dial connects OR is refused (host responding
+		// — keep polling under the cold-start budget); false ONLY on a dial
+		// timeout / no-route (host never NAT-published — fail fast once the
+		// port-bind budget is exhausted). Keys on the URL's host:port, NOT on
+		// the unreliable Vast ports map (spike DIRECTIVE).
+		primaryReachable := func(rctx context.Context, rawURL string) bool {
+			if rawURL == "" {
+				return false
+			}
+			u, perr := url.Parse(rawURL)
+			if perr != nil || u.Host == "" {
+				return false
+			}
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			conn, derr := dialer.DialContext(rctx, "tcp", u.Host)
+			if derr == nil {
+				_ = conn.Close()
+				return true // host accepted the connection — reachable
+			}
+			// A connection REFUSED means the host IS reachable (NAT-published)
+			// but nothing is listening on the port yet — services still
+			// booting. That is a legitimate cold start, NOT the spike failure.
+			// Only a dial TIMEOUT / no-route (host never published its port)
+			// counts as unreachable.
+			if errors.Is(derr, syscall.ECONNREFUSED) {
+				return true
+			}
+			return false
+		}
+
 		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
 			Cfg:         cfg,
 			Log:         log.With("subsys", "primary"),
 			Vast:        primaryVastClient,
 			HealthCheck: primaryHealthCheck,
+			Reachable:   primaryReachable,
 			Loader:      loader,       // *upstreams.Loader satisfies LoaderAdapter (3-role per Plan 06.6-06b)
 			DCGMScraper: dcgmScraper,  // *dcgm.Scraper satisfies DCGMScraperAdapter (SetURL per Plan 06.6-06b); nil-safe
 			Inflight:    shedInflight, // *shed.InflightRegistry satisfies InflightAdapter (Count per Plan 06.6-06b)
@@ -948,7 +1029,19 @@ func main() {
 			"grace_ramp_down_seconds", cfg.PrimaryPodScheduleGraceRampDownSeconds,
 			"coldstart_budget_seconds", cfg.PrimaryProvisionColdStartBudgetSeconds,
 			"failure_cooldown_seconds", cfg.PrimaryProvisionFailureCooldownSeconds,
-			"price_cap_dph", cfg.PrimaryVastPriceCapDPH,
+			// Phase 6.6.Y resolved primary-shape dump (fix-option-agnostic, locked
+			// from 06.6.X-RESEARCH-ENV-PRECEDENCE). Surfaces BOTH shapes so the
+			// operator can confirm resolved env precedence at boot.
+			// shape0 = PRIMARY (1×3090 @ 0.30); shape1 = FALLBACK (2×3090 @ 0.60).
+			"shape0_num_gpus", cfg.PrimaryVastNumGPUsPrimary,
+			"shape0_gpu", cfg.PrimaryVastGPUNamePrimary,
+			"shape0_cap", cfg.PrimaryVastPriceCapPrimary,
+			"shape1_num_gpus", cfg.PrimaryVastNumGPUsFallback,
+			"shape1_gpu", cfg.PrimaryVastGPUNameFallback,
+			"shape1_cap", cfg.PrimaryVastPriceCapFallback,
+			"allowlist", cfg.PrimaryVastMachineAllowlist,
+			"port_bind_budget_seconds", cfg.PrimaryPublicPortBindBudgetSeconds,
+			"reject_private_ip", cfg.PrimaryVastRejectPrivateIP,
 			"monthly_budget_brl", cfg.MonthlyPrimaryBudgetBRL,
 			"template_image", cfg.PrimaryTemplateImage, // Wave 0 SHA pin visibility for operator forensics
 		)
@@ -1299,6 +1392,19 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.adminAuditHandler != nil {
 			adminRouter.Method(http.MethodGet, "/audit", px.adminAuditHandler)
 		}
+		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
+		// used by `gatewayctl debug emit-error` to prove the
+		// httpx.Recoverer + sentry.CurrentHub().Recover + sentry.Flush
+		// path end-to-end in PROD. The route lives INSIDE the admin
+		// sub-router so admin.Middleware (X-Admin-Key) is enforced before
+		// the handler. httpx.Recoverer is applied globally at r.Use above
+		// (line ~1152), so the effective wrap order is
+		// Recoverer(adminMiddleware(DebugPanicHandler)) — Recoverer
+		// outermost. An automated integration test in
+		// gateway/internal/admin/debug_panic_test.go enforces both
+		// invariants (unauth -> 401 AND auth -> 500 sanitized).
+		adminRouter.Method(http.MethodPost, "/debug/panic",
+			admin.DebugPanicHandler(log))
 		r.Mount("/admin", adminRouter)
 	}
 
@@ -1394,6 +1500,65 @@ func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 	return rp, nil
 }
 
+// buildGeminiSTTProxy constructs the gemini-stt tier-1 STT fallback proxy
+// (Phase 11.2 D-B4). The director adapter translates OpenAI-shaped
+// multipart requests into Gemini's `generateContent` JSON shape; the
+// ModifyResponse flattens Gemini's envelope back into OpenAI's
+// `{"text":"..."}` so downstream consumers see the same response.
+//
+// Both URL + API key come from env (UPSTREAM_STT_FALLBACK_1_URL,
+// UPSTREAM_STT_FALLBACK_1_AUTH_BEARER) rather than the loader row to
+// keep secrets out of the DB.
+func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *slog.Logger) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse gemini-stt url %q: %w", rawURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid gemini-stt url %q", rawURL)
+	}
+	director, modifyResponse := proxy.BuildGeminiSTTDirector(parsed, apiKey, resolver, "gemini-stt", log)
+	rp := &httputil.ReverseProxy{
+		Director:       director,
+		ModifyResponse: modifyResponse,
+		Transport: &http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("gemini-stt", log),
+	}
+	return rp, nil
+}
+
+// buildGroqWhisperProxy constructs the groq-whisper tier-1 STT fallback
+// proxy (Phase 11.2 D-B8). Groq's `/openai/v1/audio/transcriptions` is
+// OpenAI-compatible so this REUSES BuildOpenAIWhisperDirector verbatim —
+// only URL + bearer differ. The director resolves the model via
+// canonicalAliasForUpstream["groq-whisper"]="whisper" + upstreamEnvVarMap
+// (UPSTREAM_STT_FALLBACK_2_MODEL).
+func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(u.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse groq-whisper url %q: %w", u.URL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid groq-whisper url %q", u.URL)
+	}
+	rp := &httputil.ReverseProxy{
+		Director: proxy.BuildOpenAIWhisperDirector(parsed, u.AuthBearer, resolver, "groq-whisper", log),
+		Transport: &http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+		ErrorHandler: proxy.ErrorHandler("groq-whisper", log),
+	}
+	return rp, nil
+}
+
 // buildOpenAIWhisperProxy constructs the openai-whisper fallback proxy.
 // The director leaves the multipart body untouched (boundary preserved);
 // only Authorization is added.
@@ -1470,10 +1635,16 @@ func bootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, bootstrap string
 		return fmt.Errorf("bcrypt bootstrap key: %w", err)
 	}
 	// Preview suffix (last 4 chars) — displayed in admin UI + audit.
-	suffix := bootstrap
-	if len(bootstrap) >= 4 {
-		suffix = bootstrap[len(bootstrap)-4:]
+	// WR-07: refuse to bootstrap when the operator passed a key shorter
+	// than 4 chars. The pre-fix fallback `suffix := bootstrap` would
+	// concatenate the FULL plaintext key into key_prefix (stored in
+	// ai_gateway.admin_keys AND emitted via log.Info), leaking the
+	// entire key to the structured log sink. While a 1-3 char key is
+	// already a deployment error, refuse-and-explain is the right defense.
+	if len(bootstrap) < 4 {
+		return fmt.Errorf("bootstrap admin key too short (got %d chars; need >= 16; the suffix-display path would otherwise leak the full plaintext into key_prefix)", len(bootstrap))
 	}
+	suffix := bootstrap[len(bootstrap)-4:]
 	if _, err := q.InsertAdminKey(ctx, gen.InsertAdminKeyParams{
 		KeyLookupHash: sum[:],
 		KeyHash:       string(bcryptHash),

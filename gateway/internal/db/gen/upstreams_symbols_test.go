@@ -20,27 +20,34 @@ import (
 func TestUpstreams_QuerierSurface(t *testing.T) {
 	q := (*Queries)(nil)
 
-	// :many — return ([]AiGatewayUpstream, error)
-	for _, name := range []string{"ListEnabledUpstreams", "ListAllUpstreams"} {
+	// :many — Phase 11.2 (D-B5′): sqlc now emits per-query Row structs
+	// because the SELECT list explicitly enumerates columns (including
+	// tier_priority added by migration 0029). The element types are
+	// ListEnabledUpstreamsRow / ListAllUpstreamsRow respectively, both
+	// of which carry a TierPriority int32 field.
+	manyReturns := map[string]reflect.Type{
+		"ListEnabledUpstreams": reflect.TypeOf(ListEnabledUpstreamsRow{}),
+		"ListAllUpstreams":     reflect.TypeOf(ListAllUpstreamsRow{}),
+	}
+	for name, wantElem := range manyReturns {
 		m, ok := reflect.TypeOf(q).MethodByName(name)
 		if !ok {
 			t.Errorf("missing method %s on *Queries", name)
 			continue
 		}
-		// signature: func(*Queries, context.Context) ([]AiGatewayUpstream, error)
 		if m.Type.NumIn() != 2 {
 			t.Errorf("%s: NumIn=%d want 2", name, m.Type.NumIn())
 		}
 		if m.Type.NumOut() != 2 {
 			t.Errorf("%s: NumOut=%d want 2", name, m.Type.NumOut())
 		}
-		if got := m.Type.Out(0); got.Kind() != reflect.Slice ||
-			got.Elem() != reflect.TypeOf(AiGatewayUpstream{}) {
-			t.Errorf("%s: Out(0)=%v want []AiGatewayUpstream", name, got)
+		if got := m.Type.Out(0); got.Kind() != reflect.Slice || got.Elem() != wantElem {
+			t.Errorf("%s: Out(0)=%v want []%v", name, got, wantElem)
 		}
 	}
 
-	// :one — return (AiGatewayUpstream, error), input (ctx, string)
+	// :one — Phase 11.2: GetUpstreamByName returns GetUpstreamByNameRow
+	// (same TierPriority-bearing struct shape).
 	if m, ok := reflect.TypeOf(q).MethodByName("GetUpstreamByName"); !ok {
 		t.Error("missing method GetUpstreamByName")
 	} else {
@@ -50,8 +57,8 @@ func TestUpstreams_QuerierSurface(t *testing.T) {
 		if got := m.Type.In(2); got.Kind() != reflect.String {
 			t.Errorf("GetUpstreamByName: In(2)=%v want string", got)
 		}
-		if got := m.Type.Out(0); got != reflect.TypeOf(AiGatewayUpstream{}) {
-			t.Errorf("GetUpstreamByName: Out(0)=%v want AiGatewayUpstream", got)
+		if got := m.Type.Out(0); got != reflect.TypeOf(GetUpstreamByNameRow{}) {
+			t.Errorf("GetUpstreamByName: Out(0)=%v want GetUpstreamByNameRow", got)
 		}
 	}
 

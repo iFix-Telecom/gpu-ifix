@@ -66,12 +66,15 @@ func NewTTSProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyResp
 		Director: BuildDirector(u),
 		// FlushInterval deliberately omitted (default 0 = buffered): the
 		// speech response is a single binary WAV body, not SSE.
-		Transport: &http.Transport{
+		// RES-13 / Plan 12-03: fallthroughRoundTripper surfaces pre-byte
+		// dial failures as the sentinel the ErrorHandler suppresses so the
+		// dispatcher re-routes to tier-1.
+		Transport: fallthroughRoundTripper{base: &http.Transport{
 			MaxIdleConns:          20,
 			MaxIdleConnsPerHost:   4,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
-		},
+		}},
 		ErrorHandler:   ErrorHandler("tts", log),
 		ModifyResponse: ComposeInterceptors(interceptors...),
 	}

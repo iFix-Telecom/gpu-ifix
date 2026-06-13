@@ -89,6 +89,16 @@ func Middleware(loader *tenants.Loader, log *slog.Logger) func(http.Handler) htt
 					log.Error("sensitive tenant in peak mode at request time; CHECK constraint bypassed",
 						"tenant", cfg.Slug)
 					obs.GatewayScheduleRouting.WithLabelValues(cfg.Slug, "blocked_sensitive_peak").Inc()
+					// D-B3 contract (Phase 9 SC1 smoke): audit row MUST record
+					// upstream="blocked_sensitive" on every RES-08 503 path so
+					// the audit-decision gate + dashboards can isolate
+					// sensitive-block rows from routine tier-0 503s. Schedule
+					// short-circuits BEFORE the Phase 3 dispatcher (whose
+					// writeSensitiveBlock sets the same override at
+					// dispatcher.go:365), so we must set it here too. See
+					// 11-08-EVIDENCE.md Segment B re-run for the gap report.
+					*r = *r.WithContext(auditctx.WithUpstreamOverride(r.Context(),
+						"blocked_sensitive"))
 					w.Header().Set("Retry-After", "30")
 					httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 						"service_unavailable", "upstream_unavailable_for_sensitive_tenant",
@@ -102,7 +112,15 @@ func Middleware(loader *tenants.Loader, log *slog.Logger) func(http.Handler) htt
 			} else {
 				obs.GatewayScheduleRouting.WithLabelValues(cfg.Slug, "local").Inc()
 			}
-			next.ServeHTTP(w, r.WithContext(ctx))
+			// Mutate the request in-place so downstream context stamps
+			// (proxy.dispatcher.writeSensitiveBlock's upstream_override,
+			// shed.trackAndPass's shed_decision) propagate back to the
+			// audit.Middleware r pointer captured upstream. Using
+			// r.WithContext(ctx) here would create a new *http.Request
+			// and silently swallow the downstream mutations — see
+			// .planning/debug/audit-blocked-sensitive-override-not-propagated.md.
+			*r = *r.WithContext(ctx)
+			next.ServeHTTP(w, r)
 		})
 	}
 }

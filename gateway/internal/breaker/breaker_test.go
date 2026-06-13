@@ -2,6 +2,7 @@ package breaker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -185,6 +186,85 @@ func TestSnapshotReturnsAllStates(t *testing.T) {
 	if snap["a"] != "closed" || snap["c"] != "closed" || snap["b"] != "open" {
 		t.Fatalf("snap = %+v", snap)
 	}
+}
+
+// TestEffectiveStateSnapshot — Phase 06.9 (SEED-005): the new snapshot
+// method honors operator force-override, emitting "forced-open" for any
+// upstream with an active override at gw:breaker:force:{name}. Mirrors
+// TestSnapshotReturnsAllStates for the natural-FSM paths and adds a
+// force-override sub-test.
+func TestEffectiveStateSnapshot(t *testing.T) {
+	t.Run("natural closed", func(t *testing.T) {
+		s, _ := newTestSet(t, []string{"a"}, fastOpts())
+		snap := s.EffectiveStateSnapshot()
+		if got := snap["a"]; got != "closed" {
+			t.Fatalf("a: want closed, got %q (snap=%+v)", got, snap)
+		}
+	})
+
+	t.Run("natural open", func(t *testing.T) {
+		s, _ := newTestSet(t, []string{"b"}, fastOpts())
+		for i := 0; i < 3; i++ {
+			_, _ = s.Execute("b", func() (*http.Response, error) { return nil, &HTTPError{Status: 503, Msg: "x"} })
+		}
+		time.Sleep(20 * time.Millisecond)
+		snap := s.EffectiveStateSnapshot()
+		if got := snap["b"]; got != "open" {
+			t.Fatalf("b: want open, got %q (snap=%+v)", got, snap)
+		}
+	})
+
+	t.Run("force-override wins over natural closed", func(t *testing.T) {
+		s, mr := newTestSet(t, []string{"c"}, fastOpts())
+		ctx := context.Background()
+		val := ForceOverrideValue{State: "open", TTLSec: 300, SetBy: "operator", SetAt: time.Now().UTC()}
+		buf, _ := json.Marshal(val)
+		rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		if err := rdb.Set(ctx, ForceOverrideKey("c"), string(buf), 300*time.Second).Err(); err != nil {
+			t.Fatalf("SET: %v", err)
+		}
+		s.RefreshForceOverride(ctx, "c")
+
+		snap := s.EffectiveStateSnapshot()
+		if got := snap["c"]; got != "forced-open" {
+			t.Fatalf("c: want forced-open, got %q (snap=%+v)", got, snap)
+		}
+		// Sanity: legacy Snapshot() must still report the raw FSM (closed).
+		raw := s.Snapshot()
+		if got := raw["c"]; got != "closed" {
+			t.Fatalf("legacy Snapshot must be unaffected: c=%q, want closed (snap=%+v)", got, raw)
+		}
+	})
+
+	t.Run("force-override wins over natural open", func(t *testing.T) {
+		s, mr := newTestSet(t, []string{"d"}, fastOpts())
+		// First, drive d to natural OPEN.
+		for i := 0; i < 3; i++ {
+			_, _ = s.Execute("d", func() (*http.Response, error) { return nil, &HTTPError{Status: 503, Msg: "x"} })
+		}
+		time.Sleep(20 * time.Millisecond)
+		// Sanity: raw FSM is OPEN before override is installed.
+		if raw := s.Snapshot(); raw["d"] != "open" {
+			t.Fatalf("precondition: want d=open before override, got %q", raw["d"])
+		}
+
+		// Install force-override.
+		ctx := context.Background()
+		val := ForceOverrideValue{State: "open", TTLSec: 300, SetBy: "operator", SetAt: time.Now().UTC()}
+		buf, _ := json.Marshal(val)
+		rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		if err := rdb.Set(ctx, ForceOverrideKey("d"), string(buf), 300*time.Second).Err(); err != nil {
+			t.Fatalf("SET: %v", err)
+		}
+		s.RefreshForceOverride(ctx, "d")
+
+		snap := s.EffectiveStateSnapshot()
+		if got := snap["d"]; got != "forced-open" {
+			t.Fatalf("d: force-override must win over natural open: got %q (snap=%+v)", got, snap)
+		}
+	})
 }
 
 func TestRebuildPreservesState(t *testing.T) {
