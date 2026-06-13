@@ -169,6 +169,20 @@ func (s *Set) CheckForceOverride(name string) bool {
 	return e.set && e.state == "open"
 }
 
+// CheckForceClose returns TRUE when a programmatic force-override with
+// State=="closed" is currently in effect for the named upstream (Phase 12
+// D-13). Symmetric to CheckForceOverride (which gates the "open" direction);
+// pure cache read, safe on the hot path. EffectiveState / EffectiveStateSnapshot
+// consult this to short-circuit a stale observation-driven OPEN back to
+// CLOSED when the reconciler has force-CLOSEd a freshly-Ready upstream.
+func (s *Set) CheckForceClose(name string) bool {
+	e, ok := s.forceCache.get(name)
+	if !ok {
+		return false
+	}
+	return e.set && e.state == "closed"
+}
+
 // RefreshForceOverride forces a Redis read for the named upstream and
 // updates the cache. Used by:
 //   - maybeRefreshForceOverride during normal Execute (debounced).
@@ -219,15 +233,19 @@ func (s *Set) maybeRefreshForceOverride(name string) {
 }
 
 // EffectiveState returns the routing-relevant breaker state for the named
-// upstream, combining operator force-override (Phase 06.9 Plan 04) with the
-// observation-driven gobreaker state. When a force-override is in effect,
-// EffectiveState returns gobreaker.StateOpen regardless of the observed
-// state — this is the read-path counterpart to Set.Execute's force-override
-// check, intended for callers (e.g. proxy/dispatcher.go) that decide which
-// tier to dispatch to BEFORE invoking Execute. The freshness of the override
-// matches CheckForceOverride (cached map read; refresh via Execute or a
-// caller-driven RefreshForceOverride). Unknown upstream → StateClosed to
-// match `cb, ok := Get(name)` callers that treat "ok=false" as no-breaker.
+// upstream, combining operator/reconciler force-override (Phase 06.9 Plan 04
+// force-OPEN + Phase 12 D-13 force-CLOSE) with the observation-driven
+// gobreaker state. When a force-OPEN override is in effect, EffectiveState
+// returns gobreaker.StateOpen regardless of the observed state; when a
+// force-CLOSE override is in effect, it returns gobreaker.StateClosed
+// regardless of a stale observed OPEN (D-13 — the reconciler's markReady
+// forces a freshly-Ready upstream live before its own probe catches up).
+// This is the read-path counterpart to Set.Execute's force-override check,
+// intended for callers (e.g. proxy/dispatcher.go) that decide which tier to
+// dispatch to BEFORE invoking Execute. The freshness matches
+// CheckForceOverride (cached map read; refresh via Execute or a caller-driven
+// RefreshForceOverride). Unknown upstream → StateClosed to match
+// `cb, ok := Get(name)` callers that treat "ok=false" as no-breaker.
 func (s *Set) EffectiveState(name string) gobreaker.State {
 	// Refresh the force-override cache once per freshness window so callers
 	// that exclusively use EffectiveState (and never call Execute) still see
@@ -235,6 +253,9 @@ func (s *Set) EffectiveState(name string) gobreaker.State {
 	s.maybeRefreshForceOverride(name)
 	if s.CheckForceOverride(name) {
 		return gobreaker.StateOpen
+	}
+	if s.CheckForceClose(name) {
+		return gobreaker.StateClosed
 	}
 	cb, ok := s.Get(name)
 	if !ok || cb == nil {
@@ -301,6 +322,14 @@ func (s *Set) EffectiveStateSnapshot() map[string]string {
 	for n, cb := range s.cbs {
 		if s.CheckForceOverride(n) {
 			out[n] = "forced-open"
+			continue
+		}
+		// Phase 12 D-13 — a force-CLOSE short-circuits a stale observed OPEN
+		// back to CLOSED so the health endpoint reports routing-layer reality
+		// (the upstream is being dispatched to). Reported as plain "closed"
+		// (additive marker semantics live in the health payload, not here).
+		if s.CheckForceClose(n) {
+			out[n] = "closed"
 			continue
 		}
 		out[n] = cb.State().String()

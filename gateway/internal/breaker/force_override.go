@@ -149,6 +149,67 @@ func ReadForceOverride(ctx context.Context, rdb redis.Cmdable, upstreamName stri
 	}
 }
 
+// WriteForceOverride writes a programmatic breaker force-override to Redis,
+// usable from non-CLI callers (Phase 12 D-13 — the primary reconciler's
+// markReady force-CLOSEs stale local-* breakers; the death poll force-OPENs
+// them). It reuses the EXACT key + value shape the gatewayctl open-only
+// writer uses (gateway/cmd/gatewayctl/breaker.go) so the read-honor path
+// (ReadForceOverride / CheckForceOverride / EffectiveState) is shared. The
+// SET carries Redis EX=ttl so a forgotten override expires naturally.
+//
+// Accepted state values: "open" and "closed". "open" short-circuits the
+// breaker to OPEN (route to fallback); "closed" short-circuits it to CLOSED
+// (force the upstream live, overriding a stale observation-driven OPEN).
+//
+// TTL semantics (the WRITE is TTL-agnostic — the duration is the CALLER's
+// choice; this godoc documents how callers should pick so the two override
+// directions interact correctly):
+//
+//   - SHORT TTL (~30-60s) — for the markReady force-"closed". It only needs
+//     to outlast the NEXT probe cycle so the freshly-Ready pod is dispatched
+//     to immediately; after the short TTL lapses, observation-driven state
+//     takes over naturally (the now-live upstream probes CLOSED on its own).
+//   - LONGER TTL (~the destroy/re-provision window, e.g. ~10min) — for the
+//     death force-"open". It must HOLD the dead address closed off until a
+//     fresh pod's markReady force-CLOSEs it. The longer hold prevents the
+//     prober/dispatcher from re-dialing the dead pod during the provision
+//     gap.
+//
+// Interaction with the Ready death poll: the death force-"open" holds the
+// dead address OPEN; when a replacement pod reaches Ready, its markReady
+// force-"close" write OVERRIDES the open key (same key, last-writer-wins)
+// before its own short TTL lapses — so there is never a window where both a
+// stale open and a live close fight. A caller MUST pick the close TTL long
+// enough to outlast one probe cycle but short enough that a genuinely-dead
+// pod is not pinned CLOSED past the next observation window.
+func WriteForceOverride(ctx context.Context, rdb redis.Cmdable, upstreamName, state string, ttl time.Duration, setBy string) error {
+	v := ForceOverrideValue{
+		State:  state,
+		TTLSec: int(ttl.Seconds()),
+		SetBy:  setBy,
+		SetAt:  time.Now().UTC(),
+	}
+	buf, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("breaker force-override marshal: %w", err)
+	}
+	if err := rdb.Set(ctx, ForceOverrideKey(upstreamName), string(buf), ttl).Err(); err != nil {
+		return fmt.Errorf("breaker force-override SET: %w", err)
+	}
+	return nil
+}
+
+// ClearForceOverride deletes the force-override key for an upstream so the
+// breaker FSM falls back to observation-driven state. Idempotent — deleting
+// an absent key is a no-op (Redis DEL returns 0, not an error). Used by the
+// reconciler to retire an override before its TTL lapses (e.g. on cutback).
+func ClearForceOverride(ctx context.Context, rdb redis.Cmdable, upstreamName string) error {
+	if err := rdb.Del(ctx, ForceOverrideKey(upstreamName)).Err(); err != nil {
+		return fmt.Errorf("breaker force-override DEL: %w", err)
+	}
+	return nil
+}
+
 // forceCacheEntry is the in-memory cache row for a single upstream.
 // lastRefresh is the timestamp of the last Redis GET; CheckForceOverride
 // returns `set` directly without re-touching Redis as long as
