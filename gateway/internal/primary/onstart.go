@@ -123,8 +123,14 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: checking env vars"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: env vars OK"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: installing mc if missing"
+# mc is baked into the pod image (pod/primary/Dockerfile) so this branch is a
+# fallback only. The runtime fetch from dl.min.io previously had no timeout —
+# when dl.min.io throttled to ~45 KB/s (2026-06-13) the pod hung here forever,
+# supervisord never exec'd, and every cold-start died on health_timeout. The
+# --max-time/--retry bound makes a slow mirror fail fast and loud instead.
 if ! command -v mc >/dev/null 2>&1; then
-  curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+  curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 5 \
+    https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
   chmod +x /usr/local/bin/mc
 fi
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: mc ready"

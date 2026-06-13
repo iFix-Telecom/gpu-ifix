@@ -58,13 +58,27 @@ FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840
 
 # Install supervisord (PID 1) + aria2 (multi-stream weight download from
 # MinIO — single-stream mc cp empirically failed Wave 0 spike Round 1
-# with EOF on 16GB GGUF) + curl/ca-certificates (mc client download from
-# https://dl.min.io/ at onstart time) + Python 3.11 (for Speaches/Chatterbox
-# TTS venvs installed below) + build-essential (some PyTorch wheels need it).
+# with EOF on 16GB GGUF) + curl/ca-certificates + Python 3.11 (for
+# Speaches/Chatterbox TTS venvs installed below) + build-essential (some
+# PyTorch wheels need it) + openssh-server (debug SSH during cold-start —
+# baked in so onstart skips the ~3min apt-get install on every boot).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        supervisor aria2 ca-certificates curl \
+        supervisor aria2 ca-certificates curl openssh-server \
         python3 python3-venv python3-pip git build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# Bake the MinIO client (mc) into the image. Previously onstart.sh fetched it
+# from https://dl.min.io/ at boot, but that host is throttled (~45 KB/s for the
+# ~28MB binary as of 2026-06-13) and the onstart curl had no timeout/fallback —
+# so the pod hung in "installing mc" forever, supervisord never exec'd, llama
+# never came up, and the gateway killed the pod on health_timeout (every
+# cold-start failed). Baking mc removes the runtime download + single point of
+# failure. Pinned release for reproducibility; verified executable at build.
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-amd64/mc.${MC_RELEASE}" \
+        -o /usr/local/bin/mc \
+    && chmod +x /usr/local/bin/mc \
+    && /usr/local/bin/mc --version
 
 # Speaches STT — Phase 11.2 RESTORED (re-add tier-0 local STT).
 #
