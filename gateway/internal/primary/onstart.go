@@ -152,7 +152,7 @@ download_with_verify() {
   echo "$sha  $target" | sha256sum -c -
 }
 
-mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates /opt/chatterbox-data/models
+mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates /opt/chatterbox-data/models/hub
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 4 parallel downloads"
 download_with_verify "$PRIMARY_QWEN_WEIGHTS_KEY" "/weights/qwen/model.gguf" "$PRIMARY_QWEN_WEIGHTS_SHA256" &
@@ -190,11 +190,15 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 4 downloads complete; extracting
 
 tar -xzf /weights/bge-m3/model.tar.gz -C /weights/bge-m3
 tar -xzf /weights/whisper/model.tar.gz -C /weights/whisper
-# Chatterbox HF-cache: extract models--ResembleAI--chatterbox/ into the cache
-# dir chatterbox_server.py points HF_HOME at, then drop the tarball. With
-# HF_HUB_OFFLINE=1 (supervisord.conf) from_pretrained() reads this cache and
-# never contacts huggingface.co.
-tar -xzf /opt/chatterbox-data/models/cache.tar.gz -C /opt/chatterbox-data/models
+# Chatterbox HF-cache: from_pretrained() calls snapshot_download() WITHOUT an
+# explicit cache_dir, so huggingface_hub resolves the cache at $HF_HOME/hub
+# (HF_HOME is /opt/chatterbox-data/models per supervisord.conf). Extract the
+# models--ResembleAI--chatterbox/ tree into that hub/ subdir — extracting it
+# one level up (…/models/) makes offline snapshot_download miss it and the
+# chatterbox child crash-loops with LocalEntryNotFoundError. With
+# HF_HUB_OFFLINE=1 from_pretrained() then reads this cache and never contacts
+# huggingface.co.
+tar -xzf /opt/chatterbox-data/models/cache.tar.gz -C /opt/chatterbox-data/models/hub
 rm -f /opt/chatterbox-data/models/cache.tar.gz
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisord"
 
