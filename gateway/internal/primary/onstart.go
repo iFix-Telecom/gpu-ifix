@@ -120,6 +120,10 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: checking env vars"
 : "${PRIMARY_WHISPER_WEIGHTS_SHA256:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_KEY:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_SHA256:?required}"
+# Chatterbox TTS model — pre-provisioned HF-cache snapshot (replaces the
+# runtime huggingface.co fetch that crash-looped on hosts without an HF route).
+: "${PRIMARY_CHATTERBOX_WEIGHTS_KEY:?required}"
+: "${PRIMARY_CHATTERBOX_WEIGHTS_SHA256:?required}"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: env vars OK"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: installing mc if missing"
@@ -148,40 +152,50 @@ download_with_verify() {
   echo "$sha  $target" | sha256sum -c -
 }
 
-mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates
+mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates /opt/chatterbox-data/models
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 3 parallel downloads"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 4 parallel downloads"
 download_with_verify "$PRIMARY_QWEN_WEIGHTS_KEY" "/weights/qwen/model.gguf" "$PRIMARY_QWEN_WEIGHTS_SHA256" &
 QWEN_PID=$!
 download_with_verify "$PRIMARY_BGEM3_WEIGHTS_KEY" "/weights/bge-m3/model.tar.gz" "$PRIMARY_BGEM3_WEIGHTS_SHA256" &
 BGE_PID=$!
 download_with_verify "$PRIMARY_WHISPER_WEIGHTS_KEY" "/weights/whisper/model.tar.gz" "$PRIMARY_WHISPER_WEIGHTS_SHA256" &
 WHISPER_PID=$!
+# Chatterbox TTS HF-cache snapshot (models--ResembleAI--chatterbox/...).
+download_with_verify "$PRIMARY_CHATTERBOX_WEIGHTS_KEY" "/opt/chatterbox-data/models/cache.tar.gz" "$PRIMARY_CHATTERBOX_WEIGHTS_SHA256" &
+CHATTERBOX_PID=$!
 
 if [ -n "${PRIMARY_QWEN_JINJA_KEY:-}" ]; then
   : "${PRIMARY_QWEN_JINJA_SHA256:?required when PRIMARY_QWEN_JINJA_KEY is set}"
   download_with_verify "$PRIMARY_QWEN_JINJA_KEY" "/app/templates/qwen3.6.jinja" "$PRIMARY_QWEN_JINJA_SHA256"
 fi
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 3 downloads"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 4 downloads"
 # CR-02 (6.6.Y review): bash 'wait' with multiple IDs returns ONLY the last
 # id's exit status, so a failed Qwen/bge-m3 download or SHA-256 mismatch was
 # silently swallowed and supervisord exec'd with a missing/corrupt weight.
 # Wait each PID individually and fail the whole onstart (no supervisord exec)
 # if ANY download/verify failed — restores the T-06.6-02 integrity fail-fast
-# for all 3 weights.
+# for all 4 weights (chatterbox TTS added 2026-06-13).
 FAIL=
 wait "$QWEN_PID" || FAIL=1
 wait "$BGE_PID" || FAIL=1
 wait "$WHISPER_PID" || FAIL=1
+wait "$CHATTERBOX_PID" || FAIL=1
 if [ -n "$FAIL" ]; then
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: FATAL — weight download/verify failed; aborting before supervisord"
   exit 1
 fi
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 3 downloads complete; extracting tarballs"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 4 downloads complete; extracting tarballs"
 
 tar -xzf /weights/bge-m3/model.tar.gz -C /weights/bge-m3
 tar -xzf /weights/whisper/model.tar.gz -C /weights/whisper
+# Chatterbox HF-cache: extract models--ResembleAI--chatterbox/ into the cache
+# dir chatterbox_server.py points HF_HOME at, then drop the tarball. With
+# HF_HUB_OFFLINE=1 (supervisord.conf) from_pretrained() reads this cache and
+# never contacts huggingface.co.
+tar -xzf /opt/chatterbox-data/models/cache.tar.gz -C /opt/chatterbox-data/models
+rm -f /opt/chatterbox-data/models/cache.tar.gz
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisord"
 
 `

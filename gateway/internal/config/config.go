@@ -210,6 +210,15 @@ type Config struct {
 	PrimarySpeachesImage      string // PRIMARY_SPEACHES_IMAGE (default ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3)
 	PrimaryBGEM3WeightsKey    string // PRIMARY_BGEM3_WEIGHTS_KEY (MinIO; default bge-m3/v1.0.0/model.tar.gz)
 	PrimaryBGEM3WeightsSHA256 string // PRIMARY_BGEM3_WEIGHTS_SHA256 (FAIL-FAST policy per reviews consensus action #6 — gateway refuses to build the create-instance payload if empty)
+	// Chatterbox Multilingual TTS weights — pre-provisioned to MinIO (not
+	// fetched from HF at runtime). The from_pretrained() call previously hit
+	// huggingface.co at boot, which crash-loops on Vast hosts without an HF
+	// route (observed 2026-06-13: California host, HF unreachable → TTS /health
+	// never came up → pod never reached Ready). Mirrors the Qwen/whisper/bge
+	// MinIO strategy: onstart downloads + extracts the HF cache snapshot and
+	// supervisord runs chatterbox with HF_HUB_OFFLINE=1.
+	PrimaryChatterboxWeightsKey    string // PRIMARY_CHATTERBOX_WEIGHTS_KEY (MinIO; default chatterbox-mtl-v2/v1.0.0/cache.tar.gz)
+	PrimaryChatterboxWeightsSHA256 string // PRIMARY_CHATTERBOX_WEIGHTS_SHA256 (FAIL-FAST when empty, same policy as the other three weights)
 	// Phase 6.6.Y — legacy primary-shape fields (PrimaryVastPriceCapDPH,
 	// PrimaryGPUName, PrimaryNumGPUs) DELETED. Their env vars now hard-fail
 	// at boot via ErrLegacyPrimaryEnv (06.6.X-RESEARCH-ENV-PRECEDENCE §5/§6).
@@ -471,9 +480,11 @@ func Load() (Config, error) {
 		PrimarySpeachesImage:   envOr("PRIMARY_SPEACHES_IMAGE", "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3"),
 		PrimaryBGEM3WeightsKey: envOr("PRIMARY_BGEM3_WEIGHTS_KEY", "bge-m3/v1.0.0/model.tar.gz"),
 		// FAIL-FAST policy per reviews consensus action #6 — no envOr default; empty passthrough so buildPrimaryCreateRequest rejects at build time.
-		PrimaryBGEM3WeightsSHA256:   os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
-		PrimaryVastMachineBlocklist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
-		PrimaryVastMachineAllowlist: parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
+		PrimaryBGEM3WeightsSHA256:      os.Getenv("PRIMARY_BGEM3_WEIGHTS_SHA256"),
+		PrimaryChatterboxWeightsKey:    envOr("PRIMARY_CHATTERBOX_WEIGHTS_KEY", "chatterbox-mtl-v2/v1.0.0/cache.tar.gz"),
+		PrimaryChatterboxWeightsSHA256: os.Getenv("PRIMARY_CHATTERBOX_WEIGHTS_SHA256"),
+		PrimaryVastMachineBlocklist:    parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_BLOCKLIST")),
+		PrimaryVastMachineAllowlist:    parseInt64CSV(os.Getenv("PRIMARY_VAST_MACHINE_ALLOWLIST")),
 		// Phase 6.6.Y — legacy PRIMARY_VAST_PRICE_CAP_DPH / PRIMARY_GPU_NAME /
 		// PRIMARY_NUM_GPUS reads DELETED; hard-fail enforced below via
 		// ErrLegacyPrimaryEnv. (Emerg VAST_PRICE_CAP_DPH above is a different

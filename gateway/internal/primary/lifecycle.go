@@ -92,6 +92,9 @@ var (
 	ErrMissingBGEM3SHA = errors.New(
 		"primary: PRIMARY_BGEM3_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
+	ErrMissingChatterboxSHA = errors.New(
+		"primary: PRIMARY_CHATTERBOX_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
+	)
 )
 
 // primaryPodURLs collects the 4 per-service URLs (one per supervisord
@@ -355,6 +358,9 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	if cfg.PrimaryBGEM3WeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingBGEM3SHA
 	}
+	if cfg.PrimaryChatterboxWeightsSHA256 == "" {
+		return vast.CreateRequest{}, ErrMissingChatterboxSHA
+	}
 
 	llamaArgs := primaryLlamaArgsDefault
 	if len(cfg.PrimaryLlamaArgs) > 0 {
@@ -400,6 +406,11 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		"PRIMARY_WHISPER_WEIGHTS_SHA256": cfg.PrimaryWhisperWeightsSHA256,
 		"PRIMARY_BGEM3_WEIGHTS_KEY":      cfg.PrimaryBGEM3WeightsKey,
 		"PRIMARY_BGEM3_WEIGHTS_SHA256":   cfg.PrimaryBGEM3WeightsSHA256,
+		// Chatterbox TTS HF-cache snapshot — pre-provisioned to MinIO so the
+		// pod loads the model offline (HF_HUB_OFFLINE=1) instead of hitting
+		// huggingface.co at boot (crash-loops on hosts without an HF route).
+		"PRIMARY_CHATTERBOX_WEIGHTS_KEY":    cfg.PrimaryChatterboxWeightsKey,
+		"PRIMARY_CHATTERBOX_WEIGHTS_SHA256": cfg.PrimaryChatterboxWeightsSHA256,
 	}
 
 	if cfg.PrimaryQwenJinjaKey != "" {

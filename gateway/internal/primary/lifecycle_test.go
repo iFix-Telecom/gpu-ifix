@@ -62,10 +62,12 @@ func cfgWithDefaults() config.Config {
 		// so the precondition gate passes; the dedicated empty-SHA tests
 		// zero them explicitly. Phase 11.2 D-B5′ restored Whisper fields
 		// (Phase 11.1 D-A4 had removed them).
-		PrimaryWhisperWeightsKey:    "whisper-large-v3/v1.0.0/model.tar.gz",
-		PrimaryWhisperWeightsSHA256: "wh1sp3rsh4test256",
-		PrimaryBGEM3WeightsKey:      "bge-m3/v1.0.0/model.tar.gz",
-		PrimaryBGEM3WeightsSHA256:   "bg3m35h4test256",
+		PrimaryWhisperWeightsKey:       "whisper-large-v3/v1.0.0/model.tar.gz",
+		PrimaryWhisperWeightsSHA256:    "wh1sp3rsh4test256",
+		PrimaryBGEM3WeightsKey:         "bge-m3/v1.0.0/model.tar.gz",
+		PrimaryBGEM3WeightsSHA256:      "bg3m35h4test256",
+		PrimaryChatterboxWeightsKey:    "chatterbox-mtl-v2/v1.0.0/cache.tar.gz",
+		PrimaryChatterboxWeightsSHA256: "ch4tt3rb0xsh4test256",
 
 		// MinIO 4 credentials (test values).
 		MinioEndpoint:  "https://s3.example.com",

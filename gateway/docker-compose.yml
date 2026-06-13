@@ -104,6 +104,9 @@ services:
       PRIMARY_QWEN_WEIGHTS_SHA256: ${PRIMARY_QWEN_WEIGHTS_SHA256:-}
       PRIMARY_WHISPER_WEIGHTS_SHA256: ${PRIMARY_WHISPER_WEIGHTS_SHA256:-}
       PRIMARY_BGEM3_WEIGHTS_SHA256: ${PRIMARY_BGEM3_WEIGHTS_SHA256:-}
+      # Chatterbox TTS model (pre-provisioned HF-cache snapshot in MinIO)
+      PRIMARY_CHATTERBOX_WEIGHTS_KEY: ${PRIMARY_CHATTERBOX_WEIGHTS_KEY:-chatterbox-mtl-v2/v1.0.0/cache.tar.gz}
+      PRIMARY_CHATTERBOX_WEIGHTS_SHA256: ${PRIMARY_CHATTERBOX_WEIGHTS_SHA256:-}
       # Phase 11.1 — Primary GPU shape (1×3090 + 2×3090 cascade after Wave 0 pivot)
       PRIMARY_VAST_GPU_NAME_PRIMARY: ${PRIMARY_VAST_GPU_NAME_PRIMARY:-RTX 3090}
       PRIMARY_VAST_GPU_NAME_FALLBACK: ${PRIMARY_VAST_GPU_NAME_FALLBACK:-RTX 3090}
@@ -114,6 +117,10 @@ services:
       # Phase 6.6.Y — cold-start hardening (Option A offer-time RFC1918 guard + Option B runtime fail-fast)
       PRIMARY_VAST_REJECT_PRIVATE_IP: ${PRIMARY_VAST_REJECT_PRIVATE_IP:-true}
       PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS: ${PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS:-120}
+      # Cold-start /health poll budget (default 2400=40min). Slow-inet hosts
+      # (e.g. US→Hetzner DE at ~1 MiB/s) need 16GB Qwen + bge + whisper download
+      # + extraction + llama GPU load to fit; raise to 3600 for such hosts.
+      PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS: ${PRIMARY_PROVISION_COLDSTART_BUDGET_SECONDS:-2400}
       PRIMARY_VAST_MACHINE_ALLOWLIST: ${PRIMARY_VAST_MACHINE_ALLOWLIST:-}
       PRIMARY_VAST_MACHINE_BLOCKLIST: ${PRIMARY_VAST_MACHINE_BLOCKLIST:-}
     networks:
