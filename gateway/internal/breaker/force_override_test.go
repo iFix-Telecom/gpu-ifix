@@ -200,6 +200,137 @@ func TestBreakerFSM_ForceOpenHonored(t *testing.T) {
 	}
 }
 
+// TestForceOverride_CloseShortCircuits — Phase 12 (D-13): a force-override
+// with State=="closed" makes EffectiveState(name) return StateClosed
+// regardless of the observed/raw FSM state. Here the raw FSM is driven OPEN
+// first, then a force-"closed" key short-circuits it back to CLOSED.
+func TestForceOverride_CloseShortCircuits(t *testing.T) {
+	rdb, _ := newMiniRedis(t)
+	ctx := context.Background()
+
+	s := NewSet(rdb, discardLogger(), Options{ConsecutiveFailures: 1, Cooldown: time.Hour}, []string{"local-llm"})
+
+	// Drive the raw FSM to OPEN (1 failure trips it).
+	_, _ = s.Execute("local-llm", func() (*http.Response, error) {
+		return nil, &HTTPError{Status: 503, Msg: "trip"}
+	})
+	time.Sleep(20 * time.Millisecond)
+	if cb, _ := s.Get("local-llm"); cb.State() != gobreaker.StateOpen {
+		t.Fatalf("pre-force raw state = %v; want open", cb.State())
+	}
+
+	// Programmatic force-CLOSE write.
+	if err := WriteForceOverride(ctx, rdb, "local-llm", "closed", 60*time.Second, "reconciler-1"); err != nil {
+		t.Fatalf("WriteForceOverride: %v", err)
+	}
+	s.RefreshForceOverride(ctx, "local-llm")
+
+	if got := s.EffectiveState("local-llm"); got != gobreaker.StateClosed {
+		t.Fatalf("EffectiveState = %v under force-closed; want StateClosed", got)
+	}
+	// Snapshot counterpart must also honor it (used by /v1/health/upstreams).
+	if snap := s.EffectiveStateSnapshot(); snap["local-llm"] != "closed" {
+		t.Fatalf("EffectiveStateSnapshot = %q under force-closed; want closed", snap["local-llm"])
+	}
+}
+
+// TestForceOverride_OpenStillWorks — State=="open" still returns StateOpen
+// (no regression from the force-close addition).
+func TestForceOverride_OpenStillWorks(t *testing.T) {
+	rdb, _ := newMiniRedis(t)
+	ctx := context.Background()
+
+	s := NewSet(rdb, discardLogger(), Options{ConsecutiveFailures: 3, Cooldown: time.Hour}, []string{"local-llm"})
+
+	if err := WriteForceOverride(ctx, rdb, "local-llm", "open", 60*time.Second, "operator"); err != nil {
+		t.Fatalf("WriteForceOverride: %v", err)
+	}
+	s.RefreshForceOverride(ctx, "local-llm")
+
+	if got := s.EffectiveState("local-llm"); got != gobreaker.StateOpen {
+		t.Fatalf("EffectiveState = %v under force-open; want StateOpen", got)
+	}
+	if snap := s.EffectiveStateSnapshot(); snap["local-llm"] != "forced-open" {
+		t.Fatalf("EffectiveStateSnapshot = %q under force-open; want forced-open", snap["local-llm"])
+	}
+}
+
+// TestForceOverride_WriteCloseRoundTrips — a programmatic WriteForceOverride
+// with state="closed" + ttl, then ReadForceOverride, returns state=="closed",
+// set==true, and a remaining TTL matching the written ttl (Redis EX honored).
+func TestForceOverride_WriteCloseRoundTrips(t *testing.T) {
+	rdb, _ := newMiniRedis(t)
+	ctx := context.Background()
+
+	const ttl = 45 * time.Second
+	if err := WriteForceOverride(ctx, rdb, "local-stt", "closed", ttl, "reconciler-2"); err != nil {
+		t.Fatalf("WriteForceOverride: %v", err)
+	}
+
+	state, gotTTL, set, err := ReadForceOverride(ctx, rdb, "local-stt")
+	if err != nil {
+		t.Fatalf("ReadForceOverride: %v", err)
+	}
+	if !set {
+		t.Fatalf("set=false after WriteForceOverride; want true")
+	}
+	if state != "closed" {
+		t.Fatalf("state=%q; want closed", state)
+	}
+	if gotTTL <= 0 || gotTTL > ttl {
+		t.Fatalf("remaining ttl=%v; want (0, %v]", gotTTL, ttl)
+	}
+	// Confirm the stored value carries the requested TTL in TTLSec + SetBy.
+	raw, gerr := rdb.Get(ctx, ForceOverrideKey("local-stt")).Result()
+	if gerr != nil {
+		t.Fatalf("redis GET: %v", gerr)
+	}
+	var v ForceOverrideValue
+	if jerr := json.Unmarshal([]byte(raw), &v); jerr != nil {
+		t.Fatalf("unmarshal stored value: %v", jerr)
+	}
+	if v.TTLSec != int(ttl.Seconds()) {
+		t.Errorf("stored TTLSec=%d; want %d", v.TTLSec, int(ttl.Seconds()))
+	}
+	if v.SetBy != "reconciler-2" {
+		t.Errorf("stored SetBy=%q; want reconciler-2", v.SetBy)
+	}
+}
+
+// TestForceOverride_DeleteClearsOverride — ClearForceOverride deletes the key:
+// ReadForceOverride then returns set==false and EffectiveState falls back to
+// the observed FSM state.
+func TestForceOverride_DeleteClearsOverride(t *testing.T) {
+	rdb, _ := newMiniRedis(t)
+	ctx := context.Background()
+
+	s := NewSet(rdb, discardLogger(), Options{ConsecutiveFailures: 3, Cooldown: time.Hour}, []string{"local-llm"})
+
+	if err := WriteForceOverride(ctx, rdb, "local-llm", "open", 60*time.Second, "op"); err != nil {
+		t.Fatalf("WriteForceOverride: %v", err)
+	}
+	s.RefreshForceOverride(ctx, "local-llm")
+	if s.EffectiveState("local-llm") != gobreaker.StateOpen {
+		t.Fatalf("pre-clear EffectiveState != StateOpen")
+	}
+
+	if err := ClearForceOverride(ctx, rdb, "local-llm"); err != nil {
+		t.Fatalf("ClearForceOverride: %v", err)
+	}
+	_, _, set, err := ReadForceOverride(ctx, rdb, "local-llm")
+	if err != nil {
+		t.Fatalf("ReadForceOverride after clear: %v", err)
+	}
+	if set {
+		t.Fatalf("set=true after ClearForceOverride; want false")
+	}
+	s.RefreshForceOverride(ctx, "local-llm")
+	// Observed FSM is CLOSED (never tripped) → EffectiveState falls back to closed.
+	if got := s.EffectiveState("local-llm"); got != gobreaker.StateClosed {
+		t.Fatalf("post-clear EffectiveState = %v; want StateClosed (observed)", got)
+	}
+}
+
 // TestBreakerFSM_ForceOverrideReadOverheadUnderMs — WARNING-4 measurement.
 // Per the plan's eval-tick budget: 1000 evaluations with force key ABSENT
 // must complete in <10ms total (≤10µs/eval — Redis GET is debounced to a

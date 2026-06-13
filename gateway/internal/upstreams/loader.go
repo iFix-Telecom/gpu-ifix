@@ -253,6 +253,65 @@ func (l *Loader) Resolve(role string, tier int) (UpstreamConfig, bool) {
 	return u, ok
 }
 
+// tier0Resolution is the canonical roster of role-keyed tier-0 resolutions
+// (Phase 12, RES-12). It is produced by ResolveTier0Roles and consumed by
+// BOTH the prober (probe.go doTick) and the health handler
+// (health.go buildHealthResponse) so the two surfaces agree with the
+// dispatcher on what tier-0 IS — honoring the active tier0Override exactly
+// like Resolve(role, 0) does on the dispatcher hot path.
+type tier0Resolution struct {
+	// Role is the upstream role ("llm"/"stt"/"tts"/"embed").
+	Role string
+	// Effective is the override-honoring tier-0 UpstreamConfig — the
+	// emergency pod (IsEmergency=true) when an override is active, or the
+	// static tier-0 row otherwise.
+	Effective UpstreamConfig
+	// Overridden reports whether an emergency-pod override is active for the
+	// role (Effective.IsEmergency). When true, the underlying static tier-0
+	// row (ReplacedStaticName) is a standby that MUST NOT be probed/flapped
+	// and MUST be excluded from the health aggregate (D-12/D-14).
+	Overridden bool
+	// ReplacedStaticName is the name of the static tier-0 row that the
+	// override replaced (empty when no override is active OR there is no
+	// static tier-0 row to base the override on). Health reports this row
+	// additively as "overridden"/standby.
+	ReplacedStaticName string
+}
+
+// tier0Roles is the fixed roster of roles that carry a tier-0 upstream
+// (D-11). Resolution iterates this set rather than enumerating the raw
+// snapshot so an active override is honored per role.
+var tier0Roles = []string{"llm", "stt", "tts", "embed"}
+
+// ResolveTier0Roles resolves the effective tier-0 for every role through the
+// SAME override-honoring path the dispatcher uses (Resolve(role, 0)). RES-12:
+// replaces the loader.All() tier-0 enumeration in the prober and the health
+// handler so neither flaps the dead static tier-0 row while an emergency
+// override is active. Roles with no tier-0 row are skipped. The returned
+// slice is ordered by the canonical tier0Roles roster for deterministic
+// output.
+func (l *Loader) ResolveTier0Roles() []tier0Resolution {
+	out := make([]tier0Resolution, 0, len(tier0Roles))
+	for _, role := range tier0Roles {
+		eff, ok := l.Resolve(role, 0)
+		if !ok {
+			continue
+		}
+		res := tier0Resolution{Role: role, Effective: eff, Overridden: eff.IsEmergency}
+		if eff.IsEmergency {
+			// Record the static tier-0 row name the override replaced (if
+			// one exists) so callers can report it additively as standby.
+			if s := l.snap.Load(); s != nil {
+				if base, found := s.byRoleTier[RoleTier{Role: role, Tier: 0}]; found {
+					res.ReplacedStaticName = base.Name
+				}
+			}
+		}
+		out = append(out, res)
+	}
+	return out
+}
+
 // ResolveAllTier1 returns every enabled tier-1 upstream for the given
 // role, ordered by tier_priority ASC (lower wins). Phase 11.2 (D-B5′)
 // — STT cascade dispatcher iterates this slice on pod-OFF, dispatching

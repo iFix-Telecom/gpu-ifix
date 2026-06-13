@@ -527,5 +527,38 @@ var AlertSendsTotal = promauto.NewCounterVec(
 	[]string{"channel", "result"},
 )
 
+// ============================================================================
+// Phase 12 — Gateway resilience remediation. Single-owner counters defined
+// here so Plan 12-01 owns obs/metrics.go and the two Wave-2 plans (02 death
+// detection, 03 dial fallthrough) increment them in parallel without a
+// file-edit conflict. Increments are NOT wired here — the consuming code in
+// Plans 02/03 calls .WithLabelValues(...).Inc(). Cardinality bounded: both
+// label sets are small fixed enums (role/outcome/cause).
+// ============================================================================
+
+// DialFallthroughTotal counts tier-0 dial failures that fell through to the
+// tier-1 cascade (RES-13, Plan 03). outcome ∈ {tier1_served, chain_exhausted,
+// sensitive_blocked}. ALERTABLE: outcome=chain_exhausted (no tier serving —
+// drives a dashboard/alert series in a future observability phase).
+var DialFallthroughTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_dial_fallthrough_total",
+		Help: "Tier-0 dial failures that fell through to tier-1, by role and outcome (tier1_served|chain_exhausted|sensitive_blocked).",
+	},
+	[]string{"role", "outcome"},
+)
+
+// PrimaryDeathDetectedTotal counts confirmed primary-pod deaths detected on
+// the Ready tick (RES-11, Plan 02). cause ∈ {billing_stopped, host_death,
+// not_found}. ALERTABLE: cause=billing_stopped (Vast account out of credit —
+// operator-actionable; drives a critical alert series).
+var PrimaryDeathDetectedTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_primary_death_detected_total",
+		Help: "Confirmed primary-pod deaths detected on the Ready tick, by cause (billing_stopped|host_death|not_found).",
+	},
+	[]string{"cause"},
+)
+
 // Handler returns the /metrics endpoint handler.
 func Handler() http.Handler { return promhttp.Handler() }

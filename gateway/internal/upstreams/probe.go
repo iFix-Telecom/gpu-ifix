@@ -157,28 +157,56 @@ func (p *Probe) doTick(parent context.Context) {
 	tickCtx, cancel := context.WithTimeout(parent, p.cfg.Budget)
 	defer cancel()
 
+	// RES-12: resolve tier-0 per role through the SAME override-honoring path
+	// the dispatcher uses (Resolve(role,0)) instead of enumerating the raw
+	// loader.All() snapshot. When an emergency override is active for a role,
+	// ResolveTier0Roles returns the live pod (IsEmergency=true) and we probe
+	// THAT — the dead static tier-0 row is overridden and is NOT probed this
+	// tick (D-12), so its breaker never flaps in prod (SEED-012).
+	tier0 := p.loader.ResolveTier0Roles()
 	all := p.loader.All()
-	if len(all) == 0 {
+	if len(tier0) == 0 && len(all) == 0 {
 		return
 	}
 	breakerSnap := p.breaker.Snapshot()
 
-	// Decide which upstreams to probe this cycle:
-	//   tier-0: always probed
-	//   tier-1: only when the same-role tier-0 breaker is OPEN or HALF_OPEN
-	//           (D-A2 — saves OpenRouter / OpenAI cost during steady state)
-	tier0Closed := make(map[string]bool, 3) // role → is the tier-0 upstream's breaker CLOSED
-	for _, u := range all {
-		if u.Tier == 0 {
-			tier0Closed[u.Role] = breakerSnap[u.Name] == "closed"
+	// overriddenStatic collects the static tier-0 row names that an active
+	// override replaced — these are NOT probed this tick (D-12).
+	overriddenStatic := make(map[string]bool, len(tier0))
+	// tier0Closed: role → is the EFFECTIVE tier-0 breaker CLOSED. Computed
+	// from the resolved tier-0 name (the emergency pod under override),
+	// NOT from the All() snapshot — preserves D-15 tier-1 gating intent.
+	tier0Closed := make(map[string]bool, len(tier0))
+	for _, res := range tier0 {
+		tier0Closed[res.Role] = breakerSnap[res.Effective.Name] == "closed"
+		if res.ReplacedStaticName != "" {
+			overriddenStatic[res.ReplacedStaticName] = true
 		}
 	}
 
 	var g errgroup.Group
+	// Always probe the EFFECTIVE tier-0 for each role.
+	for _, res := range tier0 {
+		u := res.Effective
+		g.Go(func() error {
+			p.probeOne(tickCtx, u)
+			return nil // ALWAYS nil to prevent errgroup cascade cancel
+		})
+	}
+	// Enumerate tier-1 rows from the snapshot, gated by the resolved tier-0
+	// state (D-A2/D-15). Tier-0 rows from All() are skipped here because they
+	// are covered by the override-honoring resolution above; an overridden
+	// static tier-0 row is therefore never probed.
 	for _, u := range all {
+		if u.Tier == 0 {
+			continue // tier-0 handled via ResolveTier0Roles
+		}
+		if overriddenStatic[u.Name] {
+			continue // defensive: never probe an overridden static row
+		}
 		u := u
 		if u.Tier == 1 && tier0Closed[u.Role] {
-			continue // skip external probe on-demand
+			continue // skip external probe on-demand (D-A2)
 		}
 		g.Go(func() error {
 			p.probeOne(tickCtx, u)
