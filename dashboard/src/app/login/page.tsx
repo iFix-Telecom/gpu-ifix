@@ -83,7 +83,24 @@ function LoginPageInner() {
     setError(null);
     setLoading(true);
 
-    const { error: signInError } = await signIn.email({ email, password });
+    // better-auth twoFactorClient signal: with 2FA enabled the backend returns
+    // 200 `{ twoFactorRedirect: true }` and only a temporary `two_factor` cookie
+    // (no real session). The `onSuccess` callback exposes the narrowed union
+    // (`context.data.twoFactorRedirect`); routing to the 2FA challenge here
+    // avoids the push to "/", which the middleware would otherwise bounce to
+    // /login?session_expired=1 since no session cookie exists yet
+    // (QUICK-2FA-REDIRECT).
+    let twoFactorRequired = false;
+    const { error: signInError } = await signIn.email(
+      { email, password },
+      {
+        onSuccess(context) {
+          if (context.data?.twoFactorRedirect) {
+            twoFactorRequired = true;
+          }
+        },
+      },
+    );
 
     setLoading(false);
 
@@ -91,6 +108,11 @@ function LoginPageInner() {
       setError(
         "E-mail ou senha inválidos. Verifique as credenciais e tente novamente.",
       );
+      return;
+    }
+
+    if (twoFactorRequired) {
+      router.push("/2fa/challenge");
       return;
     }
 
