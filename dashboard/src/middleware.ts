@@ -5,7 +5,7 @@
  * (D-12 + D-15) per 11-RESEARCH §Pitfall 4.
  *
  * Decision tree (reviews HIGH #2 — cookie-claim contract):
- *   1. No session cookie → redirect to /login?session_expired=1
+ *   1. No session cookie → redirect to /login
  *   2. Session present but `user.twoFactorEnabled !== true` → /2fa/enroll
  *   3. Session present, twoFactorEnabled=true, `session.twoFactorVerified !== true` → /2fa/challenge
  *   4. Both claims present → next()
@@ -90,12 +90,13 @@ async function readTwoFactorClaims(req: NextRequest): Promise<{
 export async function middleware(req: NextRequest) {
   const claims = await readTwoFactorClaims(req);
 
-  // Stage 1: no session → /login?session_expired=1 unless already
-  // somewhere outside the matcher.
+  // Stage 1: no session → clean /login. The Edge runtime cannot tell
+  // "never logged in" apart from "session genuinely expired" (both are
+  // simply the absence of a session cookie), so we MUST NOT append
+  // ?session_expired=1 here — doing so falsely shows the "Sessão encerrada
+  // por inatividade" banner on every first visit.
   if (!claims.hasSession) {
-    const url = new URL("/login", req.url);
-    url.searchParams.set("session_expired", "1");
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(new URL("/login", req.url));
   }
 
   // Stage 2a: session present, 2FA not enrolled → /2fa/enroll.
