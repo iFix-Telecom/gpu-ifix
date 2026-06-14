@@ -139,6 +139,10 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ## Accumulated Context
 
+### Roadmap Evolution
+
+- Phase 13 added (2026-06-14): dashboard-user-management — gestão de operadores owner-only (criar/remover/reset-senha/reset-2FA) + self-service change-password. Decisões locked: owner-only, 4 ops, tudo junto. Security surface → secure-phase obrigatório.
+
 ### Key Decisions (from research + PROJECT)
 
 - Gateway language: Go (chi v5 + stdlib `httputil.ReverseProxy` + slog)

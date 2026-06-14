@@ -69,6 +69,43 @@ Plans:
 - [x] 11-09-PLAN.md — Wave 3: PRD-04 RUNBOOK-INCIDENTS.md (4 classes D-11) + POSTMORTEM-TEMPLATE.md (Google SRE blameless 9-section)
 - [x] 11-10-PLAN.md — Wave 3: HUMAN-UAT S1..S8 + 11-VERIFICATION.md final phase rollup + STATE/ROADMAP advance
 
+### Phase 13: dashboard-user-management — Gestão de operadores (owner-only) + self-service change-password no dashboard ai-gateway
+
+**Goal:** Operadores do dashboard ai-gateway conseguem trocar a própria senha (self-service)
+e o owner consegue gerenciar operadores pelo browser, sem `seed-admins.sh` nem SQL manual.
+
+**Scope:**
+1. **Self-service change-password** — operador logado troca a própria senha
+   (`authClient.changePassword`, exige senha atual; sem admin). Página em `/settings`.
+2. **Gestão de operadores (owner-only):**
+   - Criar/convidar operador `@ifixtelecom.com.br` (allowlist D-13 já existe).
+   - Remover operador (+ revogar todas as sessões dele).
+   - Resetar senha de operador (nova senha temp).
+   - Resetar 2FA de operador (perdeu authenticator).
+   - Tornar funcionais os botões placeholder de `settings/operadores/page.tsx`
+     ("+ Provisionar operador", menu "···").
+
+**Decisões locked (discuss 2026-06-14):** owner-only authz (1º operador = owner);
+todas as 4 operações admin; entregar junto com a troca de senha.
+
+**Security surface (rodar /gsd:secure-phase depois):**
+- Roles (owner vs operator): admin plugin better-auth OU coluna `role` + migração CLI-canônica.
+- Owner-gating em server-actions/route-handlers (NÃO só na UI) + reforço no middleware se aplicável.
+- **Reset-2FA controlado:** o CR-01 do `auth.ts` bloqueia `/two-factor/enable` quando já habilitado
+  (anti-rotação de credencial). O reset-2FA admin precisa de caminho controlado + audit, sem
+  reabrir esse vetor (ex: clear 2FA → operador re-enrolla no próximo login via /2fa/enroll).
+- Audit log de toda ação admin (quem, alvo, quando, ação).
+- Revogar sessões ao remover/resetar.
+- Não expor hashes/secrets/backup-codes na UI (regra de privacidade já no operadores page).
+
+**Requirements**: TBD (derivar no plan-phase)
+**Depends on:** Phase 11 (auth/2FA base), Phase 12
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 13 to break down)
+
 ---
 
 ### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
