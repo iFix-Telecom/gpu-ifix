@@ -282,17 +282,17 @@ it at the next ops review.
 - **DO NOT export the DSN to chat or stdout.** Set it only at the
   executing admin's shell and `unset DASHBOARD_DATABASE_URL` after
   the procedure completes.
-- **DO wait 60 seconds after the SQL UPDATE (Step 3) before assuming
-  the locked-out admin is actually denied.** The dashboard middleware
-  uses Better Auth `cookieCache` with `maxAge=60` (see
-  `dashboard/src/lib/auth.ts` session block, WR-01) — for up to 60s
-  after the DB update, an existing session cookie can still pass the
-  middleware gate with stale `twoFactorVerified=true` claims. If the
-  admin had an active browser tab open at the moment of recovery, ask
-  them to either close the tab or wait 60s before testing the
-  re-enroll flow. This is acceptable for the 4-admin internal panel
-  per the Class 4 incident-recovery trade-off documented in
-  [`RUNBOOK-INCIDENTS.md`](./RUNBOOK-INCIDENTS.md).
+- **DO wait up to 30 minutes after the SQL UPDATE (Step 3) before
+  assuming the locked-out admin is actually denied.** The dashboard
+  middleware uses Better Auth `cookieCache` with `maxAge=1800` (see
+  `dashboard/src/lib/auth.ts` session block, WR-01) — for up to 30
+  minutes after the DB update, an existing session cookie can still
+  pass the middleware gate with stale `twoFactorVerified=true` claims.
+  If the admin had an active browser tab open at the moment of recovery,
+  ask them to either close the tab or wait up to 30 minutes before
+  testing the re-enroll flow. This is acceptable for the 4-admin
+  internal panel per the Class 4 incident-recovery trade-off documented
+  in [`RUNBOOK-INCIDENTS.md`](./RUNBOOK-INCIDENTS.md).
 
 ---
 

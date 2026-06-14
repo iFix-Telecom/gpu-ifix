@@ -71,17 +71,26 @@ export const auth = betterAuth({
   session: {
     expiresIn: 30 * 60,
     updateAge: 5 * 60,
-    // WR-01: cookieCache.maxAge=60 means the middleware reads
-    // twoFactorVerified from the signed cookie for up to 60 seconds
-    // without consulting the DB. After an operator revokes a session
+    // WR-01: cookieCache.maxAge=1800 means the middleware reads
+    // twoFactorVerified from the signed cookie for up to 30 minutes
+    // (matching session.expiresIn) without consulting the DB. We raised
+    // this from 60s because nothing reheats the cookieCache during normal
+    // dashboard use — useSession/get-session only fires at first-login,
+    // and the overview poll hits /api/gateway, not /api/auth/get-session.
+    // At maxAge=60 the session_data cookie expired after 60s, getCookieCache
+    // returned null, and the middleware's pessimistic fallback bounced
+    // authenticated admins back to /2fa/challenge mid-session.
+    // twoFactorVerified is monotonic within a session (false→true, never
+    // reverts), so 30-min staleness on that claim is harmless. The only
+    // tradeoff: after an operator revokes a session
     // (`DELETE FROM session WHERE id = ...`) OR after a TOTP reset via
     // RUNBOOK-2FA-RECOVERY.md, that change does NOT propagate to active
-    // middleware decisions for up to 60s. For a 4-admin internal panel
-    // this trade-off is acceptable; runbook ops MUST wait 60s after
-    // session revocation before assuming the operator is locked out.
-    // See gateway/docs/RUNBOOK-INCIDENTS.md class 4 + RUNBOOK-2FA-
-    // RECOVERY.md for the operator workflow.
-    cookieCache: { enabled: true, maxAge: 60 },
+    // middleware decisions for up to 30 minutes (was up to 60s). For a
+    // 4-admin internal panel this trade-off is acceptable; runbook ops
+    // MUST wait up to 30min after session revocation before assuming the
+    // operator is locked out. See gateway/docs/RUNBOOK-INCIDENTS.md class 4
+    // + RUNBOOK-2FA-RECOVERY.md for the operator workflow.
+    cookieCache: { enabled: true, maxAge: 1800 },
     additionalFields: {
       twoFactorVerified: {
         type: "boolean",
@@ -110,7 +119,7 @@ export const auth = betterAuth({
   // user already has two_factor enabled. authClient.twoFactor.enable is
   // implemented as "issue-and-replace" by Better Auth — it overwrites
   // the existing TOTP secret + backup codes. An attacker with a valid
-  // session cookie (XSS, stolen-laptop, MITM during the 60s cookieCache
+  // session cookie (XSS, stolen-laptop, MITM during the 30min cookieCache
   // miss window) + the user's password could otherwise rotate the
   // legitimate user's credentials and lock them out. We require an
   // operator-mediated reset via RUNBOOK-2FA-RECOVERY.md before any
