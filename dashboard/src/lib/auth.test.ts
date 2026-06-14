@@ -56,7 +56,7 @@ function buildTestAuth(opts?: { rateLimitWindow?: number; rateLimitMax?: number 
     session: {
       expiresIn: 30 * 60,
       updateAge: 5 * 60,
-      cookieCache: { enabled: true, maxAge: 60 },
+      cookieCache: { enabled: true, maxAge: 1800 },
       additionalFields: {
         twoFactorVerified: {
           type: "boolean",

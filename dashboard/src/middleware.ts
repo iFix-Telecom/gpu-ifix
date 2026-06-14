@@ -63,7 +63,7 @@ async function readTwoFactorClaims(req: NextRequest): Promise<{
   const cache = await getCookieCache(req);
   if (!cache || !cache.session || !cache.user) {
     // Cookie cache stale/absent (post-redeploy, post-secret-rotation, or the
-    // 60s cookieCache miss window) — we cannot consult the DB from Edge, so
+    // 30min cookieCache miss window) — we cannot consult the DB from Edge, so
     // we PESSIMISTICALLY treat the user as enrolled-but-unverified. This
     // routes to /2fa/challenge (NOT /2fa/enroll). See CR-01: routing to
     // /2fa/enroll would let an attacker with a stolen session cookie reset
