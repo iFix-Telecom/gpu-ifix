@@ -62,3 +62,6 @@ Thumbs.db
 ConverseAI_GPU_Stack_Guide.*
 gatewayctl
 pod/health-bridge/health-bridge
+
+# Playwright MCP snapshots — capture form input (passwords); never commit
+.playwright-mcp/
