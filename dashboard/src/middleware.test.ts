@@ -9,7 +9,7 @@
  * end-to-end by the Playwright route test (Task 11-02-05A).
  *
  * 6 cases per 11-02-PLAN.md Task 11-02-03 acceptance + CR-01:
- *   a. cookie absent → /login?session_expired=1
+ *   a. cookie absent → /login (clean, no param)
  *   b. session present, twoFactorEnabled=false → /2fa/enroll
  *   c. session present, twoFactorEnabled=true, twoFactorVerified=false → /2fa/challenge
  *   d. session present, both true → next()
@@ -44,13 +44,13 @@ beforeEach(() => {
 });
 
 describe("middleware — two-stage 2FA gate (D-12 + D-15)", () => {
-  it("(a) cookie absent → /login?session_expired=1", async () => {
+  it("(a) cookie absent → /login (no session_expired param)", async () => {
     mockGetSessionCookie.mockReturnValueOnce(null);
     const res = await middleware(makeReq("/"));
     expect(res.status).toBe(307);
     const loc = res.headers.get("location") ?? "";
     expect(loc).toContain("/login");
-    expect(loc).toContain("session_expired=1");
+    expect(loc).not.toContain("session_expired");
   });
 
   it("(b) session present, twoFactorEnabled=false → /2fa/enroll", async () => {
