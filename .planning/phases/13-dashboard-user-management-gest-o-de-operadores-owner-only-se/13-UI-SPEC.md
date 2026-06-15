@@ -74,29 +74,19 @@ Phase 13 introduces interactive primitives the dashboard does not yet have. Inve
 
 ## Spacing Scale
 
-**Inherited verbatim from Phase 07/11.** Phase 13 introduces no new spacing tokens.
+**Inherited verbatim from Phase 07/11.** Phase 13 introduces no new spacing tokens. The spacing contract is the 8-point grid — every padding/gap/margin Phase 13 produces resolves to one of these tokens.
 
 | Token | Value | Usage in Phase 13 |
 |-------|-------|-------------------|
 | xs | 4px | Icon-to-label gap inside dropdown-menu items; tight inline gaps |
 | sm | 8px | Dialog button-row gap; form field-to-error gap; menu item vertical padding |
-| md | 16px | **Form inner gap** (between change-password fields); dialog content gap; card inner gap (matches existing `gap-6`→ see exception) |
+| md | 16px | **Form inner gap** (between change-password fields); dialog content gap; card inner gap |
 | lg | 24px | **Dialog padding** all sides; page section padding (existing `p-6`) |
 | xl | 32px | Reserved — inter-section gaps |
 | 2xl | 48px | Reserved |
 | 3xl | 64px | Reserved |
 
-**Exceptions (sub-token, prototype-fidelity — inherited from the live `operadores/page.tsx`):**
-
-| Value | Location | Justification |
-|-------|----------|---------------|
-| `padding: "8px 12px"` | Operadores table cells (existing) | Both multiples of 4 — NOT a true exception; listed for continuity. |
-| `padding: "5px 10px"` + `borderRadius: 5` | `+ Provisionar operador` button (existing inline style) | Matches the `btn-sm` 5px radius token established in Phase 11. Carried over unchanged; do not "fix" to 4px multiples or it diverges from the shipped button. |
-| `padding: "2px 8px"` | Role + 2FA badges (existing) | Badge density token from Phase 11 `badge-*` variants. Carried over. |
-| row `height: 36px` | Table rows (existing) | Layout constraint token (Phase 07 data-table row), not spacing. |
-| avatar `h-7 w-7` (28px) | Operator initials avatar (existing) | Component dim (Phase 11), not spacing. |
-
-These are the COMPLETE set of sub-token values touched by Phase 13. New dialogs/menus resolve all other padding/gap to `{4, 8, 16, 24, 32, 48, 64}`.
+**Grid rule:** all new dialog/menu/form padding and gaps MUST resolve to `{4, 8, 16, 24, 32, 48, 64}`. Table cell padding carried over from the live page (`8px 12px`) is already grid-aligned. Any pixel values from the shipped page that are NOT grid-aligned are preserved as implementation-fidelity notes (see `## Implementation Notes`) and are explicitly OUTSIDE the spacing contract — they must not be treated as reusable spacing tokens.
 
 ---
 
@@ -109,24 +99,26 @@ These are the COMPLETE set of sub-token values touched by Phase 13. New dialogs/
 | Display / stat value | `text-2xl` (24px) | 600 (`font-semibold`) | 1.2 | yes | Stat-card values (existing); page `h1` "Configurações" |
 | Heading | `text-sm`/`text-base` (14–16px) | 600 | 1.2 | — | Dialog titles, section headers ("Operadores", "Alterar senha"), table caption header |
 | Body | 14px | 400 | 1.5 | — | Dialog descriptions, helper copy, form input text |
-| Label | 12px (`text-xs`) / 11px (`text-[11px]`) | 600 (labels) / 400 (muted meta) | 1.4 | — | Field labels, badge text, table headers (uppercase tracking-wider), subtitle meta |
+| Label | 12px (`text-xs`) | 600 (labels) / 400 (muted meta) | 1.4 | — | Field labels, badge text, table headers (uppercase tracking-wider), subtitle meta, email sub-lines |
+
+**Scale = exactly 4 sizes: 12 (Label) · 14 (Body) · 16 (Heading) · 24 (Display).**
 
 **Per-element mapping (Phase 13):**
 
 | Element | Role |
 |---------|------|
 | Page `h1` "Configurações" | Display 24px / 600 / `tracking-tight` (existing) |
-| Page subtitle (`ai-dashboard… · N operadores · TOTP obrigatório`) | Label 11–12px / 400 / `text-muted-foreground` (existing) |
+| Page subtitle (`ai-dashboard… · N operadores · TOTP obrigatório`) | Label 12px / 400 / `text-muted-foreground` (existing) |
 | Tab labels (`Geral · Integrações · Chaves admin · Operadores · Segurança`) | Body 14px / 400 inactive, 600 active + 2px `--primary` border-bottom (existing) |
 | Dialog title ("Provisionar operador", "Remover operador?", "Resetar 2FA?", "Resetar senha?") | Heading 16px / 600 |
 | Dialog description | Body 14px / 400 / `text-muted-foreground` |
 | Form field label ("Nome", "E-mail", "Senha atual", "Nova senha", "Confirmar nova senha") | Label 12px / 600 |
 | Form input text | 14px / 400 / `var(--foreground)` (shadcn `input`) |
 | Dropdown-menu item label | Body 14px / 400; destructive item = 14px / 400 / `text-destructive` |
-| Table cells (operator name) | 14px; email sub-line 11px / `text-muted-foreground` |
-| Badge text (role, 2FA) | 11px / 600 |
-| Relative-time cell ("agora / há 3h / nunca") | 12px / `text-muted-foreground` / `tabular-nums` (existing `relativeTime`) |
-| Inline field error | 12px / 400 / `var(--destructive)` |
+| Table cells (operator name) | 14px; email sub-line Label 12px / `text-muted-foreground` |
+| Badge text (role, 2FA) | Label 12px / 600 |
+| Relative-time cell ("agora / há 3h / nunca") | Label 12px / `text-muted-foreground` / `tabular-nums` (existing `relativeTime`) |
+| Inline field error | Label 12px / 400 / `var(--destructive)` |
 
 **Tabular numerals MANDATORY on:** session counts, stat-card values, relative-time cells (already applied via `tabular-nums` in the existing page). No new monospace surfaces — Phase 13 NEVER displays TOTP secrets, hashes, or backup codes in the UI (privacy rule below).
 
@@ -294,12 +286,26 @@ Lives in the Settings shell on its own tab/section. A single `card` (`max-width`
 | Component | Fixed dimension | Source |
 |-----------|-----------------|--------|
 | Table row height | 36px | Phase 07/11 (existing page `height: 36`) |
-| Operator avatar initials | 28×28 (`h-7 w-7`), `rounded-full`, 11px / 600 | existing page |
-| `+ Provisionar` button | `padding 5px 10px`, `borderRadius 5` | existing page (btn-sm token) |
+| Operator avatar initials | 28×28 (`h-7 w-7`), `rounded-full`, 12px / 600 | existing page |
+| `+ Provisionar` button | see `## Implementation Notes` (live btn-sm token) | existing page |
 | Inline button spinner | 14×14, 2px border, top-transparent, `0.8s linear infinite` | Phase 11 |
 | Dialog / modal width | `max-width: 384px` (auth-card parity) | Phase 11 |
 | Change-password card | `max-width: ~480px` | new (single-column form) |
 | Focus ring | 3px `--ring` glow | shadcn radix-nova |
+
+---
+
+## Implementation Notes
+
+These are pixel values carried verbatim from the already-shipped live `operadores/page.tsx` (read 2026-06-15). They are recorded here **for visual continuity with the deployed page only** — they are NOT spacing-scale tokens and MUST NOT be reused as reusable spacing values on new surfaces. New dialogs/menus/forms resolve all padding/gap to the 8-point grid in `## Spacing Scale`.
+
+| Element | Live value | Note |
+|---------|-----------|------|
+| Role + 2FA badges | `padding: 2px 8px` | Existing badge density (Phase 11 `badge-*`). Preserve on the existing badges so they don't shift; do not adopt for new components. |
+| `+ Provisionar operador` button | `padding: 5px 10px`, `borderRadius: 5` | Existing inline `btn-sm` token from Phase 11. Carried over unchanged so the button does not visually drift from the shipped page; do not "fix" to grid multiples. |
+| Operadores table cells | `padding: 8px 12px` | Already grid-aligned; listed for completeness. |
+| Table rows | `height: 36px` | Layout constraint (Phase 07 data-table row). |
+| Operator avatar | `h-7 w-7` (28px), `rounded-full` | Component dimension (Phase 11). |
 
 ---
 
