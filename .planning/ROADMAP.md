@@ -98,13 +98,28 @@ todas as 4 operações admin; entregar junto com a troca de senha.
 - Revogar sessões ao remover/resetar.
 - Não expor hashes/secrets/backup-codes na UI (regra de privacidade já no operadores page).
 
-**Requirements**: TBD (derivar no plan-phase)
+**Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
 **Depends on:** Phase 11 (auth/2FA base), Phase 12
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
 
-- [ ] TBD (run /gsd:plan-phase 13 to break down)
+**Wave 1**
+
+- [ ] 13-01-PLAN.md — Wave 0: RED test stubs UM-01..UM-10 (reuse auth.test.ts memoryAdapter) + shadcn dialog/dropdown-menu/alert-dialog + nodemailer [ASSUMED] legitimacy gate (autonomous: false)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 13-03-PLAN.md — 4 owner-gated Server Actions (invite/remove/reset-pw/reset-2FA CR-01-safe) + audit.ts writeAuditLog (D-03/D-08/D-09)
+- [ ] 13-04-PLAN.md — self-service change-password /settings (UM-01, not audited) + /reset-password/[token] set-password landing
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 13-05-PLAN.md — operadores/page.tsx real role (D-02) + owner-gate + + Provisionar dialog + ··· dropdown-menu + destructive alert-dialogs wired to server actions (UM-10)
 
 ---
 
