@@ -1,10 +1,11 @@
 ---
 phase: 13
 slug: dashboard-user-management-gest-o-de-operadores-owner-only-se
-status: draft
+status: approved
 shadcn_initialized: true
 preset: radix-nova
 created: 2026-06-15
+reviewed_at: 2026-06-15
 inherits_from: 11-UI-SPEC.md
 baseline_prototype: dashboard/src/app/settings/operadores/page.tsx (Phase 11 implemented + live)
 ---
