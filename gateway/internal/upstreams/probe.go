@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -229,6 +230,7 @@ func (p *Probe) probeOne(ctx context.Context, u UpstreamConfig) {
 	obs.ProbeDurationMs.WithLabelValues(u.Name).Observe(float64(dur.Milliseconds()))
 
 	var status, errMsg string
+	var he *breaker.HTTPError
 	switch {
 	case err == nil:
 		status = "ok"
@@ -236,6 +238,17 @@ func (p *Probe) probeOne(ctx context.Context, u UpstreamConfig) {
 		status = "timeout"
 		errMsg = "probe budget exceeded"
 		obs.ProbeFailureTotal.WithLabelValues(u.Name, "timeout").Inc()
+	case errors.As(err, &he) && he.Status >= 400 && he.Status < 500:
+		// 4xx is a client/config issue, NOT an upstream health failure:
+		// D-A4 / breaker.IsSuccessful treats 4xx as SUCCESS (the breaker
+		// stays closed). Recording "failed" here was the tier-1
+		// false-negative (12-FIELD-FINDINGS finding 2): openrouter-chat is
+		// breaker-healthy + serves HTTP 200 live, but the hardcoded probe
+		// body yields a 4xx, so the row showed last_probe_status=failed.
+		// "config" preserves the truth (probe got a non-2xx) without lying
+		// about health. NOT a failure → do not bump ProbeFailureTotal.
+		status = "config"
+		errMsg = err.Error()
 	default:
 		status = "failed"
 		errMsg = err.Error()

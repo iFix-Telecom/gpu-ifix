@@ -69,6 +69,58 @@ Plans:
 - [x] 11-09-PLAN.md — Wave 3: PRD-04 RUNBOOK-INCIDENTS.md (4 classes D-11) + POSTMORTEM-TEMPLATE.md (Google SRE blameless 9-section)
 - [x] 11-10-PLAN.md — Wave 3: HUMAN-UAT S1..S8 + 11-VERIFICATION.md final phase rollup + STATE/ROADMAP advance
 
+### Phase 13: dashboard-user-management — Gestão de operadores (owner-only) + self-service change-password no dashboard ai-gateway
+
+**Goal:** Operadores do dashboard ai-gateway conseguem trocar a própria senha (self-service)
+e o owner consegue gerenciar operadores pelo browser, sem `seed-admins.sh` nem SQL manual.
+
+**Scope:**
+1. **Self-service change-password** — operador logado troca a própria senha
+   (`authClient.changePassword`, exige senha atual; sem admin). Página em `/settings`.
+2. **Gestão de operadores (owner-only):**
+   - Criar/convidar operador `@ifixtelecom.com.br` (allowlist D-13 já existe).
+   - Remover operador (+ revogar todas as sessões dele).
+   - Resetar senha de operador (nova senha temp).
+   - Resetar 2FA de operador (perdeu authenticator).
+   - Tornar funcionais os botões placeholder de `settings/operadores/page.tsx`
+     ("+ Provisionar operador", menu "···").
+
+**Decisões locked (discuss 2026-06-14):** owner-only authz (1º operador = owner);
+todas as 4 operações admin; entregar junto com a troca de senha.
+
+**Security surface (rodar /gsd:secure-phase depois):**
+- Roles (owner vs operator): admin plugin better-auth OU coluna `role` + migração CLI-canônica.
+- Owner-gating em server-actions/route-handlers (NÃO só na UI) + reforço no middleware se aplicável.
+- **Reset-2FA controlado:** o CR-01 do `auth.ts` bloqueia `/two-factor/enable` quando já habilitado
+  (anti-rotação de credencial). O reset-2FA admin precisa de caminho controlado + audit, sem
+  reabrir esse vetor (ex: clear 2FA → operador re-enrolla no próximo login via /2fa/enroll).
+- Audit log de toda ação admin (quem, alvo, quando, ação).
+- Revogar sessões ao remover/resetar.
+- Não expor hashes/secrets/backup-codes na UI (regra de privacidade já no operadores page).
+
+**Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
+**Depends on:** Phase 11 (auth/2FA base), Phase 12
+**Plans:** 5 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 13-01-PLAN.md — Wave 0: RED test stubs UM-01..UM-10 (reuse auth.test.ts memoryAdapter) + shadcn dialog/dropdown-menu/alert-dialog + nodemailer [ASSUMED] legitimacy gate (autonomous: false)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 13-03-PLAN.md — 4 owner-gated Server Actions (invite/remove/reset-pw/reset-2FA CR-01-safe) + audit.ts writeAuditLog (D-03/D-08/D-09)
+- [ ] 13-04-PLAN.md — self-service change-password /settings (UM-01, not audited) + /reset-password/[token] set-password landing
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 13-05-PLAN.md — operadores/page.tsx real role (D-02) + owner-gate + + Provisionar dialog + ··· dropdown-menu + destructive alert-dialogs wired to server actions (UM-10)
+
 ---
 
 ### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
