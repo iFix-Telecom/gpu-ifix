@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-last_updated: "2026-06-14T22:38:11.353Z"
+last_updated: "2026-06-15T09:28:31.203Z"
 progress:
   total_phases: 10
   completed_phases: 7
@@ -191,6 +191,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 | 260614-l0t | Fix login redirect 2FA no dashboard: login/page.tsx ignorava data.twoFactorRedirect → push("/") ricocheteava pra /login?session_expired=1, nunca chegava em /2fa/challenge. handleSubmit agora captura o sinal via onSuccess(context).data.twoFactorRedirect (literal data.* não typecheck em better-auth 1.4.22) e roteia pra /2fa/challenge. +3-case regression test. tsc limpo, 34 testes pass. | 2026-06-14 | e054125 | [260614-l0t-fix-login-redirect-bug-dashboard-ignora-](./quick/260614-l0t-fix-login-redirect-bug-dashboard-ignora-/) |
 | 260614-ny5 | middleware.ts redirecionava no-session pra /login?session_expired=1 (banner "Sessão encerrada" em toda primeira visita). Stage 1 agora redireciona pra /login limpo (param removido; Edge não distingue never-logged de expired). Banner em login/page.tsx mantido (só não é mais disparado pelo middleware). +test case (a) atualizado. tsc limpo, 7/7. | 2026-06-14 | 3508773 | [260614-ny5-middleware-redirect-login-limpo-sem-sess](./quick/260614-ny5-middleware-redirect-login-limpo-sem-sess/) |
 | 260614-ov8 | Fix bounce 2FA: middleware lê twoFactorVerified do cookieCache (maxAge 60s) mas dashboard nunca chama get-session (useSession só em first-login, poll vai pra /api/gateway) → cache expira, fallback pessimista → /2fa/challenge loop após 60s. auth.ts cookieCache.maxAge 60→1800 (= session idle 30min); cache vive a sessão. twoFactorVerified monotônico (staleness inócuo); tradeoff: revogação propaga em até 30min. +comments/RUNBOOK. tsc limpo, 34 testes. | 2026-06-14 | f1b9acd | [260614-ov8-fix-2fa-bounce-raise-cookiecache-maxage-](./quick/260614-ov8-fix-2fa-bounce-raise-cookiecache-maxage-/) |
+| 260616-gtj | Fix tier-1 probe false-negative: probe.go gravava last_probe_status="failed" pra 4xx mesmo o breaker tratando 4xx como sucesso (D-A4). probeOne agora extrai *breaker.HTTPError via errors.As → 4xx vira status="config" (não health-failure, não bumpa ProbeFailureTotal); 5xx→failed, timeout→timeout, 2xx→ok inalterados. Escolhido "config" (zero blast radius: /v1/health/upstreams deriva do breaker state, nenhum consumer faz branch na string). Resolve openrouter-chat reportando failed enquanto serve 200 (provado live: deepseek/Novita). +TestProbe TDD RED/GREEN. build+test verde. Contexto: 12-FIELD-FINDINGS-2026-06-16 finding 2; classe SEED-012 tier-1. | 2026-06-16 | 844bf2a | [260616-gtj-fix-tier-1-probe-false-negative-status-4](./quick/260616-gtj-fix-tier-1-probe-false-negative-status-4/) |
 | Phase 06.7 P02 | 10m | 2 tasks | 7 files |
 | Phase 06.7 P03 | 25m | 2 tasks | 9 files |
 | Phase 06.7 P04 | ~20m | 2 tasks | 8 files |
@@ -201,7 +202,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ## Session Continuity
 
-- **Last session:** 2026-06-14T22:38:11.340Z
+- **Last session:** 2026-06-15T09:28:31.192Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
