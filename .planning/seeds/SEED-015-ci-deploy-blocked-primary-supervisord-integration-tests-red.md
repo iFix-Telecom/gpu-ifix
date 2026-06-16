@@ -1,5 +1,7 @@
 # SEED-015 — CI deploy pipeline blocked: 6 primary/supervisord integration tests red → nothing ships
 
+> **RESOLVED 2026-06-16** (commit `575fea2`). Root cause = test-fixture drift: `f8a7de4` added the `ErrMissingChatterboxSHA` fail-fast gate in `buildCreateRequest` + updated the unit helper `cfgWithDefaults()` but NOT the integration helper `primaryTestCfg()` → empty SHA → provision fails → FSM bounces to Asleep → 6 tests fail. Fix: 2 test-only lines adding `PrimaryChatterboxWeightsKey`+`SHA256` to `primaryTestCfg()`. 6/6 PASS locally (Docker). Diagnosed via `/gsd:debug` (bisect → f8a7de4; last green 8d676b8c 06-09). Debug session: `.planning/debug/resolved/primary-supervisord-ci-red.md`. **Same-cause-as-SEED-014 hypothesis REFUTED** — prod rev 99e4e09 has the SHA env set so its gate passes; SEED-014 (pod cold-start loop) is independent and remains OPEN.
+
 **Discovered:** 2026-06-16 while root-causing the primary-pod cold-start loop (SEED-014).
 **Severity:** HIGH — the entire deploy pipeline is gated shut. `Build & push gateway image` + `Trigger Portainer redeploy (dev/prod)` are SKIPPED whenever the integration-test gate is red, which it has been since at least 2026-06-14. Nothing has deployed to prod since. Today's probe-truth fix (SEED-013, commit 844bf2a) is on `develop` but **did NOT deploy** for this reason.
 **Related:** [[SEED-014-primary-coldstart-failure-loop-invisible-alerting-gap]] (the pod loop this blocks remediation of), [[SEED-013-probe-hardcodes-qwen-model-no-per-upstream-rewrite]] (fix pushed but undeployed).
