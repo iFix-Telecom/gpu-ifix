@@ -127,6 +127,76 @@ func TestProbe_TTS_PostsAudioSpeech(t *testing.T) {
 	})
 }
 
+// TestProbe_StatusClassification drives probeOne end-to-end through the
+// breaker against httptest servers returning 200/400/404/502 plus a timeout
+// case, and asserts the status enqueued for DB writeback. This is the
+// regression guard for the tier-1 false-negative (12-FIELD-FINDINGS finding 2):
+// a 4xx upstream response (breaker-healthy, IsSuccessful==true) must NOT be
+// recorded as "failed". 2xx→"ok", 4xx→"config", 5xx→"failed", timeout→"timeout".
+func TestProbe_StatusClassification(t *testing.T) {
+	// drainStatus reads the single writeback event probeOne enqueued onto the
+	// buffered updates channel and returns its LastProbeStatus string.
+	drainStatus := func(t *testing.T, p *Probe) string {
+		t.Helper()
+		select {
+		case ev := <-p.updates:
+			return ev.LastProbeStatus.String
+		default:
+			t.Fatalf("probeOne enqueued no writeback event")
+			return ""
+		}
+	}
+
+	cases := []struct {
+		name       string
+		statusCode int
+		want       string
+	}{
+		{"200_ok", http.StatusOK, "ok"},
+		{"400_config", http.StatusBadRequest, "config"},
+		{"404_config", http.StatusNotFound, "config"},
+		{"502_failed", http.StatusBadGateway, "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			u := UpstreamConfig{Name: "u-" + tc.name, Role: "llm", Tier: 0, URL: srv.URL, Enabled: true}
+			loader := NewLoaderForTest(u)
+			p, _ := newProbeFor(t, loader, u.Name)
+
+			p.probeOne(context.Background(), u)
+			if got := drainStatus(t, p); got != tc.want {
+				t.Errorf("status for HTTP %d = %q, want %q", tc.statusCode, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("timeout", func(t *testing.T) {
+		// A context already past its deadline makes ctx.Err() ==
+		// context.DeadlineExceeded, so probeOne records "timeout".
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		u := UpstreamConfig{Name: "u-timeout", Role: "llm", Tier: 0, URL: srv.URL, Enabled: true}
+		loader := NewLoaderForTest(u)
+		p, _ := newProbeFor(t, loader, u.Name)
+
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		p.probeOne(ctx, u)
+		if got := drainStatus(t, p); got != "timeout" {
+			t.Errorf("status for expired-deadline probe = %q, want %q", got, "timeout")
+		}
+	})
+}
+
 // newProbeFor builds a Probe wired to the loader + a breaker over the
 // supplied names. q==nil so no Postgres writeback is exercised.
 func newProbeFor(t *testing.T, loader *Loader, names ...string) (*Probe, *breaker.Set) {
