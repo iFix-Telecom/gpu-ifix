@@ -62,6 +62,8 @@ func primaryTestCfg(t *testing.T) config.Config {
 	cfg.PrimaryWhisperWeightsSHA256 = "wh1sp3rsh4test256"
 	cfg.PrimaryBGEM3WeightsKey = "bge-m3/v1.0.0/model.tar.gz"
 	cfg.PrimaryBGEM3WeightsSHA256 = "bg3m35h4test256"
+	cfg.PrimaryChatterboxWeightsKey = "chatterbox-mtl-v2/v1.0.0/cache.tar.gz"
+	cfg.PrimaryChatterboxWeightsSHA256 = "ch4tt3rb0xsh4test256"
 	cfg.MinioEndpoint = "https://s3.example.com"
 	cfg.MinioBucket = "ai-gateway"
 	cfg.MinioAccessKey = "AKID-test"
