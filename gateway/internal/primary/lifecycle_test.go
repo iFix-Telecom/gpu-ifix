@@ -45,6 +45,12 @@ func cfgWithDefaults() config.Config {
 		PrimaryInfinityImage: wave0InfinityImage,
 		PrimaryDCGMImage:     wave0DCGMImage,
 
+		// SEED-018/019 part 3: PRIMARY_POD_SERVE_STT defaults true in prod
+		// (boolOr). cfgWithDefaults is a struct literal, so mirror that default
+		// here — otherwise the zero-value false would drop the "stt" override
+		// and break the existing all-roles-override assertions.
+		PrimaryPodServeSTT: true,
+
 		// Qwen GGUF — Wave 0 verified digest (per 06.6-WAVE0-GATES.md
 		// Decision 3 default).
 		PrimaryQwenWeightsKey:    "qwen3.6-27b-Q4_K_M/v1.0.0/model.gguf",
