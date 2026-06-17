@@ -69,6 +69,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0027_openrouter_target_deepseek_v4_flash.sql",
 		"0028_remove_local_stt_upstream.sql",
 		"0029_readd_whisper_add_gemini_groq.sql",
+		"0030_probe_status_allow_config.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)
