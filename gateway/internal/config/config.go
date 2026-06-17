@@ -249,6 +249,7 @@ type Config struct {
 	PrimaryPodScheduleGraceRampDownSeconds int      // PRIMARY_POD_SCHEDULE_GRACE_RAMP_DOWN_SECONDS (default 300 = 5min drain inflight before destroy; D-08.1)
 	PrimaryPodScheduleDisabled             bool     // PRIMARY_POD_SCHEDULE_DISABLED (default true per WAVE0-GATES Decision 5 soak gate — operator manual flip to false after Plan 06.6-11 Live UAT GREEN)
 	PrimaryPodScheduleProvisionLeadSeconds int      // PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS (default 1800 = 30min; reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality; Plan 06.6-05 consumer)
+	PrimaryPodServeSTT                     bool     // PRIMARY_POD_SERVE_STT (default true — preserve current behavior; SEED-018/019 part 3. When false, the reconciler SKIPS the "stt" tier-0 override so STT requests fall through to the tier-1 cloud cascade (gemini-stt) instead of the pod's slow CPU whisper. llm/tts overrides are unaffected.)
 
 	// Pod-side secrets forwarded to the Vast.ai emergency pod via CreateRequest.Env.
 	// Mirror Phase 1 smoke.yml — pod onstart aborts without them. Sensitive; never log.
@@ -512,6 +513,8 @@ func Load() (Config, error) {
 		PrimaryPodScheduleDisabled: boolOr(os.Getenv("PRIMARY_POD_SCHEDULE_DISABLED"), true),
 		// default 1800 (30min pre-warm offset) per reviews consensus action #8 — reconciler provisions lead_seconds before UpHour to honor schedule semantics with 25-30min cold-start reality.
 		PrimaryPodScheduleProvisionLeadSeconds: atoiOr(os.Getenv("PRIMARY_POD_SCHEDULE_PROVISION_LEAD_SECONDS"), 1800),
+		// default true — preserve current behavior (pod serves STT). SEED-018/019 part 3: operator flips to "false" to route STT to the tier-1 gemini-stt cascade instead of the pod's slow CPU whisper.
+		PrimaryPodServeSTT: boolOr(os.Getenv("PRIMARY_POD_SERVE_STT"), true),
 
 		MinioEndpoint:     envOr("MINIO_ENDPOINT", "https://s3.ifixtelecom.com.br"),
 		MinioBucket:       envOr("MINIO_BUCKET", "ai-gateway"),

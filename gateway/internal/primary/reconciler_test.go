@@ -639,6 +639,84 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 		"DCGMScraper.SetURL must point at the 9400 host mapping")
 }
 
+// TestEvaluateProvisioning_PrimaryPodServeSTT gates the "stt" tier-0 override
+// on the PRIMARY_POD_SERVE_STT flag (SEED-018/019 part 3). With the flag false
+// the markReady path must override llm+tts but NOT stt, so STT requests fall
+// through to the tier-1 gemini-stt cascade instead of the pod's slow CPU
+// whisper. With the flag true (current prod default) all 3 roles override.
+func TestEvaluateProvisioning_PrimaryPodServeSTT(t *testing.T) {
+	t.Run("serve_stt_false_skips_stt_override", func(t *testing.T) {
+		cfg := testCfg(t)
+		cfg.PrimaryPodServeSTT = false
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		loader := newFakeLoader()
+		dcgm := &fakeDCGMScraper{}
+		dbtx := &fakeDBTX{}
+		r := buildReconciler(t, Deps{
+			Cfg:         cfg,
+			FSM:         fsm,
+			Loader:      loader,
+			DCGMScraper: dcgm,
+			Rule:        alwaysInPeakRule(),
+			HealthCheck: func(_ context.Context, _ string) bool { return true },
+			Vast: &fakeVast{
+				getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+					return runningInstanceWithAllPorts(42), nil
+				},
+			},
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 50*time.Millisecond)
+		require.NoError(t, err)
+		require.Equal(t, StateReady, r.deps.FSM.State())
+		snap := loader.snapshot()
+		require.Contains(t, snap, "llm", "llm override must still fire")
+		require.Contains(t, snap, "tts", "tts override must still fire")
+		require.NotContains(t, snap, "stt",
+			"PRIMARY_POD_SERVE_STT=false must SKIP the stt override (route to tier-1 gemini-stt)")
+	})
+
+	t.Run("serve_stt_true_overrides_all_three", func(t *testing.T) {
+		cfg := testCfg(t)
+		cfg.PrimaryPodServeSTT = true
+		fsm := NewFSM(nil, nil)
+		_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+		loader := newFakeLoader()
+		dcgm := &fakeDCGMScraper{}
+		dbtx := &fakeDBTX{}
+		r := buildReconciler(t, Deps{
+			Cfg:         cfg,
+			FSM:         fsm,
+			Loader:      loader,
+			DCGMScraper: dcgm,
+			Rule:        alwaysInPeakRule(),
+			HealthCheck: func(_ context.Context, _ string) bool { return true },
+			Vast: &fakeVast{
+				getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+					return runningInstanceWithAllPorts(42), nil
+				},
+			},
+		})
+		r.SetQueriesForTest(gen.New(dbtx))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 50*time.Millisecond)
+		require.NoError(t, err)
+		require.Equal(t, StateReady, r.deps.FSM.State())
+		snap := loader.snapshot()
+		require.Contains(t, snap, "llm", "llm override must fire")
+		require.Contains(t, snap, "stt", "PRIMARY_POD_SERVE_STT=true must override stt (default behavior)")
+		require.Contains(t, snap, "tts", "tts override must fire")
+	})
+}
+
 func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) {
 	cfg := testCfg(t)
 	cfg.PrimaryProvisionColdStartBudgetSeconds = 1 // tiny budget so the test ends fast
