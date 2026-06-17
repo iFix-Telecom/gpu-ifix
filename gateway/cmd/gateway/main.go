@@ -573,7 +573,7 @@ func main() {
 	// and STT routes exclusively through the openai-whisper tier-1 fallback.
 	var audioRP http.Handler
 	if cfg.UpstreamSTTURL != "" {
-		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log)
+		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log, resolver)
 		if err != nil {
 			log.Error("build audio proxy", "err", err)
 			os.Exit(2)
