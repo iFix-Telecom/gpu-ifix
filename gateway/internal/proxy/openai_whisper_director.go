@@ -71,6 +71,16 @@ var canonicalAliasForUpstream = map[string]string{
 	// differ. The canonical alias mapping is the gate that lets the
 	// shared director resolve groq-whisper's target via the resolver.
 	"groq-whisper": "whisper",
+	// quick 260617-jod (SEED-018) — local-stt is a tier-0 Speaches upstream
+	// (the primary/emergency pod's STT server) reusing this director with an
+	// EMPTY authBearer (Speaches has no bearer — the bearer-inject at L102 is
+	// skipped when authBearer==""). The (whisper, local-stt) →
+	// Systran/faster-whisper-large-v3 alias row exists in the schema (migration
+	// 0029 step 3); this entry lets a MISSING-model multipart request still
+	// inject the resolved upstream target. Both the local-stt audio path AND the
+	// emergency_pod_stt override path resolve against "local-stt" so the pod's
+	// Speaches gets its installed model id instead of the literal "whisper" (404).
+	"local-stt": "whisper",
 }
 
 // BuildOpenAIWhisperDirector returns a Director for the openai-whisper
