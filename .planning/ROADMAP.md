@@ -128,13 +128,15 @@ Plans:
 ### Phase 14: vram-adaptive-stt — gateway auto-decides pod STT via pod-reported whisper device (SEED-019 parts 2+3)
 
 **Goal:** Remove the manual `PRIMARY_POD_SERVE_STT` env flag (commit 4021901, currently `false` in prod for the 1×3090 shape) and make the gateway decide STT-from-pod automatically and shape-agnostically. **Part 2 (pod):** `onstart.sh` detects total VRAM via `nvidia-smi` and sets the whisper device through a container env-file (removing the build-baked `WHISPER__INFERENCE_DEVICE="cpu"` pin at `supervisord.conf:46`); on VRAM-capable shapes (≥~30GB: 2×3090, 5090) whisper loads on GPU with `device_index` pinned OFF the Qwen GPU to dodge CUDA OOM, on 24GB (1×3090) whisper stays off-GPU/disabled; the health-bridge `aggregateResponse` (`pod/health-bridge/handlers.go:58`, :9100) surfaces a `whisper_device` field. **Part 3 (gateway):** add `WhisperDevice` to `primaryPodURLs` (`lifecycle.go:112`), probe `:9100/health/ready` at Ready to capture it, and swap the flag-gate to a per-lifecycle device boolean at the 3 reconciler override sites (`reconciler.go:448/:875/:1631`); delete `Config.PrimaryPodServeSTT`. Net: pod that runs whisper on GPU → gateway overrides STT to pod; CPU/no-whisper pod → STT falls to tier-1 `gemini-stt` automatically. **Excludes** SEED-019 part 1 (N-shape cascade 2×3090→5090→3090) — separate phase. Research: `.planning/seeds/SEED-019-IMPL-SURFACES.md` + `SEED-019-multi-pod-shape-cascade-vram-adaptive-stt.md`.
-**Requirements**: TBD (derive in plan-phase)
+**Requirements**: STT-AUTO, STT-FAILSAFE, STT-PROBE, POD-VRAM, FLAG-REMOVE, STT-SHAPE-3090, STT-SHAPE-GPU, STT-MIGRATE (derived in plan-phase; CHANNEL: D-14-01 — health-bridge :9100 NOT viable in PROD, replaced by an onstart static device-report responder on a newly-forwarded :9100/whisper_device — see 14-01/14-02 PLANs)
 **Depends on:** Phase 11.2 (local whisper + gemini-stt tier-1 cascade); flag scaffolding commit 4021901 (the 3 gated override sites to convert)
-**Plans:** 0 plans
+**Plans:** 3 plans (3 waves)
 
 Plans:
 
-- [ ] TBD (run /gsd:plan-phase 14 to break down)
+- [ ] 14-01-PLAN.md — Wave 1: gateway device-gate (Wave 0 test rework RED→GREEN) — WhisperDevice on primaryPodURLs, gate 3 stt override sites on device==cuda, delete Config.PrimaryPodServeSTT, wire main.go DeviceReport fetch
+- [ ] 14-02-PLAN.md — Wave 2: pod VRAM-adaptive whisper — onstart.go nvidia-smi device export + :9100 /whisper_device responder, drop supervisord.conf:46 cpu pin (keep HF_HUB_CACHE), forward -p 9100:9100
+- [ ] 14-03-PLAN.md — Wave 3 (autonomous:false): rebuild+push+promote image + uat-14.sh + 2 live Vast UATs (1×3090→gemini; ≥30GB→pod-GPU <5s no OOM) + remove prod PRIMARY_POD_SERVE_STT + 14-VERIFICATION rollup
 
 ---
 
