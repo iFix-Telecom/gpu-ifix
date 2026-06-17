@@ -442,6 +442,12 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// as vulnerable to an emerg cutback clearing its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
 		for _, role := range []string{"llm", "stt", "tts"} {
+			// SEED-018/019 part 3: when PRIMARY_POD_SERVE_STT=false the pod's
+			// CPU whisper is too slow; skip the "stt" override so STT falls to
+			// the tier-1 cloud cascade (gemini-stt). llm/tts unaffected.
+			if role == "stt" && !r.cfg.PrimaryPodServeSTT {
+				continue
+			}
 			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
 				r.deps.Loader.OverrideTier0(role, stripPrimaryReadinessSuffix(roleURL(*urls, role)))
 				log.Warn("primary re-asserted tier-0 override (emerg cleared it)", "role", role)
@@ -863,7 +869,12 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 		// readiness suffix here so the dispatcher's ReverseProxy target is
 		// the BASE URL (parity emerg markHealthy / stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
+		// SEED-018/019 part 3: gate the "stt" override on PRIMARY_POD_SERVE_STT
+		// (default true). When false, STT routes to the tier-1 gemini-stt
+		// cascade instead of the pod's slow CPU whisper.
+		if r.cfg.PrimaryPodServeSTT {
+			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
+		}
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
 		// is atomic and Live; Refresh would re-scan the DB which is
@@ -1616,7 +1627,10 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if r.deps.Loader != nil {
 		// Phase 11.2 (D-B5′): 3-role restart-recovery override.
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
+		// SEED-018/019 part 3: gate "stt" override on PRIMARY_POD_SERVE_STT.
+		if r.cfg.PrimaryPodServeSTT {
+			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
+		}
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 	}
 	if r.deps.DCGMScraper != nil {
