@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
@@ -192,5 +193,181 @@ func TestNewAudioProxy_RewritesModelViaResolver(t *testing.T) {
 	}
 	if fwdAuth != "" {
 		t.Errorf("Authorization = %q forwarded to local-stt pod, want empty", fwdAuth)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 — primary-override STT path (emergency_pod_stt via
+// NewDynamicOverrideSTTProxy). The override pod runs the SAME Speaches as
+// local-stt, so the rewrite resolves against "local-stt" (NOT the synthetic
+// override name, which is not in model_aliases).
+// ---------------------------------------------------------------------------
+
+// sttOverrideServer spins up a capturing upstream that records the forwarded
+// model field, file bytes, raw body + Content-Type, and Authorization header.
+func sttOverrideServer(t *testing.T) (url string, get func() (model string, file []byte, rawBody []byte, ct string, auth string)) {
+	t.Helper()
+	var (
+		fwdBody []byte
+		fwdCT   string
+		fwdAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fwdCT = r.Header.Get("Content-Type")
+		fwdAuth = r.Header.Get("Authorization")
+		fwdBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() (string, []byte, []byte, string, string) {
+		model, file := "", []byte(nil)
+		if len(fwdBody) > 0 {
+			model, file, _ = parseMultipartFromBytes(fwdBody, fwdCT)
+		}
+		return model, file, fwdBody, fwdCT, fwdAuth
+	}
+}
+
+// TestOverrideSTTProxy_RewritesModelAgainstLocalSTT asserts the override STT
+// director forwards model=whisper as model=Systran/faster-whisper-large-v3,
+// resolving against "local-stt" (NOT the synthetic emergency_pod_stt name).
+func TestOverrideSTTProxy_RewritesModelAgainstLocalSTT(t *testing.T) {
+	upURL, get := sttOverrideServer(t)
+	resolver := models.NewResolverForTesting(sttLocalAliasFixture)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return upURL, true },
+		0,
+		&http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
+		resolver,
+		discardLogger(),
+	)
+
+	wav := loadProbeWAV(t)
+	body, ct := buildMultipartBody(t, []string{"whisper"}, "probe.wav", wav)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	gotModel, gotFile, _, _, _ := get()
+	if gotModel != "Systran/faster-whisper-large-v3" {
+		t.Errorf("model = %q, want Systran/faster-whisper-large-v3 (resolved against local-stt)", gotModel)
+	}
+	if !bytes.Equal(gotFile, wav) {
+		t.Errorf("audio bytes mutated through the override STT director")
+	}
+}
+
+// TestOverrideSTTProxy_AudioBytesByteIdentical stresses byte preservation on the
+// override path with a tricky payload (0x00 / 0xff / fake boundary).
+func TestOverrideSTTProxy_AudioBytesByteIdentical(t *testing.T) {
+	upURL, get := sttOverrideServer(t)
+	resolver := models.NewResolverForTesting(sttLocalAliasFixture)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return upURL, true },
+		0, &http.Transport{ResponseHeaderTimeout: 60 * time.Second}, resolver, discardLogger(),
+	)
+
+	tricky := bytes.Join([][]byte{
+		{0x00, 0x01, 0x02, 0x03, 0xff, 0xfe, 0xfd},
+		[]byte("\r\n--fake-boundary-xyz\r\n"),
+		{0x00, 0x00, 0x00, 0x00},
+		bytes.Repeat([]byte{0xab, 0xcd}, 100),
+	}, nil)
+
+	body, ct := buildMultipartBody(t, []string{"whisper"}, "tricky.wav", tricky)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	gotModel, gotFile, _, _, _ := get()
+	if gotModel != "Systran/faster-whisper-large-v3" {
+		t.Errorf("model = %q, want Systran/faster-whisper-large-v3", gotModel)
+	}
+	if !bytes.Equal(gotFile, tricky) {
+		t.Errorf("audio bytes mutated for tricky payload on the override path")
+	}
+}
+
+// TestOverrideSTTProxy_NonMultipartPassesThrough asserts a non-multipart (JSON)
+// request is forwarded untouched by the override STT director (defensive — the
+// rewrite must only touch multipart bodies).
+func TestOverrideSTTProxy_NonMultipartPassesThrough(t *testing.T) {
+	upURL, get := sttOverrideServer(t)
+	resolver := models.NewResolverForTesting(sttLocalAliasFixture)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return upURL, true },
+		0, &http.Transport{ResponseHeaderTimeout: 60 * time.Second}, resolver, discardLogger(),
+	)
+
+	jsonBody := []byte(`{"model":"whisper","file":"<base64...>"}`)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	_, _, rawBody, _, _ := get()
+	if !bytes.Equal(rawBody, jsonBody) {
+		t.Errorf("non-multipart body mutated by override STT director: got %q want %q", string(rawBody), string(jsonBody))
+	}
+}
+
+// TestOverrideSTTProxy_ResolverMissPassesThrough asserts an empty resolver leaves
+// model=whisper unchanged on the override path (pod then 4xx's — non-failure).
+func TestOverrideSTTProxy_ResolverMissPassesThrough(t *testing.T) {
+	upURL, get := sttOverrideServer(t)
+	resolver := models.NewResolverForTesting(nil)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return upURL, true },
+		0, &http.Transport{ResponseHeaderTimeout: 60 * time.Second}, resolver, discardLogger(),
+	)
+
+	wav := loadProbeWAV(t)
+	body, ct := buildMultipartBody(t, []string{"whisper"}, "probe.wav", wav)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	gotModel, gotFile, _, _, _ := get()
+	if gotModel != "whisper" {
+		t.Errorf("model = %q, want whisper (alias passes through on resolver miss)", gotModel)
+	}
+	if !bytes.Equal(gotFile, wav) {
+		t.Errorf("audio bytes mutated on resolver-miss override path")
+	}
+}
+
+// TestDynamicOverrideProxy_LLMUnchangedForJSON is a regression guard: the
+// existing NewDynamicOverrideProxy (used by the llm/tts override paths) does NOT
+// attempt any multipart STT rewrite — a JSON chat body is forwarded byte-for-byte.
+func TestDynamicOverrideProxy_LLMUnchangedForJSON(t *testing.T) {
+	var fwdBody []byte
+	var fwdCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fwdCT = r.Header.Get("Content-Type")
+		fwdBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	h := NewDynamicOverrideProxy("llm",
+		func() (string, bool) { return srv.URL, true },
+		-1, &http.Transport{ResponseHeaderTimeout: 30 * time.Second}, discardLogger())
+
+	chat := []byte(`{"model":"qwen","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/chat/completions", bytes.NewReader(chat))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !bytes.Equal(fwdBody, chat) {
+		t.Errorf("llm override mutated JSON chat body: got %q want %q", string(fwdBody), string(chat))
+	}
+	if fwdCT != "application/json" {
+		t.Errorf("llm override mutated Content-Type: got %q want application/json", fwdCT)
 	}
 }

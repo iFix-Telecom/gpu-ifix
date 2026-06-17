@@ -667,10 +667,15 @@ func main() {
 	sttRoleProxies := map[string]http.Handler{
 		// Dynamic primary/emergency pod override (loader.Resolve → "emergency_pod_stt").
 		// Buffered (transcription is a single JSON body); no interceptors (parity with audioRP).
-		"emergency_pod_stt": proxy.NewDynamicOverrideProxy("stt",
+		// quick 260617-jod (SEED-018): the override pod runs the SAME Speaches as
+		// local-stt, so this STT-aware constructor rewrites the multipart "model"
+		// field via the resolver against "local-stt" ((whisper,local-stt) →
+		// Systran/faster-whisper-large-v3) — bringing the primary pod up no longer
+		// regresses STT to a 404 "Model 'whisper' is not installed".
+		"emergency_pod_stt": proxy.NewDynamicOverrideSTTProxy(
 			func() (string, bool) { return loader.Tier0OverrideURL("stt") },
 			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
-			log),
+			resolver, log),
 	}
 	// Phase 11.1: local-stt is registered ONLY if UPSTREAM_STT_URL still set
 	// (transitional compat). New deployments leave it unset and STT routes via
