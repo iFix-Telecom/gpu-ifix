@@ -7,16 +7,27 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
 
 // NewAudioProxy constructs the reverse proxy for POST /v1/audio/transcriptions.
-// Multipart body preservation: BuildDirector does NOT touch Content-Type,
-// so the boundary parameter survives. ResponseHeaderTimeout is 60s for
+// Multipart body preservation: the director streams the audio file part via
+// io.Copy so the bytes survive byte-identical. ResponseHeaderTimeout is 60s for
 // Whisper. NO FlushInterval override — audio transcription never streams
 // (Speaches returns the full JSON body in one response). Codex review
 // [MEDIUM] 02-04 scope change. Body cap is enforced by `http.MaxBytesHandler`
 // in cmd/gateway — we don't re-cap here.
-func NewAudioProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyResponseInterceptor) (*httputil.ReverseProxy, error) {
+//
+// quick 260617-jod (SEED-018): the Director is BuildOpenAIWhisperDirector with
+// an EMPTY authBearer + upstreamName "local-stt". The empty bearer skips the
+// Authorization injection (BuildOpenAIWhisperDirector L102 — local-stt Speaches
+// has no bearer); the resolver rewrites the multipart "model" form field for the
+// local-stt upstream ((whisper, local-stt) → Systran/faster-whisper-large-v3 via
+// migration 0029), so bringing the primary pod up no longer regresses STT to a
+// 404 "Model 'whisper' is not installed". On a resolver miss the alias passes
+// through unchanged and the pod 4xx's (breaker classifies 4xx as non-failure).
+func NewAudioProxy(upstreamURL string, log *slog.Logger, resolver *models.Resolver, interceptors ...ProxyResponseInterceptor) (*httputil.ReverseProxy, error) {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("proxy/audio: parse %q: %w", upstreamURL, err)
@@ -25,7 +36,7 @@ func NewAudioProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyRe
 		return nil, fmt.Errorf("proxy/audio: invalid upstream url %q", upstreamURL)
 	}
 	rp := &httputil.ReverseProxy{
-		Director: BuildDirector(u),
+		Director: BuildOpenAIWhisperDirector(u, "", resolver, "local-stt", log),
 		// FlushInterval deliberately omitted (default 0 = buffered)
 		// RES-13 / Plan 12-03: wrap the base Transport with
 		// fallthroughRoundTripper so a pre-byte connection-class dial failure

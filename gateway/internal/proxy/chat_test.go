@@ -354,7 +354,9 @@ func TestProxyConstructors_RejectMalformedURL(t *testing.T) {
 			}
 		})
 		t.Run("audio/"+c.name, func(t *testing.T) {
-			if rp, err := NewAudioProxy(c.url, discardLogger()); err == nil {
+			// nil resolver is safe here: invalid URLs fail url.Parse before the
+			// director (which would reference the resolver) is ever constructed.
+			if rp, err := NewAudioProxy(c.url, discardLogger(), nil); err == nil {
 				t.Errorf("NewAudioProxy(%q) expected error, got rp=%v", c.url, rp)
 			}
 		})

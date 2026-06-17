@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 	"github.com/ifixtelecom/gpu-ifix/pkg/openai"
 )
 
@@ -38,7 +39,9 @@ func TestAudioProxy_MultipartPreservedAndAuthStripped(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rp, err := NewAudioProxy(upstream.URL, discardLogger())
+	// Empty resolver → passthrough: model=whisper forwarded unchanged, exercising
+	// the same auth-strip + multipart-preservation contract this test asserts.
+	rp, err := NewAudioProxy(upstream.URL, discardLogger(), models.NewResolverForTesting(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
