@@ -1,11 +1,17 @@
 ---
 phase: 14
 slug: vram-adaptive-stt
-status: planned
+status: in_progress
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-06-17
 ---
+
+> **Execution status (2026-06-18):** Waves 1+2 SHIPPED on develop, CI GREEN
+> (build-gateway + build-primary-pod, tip `79a2cf3`). Wave 0 test rework done
+> (gateway unit tests RED→GREEN + 4 primary integration tests repaired for the
+> device-gate contract). Wave 3 (live Vast UATs + prod flag removal) PENDING —
+> `autonomous:false` operator checkpoint.
 
 # Phase 14 — Validation Strategy
 
@@ -39,10 +45,10 @@ created: 2026-06-17
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | Status |
 |---------|------|------|-------------|-----------|-------------------|--------|
-| 14-01-T1 (rework flag-pinned tests → device, RED) | 14-01 | 1 | STT-AUTO, STT-FAILSAFE | unit (RED) | `cd gateway && go vet ./internal/primary/ 2>&1 \| grep -qi "WhisperDevice\|DeviceReport"` | ⬜ pending |
-| 14-01-T2 (WhisperDevice field + 3-site gate + flag delete + main.go wire, GREEN) | 14-01 | 1 | STT-AUTO, STT-FAILSAFE, STT-PROBE, FLAG-REMOVE | unit + compile + source-grep | `cd gateway && go build ./... && go test ./internal/primary/... ./internal/config/... -count=1` | ⬜ pending |
-| 14-02-T1 (onstart VRAM→device export + :9100 responder, grep-gate) | 14-02 | 2 | POD-VRAM, STT-PROBE | unit (grep-gate) | `cd gateway && go test ./internal/primary/... -run "PrimaryOnstart\|Onstart" -count=1` | ⬜ pending |
-| 14-02-T2 (supervisord cpu-pin drop + -p 9100 forward) | 14-02 | 2 | STT-AUTO, POD-VRAM | unit + source-grep | `cd gateway && go test ./internal/primary/... -run "CreateRequest\|Lifecycle" -count=1` | ⬜ pending |
+| 14-01-T1 (rework flag-pinned tests → device, RED) | 14-01 | 1 | STT-AUTO, STT-FAILSAFE | unit (RED) | `cd gateway && go vet ./internal/primary/ 2>&1 \| grep -qi "WhisperDevice\|DeviceReport"` | ✅ green |
+| 14-01-T2 (WhisperDevice field + 3-site gate + flag delete + main.go wire, GREEN) | 14-01 | 1 | STT-AUTO, STT-FAILSAFE, STT-PROBE, FLAG-REMOVE | unit + compile + source-grep | `cd gateway && go build ./... && go test ./internal/primary/... ./internal/config/... -count=1` | ✅ green |
+| 14-02-T1 (onstart VRAM→device export + :9100 responder, grep-gate) | 14-02 | 2 | POD-VRAM, STT-PROBE | unit (grep-gate) | `cd gateway && go test ./internal/primary/... -run "PrimaryOnstart\|Onstart" -count=1` | ✅ green |
+| 14-02-T2 (supervisord cpu-pin drop + -p 9100 forward) | 14-02 | 2 | STT-AUTO, POD-VRAM | unit + source-grep | `cd gateway && go test ./internal/primary/... -run "CreateRequest\|Lifecycle" -count=1` | ✅ green |
 | 14-03-T1 (image build/push + uat-14.sh author) | 14-03 | 3 | STT-SHAPE-3090, STT-SHAPE-GPU | syntax | `bash -n pod/smoke/uat-14.sh` | ⬜ pending |
 | 14-03-T2 (2 live Vast UATs) | 14-03 | 3 | STT-SHAPE-3090, STT-SHAPE-GPU, STT-MIGRATE | live UAT (manual) | manual Vast provision + real-audio POST + OOM grep | ⬜ pending |
 | 14-03-T3 (verdict rollup) | 14-03 | 3 | FLAG-REMOVE | source | `test -f 14-VERIFICATION.md` | ⬜ pending |
