@@ -405,6 +405,7 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		"-p 8001:8001": "1", // STT (speaches)
 		"-p 8003:8003": "1", // TTS (chatterbox) — Phase 06.7 D-11 (was embed:8002)
 		"-p 9400:9400": "1", // GPU metrics (dcgm-exporter)
+		"-p 9100:9100": "1", // device-report responder (SEED-019 part 2) — gateway reads /whisper_device at Ready
 
 		// MinIO 4 credentials — must all be non-empty per the in-pod
 		// `: "${MINIO_*:?required}"` guards. The gateway does not
