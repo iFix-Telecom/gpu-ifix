@@ -6,6 +6,7 @@
 package primary
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -17,8 +18,6 @@ import (
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
-
-	"os"
 )
 
 // Wave 0 LOCKED image digest literals — these are the EXACT strings the
@@ -385,6 +384,77 @@ func TestPrimaryOnstart_AriaC_NotMcCp(t *testing.T) {
 	require.Contains(t, req.Args[1], "aria2c", "weight download must use aria2c multi-stream")
 	require.NotRegexp(t, regexp.MustCompile(`mc\s+cp\s+ifix/`), req.Args[1],
 		"mc cp single-stream weight download is forbidden (Wave 0 spike Round 1 EOF failure)")
+}
+
+// TestPrimaryOnstart_VRAMAdaptiveWhisperDevice — SEED-019 part 2 (Plan 14-02).
+// The onstart bash must contain the VRAM-adaptive whisper-device block:
+// a one-shot nvidia-smi total-VRAM sum, the 30000 MiB threshold, exports of
+// WHISPER__INFERENCE_DEVICE / WHISPER__DEVICE_INDEX / WHISPER_DEVICE, and the
+// :9100 /whisper_device device-report responder — all BEFORE the appended
+// `exec supervisord`. No `bc` (not in the pod image — awk math only) and no
+// fmt.Sprintf (Pitfall #9 raw-string invariant).
+func TestPrimaryOnstart_VRAMAdaptiveWhisperDevice(t *testing.T) {
+	r := newReconcilerWith(cfgWithDefaults())
+	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
+	require.NoError(t, err)
+	script := req.Args[1]
+
+	// VRAM probe + threshold.
+	require.Contains(t, script, "nvidia-smi --query-gpu=memory.total",
+		"one-shot total-VRAM read for the whisper-device decision")
+	require.Contains(t, script, "30000",
+		"VRAM>=30000 MiB threshold (cuda) vs below (cpu)")
+
+	// Device exports inherited by [program:speaches] (conf:46 no longer pins).
+	require.Contains(t, script, "WHISPER__INFERENCE_DEVICE",
+		"export the speaches inference device")
+	require.Contains(t, script, "WHISPER__DEVICE_INDEX",
+		"pin whisper to the max-free GPU index on cuda shapes")
+	require.Contains(t, script, "WHISPER_DEVICE",
+		"summary var the :9100 responder reports")
+
+	// Max-free index pick (sort by memory.free desc), NOT the non-Qwen GPU.
+	require.Contains(t, script, "nvidia-smi --query-gpu=index,memory.free",
+		"max-free index pick for WHISPER__DEVICE_INDEX")
+
+	// :9100 device-report responder (the contract Plan 14-01 parses).
+	require.Contains(t, script, "/whisper_device",
+		":9100 device-report path the gateway reads at Ready")
+	require.Contains(t, script, "9100",
+		"device-report responder binds container port 9100")
+
+	// The device block must run BEFORE supervisord (exports must reach the child).
+	idxDevice := strings.Index(script, "WHISPER__INFERENCE_DEVICE")
+	idxExec := strings.Index(script, "exec /usr/bin/supervisord")
+	require.GreaterOrEqual(t, idxDevice, 0)
+	require.GreaterOrEqual(t, idxExec, 0)
+	require.Less(t, idxDevice, idxExec,
+		"whisper-device export must precede exec supervisord so the child inherits it")
+
+	// No bc dependency (Dockerfile installs no bc — awk only).
+	require.NotRegexp(t, regexp.MustCompile(`\bbc\b`), script,
+		"bc is not in the pod image; VRAM math must use awk")
+}
+
+// TestPrimaryOnstart_NoFmtSprintf — Pitfall #9 invariant: the onstart source
+// is a raw-string Go const assembled by plain concatenation. fmt.Sprintf in
+// onstart.go would reintroduce the shell-quoting-at-template-expansion hazard.
+func TestPrimaryOnstart_NoFmtSprintf(t *testing.T) {
+	src, err := os.ReadFile("onstart.go")
+	require.NoError(t, err)
+	require.NotContains(t, string(src), "fmt.Sprintf",
+		"Pitfall #9: onstart.go must use raw-string concatenation, never fmt.Sprintf")
+}
+
+// TestBuildPrimaryCreateRequest_Forwards9100 — SEED-019 part 2: the gateway
+// must forward container port 9100 so it can reach the pod's /whisper_device
+// device-report responder (the contract Plan 14-01 consumes).
+func TestBuildPrimaryCreateRequest_Forwards9100(t *testing.T) {
+	r := newReconcilerWith(cfgWithDefaults())
+	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, "1", req.Env["-p 9100:9100"],
+		"port 9100 (device-report responder) must be forwarded for the gateway probe")
 }
 
 // TestBuildPrimaryCreateRequest_SSHDebugConditional — PodDebugSSHPublicKey
