@@ -290,9 +290,21 @@ func runningPrimaryInstance(id int64) vast.Instance {
 			"8001/tcp": {{HostIP: "0.0.0.0", HostPort: "33001"}},
 			"8003/tcp": {{HostIP: "0.0.0.0", HostPort: "33003"}},
 			"9400/tcp": {{HostIP: "0.0.0.0", HostPort: "33400"}},
+			// Phase 14: :9100 device-report responder port (so podDeviceReportURL
+			// is non-empty and Deps.DeviceReport is consulted for the stt gate).
+			"9100/tcp": {{HostIP: "0.0.0.0", HostPort: "33100"}},
 		},
 	}
 }
 
 // alwaysHealthy is a HealthCheck closure returning true for any URL.
 func alwaysHealthy(_ context.Context, _ string) bool { return true }
+
+// cudaDeviceReport is the DeviceReport seam for "pod reports whisper on GPU"
+// (SEED-019 part 3 / Phase 14). Wire it as Deps.DeviceReport so
+// primaryPodURLs.WhisperDevice == "cuda" and the markReady/recovery paths fire
+// the stt tier-0 override — restoring the full llm/stt/tts trio that the
+// pre-Phase-14 unconditional override produced. Tests simulating a healthy
+// GPU-capable pod use this; tests asserting no override omit it (nil → device
+// "" → stt override correctly suppressed → routes to tier-1 gemini-stt).
+func cudaDeviceReport(_ context.Context, _ string) string { return "cuda" }

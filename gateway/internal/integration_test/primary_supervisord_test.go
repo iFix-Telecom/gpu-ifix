@@ -106,8 +106,9 @@ func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 		Rule:        alwaysInPeakRule(),
 		DB:          pool,
 		Redis:       rdb,
-		ReplicaID:   "test-supervisord-happy",
-		HealthCheck: healthChecker,
+		ReplicaID:    "test-supervisord-happy",
+		HealthCheck:  healthChecker,
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (full llm/stt/tts trio)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)
@@ -272,8 +273,9 @@ func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testi
 		Rule:        alwaysInPeakRule(),
 		DB:          pool,
 		Redis:       rdb,
-		ReplicaID:   "test-supervisord-autorestart",
-		HealthCheck: healthChecker,
+		ReplicaID:    "test-supervisord-autorestart",
+		HealthCheck:  healthChecker,
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires after autorestart (full trio)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)

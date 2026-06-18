@@ -82,8 +82,9 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 		Rule:        neverInPeakRule(),
 		DB:          pool,
 		Redis:       rdb,
-		ReplicaID:   "test-restart-healthy",
-		HealthCheck: alwaysHealthy,
+		ReplicaID:    "test-restart-healthy",
+		HealthCheck:  alwaysHealthy,
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt re-override on recovery (full trio)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)

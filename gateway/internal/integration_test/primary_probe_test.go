@@ -86,8 +86,9 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 		Rule:        alwaysInPeakRule(),
 		DB:          pool,
 		Redis:       rdb,
-		ReplicaID:   "test-primary-probe",
-		HealthCheck: healthCheck,
+		ReplicaID:    "test-primary-probe",
+		HealthCheck:  healthCheck,
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (full llm/stt/tts trio)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)
