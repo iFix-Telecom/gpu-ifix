@@ -77,15 +77,15 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 
 	fsm := primary.NewFSM(nil, nil)
 	r := primary.NewReconciler(primary.Deps{
-		Cfg:         cfg,
-		Log:         slog.New(slog.DiscardHandler),
-		Vast:        fakeV,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		FSM:         fsm,
-		Rule:        alwaysInPeakRule(),
-		DB:          pool,
-		Redis:       rdb,
+		Cfg:          cfg,
+		Log:          slog.New(slog.DiscardHandler),
+		Vast:         fakeV,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		FSM:          fsm,
+		Rule:         alwaysInPeakRule(),
+		DB:           pool,
+		Redis:        rdb,
 		ReplicaID:    "test-primary-probe",
 		HealthCheck:  healthCheck,
 		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (full llm/stt/tts trio)

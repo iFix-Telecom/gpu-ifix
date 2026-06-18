@@ -97,15 +97,15 @@ func TestSupervisord_4ServicesReachableOnLocalhost(t *testing.T) {
 
 	fsm := primary.NewFSM(nil, nil)
 	r := primary.NewReconciler(primary.Deps{
-		Cfg:         cfg,
-		Log:         slog.New(slog.DiscardHandler),
-		Vast:        fakeV,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		FSM:         fsm,
-		Rule:        alwaysInPeakRule(),
-		DB:          pool,
-		Redis:       rdb,
+		Cfg:          cfg,
+		Log:          slog.New(slog.DiscardHandler),
+		Vast:         fakeV,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		FSM:          fsm,
+		Rule:         alwaysInPeakRule(),
+		DB:           pool,
+		Redis:        rdb,
 		ReplicaID:    "test-supervisord-happy",
 		HealthCheck:  healthChecker,
 		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (full llm/stt/tts trio)
@@ -264,15 +264,15 @@ func TestSupervisord_AutorestartSimulated_RecoveryAfterTransientFailure(t *testi
 
 	fsm := primary.NewFSM(nil, nil)
 	r := primary.NewReconciler(primary.Deps{
-		Cfg:         cfg,
-		Log:         slog.New(slog.DiscardHandler),
-		Vast:        fakeV,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		FSM:         fsm,
-		Rule:        alwaysInPeakRule(),
-		DB:          pool,
-		Redis:       rdb,
+		Cfg:          cfg,
+		Log:          slog.New(slog.DiscardHandler),
+		Vast:         fakeV,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		FSM:          fsm,
+		Rule:         alwaysInPeakRule(),
+		DB:           pool,
+		Redis:        rdb,
 		ReplicaID:    "test-supervisord-autorestart",
 		HealthCheck:  healthChecker,
 		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires after autorestart (full trio)
