@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-last_updated: "2026-06-15T09:28:31.203Z"
+last_updated: "2026-06-18T01:06:45.111Z"
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 7
-  total_plans: 48
-  completed_plans: 48
-  percent: 70
+  total_plans: 56
+  completed_plans: 50
+  percent: 64
 ---
 
 # STATE: ifix-ai-gateway
@@ -136,6 +136,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 - **Phases completed:** 6 / 11 (1–6 on disk; Phase 6.5 plans done, human UAT now UNBLOCKED by Phase 6 close)
 - **Plans completed:** 59 / 61 (Phase 1: 9/9 · Phase 2: 8/9, 02-09 deferred · Phase 3: 8/8 · Phase 4: 9/9 · Phase 5: 8/8 · Phase 6: 7/7, all GREEN with SC-2 perf gap noted · Phase 6.5: 10/11, 06.5-11 human UAT now unblocked)
 - **v1 requirements covered by executed plans:** POD-01..07, GW-01..10, TEN-01..09, RES-01..08, LSH-01..05, PRV-01..10 — 49/70 (remaining: OBS-01..08, INT-01..06, PRD-01..07 in Phases 7-10)
+- **Phase 14 (vram-adaptive-stt):** 14-01 (gateway device-gate) DONE · 14-02 (pod VRAM-adaptive whisper + :9100 responder, ~5min, 2 tasks, 4 files) DONE · 14-03 (image rebuild + live Vast UAT, autonomous:false) PENDING
 
 ## Accumulated Context
 
@@ -204,7 +205,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ## Session Continuity
 
-- **Last session:** 2026-06-15T09:28:31.192Z
+- **Last session:** 2026-06-18T01:06:45.098Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
@@ -220,3 +221,4 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 - [Phase ?]: [Phase 06.7]: 06.7-04 voices.tenant_id = UUID FK->tenants(id) ON DELETE CASCADE, matching the verified ai_gateway schema convention (api_keys/usage_counters/billing_events) over the PATTERNS TEXT placeholder; no .pt column (Chatterbox zero-shot D-08)
 - [Phase ?]: Phase 11.2 Plan 07 — created docs/RUNBOOK-OPS.md as canonical STT cascade operator playbook
 - [Phase ?]: Phase 11.2 Plan 07 — gateway/.env.example created mirroring pod/.env.example parity
+- [Phase 14]: 14-02 — pod self-decides whisper device at onstart via nvidia-smi total-VRAM sum (awk, no bc): >=30000 MiB → cuda pinned to the max-free GPU index (WHISPER__DEVICE_INDEX; llama --split-mode layer leaves no Qwen-free card so max-free, not non-Qwen, is the headroom pick); below threshold / nvidia-smi absent → cpu. Exports precede exec supervisord so [program:speaches] inherits the device (supervisord.conf:46 cpu pin removed, HF_HUB_CACHE kept — env inheritance Option A, fail-open). Minimal python3 :9100 /whisper_device responder (NOT health-bridge — that's compose-only) + -p 9100:9100 forwarded; fulfills the Plan 14-01 device-report contract. Image rebuild + live UAT gated in 14-03.
