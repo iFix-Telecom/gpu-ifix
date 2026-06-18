@@ -438,6 +438,14 @@ func runningInstanceWithAllPorts(id int64) vast.Instance {
 	}
 }
 
+// cudaDeviceReport is the standard test seam for "pod reports whisper on
+// GPU" (SEED-019 part 3). Tests that assert the "stt" tier-0 override fires
+// wire this as Deps.DeviceReport so primaryPodURLs.WhisperDevice == "cuda"
+// gates the override on. Tests that want the fail-safe (no stt override)
+// either omit DeviceReport (nil → device "") or wire a closure returning a
+// non-"cuda" value.
+func cudaDeviceReport(_ context.Context, _ string) string { return "cuda" }
+
 // ===========================================================================
 // evaluateAsleep / cooldown gate tests
 // ===========================================================================
@@ -616,12 +624,13 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 	dcgm := &fakeDCGMScraper{}
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
-		Cfg:         cfg,
-		FSM:         fsm,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		Rule:        alwaysInPeakRule(),
-		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Cfg:          cfg,
+		FSM:          fsm,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		Rule:         alwaysInPeakRule(),
+		HealthCheck:  func(_ context.Context, _ string) bool { return true },
+		DeviceReport: cudaDeviceReport, // SEED-019 part 3: pod whisper on GPU → stt override fires
 		Vast: &fakeVast{
 			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
 				return runningInstanceWithAllPorts(42), nil
@@ -1140,10 +1149,11 @@ func TestMarkReady_OverridesTier0_2Roles(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 
 	urls := primaryPodURLs{
-		LLM:  "http://1.2.3.4:33000/v1/models",
-		STT:  "http://1.2.3.4:33001/health",
-		TTS:  "http://1.2.3.4:33003/health",
-		DCGM: "http://1.2.3.4:33400/metrics",
+		LLM:           "http://1.2.3.4:33000/v1/models",
+		STT:           "http://1.2.3.4:33001/health",
+		TTS:           "http://1.2.3.4:33003/health",
+		DCGM:          "http://1.2.3.4:33400/metrics",
+		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 	err := r.markReady(context.Background(), 5, urls, 0.30, testLogger())
 	require.NoError(t, err)
@@ -1540,13 +1550,14 @@ func TestRecoverOpenLifecycle_HealthyInstanceRestoresReady(t *testing.T) {
 		},
 	}
 	r := buildReconciler(t, Deps{
-		Cfg:         cfg,
-		FSM:         fsm,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		HealthCheck: func(_ context.Context, _ string) bool { return true },
-		Vast:        fakeV,
-		Rule:        alwaysInPeakRule(),
+		Cfg:          cfg,
+		FSM:          fsm,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		HealthCheck:  func(_ context.Context, _ string) bool { return true },
+		DeviceReport: cudaDeviceReport, // SEED-019 part 3: GPU pod → stt re-override on recovery
+		Vast:         fakeV,
+		Rule:         alwaysInPeakRule(),
 	})
 	r.SetQueriesForTest(gen.New(dbtx))
 
@@ -2134,10 +2145,11 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	r.activeLifecycleID.Store(7)
 	// activePodURLs must be populated for the re-assert loop to know the URLs.
 	urls := primaryPodURLs{
-		LLM:  "http://203.0.113.7:33000/v1/models",
-		STT:  "http://203.0.113.7:33001/health",
-		TTS:  "http://203.0.113.7:33003/health",
-		DCGM: "http://203.0.113.7:33400/metrics",
+		LLM:           "http://203.0.113.7:33000/v1/models",
+		STT:           "http://203.0.113.7:33001/health",
+		TTS:           "http://203.0.113.7:33003/health",
+		DCGM:          "http://203.0.113.7:33400/metrics",
+		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt re-assert fires
 	}
 	r.activePodURLs.Store(&urls)
 
@@ -2179,10 +2191,11 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 
 	urls := primaryPodURLs{
-		LLM:  "http://1.2.3.4:33000/v1/models",
-		STT:  "http://1.2.3.4:33001/health",
-		TTS:  "http://1.2.3.4:33003/health",
-		DCGM: "http://1.2.3.4:33400/metrics",
+		LLM:           "http://1.2.3.4:33000/v1/models",
+		STT:           "http://1.2.3.4:33001/health",
+		TTS:           "http://1.2.3.4:33003/health",
+		DCGM:          "http://1.2.3.4:33400/metrics",
+		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
 
@@ -2258,10 +2271,11 @@ func TestMarkReady_OverrideTier0_CalledFor_STT(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 
 	urls := primaryPodURLs{
-		LLM:  "http://primary:33000/v1/models",
-		STT:  "http://primary:33001/health",
-		TTS:  "http://primary:33003/health",
-		DCGM: "http://primary:33400/metrics",
+		LLM:           "http://primary:33000/v1/models",
+		STT:           "http://primary:33001/health",
+		TTS:           "http://primary:33003/health",
+		DCGM:          "http://primary:33400/metrics",
+		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 	require.NoError(t, r.markReady(context.Background(), 7, urls, 0.30, testLogger()))
 
@@ -2702,10 +2716,11 @@ func markReadyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redi
 
 func markReadyURLs() primaryPodURLs {
 	return primaryPodURLs{
-		LLM:  "http://1.2.3.4:33000/v1/models",
-		STT:  "http://1.2.3.4:33001/health",
-		TTS:  "http://1.2.3.4:33003/health",
-		DCGM: "http://1.2.3.4:33400/metrics",
+		LLM:           "http://1.2.3.4:33000/v1/models",
+		STT:           "http://1.2.3.4:33001/health",
+		TTS:           "http://1.2.3.4:33003/health",
+		DCGM:          "http://1.2.3.4:33400/metrics",
+		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 }
 

@@ -45,10 +45,10 @@ func cfgWithDefaults() config.Config {
 		PrimaryInfinityImage: wave0InfinityImage,
 		PrimaryDCGMImage:     wave0DCGMImage,
 
-		// SEED-019 part 3: PRIMARY_POD_SERVE_STT is DELETED. The "stt" tier-0
-		// override is now gated on the pod-reported whisper_device value
-		// (primaryPodURLs.WhisperDevice, via Deps.DeviceReport) rather than a
-		// config flag — so there is no PrimaryPodServeSTT field to seed here.
+		// SEED-019 part 3: the manual STT-serve config flag is DELETED. The
+		// "stt" tier-0 override is now gated on the pod-reported whisper_device
+		// value (primaryPodURLs.WhisperDevice, via Deps.DeviceReport) rather
+		// than a config flag — so there is no such field to seed here.
 
 		// Qwen GGUF — Wave 0 verified digest (per 06.6-WAVE0-GATES.md
 		// Decision 3 default).

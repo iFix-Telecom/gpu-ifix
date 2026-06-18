@@ -114,6 +114,17 @@ type primaryPodURLs struct {
 	STT  string // Phase 11.2 D-B5′: restored (revert 11.1 D-A4 — speaches back on pod)
 	TTS  string
 	DCGM string
+
+	// WhisperDevice carries the pod-reported whisper inference device read
+	// at Ready from the pod's :9100/whisper_device report (SEED-019 part 3 —
+	// replaces the deleted manual STT-serve config flag). Whitelisted to
+	// {"cuda","cpu"}; ANY other value, a non-200, a parse error, a missing
+	// 9100 port mapping, an unreachable pod, or a nil DeviceReport closure →
+	// "" (unknown). Only WhisperDevice == "cuda" gates the "stt" tier-0
+	// override at the 3 reconciler sites; "cpu"/""/unknown fail-safe to NO
+	// override so STT falls through to the tier-1 gemini-stt cascade
+	// (preserving today's prod behavior during the pod-image rollout window).
+	WhisperDevice string
 }
 
 // Deps is the full wiring for the primary Reconciler after Plan 06.6-06a.
@@ -165,6 +176,18 @@ type Deps struct {
 	// false-positive destroys); the cold-start budget remains the backstop.
 	// Tests inject a scriptable closure.
 	Reachable func(ctx context.Context, url string) bool
+
+	// DeviceReport fetches the pod-reported whisper device from the pod's
+	// :9100/whisper_device report (SEED-019 part 3). Given the report URL it
+	// GETs the body, bounds the read (io.LimitReader, parity probes/clickup),
+	// JSON-decodes {"whisper_device":"cuda"|"cpu"}, and returns the value
+	// ONLY if it is exactly "cuda" or "cpu" — else "" (the whitelist /
+	// default-deny gate, fail-safe to gemini-stt on a compromised or
+	// old-image pod). When nil, the reconciler treats the device as ""
+	// (no stt override) — preserving prod behavior before the pod ships the
+	// report. Production wires this in main.go; tests inject a scriptable
+	// closure the same way HealthCheck is wired.
+	DeviceReport func(ctx context.Context, url string) string
 
 	// Loader is the upstream loader (3-role tier-0 override target). Plan
 	// 06.6-06b satisfies LoaderAdapter on the real *upstreams.Loader.
@@ -500,6 +523,33 @@ func (r *Reconciler) podTTSURL(inst vast.Instance) string {
 // a running Vast.ai instance.
 func (r *Reconciler) podDCGMURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "9400", "/metrics")
+}
+
+// podDeviceReportURL extracts the public device-report endpoint
+// (9100/tcp -> /whisper_device) from a running Vast.ai instance (SEED-019
+// part 3). Returns "" when the 9100 port is not mapped — the device then
+// fail-safes to "" (no stt override). Plan 14-02 stands a minimal static
+// responder on container port 9100 that answers this path with
+// {"whisper_device":"cuda"|"cpu"}.
+func (r *Reconciler) podDeviceReportURL(inst vast.Instance) string {
+	return r.podPortURL(inst, "9100", "/whisper_device")
+}
+
+// deviceReport returns the pod-reported whisper device for inst, or "" when
+// the report is unavailable. Nil-safe: returns "" if Deps.DeviceReport is
+// not wired (prod before the pod ships the report, or a test that does not
+// exercise the device gate) or if the 9100 port is unmapped. The returned
+// value is already whitelisted by the DeviceReport closure (production
+// main.go) — the reconciler only further gates "cuda" at the override sites.
+func (r *Reconciler) deviceReport(inst vast.Instance) string {
+	if r.deps.DeviceReport == nil {
+		return ""
+	}
+	url := r.podDeviceReportURL(inst)
+	if url == "" {
+		return ""
+	}
+	return r.deps.DeviceReport(context.Background(), url)
 }
 
 // roleURL maps a dynamic primary role ("llm"/"stt"/"tts") to its raw

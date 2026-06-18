@@ -442,10 +442,12 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// as vulnerable to an emerg cutback clearing its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
 		for _, role := range []string{"llm", "stt", "tts"} {
-			// SEED-018/019 part 3: when PRIMARY_POD_SERVE_STT=false the pod's
-			// CPU whisper is too slow; skip the "stt" override so STT falls to
-			// the tier-1 cloud cascade (gemini-stt). llm/tts unaffected.
-			if role == "stt" && !r.cfg.PrimaryPodServeSTT {
+			// SEED-019 part 3: gate the "stt" re-assert on the pod-reported
+			// whisper_device. Only a GPU pod (device=="cuda") re-asserts stt;
+			// for cpu/missing/unknown the pod's whisper is too slow (or absent)
+			// so STT falls to the tier-1 cloud cascade (gemini-stt). llm/tts
+			// unaffected. (Replaces the deleted manual STT-serve config flag.)
+			if role == "stt" && urls.WhisperDevice != "cuda" {
 				continue
 			}
 			if _, set := r.deps.Loader.Tier0OverrideURL(role); !set {
@@ -869,10 +871,12 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 		// readiness suffix here so the dispatcher's ReverseProxy target is
 		// the BASE URL (parity emerg markHealthy / stripHealthSuffix).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		// SEED-018/019 part 3: gate the "stt" override on PRIMARY_POD_SERVE_STT
-		// (default true). When false, STT routes to the tier-1 gemini-stt
-		// cascade instead of the pod's slow CPU whisper.
-		if r.cfg.PrimaryPodServeSTT {
+		// SEED-019 part 3: gate the "stt" override on the pod-reported
+		// whisper_device. device=="cuda" (pod whisper on GPU) → override; any
+		// other value (cpu/missing/unknown, the fail-safe) → STT routes to the
+		// tier-1 gemini-stt cascade instead of the pod. Replaces the deleted
+		// manual STT-serve config flag.
+		if urls.WhisperDevice == "cuda" {
 			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		}
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
@@ -1535,6 +1539,10 @@ func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 		STT:  r.podSTTURL(inst), // Phase 11.2 D-B5′: restored
 		TTS:  r.podTTSURL(inst),
 		DCGM: r.podDCGMURL(inst),
+		// SEED-019 part 3: capture the pod-reported whisper device (already
+		// whitelisted to cuda/cpu; "" when unavailable). Gates the "stt"
+		// tier-0 override at the 3 sites below (replaces the deleted flag).
+		WhisperDevice: r.deviceReport(inst),
 	}
 }
 
@@ -1627,8 +1635,10 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if r.deps.Loader != nil {
 		// Phase 11.2 (D-B5′): 3-role restart-recovery override.
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
-		// SEED-018/019 part 3: gate "stt" override on PRIMARY_POD_SERVE_STT.
-		if r.cfg.PrimaryPodServeSTT {
+		// SEED-019 part 3: gate "stt" override on the pod-reported
+		// whisper_device (cuda → override; else fail-safe to gemini-stt).
+		// Replaces the deleted manual STT-serve config flag.
+		if urls.WhisperDevice == "cuda" {
 			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		}
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
