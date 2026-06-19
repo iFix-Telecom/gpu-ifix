@@ -206,27 +206,39 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # The pod is the source of truth for whether its whisper runs on GPU. Sum total
 # VRAM across all visible GPUs via nvidia-smi (present on every CUDA Vast host;
 # the image ships no calculator binary — Dockerfile uses awk only). On a >=30000 MiB
-# shape (2x3090=48, 5090=32) export cuda + pin WHISPER__DEVICE_INDEX to the GPU
-# with the MOST free VRAM right now (llama runs --split-mode layer, spreading
-# Qwen across ALL GPUs, so there is no "Qwen-free" card — max-free index is the
-# correct headroom pick, RESEARCH gap #2). Below threshold (1x3090=24) export
-# cpu so the gateway fail-safes STT to tier-1 gemini instead of slow CPU whisper.
+# shape (2x3090=48, 5090=32) export cuda + pin WHISPER__DEVICE_INDEX.
+# SEED-019 part 4 (2026-06-19): qwen is now PINNED to GPU0 (supervisord:
+# --split-mode none --main-gpu 0), so on MULTI-GPU shapes the LAST card is
+# Qwen-free — dedicate it to whisper (WHISPER__DEVICE_INDEX = NUM_GPUS-1) → no
+# shared-card CUDA OOM. The old "max-free at onstart" pick was unreliable: at
+# onstart (before llama loads) every card reads ~empty, tying to GPU0, the very
+# card qwen then loads onto → OOM (UAT B "instance terminal", 2026-06-19). On a
+# single-GPU >=30GB shape (5090=32) there is no second card, so whisper shares
+# GPU0 with qwen (32GB has the headroom). Below threshold (1x3090=24) export cpu
+# so the gateway fail-safes STT to tier-1 gemini instead of slow CPU whisper.
 # These exports happen BEFORE exec supervisord so [program:speaches] inherits
-# them (supervisord.conf:46 no longer pins WHISPER__INFERENCE_DEVICE — env
+# them (supervisord.conf no longer pins WHISPER__INFERENCE_DEVICE — env
 # inheritance Option A, fail-open to speaches default auto/0 if ever unset).
 WHISPER_GPU_THRESHOLD_MIB=30000
 TOTAL_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END{print s}')
+NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'END{print NR}')
 if [ -z "${TOTAL_VRAM_MIB:-}" ]; then
   # nvidia-smi absent or empty → fail-safe to cpu (gateway routes STT to gemini).
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: nvidia-smi unavailable; whisper device=cpu (fail-safe)"
   export WHISPER__INFERENCE_DEVICE=cpu
   export WHISPER_DEVICE=cpu
 elif [ "$TOTAL_VRAM_MIB" -ge "$WHISPER_GPU_THRESHOLD_MIB" ]; then
-  WHISPER_IDX=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null | sort -t, -k2 -n -r | head -1 | cut -d, -f1 | tr -d ' ')
+  # qwen pinned to GPU0; dedicate the LAST card to whisper on multi-GPU shapes
+  # (Qwen-free), else card 0 on a single-GPU >=30GB shape.
+  if [ "${NUM_GPUS:-1}" -ge 2 ]; then
+    WHISPER_IDX=$(( NUM_GPUS - 1 ))
+  else
+    WHISPER_IDX=0
+  fi
   export WHISPER__INFERENCE_DEVICE=cuda
-  export WHISPER__DEVICE_INDEX="${WHISPER_IDX:-0}"
+  export WHISPER__DEVICE_INDEX="${WHISPER_IDX}"
   export WHISPER_DEVICE=cuda
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: total VRAM ${TOTAL_VRAM_MIB} MiB >= ${WHISPER_GPU_THRESHOLD_MIB}; whisper device=cuda index=${WHISPER__DEVICE_INDEX}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: total VRAM ${TOTAL_VRAM_MIB} MiB >= ${WHISPER_GPU_THRESHOLD_MIB} across ${NUM_GPUS} GPU(s); qwen pinned GPU0; whisper device=cuda index=${WHISPER__DEVICE_INDEX}"
 else
   export WHISPER__INFERENCE_DEVICE=cpu
   export WHISPER_DEVICE=cpu

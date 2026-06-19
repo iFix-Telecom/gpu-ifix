@@ -409,13 +409,17 @@ func TestPrimaryOnstart_VRAMAdaptiveWhisperDevice(t *testing.T) {
 	require.Contains(t, script, "WHISPER__INFERENCE_DEVICE",
 		"export the speaches inference device")
 	require.Contains(t, script, "WHISPER__DEVICE_INDEX",
-		"pin whisper to the max-free GPU index on cuda shapes")
+		"pin whisper to the Qwen-free GPU index on cuda multi-GPU shapes")
 	require.Contains(t, script, "WHISPER_DEVICE",
 		"summary var the :9100 responder reports")
 
-	// Max-free index pick (sort by memory.free desc), NOT the non-Qwen GPU.
-	require.Contains(t, script, "nvidia-smi --query-gpu=index,memory.free",
-		"max-free index pick for WHISPER__DEVICE_INDEX")
+	// SEED-019 part 4: qwen is pinned to GPU0 (supervisord --main-gpu 0), so on
+	// multi-GPU shapes whisper takes the LAST card (NUM_GPUS-1), the Qwen-free
+	// GPU — NOT the old "max-free at onstart" pick (unreliable before llama loads).
+	require.Contains(t, script, "nvidia-smi --query-gpu=index --format=csv,noheader",
+		"count GPUs to derive the Qwen-free whisper index")
+	require.Contains(t, script, "NUM_GPUS - 1",
+		"whisper pins to the last (Qwen-free) GPU on multi-GPU cuda shapes")
 
 	// :9100 device-report responder (the contract Plan 14-01 parses).
 	require.Contains(t, script, "/whisper_device",
