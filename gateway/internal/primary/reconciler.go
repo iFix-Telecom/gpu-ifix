@@ -747,8 +747,14 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 
 	inflight := int64(0)
 	if r.deps.Inflight != nil {
+		// Sum the upstreams that actually live on the primary pod
+		// (llama/speaches/chatterbox). embed is off-pod (D-03) — do not count it.
+		// Phase 11.2 D-B5′ / Phase 14: local-stt and local-tts are back on the
+		// pod, so the drain-complete gate must hold open until in-flight STT/TTS
+		// requests finish, not just LLM.
 		inflight = r.deps.Inflight.Count("local-llm") +
-			r.deps.Inflight.Count("local-embed")
+			r.deps.Inflight.Count("local-stt") +
+			r.deps.Inflight.Count("local-tts")
 	}
 
 	if inflight == 0 || elapsed >= grace {

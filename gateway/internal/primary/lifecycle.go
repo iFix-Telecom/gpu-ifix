@@ -65,10 +65,13 @@ type DCGMScraperAdapter interface {
 // InflightAdapter is the minimal surface the primary reconciler needs
 // from the shed.InflightRegistry. Plan 06.6-06b's job is to add Count on
 // the real *shed.InflightRegistry (wrapping the existing GlobalInflight)
-// so the reconciler can sum local-llm + local-embed inflight (Phase 11.1
-// D-A4: local-stt term removed — Whisper deleted from pod and DB)
-// during evaluateDraining (drain-complete gate: inflight==0 OR grace
-// elapsed → transition Draining→Destroying).
+// so the reconciler can sum the 3 on-pod upstreams (local-llm + local-stt
+// + local-tts, i.e. llama/speaches/chatterbox) inflight during
+// evaluateDraining. embed is off-pod (D-03 — static tier-0 row on a 24/7
+// CPU host) and is NOT counted; Phase 11.2 D-B5′ / Phase 14 restored STT
+// (and TTS) to the pod, so both must hold the drain open
+// (drain-complete gate: inflight==0 OR grace elapsed → transition
+// Draining→Destroying).
 type InflightAdapter interface {
 	Count(upstream string) int64
 }
