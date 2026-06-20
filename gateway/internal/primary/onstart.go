@@ -219,6 +219,19 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # These exports happen BEFORE exec supervisord so [program:speaches] inherits
 # them (supervisord.conf no longer pins WHISPER__INFERENCE_DEVICE — env
 # inheritance Option A, fail-open to speaches default auto/0 if ever unset).
+#
+# WR-05: the GPU0-vs-LAST-card coordination is OOM-safe ONLY if llama.cpp's
+# --main-gpu index space and faster-whisper's WHISPER__DEVICE_INDEX (CUDA
+# ordinal) enumerate the GPUs in the SAME order. Both default to the CUDA
+# runtime ordering, but that default is FASTEST_FIRST, which can reorder cards
+# vs physical/PCI layout and is not guaranteed stable across the two children.
+# Pin CUDA_DEVICE_ORDER=PCI_BUS_ID HERE (before exec supervisord) so BOTH
+# llama and speaches inherit it and enumerate identically + deterministically —
+# index 0 (qwen --main-gpu 0) and index NUM_GPUS-1 (whisper) then always
+# resolve to distinct physical cards on multi-GPU shapes, preserving the
+# UAT-B OOM fix. (Documented at the supervisord [program:llama]/[program:speaches]
+# boundary too.)
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 WHISPER_GPU_THRESHOLD_MIB=30000
 TOTAL_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END{print s}')
 NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'END{print NR}')
