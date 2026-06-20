@@ -354,7 +354,7 @@ func (r *Reconciler) ActivePodURLs() *primaryPodURLs {
 //   - Image: cfg.PrimaryTemplateImage (Wave 0 SHA-pinned to llama.cpp
 //     server-cuda-b9191, override allowed for the custom converseai-
 //     primary-pod image once GHA build-primary-pod publishes it).
-//   - Env: 4 port forwards (8000 LLM + 8001 STT + 8002 embed + 9400
+//   - Env: 4 port forwards (8000 LLM + 8001 STT + 8003 TTS + 9400
 //     DCGM per Pitfall #8) instead of 1; 3 weight key/sha pairs (Qwen +
 //     Whisper + BGE-M3) instead of 1; PRIMARY_SPEACHES_IMAGE /
 //     INFINITY_IMAGE / DCGM_IMAGE are NOT passed at runtime — they are
@@ -483,8 +483,8 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 // parity).
 //
 // Wave 0 LOCKED supervisord 4-services model: container ports 8000 (LLM,
-// llama-server /v1/models), 8001 (STT, speaches /health), 8002 (embed,
-// infinity /health), 9400 (DCGM exporter /metrics). All 4 land inside ONE
+// llama-server /v1/models), 8001 (STT, speaches /health), 8003 (TTS,
+// chatterbox /health), 9400 (DCGM exporter /metrics). All 4 land inside ONE
 // container's network namespace — children of supervisord PID 1. The
 // reconciler does not know about supervisord (orchestration opaque); it
 // only polls 4 HTTP endpoints on Vast-exposed host ports.

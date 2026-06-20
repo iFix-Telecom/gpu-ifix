@@ -46,7 +46,7 @@
 //
 // The reconciler does NOT know about supervisord — orchestration is opaque
 // from the gateway's view. It polls 4 HTTP endpoints on Vast-exposed host
-// ports (8000 LLM + 8001 STT + 8002 embed + 9400 DCGM). All 4 endpoints
+// ports (8000 LLM + 8001 STT + 8003 TTS + 9400 DCGM). All 4 endpoints
 // land inside ONE container's network namespace (supervisord PID 1 +
 // 4 child processes). This file is agnostic to that fact.
 package primary
@@ -1262,7 +1262,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 }
 
 // waitForReadyOrDestroy polls GetInstance every primaryInstancePollInterval
-// until either ALL 4 health endpoints pass (LLM + STT + embed + DCGM) OR
+// until either ALL 4 health endpoints pass (LLM + STT + TTS + DCGM) OR
 // a terminal exit path fires.
 //
 // Reviews #11 status_msg gate: each poll iteration ALSO inspects
@@ -1270,7 +1270,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // lifecycle-29 forensics fix from STATE.md.
 //
 // Wave 0 supervisord 4-services note: the 4 endpoints sit on 4 different
-// container ports (8000/8001/8002/9400) but share the SAME container's
+// container ports (8000/8001/8003/9400) but share the SAME container's
 // network namespace. The reconciler does not need to know this — it polls
 // 4 URLs via the Vast.ai-exposed host port mapping.
 func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) error {
@@ -1623,7 +1623,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		!r.deps.HealthCheck(ctx, urls.STT) ||
 		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
-		r.deps.Log.Warn("primary recover: 3-endpoint health check failed; closing as unhealthy orphan",
+		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
