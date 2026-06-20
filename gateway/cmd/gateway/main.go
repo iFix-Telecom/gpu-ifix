@@ -999,10 +999,15 @@ func main() {
 		// to the tier-1 gemini-stt cascade (fail-safe). The body is bounded
 		// (io.LimitReader, parity with the upstreams/alert probes) to cap a
 		// hostile/compromised pod's response (threat T-14-02).
-		primaryDeviceReport := func(dctx context.Context, u string) string {
-			if u == "" {
-				return ""
-			}
+		//
+		// WR-01: the pod's :9100 responder binds asynchronously (nohup) right
+		// before exec supervisord, so a single GET at pod-Ready can lose the
+		// startup race and read "" → a GPU pod that CAN serve STT silently
+		// routes to the costlier tier-1 cascade for its whole lifecycle. To
+		// close that race we retry the fetch up to 3 times with a short backoff;
+		// a retry only fires on a transient miss (empty/non-200/parse error),
+		// NOT on a legitimate "cpu" value (which is a valid terminal answer).
+		deviceReportOnce := func(dctx context.Context, u string) string {
 			probeCtx, cancel := context.WithTimeout(dctx, 5*time.Second)
 			defer cancel()
 			req, rerr := http.NewRequestWithContext(probeCtx, http.MethodGet, u, nil)
@@ -1032,6 +1037,26 @@ func main() {
 			default:
 				return "" // whitelist / default-deny → fail-safe to gemini-stt
 			}
+		}
+		primaryDeviceReport := func(dctx context.Context, u string) string {
+			if u == "" {
+				return ""
+			}
+			const deviceReportAttempts = 3
+			const deviceReportBackoff = 500 * time.Millisecond
+			for attempt := 0; attempt < deviceReportAttempts; attempt++ {
+				if dev := deviceReportOnce(dctx, u); dev != "" {
+					return dev
+				}
+				if attempt < deviceReportAttempts-1 {
+					select {
+					case <-dctx.Done():
+						return ""
+					case <-time.After(deviceReportBackoff):
+					}
+				}
+			}
+			return ""
 		}
 
 		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
