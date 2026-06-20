@@ -143,6 +143,7 @@ func TestDefaultClassifyRoute(t *testing.T) {
 		{"/v1/chat/completions", "llm"},
 		{"/v1/completions", "llm"},
 		{"/v1/audio/transcriptions", "stt"},
+		{"/v1/audio/speech", "tts"},
 		{"/v1/embeddings", "embed"},
 		{"/admin/anything", ""},
 		{"/health", ""},

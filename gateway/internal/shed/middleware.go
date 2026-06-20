@@ -85,6 +85,13 @@ func defaultClassifyRoute(path string) string {
 		return "llm"
 	case strings.HasPrefix(path, "/v1/audio/transcriptions"):
 		return "stt"
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		// Phase 14 CR-01 follow-up: TTS (/v1/audio/speech → local-tts)
+		// MUST be classified so trackAndPass increments Inflight("local-tts").
+		// Without this the evaluateDraining local-tts term reads a counter
+		// that is never incremented (always 0) and in-flight TTS requests
+		// do not hold the drain gate open.
+		return "tts"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
 	}
