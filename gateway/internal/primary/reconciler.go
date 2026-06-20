@@ -886,6 +886,19 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 		// manual STT-serve config flag.
 		if urls.WhisperDevice == "cuda" {
 			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
+		} else if urls.STT != "" {
+			// WR-04: the pod health-passed (STT is up on the pod, urls.STT set)
+			// yet we are NOT taking the tier-0 STT override because the reported
+			// whisper_device is not "cuda". On a legitimately cpu/24GB shape this
+			// is correct; but if the :9100 report lost its startup race (WR-01)
+			// or transiently mis-read, this is a silent cost regression — we pay
+			// the tier-1 gemini/groq/openai per-minute cost while a local STT
+			// service runs idle on the pod. Log it so operators can distinguish a
+			// chronically mis-read device report from an expected cpu shape.
+			log.Warn("primary: STT service is up on pod but tier-0 STT override skipped (whisper_device != cuda) — STT routes to tier-1 cascade",
+				"lifecycle_id", lifecycleID,
+				"whisper_device", urls.WhisperDevice,
+				"stt_url", urls.STT)
 		}
 		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
