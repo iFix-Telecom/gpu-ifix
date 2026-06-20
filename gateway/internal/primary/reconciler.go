@@ -762,8 +762,10 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 			"inflight", inflight, "elapsed_seconds", int64(elapsed.Seconds()),
 			"grace_seconds", int64(grace.Seconds()))
 		_ = r.deps.FSM.Transition(StateDraining, StateDestroying, now, "drain_complete")
-		_ = ctx
 	}
+	// ctx is unused here but retained for signature parity with the sibling
+	// evaluate* dispatchers (evaluateTick/Asleep/Ready/Destroying). Any future
+	// DB/Redis call added to this drain path MUST thread ctx for cancellation.
 }
 
 // evaluateDestroying calls vastutil.BestEffortDestroy + closes the
