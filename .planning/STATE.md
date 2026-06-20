@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-last_updated: "2026-06-15T09:28:31.203Z"
+status: executing
+last_updated: "2026-06-19T22:49:46.581Z"
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 7
-  total_plans: 48
-  completed_plans: 48
-  percent: 70
+  total_plans: 56
+  completed_plans: 50
+  percent: 64
 ---
 
 # STATE: ifix-ai-gateway
@@ -27,8 +27,8 @@ progress:
 
 ## Current Position
 
-Phase: 12
-Plan: Not started
+Phase: 14 (vram-adaptive-stt-gateway-auto-decides-pod-stt-via-pod-repor) — EXECUTING
+Plan: 1 of 3
 Next autonomous-eligible work: Phase 6.6.Y — implement cold-start + env-precedence fixes from 06.6.X-RESEARCH-COLD-START.md (Option A+B bundle recommended) + 06.6.X-RESEARCH-ENV-PRECEDENCE.md (hard fail-fast canonical PRIMARY_VAST_*_{PRIMARY,FALLBACK}). Phase 6.6.X total spend $0.040 / $1.20 cap.
 
 Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
@@ -129,13 +129,14 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Milestone complete
+- **Status:** Executing Phase 14
 
 ## Performance Metrics
 
 - **Phases completed:** 6 / 11 (1–6 on disk; Phase 6.5 plans done, human UAT now UNBLOCKED by Phase 6 close)
 - **Plans completed:** 59 / 61 (Phase 1: 9/9 · Phase 2: 8/9, 02-09 deferred · Phase 3: 8/8 · Phase 4: 9/9 · Phase 5: 8/8 · Phase 6: 7/7, all GREEN with SC-2 perf gap noted · Phase 6.5: 10/11, 06.5-11 human UAT now unblocked)
 - **v1 requirements covered by executed plans:** POD-01..07, GW-01..10, TEN-01..09, RES-01..08, LSH-01..05, PRV-01..10 — 49/70 (remaining: OBS-01..08, INT-01..06, PRD-01..07 in Phases 7-10)
+- **Phase 14 (vram-adaptive-stt):** 14-01 (gateway device-gate) DONE · 14-02 (pod VRAM-adaptive whisper + :9100 responder, ~5min, 2 tasks, 4 files) DONE · 14-03 (image rebuild + live Vast UAT, autonomous:false) PENDING. **Develop CI GREEN** (build-gateway + build-primary-pod) on tip `79a2cf3`. 3 post-CI fixes landed during orchestration (NOT in the device-gate logic itself): (1) `d5e086e` — 4 primary INTEGRATION tests asserted the full llm/stt/tts trio but their fake pod neither served `:9100` nor wired `Deps.DeviceReport` → stt correctly suppressed → 2 roles → CI red; fixed with a shared `cudaDeviceReport` helper + `9100/tcp` in the `runningPrimaryInstance` fixture; (2) flaky unit `TestHandleForceUpRequest_TransitionsAsleepToProvisioning` (async provision-fail races the lastProvisionFailureAt=nil assert) passed on rerun — pre-existing, left as-is; (3) `79a2cf3` gofmt realign of Deps blocks. **LESSON: integration tests (`-tags integration`, need Docker) + `gofmt -l` do NOT run in the executor's local `go test ./internal/primary/...` check — run `sudo env PATH=... go test -tags integration ./internal/integration_test/` + `gofmt -l` before pushing any reconciler change.**
 
 ## Accumulated Context
 
@@ -183,6 +184,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 260617-nrk | Fix 3 migration integration tests blocking build-gateway on main. Migration 0030 (probe_status_allow_config) added a new HEAD; the 0026/0029 round-trip tests hard-code `db.Down(n)` step counts relative to old HEAD (0029) → each Down walk off by one (reverted 0030 instead of target boundary). 0030 Down is row-neutral (CHECK constraint swap on upstreams), so bumped each count +1: 0026 UpDownUp Down(2)→Down(3); 0026 DownAborts Down(4)→Down(5); 0029 Down_Symmetric Down(1)→Down(2). 7/7 integration tests green locally. Unblocked `:main` build (30f4c81) → deployed prod gateway → PRIMARY_POD_SERVE_STT=false now live → STT routes to gemini (2.04s, HTTP 200) instead of pod CPU whisper (~17s timeout). | 2026-06-17 | c3655f7 | [260617-nrk-migration-down-counts](./quick/260617-nrk-migration-down-counts/) |
 | 260617-jod | SEED-018: gateway STT model-rewrite — `/v1/audio/transcriptions` sent literal `model=whisper` to speaches (local-stt + primary-override paths) → 404 "Model 'whisper' not installed" whenever pod Ready. Reused existing `rewriteMultipartModelViaResolver`/`BuildOpenAIWhisperDirector`: `NewAudioProxy` now takes resolver + rewrites via `local-stt` target (no bearer); new `NewDynamicOverrideSTTProxy` resolves override against tier-0 `local-stt` (synthetic `emergency_pod_stt` not in model_aliases). +373 test lines (both paths). build+`go test ./internal/...` green; openai-whisper/groq/gemini/WhisperAbortGuard unchanged. | 2026-06-17 | c22b482 | [260617-jod-rewrite-stt-model-alias-to-upstream-targ](./quick/260617-jod-rewrite-stt-model-alias-to-upstream-targ/) |
 | 260515-ayc | Fix STATE.md corruption (heading `## Current Position` duplicado injetado no meio do Phase 6.5 bullet) | 2026-05-15 | f44cf11 | [260515-ayc-fix-state-md-corruption-linha-40-42-tem-](./quick/260515-ayc-fix-state-md-corruption-linha-40-42-tem-/) |
 | 260516-rym | Fix handleForceProvision não trata FSM em cooldown — pod Vast.ai órfão queimava $$ quando operator force-provision após falha. Precheck FSM.State() + SetState(EmergencyProvisioning) em vez de 2x Transition. +2 regression tests. | 2026-05-16 | 5aec0eb | [260516-rym-fix-force-provision-cooldown-transition](./quick/260516-rym-fix-force-provision-cooldown-transition/) |
@@ -193,6 +195,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 | 260614-ny5 | middleware.ts redirecionava no-session pra /login?session_expired=1 (banner "Sessão encerrada" em toda primeira visita). Stage 1 agora redireciona pra /login limpo (param removido; Edge não distingue never-logged de expired). Banner em login/page.tsx mantido (só não é mais disparado pelo middleware). +test case (a) atualizado. tsc limpo, 7/7. | 2026-06-14 | 3508773 | [260614-ny5-middleware-redirect-login-limpo-sem-sess](./quick/260614-ny5-middleware-redirect-login-limpo-sem-sess/) |
 | 260614-ov8 | Fix bounce 2FA: middleware lê twoFactorVerified do cookieCache (maxAge 60s) mas dashboard nunca chama get-session (useSession só em first-login, poll vai pra /api/gateway) → cache expira, fallback pessimista → /2fa/challenge loop após 60s. auth.ts cookieCache.maxAge 60→1800 (= session idle 30min); cache vive a sessão. twoFactorVerified monotônico (staleness inócuo); tradeoff: revogação propaga em até 30min. +comments/RUNBOOK. tsc limpo, 34 testes. | 2026-06-14 | f1b9acd | [260614-ov8-fix-2fa-bounce-raise-cookiecache-maxage-](./quick/260614-ov8-fix-2fa-bounce-raise-cookiecache-maxage-/) |
 | 260616-gtj | Fix tier-1 probe false-negative: probe.go gravava last_probe_status="failed" pra 4xx mesmo o breaker tratando 4xx como sucesso (D-A4). probeOne agora extrai *breaker.HTTPError via errors.As → 4xx vira status="config" (não health-failure, não bumpa ProbeFailureTotal); 5xx→failed, timeout→timeout, 2xx→ok inalterados. Escolhido "config" (zero blast radius: /v1/health/upstreams deriva do breaker state, nenhum consumer faz branch na string). Resolve openrouter-chat reportando failed enquanto serve 200 (provado live: deepseek/Novita). +TestProbe TDD RED/GREEN. build+test verde. Contexto: 12-FIELD-FINDINGS-2026-06-16 finding 2; classe SEED-012 tier-1. | 2026-06-16 | 844bf2a | [260616-gtj-fix-tier-1-probe-false-negative-status-4](./quick/260616-gtj-fix-tier-1-probe-false-negative-status-4/) |
+| 260620-o7d | Fix TTS health prober per-upstream: `dispatch` `case "tts":` hardcodava `POST /v1/audio/speech` (OpenAI body) pra todo tts upstream. Tier-1 `voice-api-piper` só serve `POST /tts` `{"text":...}` → probe 404 → status `config` (falso). Branch em `u.Name` (único discriminador in-scope; `UpstreamConfig` não expõe `UrlEnv`): `voice-api-piper`→`/tts` body Piper (espelha `piperTTSAdapter`), demais→`/v1/audio/speech` inalterado. 2xx Piper→`ok`. +`piper_posts_tts`/`piper_trailing_slash` subtests; `primary-tts` OpenAI-path intactos. build+vet+gofmt+test verde. Contexto: prod URL fix (172.18.0.1→10.10.10.30) já resolveu 503 live; este fix tira o status `config` enganoso. Deploy: precisa GHCR push + redeploy gateway n8n-ia-vm. | 2026-06-20 | 639e4c7 | [260620-o7d-fix-tts-health-prober-per-upstream-probe](./quick/260620-o7d-fix-tts-health-prober-per-upstream-probe/) |
 | Phase 06.7 P02 | 10m | 2 tasks | 7 files |
 | Phase 06.7 P03 | 25m | 2 tasks | 9 files |
 | Phase 06.7 P04 | ~20m | 2 tasks | 8 files |
@@ -203,7 +206,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ## Session Continuity
 
-- **Last session:** 2026-06-15T09:28:31.192Z
+- **Last session:** 2026-06-18T01:06:45.098Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
@@ -219,3 +222,4 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 - [Phase ?]: [Phase 06.7]: 06.7-04 voices.tenant_id = UUID FK->tenants(id) ON DELETE CASCADE, matching the verified ai_gateway schema convention (api_keys/usage_counters/billing_events) over the PATTERNS TEXT placeholder; no .pt column (Chatterbox zero-shot D-08)
 - [Phase ?]: Phase 11.2 Plan 07 — created docs/RUNBOOK-OPS.md as canonical STT cascade operator playbook
 - [Phase ?]: Phase 11.2 Plan 07 — gateway/.env.example created mirroring pod/.env.example parity
+- [Phase 14]: 14-02 — pod self-decides whisper device at onstart via nvidia-smi total-VRAM sum (awk, no bc): >=30000 MiB → cuda pinned to the max-free GPU index (WHISPER__DEVICE_INDEX; llama --split-mode layer leaves no Qwen-free card so max-free, not non-Qwen, is the headroom pick); below threshold / nvidia-smi absent → cpu. Exports precede exec supervisord so [program:speaches] inherits the device (supervisord.conf:46 cpu pin removed, HF_HUB_CACHE kept — env inheritance Option A, fail-open). Minimal python3 :9100 /whisper_device responder (NOT health-bridge — that's compose-only) + -p 9100:9100 forwarded; fulfills the Plan 14-01 device-report contract. Image rebuild + live UAT gated in 14-03.

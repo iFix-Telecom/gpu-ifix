@@ -65,10 +65,13 @@ type DCGMScraperAdapter interface {
 // InflightAdapter is the minimal surface the primary reconciler needs
 // from the shed.InflightRegistry. Plan 06.6-06b's job is to add Count on
 // the real *shed.InflightRegistry (wrapping the existing GlobalInflight)
-// so the reconciler can sum local-llm + local-embed inflight (Phase 11.1
-// D-A4: local-stt term removed — Whisper deleted from pod and DB)
-// during evaluateDraining (drain-complete gate: inflight==0 OR grace
-// elapsed → transition Draining→Destroying).
+// so the reconciler can sum the 3 on-pod upstreams (local-llm + local-stt
+// + local-tts, i.e. llama/speaches/chatterbox) inflight during
+// evaluateDraining. embed is off-pod (D-03 — static tier-0 row on a 24/7
+// CPU host) and is NOT counted; Phase 11.2 D-B5′ / Phase 14 restored STT
+// (and TTS) to the pod, so both must hold the drain open
+// (drain-complete gate: inflight==0 OR grace elapsed → transition
+// Draining→Destroying).
 type InflightAdapter interface {
 	Count(upstream string) int64
 }
@@ -114,6 +117,17 @@ type primaryPodURLs struct {
 	STT  string // Phase 11.2 D-B5′: restored (revert 11.1 D-A4 — speaches back on pod)
 	TTS  string
 	DCGM string
+
+	// WhisperDevice carries the pod-reported whisper inference device read
+	// at Ready from the pod's :9100/whisper_device report (SEED-019 part 3 —
+	// replaces the deleted manual STT-serve config flag). Whitelisted to
+	// {"cuda","cpu"}; ANY other value, a non-200, a parse error, a missing
+	// 9100 port mapping, an unreachable pod, or a nil DeviceReport closure →
+	// "" (unknown). Only WhisperDevice == "cuda" gates the "stt" tier-0
+	// override at the 3 reconciler sites; "cpu"/""/unknown fail-safe to NO
+	// override so STT falls through to the tier-1 gemini-stt cascade
+	// (preserving today's prod behavior during the pod-image rollout window).
+	WhisperDevice string
 }
 
 // Deps is the full wiring for the primary Reconciler after Plan 06.6-06a.
@@ -165,6 +179,18 @@ type Deps struct {
 	// false-positive destroys); the cold-start budget remains the backstop.
 	// Tests inject a scriptable closure.
 	Reachable func(ctx context.Context, url string) bool
+
+	// DeviceReport fetches the pod-reported whisper device from the pod's
+	// :9100/whisper_device report (SEED-019 part 3). Given the report URL it
+	// GETs the body, bounds the read (io.LimitReader, parity probes/clickup),
+	// JSON-decodes {"whisper_device":"cuda"|"cpu"}, and returns the value
+	// ONLY if it is exactly "cuda" or "cpu" — else "" (the whitelist /
+	// default-deny gate, fail-safe to gemini-stt on a compromised or
+	// old-image pod). When nil, the reconciler treats the device as ""
+	// (no stt override) — preserving prod behavior before the pod ships the
+	// report. Production wires this in main.go; tests inject a scriptable
+	// closure the same way HealthCheck is wired.
+	DeviceReport func(ctx context.Context, url string) string
 
 	// Loader is the upstream loader (3-role tier-0 override target). Plan
 	// 06.6-06b satisfies LoaderAdapter on the real *upstreams.Loader.
@@ -328,7 +354,7 @@ func (r *Reconciler) ActivePodURLs() *primaryPodURLs {
 //   - Image: cfg.PrimaryTemplateImage (Wave 0 SHA-pinned to llama.cpp
 //     server-cuda-b9191, override allowed for the custom converseai-
 //     primary-pod image once GHA build-primary-pod publishes it).
-//   - Env: 4 port forwards (8000 LLM + 8001 STT + 8002 embed + 9400
+//   - Env: 4 port forwards (8000 LLM + 8001 STT + 8003 TTS + 9400
 //     DCGM per Pitfall #8) instead of 1; 3 weight key/sha pairs (Qwen +
 //     Whisper + BGE-M3) instead of 1; PRIMARY_SPEACHES_IMAGE /
 //     INFINITY_IMAGE / DCGM_IMAGE are NOT passed at runtime — they are
@@ -382,6 +408,7 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		"-p 8001:8001": "1", // STT (speaches)
 		"-p 8003:8003": "1", // TTS (chatterbox) — Phase 06.7 D-11 (was embed:8002)
 		"-p 9400:9400": "1", // GPU metrics (dcgm-exporter)
+		"-p 9100:9100": "1", // device-report responder (SEED-019 part 2) — gateway reads /whisper_device at Ready
 
 		// MinIO 4 credentials — must all be non-empty per the in-pod
 		// `: "${MINIO_*:?required}"` guards. The gateway does not
@@ -456,8 +483,8 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 // parity).
 //
 // Wave 0 LOCKED supervisord 4-services model: container ports 8000 (LLM,
-// llama-server /v1/models), 8001 (STT, speaches /health), 8002 (embed,
-// infinity /health), 9400 (DCGM exporter /metrics). All 4 land inside ONE
+// llama-server /v1/models), 8001 (STT, speaches /health), 8003 (TTS,
+// chatterbox /health), 9400 (DCGM exporter /metrics). All 4 land inside ONE
 // container's network namespace — children of supervisord PID 1. The
 // reconciler does not know about supervisord (orchestration opaque); it
 // only polls 4 HTTP endpoints on Vast-exposed host ports.
@@ -500,6 +527,33 @@ func (r *Reconciler) podTTSURL(inst vast.Instance) string {
 // a running Vast.ai instance.
 func (r *Reconciler) podDCGMURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "9400", "/metrics")
+}
+
+// podDeviceReportURL extracts the public device-report endpoint
+// (9100/tcp -> /whisper_device) from a running Vast.ai instance (SEED-019
+// part 3). Returns "" when the 9100 port is not mapped — the device then
+// fail-safes to "" (no stt override). Plan 14-02 stands a minimal static
+// responder on container port 9100 that answers this path with
+// {"whisper_device":"cuda"|"cpu"}.
+func (r *Reconciler) podDeviceReportURL(inst vast.Instance) string {
+	return r.podPortURL(inst, "9100", "/whisper_device")
+}
+
+// deviceReport returns the pod-reported whisper device for inst, or "" when
+// the report is unavailable. Nil-safe: returns "" if Deps.DeviceReport is
+// not wired (prod before the pod ships the report, or a test that does not
+// exercise the device gate) or if the 9100 port is unmapped. The returned
+// value is already whitelisted by the DeviceReport closure (production
+// main.go) — the reconciler only further gates "cuda" at the override sites.
+func (r *Reconciler) deviceReport(inst vast.Instance) string {
+	if r.deps.DeviceReport == nil {
+		return ""
+	}
+	url := r.podDeviceReportURL(inst)
+	if url == "" {
+		return ""
+	}
+	return r.deps.DeviceReport(context.Background(), url)
 }
 
 // roleURL maps a dynamic primary role ("llm"/"stt"/"tts") to its raw

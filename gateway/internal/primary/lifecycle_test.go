@@ -6,6 +6,7 @@
 package primary
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -17,8 +18,6 @@ import (
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
-
-	"os"
 )
 
 // Wave 0 LOCKED image digest literals — these are the EXACT strings the
@@ -45,11 +44,10 @@ func cfgWithDefaults() config.Config {
 		PrimaryInfinityImage: wave0InfinityImage,
 		PrimaryDCGMImage:     wave0DCGMImage,
 
-		// SEED-018/019 part 3: PRIMARY_POD_SERVE_STT defaults true in prod
-		// (boolOr). cfgWithDefaults is a struct literal, so mirror that default
-		// here — otherwise the zero-value false would drop the "stt" override
-		// and break the existing all-roles-override assertions.
-		PrimaryPodServeSTT: true,
+		// SEED-019 part 3: the manual STT-serve config flag is DELETED. The
+		// "stt" tier-0 override is now gated on the pod-reported whisper_device
+		// value (primaryPodURLs.WhisperDevice, via Deps.DeviceReport) rather
+		// than a config flag — so there is no such field to seed here.
 
 		// Qwen GGUF — Wave 0 verified digest (per 06.6-WAVE0-GATES.md
 		// Decision 3 default).
@@ -386,6 +384,81 @@ func TestPrimaryOnstart_AriaC_NotMcCp(t *testing.T) {
 	require.Contains(t, req.Args[1], "aria2c", "weight download must use aria2c multi-stream")
 	require.NotRegexp(t, regexp.MustCompile(`mc\s+cp\s+ifix/`), req.Args[1],
 		"mc cp single-stream weight download is forbidden (Wave 0 spike Round 1 EOF failure)")
+}
+
+// TestPrimaryOnstart_VRAMAdaptiveWhisperDevice — SEED-019 part 2 (Plan 14-02).
+// The onstart bash must contain the VRAM-adaptive whisper-device block:
+// a one-shot nvidia-smi total-VRAM sum, the 30000 MiB threshold, exports of
+// WHISPER__INFERENCE_DEVICE / WHISPER__DEVICE_INDEX / WHISPER_DEVICE, and the
+// :9100 /whisper_device device-report responder — all BEFORE the appended
+// `exec supervisord`. No `bc` (not in the pod image — awk math only) and no
+// fmt.Sprintf (Pitfall #9 raw-string invariant).
+func TestPrimaryOnstart_VRAMAdaptiveWhisperDevice(t *testing.T) {
+	r := newReconcilerWith(cfgWithDefaults())
+	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
+	require.NoError(t, err)
+	script := req.Args[1]
+
+	// VRAM probe + threshold.
+	require.Contains(t, script, "nvidia-smi --query-gpu=memory.total",
+		"one-shot total-VRAM read for the whisper-device decision")
+	require.Contains(t, script, "30000",
+		"VRAM>=30000 MiB threshold (cuda) vs below (cpu)")
+
+	// Device exports inherited by [program:speaches] (conf:46 no longer pins).
+	require.Contains(t, script, "WHISPER__INFERENCE_DEVICE",
+		"export the speaches inference device")
+	require.Contains(t, script, "WHISPER__DEVICE_INDEX",
+		"pin whisper to the Qwen-free GPU index on cuda multi-GPU shapes")
+	require.Contains(t, script, "WHISPER_DEVICE",
+		"summary var the :9100 responder reports")
+
+	// SEED-019 part 4: qwen is pinned to GPU0 (supervisord --main-gpu 0), so on
+	// multi-GPU shapes whisper takes the LAST card (NUM_GPUS-1), the Qwen-free
+	// GPU — NOT the old "max-free at onstart" pick (unreliable before llama loads).
+	require.Contains(t, script, "nvidia-smi --query-gpu=index --format=csv,noheader",
+		"count GPUs to derive the Qwen-free whisper index")
+	require.Contains(t, script, "NUM_GPUS - 1",
+		"whisper pins to the last (Qwen-free) GPU on multi-GPU cuda shapes")
+
+	// :9100 device-report responder (the contract Plan 14-01 parses).
+	require.Contains(t, script, "/whisper_device",
+		":9100 device-report path the gateway reads at Ready")
+	require.Contains(t, script, "9100",
+		"device-report responder binds container port 9100")
+
+	// The device block must run BEFORE supervisord (exports must reach the child).
+	idxDevice := strings.Index(script, "WHISPER__INFERENCE_DEVICE")
+	idxExec := strings.Index(script, "exec /usr/bin/supervisord")
+	require.GreaterOrEqual(t, idxDevice, 0)
+	require.GreaterOrEqual(t, idxExec, 0)
+	require.Less(t, idxDevice, idxExec,
+		"whisper-device export must precede exec supervisord so the child inherits it")
+
+	// No bc dependency (Dockerfile installs no bc — awk only).
+	require.NotRegexp(t, regexp.MustCompile(`\bbc\b`), script,
+		"bc is not in the pod image; VRAM math must use awk")
+}
+
+// TestPrimaryOnstart_NoFmtSprintf — Pitfall #9 invariant: the onstart source
+// is a raw-string Go const assembled by plain concatenation. fmt.Sprintf in
+// onstart.go would reintroduce the shell-quoting-at-template-expansion hazard.
+func TestPrimaryOnstart_NoFmtSprintf(t *testing.T) {
+	src, err := os.ReadFile("onstart.go")
+	require.NoError(t, err)
+	require.NotContains(t, string(src), "fmt.Sprintf",
+		"Pitfall #9: onstart.go must use raw-string concatenation, never fmt.Sprintf")
+}
+
+// TestBuildPrimaryCreateRequest_Forwards9100 — SEED-019 part 2: the gateway
+// must forward container port 9100 so it can reach the pod's /whisper_device
+// device-report responder (the contract Plan 14-01 consumes).
+func TestBuildPrimaryCreateRequest_Forwards9100(t *testing.T) {
+	r := newReconcilerWith(cfgWithDefaults())
+	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, "1", req.Env["-p 9100:9100"],
+		"port 9100 (device-report responder) must be forwarded for the gateway probe")
 }
 
 // TestBuildPrimaryCreateRequest_SSHDebugConditional — PodDebugSSHPublicKey

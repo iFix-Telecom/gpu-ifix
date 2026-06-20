@@ -202,6 +202,98 @@ tar -xzf /opt/chatterbox-data/models/cache.tar.gz -C /opt/chatterbox-data/models
 rm -f /opt/chatterbox-data/models/cache.tar.gz
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisord"
 
+# --- SEED-019 part 2: VRAM-adaptive whisper device (Block A) -----------------
+# The pod is the source of truth for whether its whisper runs on GPU. Sum total
+# VRAM across all visible GPUs via nvidia-smi (present on every CUDA Vast host;
+# the image ships no calculator binary — Dockerfile uses awk only). On a >=30000 MiB
+# shape (2x3090=48, 5090=32) export cuda + pin WHISPER__DEVICE_INDEX.
+# SEED-019 part 4 (2026-06-19): qwen is now PINNED to GPU0 (supervisord:
+# --split-mode none --main-gpu 0), so on MULTI-GPU shapes the LAST card is
+# Qwen-free — dedicate it to whisper (WHISPER__DEVICE_INDEX = NUM_GPUS-1) → no
+# shared-card CUDA OOM. The old "max-free at onstart" pick was unreliable: at
+# onstart (before llama loads) every card reads ~empty, tying to GPU0, the very
+# card qwen then loads onto → OOM (UAT B "instance terminal", 2026-06-19). On a
+# single-GPU >=30GB shape (5090=32) there is no second card, so whisper shares
+# GPU0 with qwen (32GB has the headroom). Below threshold (1x3090=24) export cpu
+# so the gateway fail-safes STT to tier-1 gemini instead of slow CPU whisper.
+# These exports happen BEFORE exec supervisord so [program:speaches] inherits
+# them (supervisord.conf no longer pins WHISPER__INFERENCE_DEVICE — env
+# inheritance Option A, fail-open to speaches default auto/0 if ever unset).
+#
+# WR-05: the GPU0-vs-LAST-card coordination is OOM-safe ONLY if llama.cpp's
+# --main-gpu index space and faster-whisper's WHISPER__DEVICE_INDEX (CUDA
+# ordinal) enumerate the GPUs in the SAME order. Both default to the CUDA
+# runtime ordering, but that default is FASTEST_FIRST, which can reorder cards
+# vs physical/PCI layout and is not guaranteed stable across the two children.
+# Pin CUDA_DEVICE_ORDER=PCI_BUS_ID HERE (before exec supervisord) so BOTH
+# llama and speaches inherit it and enumerate identically + deterministically —
+# index 0 (qwen --main-gpu 0) and index NUM_GPUS-1 (whisper) then always
+# resolve to distinct physical cards on multi-GPU shapes, preserving the
+# UAT-B OOM fix. (Documented at the supervisord [program:llama]/[program:speaches]
+# boundary too.)
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+WHISPER_GPU_THRESHOLD_MIB=30000
+TOTAL_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END{print s}')
+NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'END{print NR}')
+if [ -z "${TOTAL_VRAM_MIB:-}" ]; then
+  # nvidia-smi absent or empty → fail-safe to cpu (gateway routes STT to gemini).
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: nvidia-smi unavailable; whisper device=cpu (fail-safe)"
+  export WHISPER__INFERENCE_DEVICE=cpu
+  export WHISPER_DEVICE=cpu
+elif [ "$TOTAL_VRAM_MIB" -ge "$WHISPER_GPU_THRESHOLD_MIB" ]; then
+  # qwen pinned to GPU0; dedicate the LAST card to whisper on multi-GPU shapes
+  # (Qwen-free), else card 0 on a single-GPU >=30GB shape.
+  if [ "${NUM_GPUS:-1}" -ge 2 ]; then
+    WHISPER_IDX=$(( NUM_GPUS - 1 ))
+  else
+    WHISPER_IDX=0
+  fi
+  export WHISPER__INFERENCE_DEVICE=cuda
+  export WHISPER__DEVICE_INDEX="${WHISPER_IDX}"
+  export WHISPER_DEVICE=cuda
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: total VRAM ${TOTAL_VRAM_MIB} MiB >= ${WHISPER_GPU_THRESHOLD_MIB} across ${NUM_GPUS} GPU(s); qwen pinned GPU0; whisper device=cuda index=${WHISPER__DEVICE_INDEX}"
+else
+  export WHISPER__INFERENCE_DEVICE=cpu
+  export WHISPER_DEVICE=cpu
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: total VRAM ${TOTAL_VRAM_MIB} MiB < ${WHISPER_GPU_THRESHOLD_MIB}; whisper device=cpu"
+fi
+
+# --- SEED-019 part 2: :9100 device-report responder (Block B) ----------------
+# Write the device JSON and stand a minimal static responder on 0.0.0.0:9100
+# serving GET /whisper_device. The gateway (Plan 14-01) reads this at pod-Ready
+# and whitelists exactly {cuda,cpu}; anything else / unreachable → no STT
+# override → gemini-stt (fail-safe). python3 is baked into the image
+# (Dockerfile). The launch is wrapped in '|| true' so a transient :9100 bind
+# failure never aborts the pod under set -e — the gateway already fail-safes on
+# an unreachable :9100 (threat T-14-06).
+printf '{"whisper_device":"%s"}' "$WHISPER_DEVICE" > /weights/whisper/whisper_device.json
+{ nohup python3 -c '
+import json, http.server, socketserver
+PATH = "/weights/whisper/whisper_device.json"
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/whisper_device":
+            try:
+                with open(PATH, "rb") as f:
+                    body = f.read()
+            except OSError:
+                body = b"{\"whisper_device\":\"cpu\"}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, *a):
+        pass
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("0.0.0.0", 9100), H) as s:
+    s.serve_forever()
+' >/tmp/devreport.log 2>&1 & } || true
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: device-report responder on :9100 (whisper_device=${WHISPER_DEVICE})"
+
 `
 
 // buildPrimaryOnstart appends the trailing `exec /usr/bin/supervisord -n

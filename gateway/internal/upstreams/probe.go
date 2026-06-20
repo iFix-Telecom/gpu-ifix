@@ -37,6 +37,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -282,18 +283,35 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 		}
 		req.Header.Set("Content-Type", "application/json")
 	case "tts":
-		// Phase 06.7 (D-12) — synthetic OpenAI /v1/audio/speech probe. The
-		// 4-char "ping" input with response_format=pcm bounds synthesis cost
-		// (T-06.7-04) and voice="random" skips speaker-embedding resolution.
-		// Engine-agnostic: any /v1/audio/speech server (Chatterbox primary or
-		// the Piper tier-1 adapter) returns 200+audio on success; 5xx is a
-		// breaker failure via the shared classification below.
-		body := []byte(`{"model":"tts-1","input":"ping","voice":"random","response_format":"pcm"}`)
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, u.URL+"/v1/audio/speech", bytes.NewReader(body))
-		if err != nil {
-			return nil, err
+		// Phase 06.7 (D-12) — synthetic TTS probe, per-upstream shape:
+		//   - voice-api-piper (tier-1 Piper fallback): POST <url>/tts with
+		//     {"text":"ping"}. Piper only serves /tts {"text":...}; the live
+		//     path is bridged by proxy/tts.go piperTTSAdapter, so the probe
+		//     must mirror that shape or it gets a 404 (false "config" status
+		//     on a healthy fallback — quick-260620-o7d).
+		//   - all other tts upstreams (Chatterbox primary, any OpenAI-compatible
+		//     /v1/audio/speech server): POST <url>/v1/audio/speech with the
+		//     OpenAI body. The 4-char "ping" input with response_format=pcm
+		//     bounds synthesis cost (T-06.7-04) and voice="random" skips
+		//     speaker-embedding resolution.
+		// A 2xx is success either way; 5xx is a breaker failure via the shared
+		// classification below.
+		if u.Name == "voice-api-piper" {
+			base := strings.TrimRight(u.URL, "/")
+			body := []byte(`{"text":"ping"}`)
+			req, err = http.NewRequestWithContext(ctx, http.MethodPost, base+"/tts", bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+		} else {
+			body := []byte(`{"model":"tts-1","input":"ping","voice":"random","response_format":"pcm"}`)
+			req, err = http.NewRequestWithContext(ctx, http.MethodPost, u.URL+"/v1/audio/speech", bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
 		}
-		req.Header.Set("Content-Type", "application/json")
 	case "stt":
 		buf := &bytes.Buffer{}
 		mw := multipart.NewWriter(buf)

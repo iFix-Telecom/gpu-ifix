@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -990,20 +991,89 @@ func main() {
 			return false
 		}
 
+		// SEED-019 part 3: DeviceReport fetches the pod-reported whisper
+		// device from the pod's :9100/whisper_device report and returns it
+		// ONLY when it is exactly "cuda" or "cpu" (the whitelist / default-deny
+		// gate). Any other value, a non-200, a parse error, or an unreachable
+		// pod → "" → the reconciler skips the stt tier-0 override → STT routes
+		// to the tier-1 gemini-stt cascade (fail-safe). The body is bounded
+		// (io.LimitReader, parity with the upstreams/alert probes) to cap a
+		// hostile/compromised pod's response (threat T-14-02).
+		//
+		// WR-01: the pod's :9100 responder binds asynchronously (nohup) right
+		// before exec supervisord, so a single GET at pod-Ready can lose the
+		// startup race and read "" → a GPU pod that CAN serve STT silently
+		// routes to the costlier tier-1 cascade for its whole lifecycle. To
+		// close that race we retry the fetch up to 3 times with a short backoff;
+		// a retry only fires on a transient miss (empty/non-200/parse error),
+		// NOT on a legitimate "cpu" value (which is a valid terminal answer).
+		deviceReportOnce := func(dctx context.Context, u string) string {
+			probeCtx, cancel := context.WithTimeout(dctx, 5*time.Second)
+			defer cancel()
+			req, rerr := http.NewRequestWithContext(probeCtx, http.MethodGet, u, nil)
+			if rerr != nil {
+				return ""
+			}
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, herr := client.Do(req)
+			if herr != nil {
+				return ""
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return ""
+			}
+			var payload struct {
+				WhisperDevice string `json:"whisper_device"`
+			}
+			// Bound the read (8 KiB is ample for the tiny device JSON) before
+			// decoding so a hostile pod cannot stream an unbounded body.
+			if derr := json.NewDecoder(io.LimitReader(resp.Body, 8*1024)).Decode(&payload); derr != nil {
+				return ""
+			}
+			switch payload.WhisperDevice {
+			case "cuda", "cpu":
+				return payload.WhisperDevice
+			default:
+				return "" // whitelist / default-deny → fail-safe to gemini-stt
+			}
+		}
+		primaryDeviceReport := func(dctx context.Context, u string) string {
+			if u == "" {
+				return ""
+			}
+			const deviceReportAttempts = 3
+			const deviceReportBackoff = 500 * time.Millisecond
+			for attempt := 0; attempt < deviceReportAttempts; attempt++ {
+				if dev := deviceReportOnce(dctx, u); dev != "" {
+					return dev
+				}
+				if attempt < deviceReportAttempts-1 {
+					select {
+					case <-dctx.Done():
+						return ""
+					case <-time.After(deviceReportBackoff):
+					}
+				}
+			}
+			return ""
+		}
+
 		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
-			Cfg:         cfg,
-			Log:         log.With("subsys", "primary"),
-			Vast:        primaryVastClient,
-			HealthCheck: primaryHealthCheck,
-			Reachable:   primaryReachable,
-			Loader:      loader,       // *upstreams.Loader satisfies LoaderAdapter (3-role per Plan 06.6-06b)
-			DCGMScraper: dcgmScraper,  // *dcgm.Scraper satisfies DCGMScraperAdapter (SetURL per Plan 06.6-06b); nil-safe
-			Inflight:    shedInflight, // *shed.InflightRegistry satisfies InflightAdapter (Count per Plan 06.6-06b)
-			FSM:         primaryFSM,
-			Rule:        primaryRule,
-			DB:          pool,
-			Redis:       rdb,
-			ReplicaID:   hostnameOrUnknown(),
+			Cfg:          cfg,
+			Log:          log.With("subsys", "primary"),
+			Vast:         primaryVastClient,
+			HealthCheck:  primaryHealthCheck,
+			Reachable:    primaryReachable,
+			DeviceReport: primaryDeviceReport,
+			Loader:       loader,       // *upstreams.Loader satisfies LoaderAdapter (3-role per Plan 06.6-06b)
+			DCGMScraper:  dcgmScraper,  // *dcgm.Scraper satisfies DCGMScraperAdapter (SetURL per Plan 06.6-06b); nil-safe
+			Inflight:     shedInflight, // *shed.InflightRegistry satisfies InflightAdapter (Count per Plan 06.6-06b)
+			FSM:          primaryFSM,
+			Rule:         primaryRule,
+			DB:           pool,
+			Redis:        rdb,
+			ReplicaID:    hostnameOrUnknown(),
 		})
 		// Reviews #2 (2026-05-17): Start runs UNCONDITIONALLY — event
 		// subscriber always launches; cfg.PrimaryPodScheduleDisabled gates

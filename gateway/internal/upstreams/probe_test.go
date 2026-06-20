@@ -103,6 +103,71 @@ func TestProbe_TTS_PostsAudioSpeech(t *testing.T) {
 		}
 	})
 
+	// --- voice-api-piper -> POST /tts {"text":"ping"} -> success ---
+	// The Piper tier-1 upstream only serves POST /tts {"text":...} (see
+	// proxy/tts.go piperTTSAdapter). dispatch must mirror that shape for the
+	// upstream named "voice-api-piper" instead of the OpenAI /v1/audio/speech
+	// path, so a healthy Piper probe classifies as ok (not config).
+	t.Run("piper_posts_tts", func(t *testing.T) {
+		var gotPath, gotMethod, gotCT string
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotMethod = r.Method
+			gotCT = r.Header.Get("Content-Type")
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &gotBody)
+			w.Header().Set("Content-Type", "audio/wav")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{0x00, 0x01, 0x02, 0x03}) // synthetic audio bytes
+		}))
+		defer srv.Close()
+
+		u := UpstreamConfig{Name: "voice-api-piper", Role: "tts", Tier: 1, URL: srv.URL, Enabled: true}
+		p := newTTSProbe(u.Name, u)
+
+		resp, err := p.dispatch(context.Background(), u)
+		if err != nil {
+			t.Fatalf("dispatch(piper tts) returned error on 200: %v", err)
+		}
+		if resp == nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 response, got %+v", resp)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want POST", gotMethod)
+		}
+		if gotPath != "/tts" {
+			t.Errorf("path = %q, want /tts", gotPath)
+		}
+		if gotCT != "application/json" {
+			t.Errorf("content-type = %q, want application/json", gotCT)
+		}
+		if gotBody["text"] != "ping" {
+			t.Errorf("body.text = %v, want ping", gotBody["text"])
+		}
+	})
+
+	// --- voice-api-piper trailing slash -> no double slash before /tts ---
+	t.Run("piper_trailing_slash", func(t *testing.T) {
+		var gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{0x00})
+		}))
+		defer srv.Close()
+
+		u := UpstreamConfig{Name: "voice-api-piper", Role: "tts", Tier: 1, URL: srv.URL + "/", Enabled: true}
+		p := newTTSProbe(u.Name, u)
+
+		if _, err := p.dispatch(context.Background(), u); err != nil {
+			t.Fatalf("dispatch(piper tts) returned error: %v", err)
+		}
+		if gotPath != "/tts" {
+			t.Errorf("path = %q, want /tts (no double slash from trailing-slash base URL)", gotPath)
+		}
+	})
+
 	// --- 5xx -> *breaker.HTTPError failure ---
 	t.Run("5xx_failure", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

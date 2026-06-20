@@ -73,17 +73,18 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 
 	fsm := primary.NewFSM(nil, nil)
 	r := primary.NewReconciler(primary.Deps{
-		Cfg:         cfg,
-		Log:         slog.New(slog.DiscardHandler),
-		Vast:        fakeV,
-		Loader:      loader,
-		DCGMScraper: dcgm,
-		FSM:         fsm,
-		Rule:        neverInPeakRule(),
-		DB:          pool,
-		Redis:       rdb,
-		ReplicaID:   "test-restart-healthy",
-		HealthCheck: alwaysHealthy,
+		Cfg:          cfg,
+		Log:          slog.New(slog.DiscardHandler),
+		Vast:         fakeV,
+		Loader:       loader,
+		DCGMScraper:  dcgm,
+		FSM:          fsm,
+		Rule:         neverInPeakRule(),
+		DB:           pool,
+		Redis:        rdb,
+		ReplicaID:    "test-restart-healthy",
+		HealthCheck:  alwaysHealthy,
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt re-override on recovery (full trio)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)
