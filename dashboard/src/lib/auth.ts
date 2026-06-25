@@ -14,9 +14,10 @@
  * - rateLimit customRules (D-14): /sign-in/email + /sign-up/email
  *   5 attempts / 15 min / IP; /two-factor/verify-totp 5 attempts /
  *   60s / IP. Built-in (NOT plugin) per 11-RESEARCH state-of-the-art.
- * - session.expiresIn = 30 * 60 (D-15): idle timeout 30 min (vs the
- *   prior 7 days). cookieCache enabled so the Edge middleware can read
- *   the twoFactor claims without a DB call.
+ * - session.expiresIn = 7 days (D-15, revised quick-260625-k17): 7-day
+ *   idle window (raised back from the 30-min Phase-11 value). cookieCache
+ *   maxAge matches expiresIn so the Edge middleware can read the twoFactor
+ *   claims without a DB call and never bounces mid-session (WR-01).
  *
  * Cookie-claim contract (11-REVIEWS HIGH #2): the middleware MUST be
  * able to read `user.twoFactorEnabled` AND `session.twoFactorVerified`
@@ -62,35 +63,42 @@ export const auth = betterAuth({
   database: drizzleAdapter(db, { provider: "pg", schema }),
   // D-12: never auto sign-in pre-enrollment (11-RESEARCH Pitfall 4).
   emailAndPassword: { enabled: true, autoSignIn: false },
-  // D-15: 30-min idle session + cookieCache so the Edge middleware can
-  // read twoFactor claims without a DB hit. Option A — session.additionalFields
+  // D-15 (revised quick-260625-k17): 7-day idle session + cookieCache so
+  // the Edge middleware can read twoFactor claims without a DB hit. Option A
+  // — session.additionalFields
   // declares `twoFactorVerified`; the twoFactor plugin contributes
   // `user.twoFactorEnabled` (column on the user table) which also flows
   // into the cookie via parseUserOutput. See file header for the full
   // cookie-claim contract.
   session: {
-    expiresIn: 30 * 60,
+    expiresIn: 7 * 24 * 60 * 60,
     updateAge: 5 * 60,
-    // WR-01: cookieCache.maxAge=1800 means the middleware reads
-    // twoFactorVerified from the signed cookie for up to 30 minutes
-    // (matching session.expiresIn) without consulting the DB. We raised
-    // this from 60s because nothing reheats the cookieCache during normal
-    // dashboard use — useSession/get-session only fires at first-login,
-    // and the overview poll hits /api/gateway, not /api/auth/get-session.
-    // At maxAge=60 the session_data cookie expired after 60s, getCookieCache
-    // returned null, and the middleware's pessimistic fallback bounced
-    // authenticated admins back to /2fa/challenge mid-session.
+    // WR-01 (revised quick-260625-k17): cookieCache.maxAge MUST equal
+    // session.expiresIn (both 7 days). The middleware reads
+    // twoFactorVerified from the signed cookie for up to 7 days without
+    // consulting the DB. maxAge MUST NOT be shorter than expiresIn —
+    // nothing reheats the cookieCache during normal dashboard use:
+    // useSession/get-session only fires at first-login, and the overview
+    // poll hits /api/gateway, not /api/auth/get-session. When maxAge <
+    // expiresIn the session_data cookie expires mid-session, getCookieCache
+    // returns null, and the middleware's pessimistic fallback bounces
+    // authenticated admins back to /2fa/challenge mid-session — the exact
+    // bug this casa-de-valores fix kills (was maxAge=1800 vs expiresIn=1800,
+    // both 30 min, which still expired during long idle sessions).
     // twoFactorVerified is monotonic within a session (false→true, never
-    // reverts), so 30-min staleness on that claim is harmless. The only
-    // tradeoff: after an operator revokes a session
+    // reverts), so staleness on that claim is harmless. The only tradeoff:
+    // after an operator revokes a session
     // (`DELETE FROM session WHERE id = ...`) OR after a TOTP reset via
     // RUNBOOK-2FA-RECOVERY.md, that change does NOT propagate to active
-    // middleware decisions for up to 30 minutes (was up to 60s). For a
-    // 4-admin internal panel this trade-off is acceptable; runbook ops
-    // MUST wait up to 30min after session revocation before assuming the
-    // operator is locked out. See gateway/docs/RUNBOOK-INCIDENTS.md class 4
-    // + RUNBOOK-2FA-RECOVERY.md for the operator workflow.
-    cookieCache: { enabled: true, maxAge: 1800 },
+    // middleware decisions for up to 7 days (was up to 30 min). For
+    // IMMEDIATE revocation the operator MUST delete the row in
+    // `public.session` in the database — that invalidates the session
+    // server-side regardless of the cookie cache. For a 4-admin internal
+    // panel this trade-off is acceptable; runbook ops MUST either delete
+    // the `public.session` row for instant lockout or wait up to 7 days.
+    // See gateway/docs/RUNBOOK-INCIDENTS.md class 4 +
+    // RUNBOOK-2FA-RECOVERY.md for the operator workflow.
+    cookieCache: { enabled: true, maxAge: 7 * 24 * 60 * 60 },
     additionalFields: {
       twoFactorVerified: {
         type: "boolean",
