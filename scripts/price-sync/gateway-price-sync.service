@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync OpenRouter reference prices + USD/BRL fx into ifix-ai-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Optional token (leading - = file may be absent; the OpenRouter endpoint serves
+# unauthenticated). Place OPENROUTER_TOKEN=... in this file, mode 600, NOT committed.
+EnvironmentFile=-%h/.config/gateway-price-sync.env
+ExecStart=/home/pedro/bin/gateway-price-sync.sh
