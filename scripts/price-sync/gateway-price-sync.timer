@@ -1,0 +1,10 @@
+[Unit]
+Description=Mon-Fri 08:30 BRT gateway price/fx sync (before 09:00 pod up)
+
+[Timer]
+# ops-claude TZ is America/Sao_Paulo, so a bare OnCalendar = 08:30 BRT.
+OnCalendar=Mon..Fri 08:30
+Persistent=false
+
+[Install]
+WantedBy=timers.target
