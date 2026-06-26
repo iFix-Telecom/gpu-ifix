@@ -104,6 +104,11 @@ type proxies struct {
 	adminMetricsHandler http.Handler
 	adminAuditHandler   http.Handler
 
+	// quick-260625-v04 — Tier-2 "Operação" panel data source. Mounted
+	// under the SAME admin-key-gated /admin sub-router. nil in the
+	// scaffold test variant; production main wires it.
+	adminOperationsHandler http.Handler
+
 	// Phase 5 — shed middleware collaborators. nil disables the shed
 	// middleware mount; production main always supplies all four
 	// pointers after the Phase 5 wiring block runs.
@@ -1231,27 +1236,35 @@ func main() {
 	adminMetricsHandler := admin.NewMetricsHandler(gen.New(pool), emergFSM, log)
 	adminAuditHandler := admin.NewAuditHandler(gen.New(pool), log)
 
+	// quick-260625-v04 — Tier-2 "Operação" panel. Reads the primary
+	// reconciler Snapshot() (lockless FSM/lifecycle/leader), the breaker
+	// Set effective states, the schedule rule (recomputed from cfg), and
+	// aggregates Vast cost over the month's primary_lifecycles. rec +
+	// emergFSM may be nil when Vast/Phase-6 is disabled → "unknown".
+	adminOperationsHandler := admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, cfg, log)
+
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
-		chat:                chatHandler,
-		embed:               embedHandler,
-		audio:               audioHandler,
-		tts:                 ttsHandler,
-		voices:              voiceHandlers,
-		voicesMaxBytes:      cfg.VoiceMaxUploadBytes,
-		auditWriter:         auditWriter,
-		resolver:            resolver,
-		upstreamsHealth:     upstreams.NewHealthHandler(loader, breakerSet, log),
-		idemStore:           idemStore,
-		tenantsLoader:       tenantsLoader,
-		quotaChecker:        quotaChecker,
-		adminUsageHandler:   adminUsageHandler,
-		adminMetricsHandler: adminMetricsHandler,
-		adminAuditHandler:   adminAuditHandler,
-		adminVerifier:       adminVerifier,
-		rdb:                 rdb,
-		rateLimitFailOpen:   cfg.RateLimitFailOpen,
-		quotaFailOpen:       cfg.QuotaFailOpen,
+		chat:                   chatHandler,
+		embed:                  embedHandler,
+		audio:                  audioHandler,
+		tts:                    ttsHandler,
+		voices:                 voiceHandlers,
+		voicesMaxBytes:         cfg.VoiceMaxUploadBytes,
+		auditWriter:            auditWriter,
+		resolver:               resolver,
+		upstreamsHealth:        upstreams.NewHealthHandler(loader, breakerSet, log),
+		idemStore:              idemStore,
+		tenantsLoader:          tenantsLoader,
+		quotaChecker:           quotaChecker,
+		adminUsageHandler:      adminUsageHandler,
+		adminMetricsHandler:    adminMetricsHandler,
+		adminAuditHandler:      adminAuditHandler,
+		adminOperationsHandler: adminOperationsHandler,
+		adminVerifier:          adminVerifier,
+		rdb:                    rdb,
+		rateLimitFailOpen:      cfg.RateLimitFailOpen,
+		quotaFailOpen:          cfg.QuotaFailOpen,
 		// Phase 5 — shed middleware wiring (D-B4).
 		upstreamsLoader: loader,
 		shedSet:         shedSet,
@@ -1466,6 +1479,10 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		}
 		if px.adminAuditHandler != nil {
 			adminRouter.Method(http.MethodGet, "/audit", px.adminAuditHandler)
+		}
+		// quick-260625-v04 — Tier-2 "Operação" panel, same X-Admin-Key gate.
+		if px.adminOperationsHandler != nil {
+			adminRouter.Method(http.MethodGet, "/operations", px.adminOperationsHandler)
 		}
 		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
 		// used by `gatewayctl debug emit-error` to prove the
