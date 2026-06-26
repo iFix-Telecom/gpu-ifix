@@ -1021,22 +1021,41 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 
 // calculatePrimaryCostBRL computes the realised cost of a primary
 // lifecycle for the close-event payload. Returns 0 when accepted_dph is
-// 0 (no instance was ever created) OR first_health_pass_at is NULL.
-// Mirrors emerg.calculateCostBRL.
+// 0 (no instance was ever created) OR no open lifecycle row is readable.
+//
+// Cost basis = first_health_pass_at when present; if it is NULL (never
+// stamped — e.g. the row is being closed before markReady wrote it), it
+// falls back to started_at. The started_at basis OVER-counts the cold-start
+// window (~5 min, bounded), keeping the persisted total_cost_brl consistent
+// with the live accrual in the /admin/operations handler (which also
+// approximates with started_at). Mirrors emerg.calculateCostBRL.
+//
+// Reads the row via GetOpenPrimaryLifecycle (the singleton open row — which
+// at close time, before ClosePrimaryLifecycle stamps ended_at, IS the row
+// identified by id) so the sqlc DBTX seam is unit-testable. Deps.DB is a
+// concrete *pgxpool.Pool that cannot be faked directly, so the override-
+// aware r.queries() handle is used instead. The id arg is retained for
+// caller/signature parity and audit clarity.
 func (r *Reconciler) calculatePrimaryCostBRL(ctx context.Context, id int64, acceptedDPH float64) float64 {
-	if acceptedDPH <= 0 || r.deps.DB == nil {
+	q := r.queries()
+	if acceptedDPH <= 0 || q == nil {
 		return 0
 	}
-	var firstHealth pgtype.Timestamptz
-	row := r.deps.DB.QueryRow(ctx,
-		`SELECT first_health_pass_at FROM ai_gateway.primary_lifecycles WHERE id = $1`, id)
-	if err := row.Scan(&firstHealth); err != nil {
+	_ = id
+	row, err := q.GetOpenPrimaryLifecycle(ctx)
+	if err != nil {
 		return 0
 	}
-	if !firstHealth.Valid {
+	var basis time.Time
+	switch {
+	case row.FirstHealthPassAt.Valid:
+		basis = row.FirstHealthPassAt.Time
+	case !row.StartedAt.IsZero():
+		basis = row.StartedAt
+	default:
 		return 0
 	}
-	hours := time.Since(firstHealth.Time).Hours()
+	hours := time.Since(basis).Hours()
 	if hours < 0 {
 		hours = 0
 	}

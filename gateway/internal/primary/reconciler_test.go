@@ -2890,3 +2890,71 @@ func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
 	require.Equal(t, StateReady, r.deps.FSM.State(),
 		"markReady completes the Provisioning→Ready transition despite no Redis")
 }
+
+// costOpenRow models the GetOpenPrimaryLifecycle row for
+// calculatePrimaryCostBRL tests. Only started_at (dest[1]) and
+// first_health_pass_at (dest[2]) drive the cost basis.
+type costOpenRow struct {
+	startedAt   time.Time
+	firstHealth pgtype.Timestamptz
+}
+
+func (r costOpenRow) Scan(dest ...interface{}) error {
+	if len(dest) < 13 {
+		return fmt.Errorf("costOpenRow: expected 13 dest pointers, got %d", len(dest))
+	}
+	if p, ok := dest[1].(*time.Time); ok {
+		*p = r.startedAt
+	}
+	if p, ok := dest[2].(*pgtype.Timestamptz); ok {
+		*p = r.firstHealth
+	}
+	return nil
+}
+
+// TestCalculatePrimaryCostBRL_StartedAtFallback proves the cost basis falls
+// back from first_health_pass_at to started_at when the former is NULL, so
+// closed lifecycle rows persist a non-zero total_cost_brl (dashboard
+// vast_cost R$0 bug). Mirrors the /admin/operations live-accrual
+// approximation (started_at over-counts only the bounded cold-start window).
+func TestCalculatePrimaryCostBRL_StartedAtFallback(t *testing.T) {
+	cfg := testCfg(t) // USDToBRLRate = 5.0
+	const dph = 0.30
+	started := time.Now().Add(-2 * time.Hour)
+	health := time.Now().Add(-1 * time.Hour)
+
+	cases := []struct {
+		name        string
+		startedAt   time.Time
+		firstHealth pgtype.Timestamptz
+		dph         float64
+		wantHours   float64
+		wantZero    bool
+	}{
+		{"first_health set uses first_health", started, pgtype.Timestamptz{Time: health, Valid: true}, dph, 1.0, false},
+		{"first_health NULL falls back to started_at", started, pgtype.Timestamptz{}, dph, 2.0, false},
+		{"both NULL returns 0", time.Time{}, pgtype.Timestamptz{}, dph, 0, true},
+		{"acceptedDPH<=0 returns 0", started, pgtype.Timestamptz{Time: health, Valid: true}, 0, 0, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dbtx := &fakeDBTX{
+				queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+					return costOpenRow{startedAt: tc.startedAt, firstHealth: tc.firstHealth}
+				},
+			}
+			r := buildReconciler(t, Deps{Cfg: cfg})
+			r.SetQueriesForTest(gen.New(dbtx))
+
+			got := r.calculatePrimaryCostBRL(context.Background(), 7, tc.dph)
+			if tc.wantZero {
+				require.Equal(t, 0.0, got)
+				return
+			}
+			want := tc.dph * tc.wantHours * cfg.USDToBRLRate
+			require.InDelta(t, want, got, 0.01,
+				"cost = dph(%v) × hours(%v) × rate(%v)", tc.dph, tc.wantHours, cfg.USDToBRLRate)
+		})
+	}
+}
