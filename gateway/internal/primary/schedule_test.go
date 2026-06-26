@@ -376,6 +376,59 @@ func TestShouldBeProvisioned_DisabledKillSwitch(t *testing.T) {
 	}
 }
 
+// --- ShouldStayUp (pre-warm flap fix) ----------------------------------
+//
+// Regression for primary-pod-flap-prewarm-window: the keep-up/drain gate
+// MUST be lead-aware (mirror ShouldBeProvisioned), otherwise a pod that
+// reaches Ready inside the pre-warm lead window [UpHour-lead, UpHour) is
+// immediately drained because IsInPeak is still false → provision/drain
+// disagree → flap. ShouldStayUp must be true throughout that lead window.
+
+func TestShouldStayUp_DuringPeak(t *testing.T) {
+	loc := brtZone()
+	rule := buildRule(loc, 9, 17, allWeekdays(), false, 1800)
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, loc) // Wed 12:00 — mid-peak
+	if !rule.ShouldStayUp(now) {
+		t.Fatalf("ShouldStayUp during active peak = false, want true")
+	}
+}
+
+func TestShouldStayUp_LeadWindowBeforeUpHour(t *testing.T) {
+	loc := brtZone()
+	rule := buildRule(loc, 9, 17, allWeekdays(), false, 1800) // 30-min lead
+	now := time.Date(2026, 5, 13, 8, 45, 0, 0, loc)           // Wed 08:45 — 15 min before UpHour=9
+	if !rule.ShouldStayUp(now) {
+		t.Fatalf("ShouldStayUp 15min before UpHour with lead=1800 = false, want true (pre-warm keep-up)")
+	}
+}
+
+func TestShouldStayUp_AfterDownHour(t *testing.T) {
+	loc := brtZone()
+	rule := buildRule(loc, 9, 17, allWeekdays(), false, 1800)
+	now := time.Date(2026, 5, 13, 17, 30, 0, 0, loc) // Wed 17:30 — past DownHour=17
+	if rule.ShouldStayUp(now) {
+		t.Fatalf("ShouldStayUp after DownHour = true, want false (window exited → drain)")
+	}
+}
+
+func TestShouldStayUp_BeyondLead(t *testing.T) {
+	loc := brtZone()
+	rule := buildRule(loc, 9, 17, allWeekdays(), false, 1800)
+	now := time.Date(2026, 5, 13, 7, 0, 0, 0, loc) // Wed 07:00 — 2h before UpHour, beyond 30-min lead
+	if rule.ShouldStayUp(now) {
+		t.Fatalf("ShouldStayUp 2h before UpHour with lead=1800 = true, want false (beyond lead)")
+	}
+}
+
+func TestShouldStayUp_DisabledKillSwitch(t *testing.T) {
+	loc := brtZone()
+	rule := buildRule(loc, 9, 17, allWeekdays(), true, 1800)
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, loc) // mid-peak but disabled
+	if rule.ShouldStayUp(now) {
+		t.Fatalf("ShouldStayUp with Disabled=true = true, want false (kill-switch)")
+	}
+}
+
 // --- NextTransition ----------------------------------------------------
 
 func TestNextTransition_BeforePeakReturnsUp(t *testing.T) {

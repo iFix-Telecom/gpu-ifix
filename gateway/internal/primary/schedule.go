@@ -225,6 +225,30 @@ func (r ScheduleRule) ShouldBeProvisioned(now time.Time) bool {
 	return delta > 0 && delta <= lead
 }
 
+// ShouldStayUp reports whether a Ready pod should REMAIN up right now (the
+// keep-up / drain gate consumed by reconciler.evaluateReady). It is
+// deliberately lead-aware and delegates to ShouldBeProvisioned so the
+// keep-up gate is IDENTICAL to the provision gate.
+//
+// Why not IsInPeak (the original gate)? evaluateAsleep provisions during
+// the pre-warm lead window [UpHour-lead, UpHour) via ShouldBeProvisioned,
+// but IsInPeak only turns true at UpHour. A pod that finishes cold-start
+// and reaches Ready INSIDE the lead window would then be drained
+// immediately by an IsInPeak gate (still false) and re-provisioned on the
+// next tick — flapping create→destroy every few minutes until the clock
+// reaches UpHour (debug: primary-pod-flap-prewarm-window). Making the
+// keep-up gate match the provision gate (ShouldBeProvisioned) removes the
+// disagreement: a pre-warmed pod stays up through UpHour. After DownHour
+// both gates report false, so drain still fires at window exit.
+//
+// The kill-switch (Disabled=true) propagates through ShouldBeProvisioned →
+// false, preserving the operator force-up-under-DISABLED semantics
+// (DISABLED is handled separately in evaluateReady, which short-circuits
+// before reaching this gate).
+func (r ScheduleRule) ShouldStayUp(now time.Time) bool {
+	return r.ShouldBeProvisioned(now)
+}
+
 // NextTransition returns the next scheduled transition timestamp and its
 // kind ("up" or "down"). Used by:
 //

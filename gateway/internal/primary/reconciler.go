@@ -418,10 +418,15 @@ func (r *Reconciler) cooldownElapsed(now time.Time) bool {
 }
 
 // evaluateReady triggers drain when the schedule window closes. Uses
-// IsInPeak (NOT ShouldBeProvisioned) — drain happens at the active-window
-// EXIT, not at the pre-warm-fall (pre-warm is asymmetric: only kicks in
-// before UpHour; AFTER DownHour the schedule is OFF and ShouldBeProvisioned
-// would also report false, but using IsInPeak makes intent clearer).
+// ShouldStayUp — the lead-aware keep-up gate (== ShouldBeProvisioned), NOT
+// the bare IsInPeak. The earlier IsInPeak gate disagreed with the provision
+// gate during the pre-warm lead window [UpHour-lead, UpHour): evaluateAsleep
+// provisions there (ShouldBeProvisioned=true) but IsInPeak is still false,
+// so a pod that reached Ready inside that window was drained immediately and
+// re-provisioned every tick — flapping create→destroy until UpHour
+// (debug: primary-pod-flap-prewarm-window). Aligning the keep-up gate with
+// the provision gate keeps a pre-warmed pod up through UpHour; after DownHour
+// both gates report false so drain still fires cleanly at window exit.
 //
 // UAT 14 follow-up (2026-05-19): DISABLED gates auto-drain. ScheduleRule's
 // IsInPeak returns false under Disabled, which would drain a Ready pod
@@ -476,7 +481,7 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	if r.cfg.PrimaryPodScheduleDisabled {
 		return
 	}
-	if !r.rule.IsInPeak(now) {
+	if !r.rule.ShouldStayUp(now) {
 		r.startDrain(ctx, "schedule_window_exited", log)
 		return
 	}

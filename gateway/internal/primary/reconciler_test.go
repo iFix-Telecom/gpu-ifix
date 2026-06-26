@@ -1062,6 +1062,104 @@ func TestEvaluateReady_NoopWhenDisabled(t *testing.T) {
 		"DISABLED evaluateReady must NOT call RestoreTier0")
 }
 
+// Regression: primary-pod-flap-prewarm-window. A Ready pod that reaches
+// Ready inside the pre-warm lead window [UpHour-lead, UpHour) MUST NOT be
+// drained — the provision gate (ShouldBeProvisioned) already keeps it up
+// during this window, so evaluateReady must agree (ShouldStayUp), else the
+// pod flaps create→destroy every tick until the clock hits UpHour.
+func TestEvaluateReady_DoesNotDrainDuringPreWarmLead(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		// UpHour=9 DownHour=17 weekdays, lead=1800s (30 min).
+		Rule: buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 08:45 BRT — 15 min before UpHour=9, inside the 30-min lead.
+	now := time.Date(2026, 5, 13, 8, 45, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"pod inside pre-warm lead window must STAY Ready (no flap), got drain")
+	require.Nil(t, r.drainStartedAt.Load(), "drainStartedAt must NOT be populated inside lead window")
+	require.Empty(t, loader.restoredRoles(),
+		"evaluateReady must NOT RestoreTier0 inside the pre-warm lead window")
+}
+
+// Regression companion: once the window has fully exited (now >= DownHour)
+// the pod MUST still drain — the fix must not over-extend keep-up.
+func TestEvaluateReady_DrainsAfterDownHour(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 17:30 BRT — past DownHour=17, window exited.
+	now := time.Date(2026, 5, 13, 17, 30, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"pod past DownHour must drain (schedule_window_exited)")
+	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated on window-exit drain")
+}
+
+// Regression companion: a pod squarely inside peak must never drain.
+func TestEvaluateReady_DoesNotDrainDuringPeak(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 12:00 BRT — mid-peak.
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"pod mid-peak must STAY Ready")
+	require.Nil(t, r.drainStartedAt.Load(), "drainStartedAt must NOT be populated mid-peak")
+}
+
 // ===========================================================================
 // evaluateDraining tests
 // ===========================================================================
