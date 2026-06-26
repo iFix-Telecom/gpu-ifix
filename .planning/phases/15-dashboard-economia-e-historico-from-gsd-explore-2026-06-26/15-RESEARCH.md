@@ -405,7 +405,12 @@ Handler builds `searchPattern := "%"; if q != "" { searchPattern = "%"+q+"%" }`.
 | A4 | `Input` shadcn component exists for the search box | §Standard Stack | Trivial — `npx shadcn add input` if missing; verify before planning. |
 | A5 | Phantom price is correct (per exploration decision) — no validation task | §User Constraints | Locked by exploration; explicitly out of scope. |
 
-## Open Questions
+## Open Questions (RESOLVED — see 15-CONTEXT.md `<decisions>`)
+
+> All three resolved during inline design (2026-06-26). Resolutions are authoritative in 15-CONTEXT.md; plans implement them.
+> - Q1 → **`cfg.USDToBRLRate`** (config constant, consistency).
+> - Q2 → **new `/economia` route**.
+> - Q3 → **drop "recorte janela pod-up"** (== líquido, since phantom=0 when pod down); instead show all 5 metrics (líquido, ROI, custo OpenRouter fallback, % servido local, horas pod UP).
 
 1. **Forex rate source for live accrual: config constant vs `fx_rates` table?**
    - What we know: `operations.go` uses `cfg.USDToBRLRate` (default 5.0). A daily timer populates `fx_rates` (`GetCurrentFX('USD/BRL')` query exists).
