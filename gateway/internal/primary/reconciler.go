@@ -1720,6 +1720,40 @@ func (r *Reconciler) IsLeader() bool {
 	return r.isLeader.Load()
 }
 
+// ReconcilerSnapshot is a point-in-time, lockless view of the primary
+// reconciler's observable state, consumed by the GET /admin/operations
+// panel. State is the FSM state name ("asleep"|"provisioning"|"ready"|
+// "draining"|"destroying"), or "unknown" when the FSM is unwired (Vast
+// disabled / early boot). ActiveLifecycleID and ActiveInstanceID are 0
+// when no lifecycle is active.
+type ReconcilerSnapshot struct {
+	State             string
+	ActiveLifecycleID int64
+	ActiveInstanceID  int64
+	IsLeader          bool
+}
+
+// Snapshot composes the reconciler's observable state for the operations
+// dashboard. No data race: every read is a lockless atomic load —
+// r.deps.FSM.State() (atomic.Int32), r.activeLifecycleSnapshot() (two
+// atomic.Int64 loads), and r.isLeader.Load() — and no shared state is
+// written here. Safe to call from the /admin/operations request
+// goroutine concurrently with the reconciler loop. nil-guards
+// r.deps.FSM → State "unknown".
+func (r *Reconciler) Snapshot() ReconcilerSnapshot {
+	state := "unknown"
+	if r.deps.FSM != nil {
+		state = r.deps.FSM.State().String()
+	}
+	lid, iid := r.activeLifecycleSnapshot()
+	return ReconcilerSnapshot{
+		State:             state,
+		ActiveLifecycleID: lid,
+		ActiveInstanceID:  iid,
+		IsLeader:          r.isLeader.Load(),
+	}
+}
+
 // ReplicaID returns the per-replica identifier (deps.ReplicaID; defaults
 // to os.Hostname() in NewReconcilerFull). Used by gatewayctl + Pub/Sub
 // payload attribution.

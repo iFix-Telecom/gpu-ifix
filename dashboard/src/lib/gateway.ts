@@ -189,6 +189,77 @@ export interface UsageResponse {
   }>;
 }
 
+// --- /admin/operations (quick-260625-v04, Tier-2 "Operação") --------------
+//
+// These interfaces mirror the Go handler `admin.OperationsResponse` and its
+// sections in gateway/internal/admin/operations.go FIELD-FOR-FIELD. The Go
+// handler is the source of truth. Nullable Postgres columns are rendered as
+// JSON null by the handler → typed as `T | null` here. `phantom_month_brl`
+// is omitted by the handler this version (economy deferred) → optional.
+
+/** Primary + emergency FSM state. Mirrors `admin.FSMSection`. */
+export interface OperationsFSM {
+  primary_state: string; // asleep|provisioning|ready|draining|destroying|unknown
+  emerg_state: string; // unknown when Vast/Phase-6 off
+  active_lifecycle_id: number;
+  active_instance_id: number;
+  is_leader: boolean;
+}
+
+/** Resolved schedule window + next transition. Mirrors `admin.ScheduleSection`. */
+export interface OperationsSchedule {
+  timezone: string;
+  up_hour: number;
+  down_hour: number;
+  days: string[]; // ordered ["mon","tue",...]
+  provision_lead_seconds: number;
+  grace_ramp_down_seconds: number;
+  disabled: boolean;
+  should_be_provisioned_now: boolean;
+  next_transition_at: string; // RFC3339; "" when none
+  next_transition_kind: string; // up|down|""
+}
+
+/** One primary lifecycle row. Mirrors `admin.LifecycleRow`. */
+export interface OperationsLifecycle {
+  id: number;
+  started_at: string;
+  drain_started_at: string | null;
+  ended_at: string | null; // null = still running
+  trigger_reason: string;
+  vast_instance_id: number | null;
+  accepted_dph: number | null;
+  cost_brl: number | null; // null while open
+  shutdown_reason: string | null;
+}
+
+/** One upstream's effective breaker state. Mirrors `admin.BreakerRow`. */
+export interface OperationsBreaker {
+  upstream: string;
+  state: string; // closed|half-open|open|forced-open
+}
+
+/** Vast spend + budget. Mirrors `admin.VastCostSection`. */
+export interface OperationsVastCost {
+  today_brl: number;
+  month_brl: number;
+  budget_brl: number;
+  budget_pct_used: number;
+  phantom_month_brl?: number; // omitted this version (economy deferred)
+}
+
+/**
+ * `/admin/operations` JSON — the Tier-2 "Operação" panel's single fetch.
+ * Mirrors `admin.OperationsResponse` in gateway/internal/admin/operations.go.
+ */
+export interface OperationsResponse {
+  fsm: OperationsFSM;
+  schedule: OperationsSchedule;
+  lifecycles: OperationsLifecycle[];
+  breakers: OperationsBreaker[];
+  vast_cost: OperationsVastCost;
+}
+
 /**
  * Error envelope surfaced by the proxy or the gateway.
  *
@@ -273,4 +344,9 @@ export function fetchUsage(
   to: string,
 ): Promise<UsageResponse> {
   return proxyGet<UsageResponse>("usage", { tenant, from, to });
+}
+
+/** GET /admin/operations — Tier-2 "Operação" aggregate (FSM/schedule/cost). */
+export function fetchOperations(): Promise<OperationsResponse> {
+  return proxyGet<OperationsResponse>("operations");
 }
