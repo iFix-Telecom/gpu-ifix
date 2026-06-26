@@ -2892,11 +2892,15 @@ func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
 }
 
 // costOpenRow models the GetOpenPrimaryLifecycle row for
-// calculatePrimaryCostBRL tests. Only started_at (dest[1]) and
-// first_health_pass_at (dest[2]) drive the cost basis.
+// calculatePrimaryCostBRL tests. started_at (dest[1]) and
+// first_health_pass_at (dest[2]) drive the cost basis; accepted_dph
+// (dest[8]) drives the effective DPH (fix #2 — the calc reads the row's
+// accepted_dph, NOT the closeLifecycle param, because evaluateDestroying
+// closes schedule-driven rows with param=0).
 type costOpenRow struct {
 	startedAt   time.Time
 	firstHealth pgtype.Timestamptz
+	acceptedDph pgtype.Numeric
 }
 
 func (r costOpenRow) Scan(dest ...interface{}) error {
@@ -2909,52 +2913,68 @@ func (r costOpenRow) Scan(dest ...interface{}) error {
 	if p, ok := dest[2].(*pgtype.Timestamptz); ok {
 		*p = r.firstHealth
 	}
+	if p, ok := dest[8].(*pgtype.Numeric); ok {
+		*p = r.acceptedDph
+	}
 	return nil
 }
 
-// TestCalculatePrimaryCostBRL_StartedAtFallback proves the cost basis falls
-// back from first_health_pass_at to started_at when the former is NULL, so
-// closed lifecycle rows persist a non-zero total_cost_brl (dashboard
-// vast_cost R$0 bug). Mirrors the /admin/operations live-accrual
-// approximation (started_at over-counts only the bounded cold-start window).
+// TestCalculatePrimaryCostBRL_StartedAtFallback proves two things:
+//
+//   - Cost basis falls back from first_health_pass_at to started_at when the
+//     former is NULL, so closed lifecycle rows persist a non-zero
+//     total_cost_brl (dashboard vast_cost R$0 bug). Mirrors the
+//     /admin/operations live-accrual approximation (started_at over-counts
+//     only the bounded cold-start window).
+//   - The effective DPH comes from the ROW's accepted_dph, NOT the param
+//     (fix #2). evaluateDestroying closes schedule-driven rows via
+//     closeLifecycle(..., "destroyed", 0) — a param=0 must NOT zero the cost
+//     when the row carries a real accepted_dph.
 func TestCalculatePrimaryCostBRL_StartedAtFallback(t *testing.T) {
 	cfg := testCfg(t) // USDToBRLRate = 5.0
-	const dph = 0.30
 	started := time.Now().Add(-2 * time.Hour)
 	health := time.Now().Add(-1 * time.Hour)
+	healthTz := pgtype.Timestamptz{Time: health, Valid: true}
 
 	cases := []struct {
 		name        string
 		startedAt   time.Time
 		firstHealth pgtype.Timestamptz
-		dph         float64
+		rowDPH      pgtype.Numeric // accepted_dph stored on the lifecycle row
+		paramDPH    float64        // value passed by closeLifecycle (often 0)
 		wantHours   float64
+		wantDPH     float64
 		wantZero    bool
 	}{
-		{"first_health set uses first_health", started, pgtype.Timestamptz{Time: health, Valid: true}, dph, 1.0, false},
-		{"first_health NULL falls back to started_at", started, pgtype.Timestamptz{}, dph, 2.0, false},
-		{"both NULL returns 0", time.Time{}, pgtype.Timestamptz{}, dph, 0, true},
-		{"acceptedDPH<=0 returns 0", started, pgtype.Timestamptz{Time: health, Valid: true}, 0, 0, true},
+		{"first_health set uses first_health", started, healthTz, numericFromFloat(0.30), 0.30, 1.0, 0.30, false},
+		{"first_health NULL falls back to started_at", started, pgtype.Timestamptz{}, numericFromFloat(0.30), 0.30, 2.0, 0.30, false},
+		{"both timestamps NULL returns 0", time.Time{}, pgtype.Timestamptz{}, numericFromFloat(0.30), 0.30, 0, 0, true},
+		// fix #2 — schedule close: evaluateDestroying passes param=0 but row
+		// carries the real accepted_dph; cost MUST come from the row.
+		{"param dph 0 uses row accepted_dph (schedule close)", started, pgtype.Timestamptz{}, numericFromFloat(0.1888), 0, 2.0, 0.1888, false},
+		// fix #2 — provisioning failure: row never stamped accepted_dph.
+		{"row accepted_dph NULL returns 0", started, healthTz, pgtype.Numeric{}, 0, 0, 0, true},
+		{"row accepted_dph 0 returns 0", started, healthTz, numericFromFloat(0), 0, 0, 0, true},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			dbtx := &fakeDBTX{
 				queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
-					return costOpenRow{startedAt: tc.startedAt, firstHealth: tc.firstHealth}
+					return costOpenRow{startedAt: tc.startedAt, firstHealth: tc.firstHealth, acceptedDph: tc.rowDPH}
 				},
 			}
 			r := buildReconciler(t, Deps{Cfg: cfg})
 			r.SetQueriesForTest(gen.New(dbtx))
 
-			got := r.calculatePrimaryCostBRL(context.Background(), 7, tc.dph)
+			got := r.calculatePrimaryCostBRL(context.Background(), 7, tc.paramDPH)
 			if tc.wantZero {
 				require.Equal(t, 0.0, got)
 				return
 			}
-			want := tc.dph * tc.wantHours * cfg.USDToBRLRate
+			want := tc.wantDPH * tc.wantHours * cfg.USDToBRLRate
 			require.InDelta(t, want, got, 0.01,
-				"cost = dph(%v) × hours(%v) × rate(%v)", tc.dph, tc.wantHours, cfg.USDToBRLRate)
+				"cost = rowDPH(%v) × hours(%v) × rate(%v)", tc.wantDPH, tc.wantHours, cfg.USDToBRLRate)
 		})
 	}
 }
