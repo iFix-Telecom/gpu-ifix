@@ -11,7 +11,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Receipt, ScrollText, Users } from "lucide-react";
+import { Activity, Receipt, ScrollText, ServerCog, Users } from "lucide-react";
 
 import {
   Sidebar,
@@ -29,6 +29,7 @@ const NAV_ITEMS = [
   { href: "/", label: "Visão geral", icon: Activity },
   { href: "/tenants", label: "Tenants", icon: Users },
   { href: "/consumo", label: "Consumo", icon: Receipt },
+  { href: "/operacao", label: "Operação", icon: ServerCog },
   { href: "/incidents", label: "Histórico de incidentes", icon: ScrollText },
 ] as const;
 
