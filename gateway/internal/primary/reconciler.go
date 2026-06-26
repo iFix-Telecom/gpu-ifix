@@ -1020,8 +1020,18 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 }
 
 // calculatePrimaryCostBRL computes the realised cost of a primary
-// lifecycle for the close-event payload. Returns 0 when accepted_dph is
-// 0 (no instance was ever created) OR no open lifecycle row is readable.
+// lifecycle for the close-event payload. Returns 0 when the row's
+// accepted_dph is NULL/<=0 (no real instance) OR no open lifecycle row is
+// readable.
+//
+// DPH source = the ROW's accepted_dph, NOT the acceptedDPH param (fix #2).
+// The normal close path evaluateDestroying calls
+// closeLifecycle(..., "destroyed", 0) for schedule-driven shutdowns, so the
+// param is 0 there — relying on it would zero the cost of EVERY scheduled
+// pod and defeat the started_at fallback. The provisioning-failure
+// call-sites also pass 0, but those rows never stamped accepted_dph either,
+// so reading the row yields 0 and the early-return still holds. The param
+// is therefore ignored (retained only for closeLifecycle signature parity).
 //
 // Cost basis = first_health_pass_at when present; if it is NULL (never
 // stamped — e.g. the row is being closed before markReady wrote it), it
@@ -1038,12 +1048,17 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 // caller/signature parity and audit clarity.
 func (r *Reconciler) calculatePrimaryCostBRL(ctx context.Context, id int64, acceptedDPH float64) float64 {
 	q := r.queries()
-	if acceptedDPH <= 0 || q == nil {
+	if q == nil {
 		return 0
 	}
 	_ = id
+	_ = acceptedDPH // fix #2: DPH comes from the row, not the param.
 	row, err := q.GetOpenPrimaryLifecycle(ctx)
 	if err != nil {
+		return 0
+	}
+	dph := primaryNumericToFloat(row.AcceptedDph)
+	if dph <= 0 {
 		return 0
 	}
 	var basis time.Time
@@ -1059,7 +1074,7 @@ func (r *Reconciler) calculatePrimaryCostBRL(ctx context.Context, id int64, acce
 	if hours < 0 {
 		hours = 0
 	}
-	return acceptedDPH * hours * r.deps.Cfg.USDToBRLRate
+	return dph * hours * r.deps.Cfg.USDToBRLRate
 }
 
 // cancelActiveLifecycle is the triple-layer cancel pattern (parity
