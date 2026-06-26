@@ -84,6 +84,8 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [ ] **OBS-06**: Rate-limit de alertas (deduplicação em janela de 5 min) para prevenir alert fatigue
 - [ ] **OBS-07**: Audit log append-only em `audit_log` Postgres para: mudança de FSM, ativação/desativação de tenant, spin-up/shutdown emergencial, ajuste de threshold
 - [ ] **OBS-08**: Sentry integration (padrão Ifix) com redaction de API keys e payloads sensíveis
+- [ ] **OBS-09**: Dashboard exibe painel de **Economia** (phantom vs Vast) — destrava o painel hoje deferred. Gateway soma `cost_local_phantom_brl` gateway-wide (todos tenants) por período e cruza com custo real Vast (`primary_lifecycles.total_cost_brl` + accrual `accepted_dph × horas`). UI mostra 3 números lado a lado: **líquido R$** (phantom − Vast), **recorte janela pod-up** (só horas com pod UP), **multiplicador ROI** (phantom evitado por R$1 de GPU), + gráfico de economia como **série temporal real** (eixo X = tempo). Assume preço phantom confiável (daily timer OpenRouter+forex)
+- [ ] **OBS-10**: Página `/incidents` (audit log) ganha **filtro de data + busca + total count** — hoje só tem pager limit/offset, sem range nem COUNT
 
 ### Integrations — Client Apps
 
@@ -226,6 +228,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBS-06 | Phase 7: Observability — Dashboard & Alerting | Pending |
 | OBS-07 | Phase 7: Observability — Dashboard & Alerting | Pending |
 | OBS-08 | Phase 7: Observability — Dashboard & Alerting | Pending |
+| OBS-09 | Phase 13: Dashboard Economia & Histórico | Pending |
+| OBS-10 | Phase 13: Dashboard Economia & Histórico | Pending |
 | INT-01 | Phase 8: Client Integration — ConverseAI + Chat Ifix | Pending |
 | INT-02 | Phase 8: Client Integration — ConverseAI + Chat Ifix | Pending |
 | INT-03 | Phase 9: Client Integration — Sensitive Tenants | Pending |
