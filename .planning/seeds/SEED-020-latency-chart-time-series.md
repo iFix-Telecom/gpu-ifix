@@ -1,6 +1,6 @@
 ---
 title: Latency chart como série temporal (eixo = tempo, não rota)
-trigger_condition: quando alguém precisar de tendência histórica de latência (debug de regressão, capacity planning, ou após Phase 13 estabelecer o padrão de série temporal no dashboard)
+trigger_condition: quando alguém precisar de tendência histórica de latência (debug de regressão, capacity planning, ou após Phase 15 estabelecer o padrão de série temporal no dashboard)
 planted_date: 2026-06-26
 source: /gsd:explore (dashboard melhorias)
 ---
@@ -24,10 +24,10 @@ temporais.
 - UI: trocar eixo X do `latency-chart` para tempo; opcionalmente seletor de janela.
 
 ## Por que seed e não fase
-Não é o número que importa hoje (economia é). A Phase 13 já estabelece o padrão de
+Não é o número que importa hoje (economia é). A Phase 15 já estabelece o padrão de
 série temporal real (gráfico de economia) — depois disso, replicar pra latência é barato.
 Reaproveitar o mesmo padrão de bucketing temporal.
 
 ## Relacionado
-- Phase 13 (OBS-09) — série temporal de economia (estabelece o padrão)
+- Phase 15 (OBS-09) — série temporal de economia (estabelece o padrão)
 - [[dashboard-economia-definicao-e-gaps]]

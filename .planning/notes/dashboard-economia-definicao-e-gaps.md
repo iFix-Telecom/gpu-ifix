@@ -43,7 +43,7 @@ Preço phantom = **confiável, NÃO validar antes**. Histórico: custo já apare
 mismatch de chave (`model.gguf` vs seed); corrigido por daily timer ops-claude que popula
 preços OpenRouter + forex. Assumir correto e construir.
 
-## Gaps conhecidos NÃO-prioritários (fora da Phase 13)
+## Gaps conhecidos NÃO-prioritários (fora da Phase 15)
 - **audio_seconds / embeds_count = 0** — metering não grava. KPIs de áudio/embed no
   `/consumo` vêm zerados. (`HANDOFF-tier3-gpu-metrics.md:27`)
 - **Latency chart não é série temporal** — eixo X = rota (categórico), não tempo.

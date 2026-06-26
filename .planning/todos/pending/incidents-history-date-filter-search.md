@@ -25,5 +25,5 @@ Sem filtro de data, sem busca, sem total count → "não consigo consultar hist�
 - [ ] UI: date range picker + search box (reusar padrão do `/consumo` tenant filter)
 
 ## Nota
-Faz parte da Phase 13 (OBS-10) — pode virar plano dentro dela em vez de todo solto.
+Faz parte da Phase 15 (OBS-10) — pode virar plano dentro dela em vez de todo solto.
 Mantido aqui pra não perder o detalhe de implementação.

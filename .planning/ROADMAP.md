@@ -263,7 +263,7 @@ Plans:
 
 - [x] 12-05-PLAN.md — Prod chaos gate (HUMAN-UAT, zero-502 D-18) + CAP-01 saturation decision doc (D-19)
 
-### Phase 13: dashboard-economia-e-historico (from /gsd:explore 2026-06-26)
+### Phase 15: dashboard-economia-e-historico (from /gsd:explore 2026-06-26)
 
 **Goal:** Dar ao operador o número que mais importa — **se a GPU própria economiza de verdade vs OpenRouter** — e tornar o histórico navegável. (1) OBS-09 — destravar o painel de Economia hoje deferred: o gateway ganha uma soma `cost_local_phantom_brl` **gateway-wide** (todos tenants, query sem filtro de tenant — o blocker atual) por período, cruzada com o custo real Vast (`primary_lifecycles.total_cost_brl` para lifecycles fechados + accrual `accepted_dph × horas-desde-started` para o lifecycle aberto). O dashboard exibe **3 números lado a lado** — líquido R$ (phantom − Vast), recorte janela pod-up (só horas com pod UP; alinhamento natural pois phantom só é gravado quando servido local), e multiplicador ROI (phantom evitado por R$1 de GPU) — mais um **gráfico de economia como série temporal real** (eixo X = tempo), que de quebra resolve a queixa do gráfico atual (latency chart usa eixo = rota, não tempo). Assume preço phantom confiável (decisão da exploração: daily timer OpenRouter+forex já popula). (2) OBS-10 — `/incidents` (audit log) ganha filtro de data + busca + total count (hoje só pager limit/offset, sem range nem COUNT no handler).
 
