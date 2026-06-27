@@ -11,9 +11,10 @@
  * `id`, no `actor`, no `detail` JSON blob (CR-01); the human-readable
  * cause of a state change rides the dedicated `reason` column (CR-03).
  *
- * The pager has no server-reported `total` — the Go handler does not run
- * a COUNT. `canNext` is inferred from whether the current page is full
- * (a full page means there is probably another page).
+ * The pager is driven by the server-reported `total` (15-02 added a real
+ * COUNT over the same range/search predicate): `canNext = offset + limit <
+ * total`. When `total` is absent it falls back to the legacy full-page
+ * heuristic (`rows.length >= limit`).
  *
  * UI-SPEC §Layout Constraints — 36px fixed rows. §Copywriting — the
  * "Nenhum evento registrado no período." empty state.
@@ -37,6 +38,12 @@ export interface AuditTableProps {
   /** Current page size + offset. */
   limit: number;
   offset: number;
+  /**
+   * Total matching rows (real COUNT — 15-02). When provided, the pager
+   * derives honest bounds (`offset + limit < total`); when absent, it falls
+   * back to the legacy full-page heuristic.
+   */
+  total?: number;
   /** Pager callbacks — the page owns the limit/offset query state. */
   onPrev: () => void;
   onNext: () => void;
@@ -55,6 +62,7 @@ export function AuditTable({
   rows,
   limit,
   offset,
+  total,
   onPrev,
   onNext,
 }: AuditTableProps) {
@@ -69,8 +77,9 @@ export function AuditTable({
   const from = offset + 1;
   const to = offset + rows.length;
   const canPrev = offset > 0;
-  // No server `total` — a full page implies there is likely a next page.
-  const canNext = rows.length >= limit;
+  // Server `total` (15-02 COUNT) gives honest bounds; fall back to the
+  // full-page heuristic when total is unavailable.
+  const canNext = total !== undefined ? offset + limit < total : rows.length >= limit;
 
   return (
     <div className="flex flex-col gap-4">
@@ -122,10 +131,11 @@ export function AuditTable({
         </Table>
       </ScrollArea>
 
-      {/* limit/offset pager — no server total, so show the current range. */}
+      {/* limit/offset pager — current range, plus the real total when known. */}
       <div className="flex items-center justify-between gap-4">
         <span className="text-[12px] font-semibold text-muted-foreground tabular-nums">
           {from}–{to}
+          {total !== undefined ? ` de ${total}` : ""}
         </span>
         <div className="flex gap-2">
           <Button
