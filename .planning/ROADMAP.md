@@ -270,7 +270,7 @@ Plans:
 **Requirements:** OBS-09 (painel economia phantom vs Vast + série temporal), OBS-10 (filtro/busca/count no histórico de incidentes)
 **Depends on:** Phase 7 (dashboard base + `/admin/usage` billing_events), Phase 12 (Vast cost em `primary_lifecycles` com `total_cost_brl`/`accepted_dph` confiável)
 **Mode:** sequential (não MVP)
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 **Cost:** dev-only, sem spend Vast/GPU (lê dados existentes)
 
 Plans:
@@ -286,7 +286,7 @@ Plans:
 
 **Wave 3** *(blocked on 15-02 endpoint + 15-03 shared lib/gateway.ts)*
 
-- [ ] 15-04-PLAN.md — OBS-10 frontend: AuditResponse.total + fetchAudit(from/to/search) + /incidents date-range + search + total-driven pager
+- [x] 15-04-PLAN.md — OBS-10 frontend: AuditResponse.total + fetchAudit(from/to/search) + /incidents date-range + search + total-driven pager
 
 **Decisões da exploração (2026-06-26):**
 
