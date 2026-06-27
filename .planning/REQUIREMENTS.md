@@ -228,7 +228,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBS-06 | Phase 7: Observability — Dashboard & Alerting | Pending |
 | OBS-07 | Phase 7: Observability — Dashboard & Alerting | Pending |
 | OBS-08 | Phase 7: Observability — Dashboard & Alerting | Pending |
-| OBS-09 | Phase 15: Dashboard Economia & Histórico | Pending |
+| OBS-09 | Phase 15: Dashboard Economia & Histórico | Complete |
 | OBS-10 | Phase 15: Dashboard Economia & Histórico | Complete |
 | INT-01 | Phase 8: Client Integration — ConverseAI + Chat Ifix | Pending |
 | INT-02 | Phase 8: Client Integration — ConverseAI + Chat Ifix | Pending |
