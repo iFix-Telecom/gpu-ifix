@@ -74,3 +74,17 @@ FROM ai_gateway.primary_lifecycles
 WHERE started_at >= $1
 ORDER BY started_at DESC
 LIMIT $2;
+
+-- name: ListPrimaryLifecyclesInRange :many
+-- Range-overlap variant of ListPrimaryLifecycles for GET /admin/economy
+-- (OBS-09). Same compact column list (no events JSONB). Filters by the
+-- lifecycle's started_at into the [from, to) window -- one lifecycle = one BRT
+-- day (CONTEXT A1: pod runs 9-17h BRT same-day windows). No LIMIT -- the
+-- handler reduces over every lifecycle in the period for the Vast accrual.
+SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
+       vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
+       shutdown_reason, leader_replica
+FROM ai_gateway.primary_lifecycles
+WHERE started_at >= $1
+  AND started_at <  $2
+ORDER BY started_at DESC;
