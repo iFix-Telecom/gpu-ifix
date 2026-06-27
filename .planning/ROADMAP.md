@@ -270,7 +270,7 @@ Plans:
 **Requirements:** OBS-09 (painel economia phantom vs Vast + série temporal), OBS-10 (filtro/busca/count no histórico de incidentes)
 **Depends on:** Phase 7 (dashboard base + `/admin/usage` billing_events), Phase 12 (Vast cost em `primary_lifecycles` com `total_cost_brl`/`accepted_dph` confiável)
 **Mode:** sequential (não MVP)
-**Plans:** 1/4 plans executed
+**Plans:** 3/4 plans executed
 **Cost:** dev-only, sem spend Vast/GPU (lê dados existentes)
 
 Plans:
@@ -281,8 +281,8 @@ Plans:
 
 **Wave 2** *(15-02 blocked on 15-01 gen tree; 15-03 blocked on 15-01 endpoint; both parallel — Go vs TS, no file overlap)*
 
-- [ ] 15-02-PLAN.md — OBS-10 backend: audit.sql +from/to/search + CountAuditStateChanges + sqlc regen + audit.go handler (total)
-- [ ] 15-03-PLAN.md — OBS-09 frontend: fetchEconomy wrapper + economy-panel (5 KPIs) + single-axis economy-trend-chart + /economia route + sidebar nav
+- [x] 15-02-PLAN.md — OBS-10 backend: audit.sql +from/to/search + CountAuditStateChanges + sqlc regen + audit.go handler (total)
+- [x] 15-03-PLAN.md — OBS-09 frontend: fetchEconomy wrapper + economy-panel (5 KPIs) + single-axis economy-trend-chart + /economia route + sidebar nav
 
 **Wave 3** *(blocked on 15-02 endpoint + 15-03 shared lib/gateway.ts)*
 
