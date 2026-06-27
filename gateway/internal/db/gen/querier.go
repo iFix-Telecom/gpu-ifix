@@ -24,6 +24,11 @@ type Querier interface {
 	ClosePrimaryLifecycle(ctx context.Context, arg ClosePrimaryLifecycleParams) error
 	// Used by boot-time bootstrap: if 0, generate and INSERT a random admin key.
 	CountActiveAdminKeys(ctx context.Context) (int64, error)
+	// Phase 15 (OBS-10): honest total for the /incidents pager — same WHERE
+	// predicate as ListAuditStateChanges ($1/$2 range, $3 search) minus the
+	// LIMIT/OFFSET so the dashboard derives canNext as (offset+limit < total)
+	// instead of a heuristic. COUNT is bounded by the date range (threat T-15-08).
+	CountAuditStateChanges(ctx context.Context, arg CountAuditStateChangesParams) (int64, error)
 	// Boot-time defensive check (D-C1 path 3). The CHECK constraint should make
 	// this impossible. If COUNT > 0, gateway os.Exit(1).
 	CountSensitivePeakInvariant(ctx context.Context) (int64, error)
@@ -164,6 +169,14 @@ type Querier interface {
 	// added by migration 0021, serves the ts-leading sort.
 	// `reason` (migration 0022) carries the human-readable transition cause for
 	// state-change rows — distinct from error_code (request error codes).
+	// Phase 15 (OBS-10): the dashboard's /incidents history needs to filter by a
+	// BRT date range and a free-text search. $1/$2 bound the [from, to) window
+	// (exclusive end set by the handler); $3 is the single parameterized ILIKE
+	// pattern — "%" matches everything (the sentinel for "no search"), otherwise
+	// "%term%". The search arg is bound once and reused across route/reason/
+	// error_code/event_kind so a hostile value can never be string-concatenated
+	// into SQL (threat T-15-05). The metadata-only column list is PRESERVED —
+	// audit_log_content (prompts/responses) is NEVER selected (threat T-07-09).
 	ListAuditStateChanges(ctx context.Context, arg ListAuditStateChangesParams) ([]ListAuditStateChangesRow, error)
 	// Used by `gatewayctl emerg lifecycles --since N --limit M`. Excludes the
 	// events JSONB column (callers fetch via id when needed) so the listing is
