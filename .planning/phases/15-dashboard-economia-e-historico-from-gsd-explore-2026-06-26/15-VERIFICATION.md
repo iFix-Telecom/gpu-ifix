@@ -1,8 +1,9 @@
 ---
 phase: 15-dashboard-economia-e-historico
 verified: 2026-06-27T00:51:00Z
-status: human_needed
+status: passed
 score: 17/17 must-haves verified
+human_verification_result: "Both items PASS (UAT 2026-06-27, prod ai-dashboard.converse-ai.app after develop→main release). /economia: 5 KPIs render (líquido R$3.75, ROI '—' null-safe, custo OR R$3.28, %local 51.6%, pod 70.3h) + trend chart. /incidents: calendar+search+total pager work."
 overrides_applied: 0
 human_verification:
   - test: "Open /economia in the browser; confirm the 5 KPIs render (Líquido R$, ROI multiplier, Custo OpenRouter, % servido local, Horas pod UP) and the daily phantom-vs-Vast trend chart appears"
