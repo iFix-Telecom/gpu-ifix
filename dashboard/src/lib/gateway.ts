@@ -260,6 +260,52 @@ export interface OperationsResponse {
   vast_cost: OperationsVastCost;
 }
 
+// --- /admin/economy (OBS-09) ----------------------------------------------
+//
+// These interfaces mirror the Go handler `admin.EconomyResponse` /
+// `admin.EconomySummary` / `admin.EconomyDayRow` in
+// gateway/internal/admin/economy.go FIELD-FOR-FIELD. The Go handler is the
+// source of truth (15-01). `roi_multiplier` and `pct_servido_local` are
+// `*float64` server-side → JSON null when their denominator is zero (never
+// Inf/NaN) → typed `number | null` here. This is a SINGLE server-side
+// gateway-wide aggregate — NOT a client per-tenant fan-out (deliberately
+// avoids the /consumo Promise.allSettled partial-failure anti-pattern).
+
+/** One day in the economy series (economia = phantom − vast for that BRT day). */
+export interface EconomyDayRow {
+  date: string;
+  phantom_brl: number;
+  vast_brl: number;
+  economia_brl: number;
+}
+
+/**
+ * `/admin/economy` JSON — the OBS-09 "Economia" panel's single fetch.
+ * `summary` carries all five locked metrics; `series` is the daily
+ * phantom-vs-Vast trend. Mirrors `admin.EconomyResponse`.
+ */
+export interface EconomyResponse {
+  range: {
+    from: string;
+    to: string;
+    timezone: string;
+  };
+  summary: {
+    phantom_brl: number;
+    vast_brl: number;
+    economia_liquida_brl: number;
+    /** phantom_brl / vast_brl — null when vast_brl == 0. */
+    roi_multiplier: number | null;
+    /** Real external spend (OpenRouter) while the pod was DOWN. */
+    custo_openrouter_brl: number;
+    /** local_requests / total_requests — null when total == 0. */
+    pct_servido_local: number | null;
+    /** Total pod-up hours in the period. */
+    horas_pod_up: number;
+  };
+  series: EconomyDayRow[];
+}
+
 /**
  * Error envelope surfaced by the proxy or the gateway.
  *
@@ -349,4 +395,13 @@ export function fetchUsage(
 /** GET /admin/operations — Tier-2 "Operação" aggregate (FSM/schedule/cost). */
 export function fetchOperations(): Promise<OperationsResponse> {
   return proxyGet<OperationsResponse>("operations");
+}
+
+/**
+ * GET /admin/economy — OBS-09 "Economia" aggregate (5-metric summary + daily
+ * phantom-vs-Vast series) for a date range. A SINGLE server-side gateway-wide
+ * fetch — no per-tenant fan-out.
+ */
+export function fetchEconomy(from: string, to: string): Promise<EconomyResponse> {
+  return proxyGet<EconomyResponse>("economy", { from, to });
 }
