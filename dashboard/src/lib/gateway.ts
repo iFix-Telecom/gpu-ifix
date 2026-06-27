@@ -138,13 +138,16 @@ export interface AuditRow {
 
 /**
  * `/admin/audit` JSON — paginated state-change history, newest-first.
- * Mirrors `admin.AuditResponse` — `items`, `limit`, `offset` (no `total`:
- * the gateway handler does not run a COUNT).
+ * Mirrors `admin.AuditResponse` — `items`, `limit`, `offset`, and `total`
+ * (15-02 added a real `COUNT(*)` over the same date-range/search predicate,
+ * so the pager derives honest bounds: `offset + limit < total`).
  */
 export interface AuditResponse {
   items: AuditRow[];
   limit: number;
   offset: number;
+  /** Total matching rows (real COUNT) for pager bounds — 15-02. */
+  total: number;
 }
 
 // --- /admin/usage (Phase 4, existing) -------------------------------------
@@ -375,11 +378,29 @@ export function fetchMetrics(window?: string): Promise<MetricsResponse> {
   );
 }
 
-/** GET /admin/audit — paginated state-change history, newest-first. */
-export function fetchAudit(limit = 50, offset = 0): Promise<AuditResponse> {
+/**
+ * GET /admin/audit — paginated state-change history, newest-first.
+ *
+ * `from`/`to` (YYYY-MM-DD, BRT) and `search` (free text) are OPTIONAL and
+ * forwarded only when truthy — an empty value would otherwise override the
+ * handler's current-month default (Pitfall 6). The gateway runs the
+ * parameterized ILIKE / BRT range; the browser only passes the query string
+ * (T-15-13 — no client-side SQL). The admin key stays server-side in the
+ * proxy (T-15-14).
+ */
+export function fetchAudit(
+  limit = 50,
+  offset = 0,
+  from?: string,
+  to?: string,
+  search?: string,
+): Promise<AuditResponse> {
   return proxyGet<AuditResponse>("audit", {
     limit: String(limit),
     offset: String(offset),
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+    ...(search ? { search } : {}),
   });
 }
 
