@@ -49,7 +49,10 @@ export default function ChallengePage() {
     setError(null);
     setVerifying(true);
     try {
-      const res = await authClient.twoFactor.verifyTotp({ code });
+      const res = await authClient.twoFactor.verifyTotp({
+        code,
+        trustDevice: true,
+      });
       setVerifying(false);
       if (res.error) {
         setOtpState("invalid");

@@ -138,13 +138,16 @@ export interface AuditRow {
 
 /**
  * `/admin/audit` JSON — paginated state-change history, newest-first.
- * Mirrors `admin.AuditResponse` — `items`, `limit`, `offset` (no `total`:
- * the gateway handler does not run a COUNT).
+ * Mirrors `admin.AuditResponse` — `items`, `limit`, `offset`, and `total`
+ * (15-02 added a real `COUNT(*)` over the same date-range/search predicate,
+ * so the pager derives honest bounds: `offset + limit < total`).
  */
 export interface AuditResponse {
   items: AuditRow[];
   limit: number;
   offset: number;
+  /** Total matching rows (real COUNT) for pager bounds — 15-02. */
+  total: number;
 }
 
 // --- /admin/usage (Phase 4, existing) -------------------------------------
@@ -187,6 +190,123 @@ export interface UsageResponse {
     cost_total_brl: number;
     requests_count: number;
   }>;
+}
+
+// --- /admin/operations (quick-260625-v04, Tier-2 "Operação") --------------
+//
+// These interfaces mirror the Go handler `admin.OperationsResponse` and its
+// sections in gateway/internal/admin/operations.go FIELD-FOR-FIELD. The Go
+// handler is the source of truth. Nullable Postgres columns are rendered as
+// JSON null by the handler → typed as `T | null` here. `phantom_month_brl`
+// is omitted by the handler this version (economy deferred) → optional.
+
+/** Primary + emergency FSM state. Mirrors `admin.FSMSection`. */
+export interface OperationsFSM {
+  primary_state: string; // asleep|provisioning|ready|draining|destroying|unknown
+  emerg_state: string; // unknown when Vast/Phase-6 off
+  active_lifecycle_id: number;
+  active_instance_id: number;
+  is_leader: boolean;
+}
+
+/** Resolved schedule window + next transition. Mirrors `admin.ScheduleSection`. */
+export interface OperationsSchedule {
+  timezone: string;
+  up_hour: number;
+  down_hour: number;
+  days: string[]; // ordered ["mon","tue",...]
+  provision_lead_seconds: number;
+  grace_ramp_down_seconds: number;
+  disabled: boolean;
+  should_be_provisioned_now: boolean;
+  next_transition_at: string; // RFC3339; "" when none
+  next_transition_kind: string; // up|down|""
+}
+
+/** One primary lifecycle row. Mirrors `admin.LifecycleRow`. */
+export interface OperationsLifecycle {
+  id: number;
+  started_at: string;
+  drain_started_at: string | null;
+  ended_at: string | null; // null = still running
+  trigger_reason: string;
+  vast_instance_id: number | null;
+  accepted_dph: number | null;
+  cost_brl: number | null; // null while open
+  shutdown_reason: string | null;
+}
+
+/** One upstream's effective breaker state. Mirrors `admin.BreakerRow`. */
+export interface OperationsBreaker {
+  upstream: string;
+  state: string; // closed|half-open|open|forced-open
+}
+
+/** Vast spend + budget. Mirrors `admin.VastCostSection`. */
+export interface OperationsVastCost {
+  today_brl: number;
+  month_brl: number;
+  budget_brl: number;
+  budget_pct_used: number;
+  phantom_month_brl?: number; // omitted this version (economy deferred)
+}
+
+/**
+ * `/admin/operations` JSON — the Tier-2 "Operação" panel's single fetch.
+ * Mirrors `admin.OperationsResponse` in gateway/internal/admin/operations.go.
+ */
+export interface OperationsResponse {
+  fsm: OperationsFSM;
+  schedule: OperationsSchedule;
+  lifecycles: OperationsLifecycle[];
+  breakers: OperationsBreaker[];
+  vast_cost: OperationsVastCost;
+}
+
+// --- /admin/economy (OBS-09) ----------------------------------------------
+//
+// These interfaces mirror the Go handler `admin.EconomyResponse` /
+// `admin.EconomySummary` / `admin.EconomyDayRow` in
+// gateway/internal/admin/economy.go FIELD-FOR-FIELD. The Go handler is the
+// source of truth (15-01). `roi_multiplier` and `pct_servido_local` are
+// `*float64` server-side → JSON null when their denominator is zero (never
+// Inf/NaN) → typed `number | null` here. This is a SINGLE server-side
+// gateway-wide aggregate — NOT a client per-tenant fan-out (deliberately
+// avoids the /consumo Promise.allSettled partial-failure anti-pattern).
+
+/** One day in the economy series (economia = phantom − vast for that BRT day). */
+export interface EconomyDayRow {
+  date: string;
+  phantom_brl: number;
+  vast_brl: number;
+  economia_brl: number;
+}
+
+/**
+ * `/admin/economy` JSON — the OBS-09 "Economia" panel's single fetch.
+ * `summary` carries all five locked metrics; `series` is the daily
+ * phantom-vs-Vast trend. Mirrors `admin.EconomyResponse`.
+ */
+export interface EconomyResponse {
+  range: {
+    from: string;
+    to: string;
+    timezone: string;
+  };
+  summary: {
+    phantom_brl: number;
+    vast_brl: number;
+    economia_liquida_brl: number;
+    /** phantom_brl / vast_brl — null when vast_brl == 0. */
+    roi_multiplier: number | null;
+    /** Real external spend (OpenRouter) while the pod was DOWN. */
+    custo_openrouter_brl: number;
+    /** local_requests / total_requests — null when total == 0. */
+    pct_servido_local: number | null;
+    /** Total pod-up hours in the period. */
+    horas_pod_up: number;
+  };
+  series: EconomyDayRow[];
 }
 
 /**
@@ -258,11 +378,29 @@ export function fetchMetrics(window?: string): Promise<MetricsResponse> {
   );
 }
 
-/** GET /admin/audit — paginated state-change history, newest-first. */
-export function fetchAudit(limit = 50, offset = 0): Promise<AuditResponse> {
+/**
+ * GET /admin/audit — paginated state-change history, newest-first.
+ *
+ * `from`/`to` (YYYY-MM-DD, BRT) and `search` (free text) are OPTIONAL and
+ * forwarded only when truthy — an empty value would otherwise override the
+ * handler's current-month default (Pitfall 6). The gateway runs the
+ * parameterized ILIKE / BRT range; the browser only passes the query string
+ * (T-15-13 — no client-side SQL). The admin key stays server-side in the
+ * proxy (T-15-14).
+ */
+export function fetchAudit(
+  limit = 50,
+  offset = 0,
+  from?: string,
+  to?: string,
+  search?: string,
+): Promise<AuditResponse> {
   return proxyGet<AuditResponse>("audit", {
     limit: String(limit),
     offset: String(offset),
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+    ...(search ? { search } : {}),
   });
 }
 
@@ -273,4 +411,18 @@ export function fetchUsage(
   to: string,
 ): Promise<UsageResponse> {
   return proxyGet<UsageResponse>("usage", { tenant, from, to });
+}
+
+/** GET /admin/operations — Tier-2 "Operação" aggregate (FSM/schedule/cost). */
+export function fetchOperations(): Promise<OperationsResponse> {
+  return proxyGet<OperationsResponse>("operations");
+}
+
+/**
+ * GET /admin/economy — OBS-09 "Economia" aggregate (5-metric summary + daily
+ * phantom-vs-Vast series) for a date range. A SINGLE server-side gateway-wide
+ * fetch — no per-tenant fan-out.
+ */
+export function fetchEconomy(from: string, to: string): Promise<EconomyResponse> {
+  return proxyGet<EconomyResponse>("economy", { from, to });
 }

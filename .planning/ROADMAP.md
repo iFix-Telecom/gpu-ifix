@@ -262,3 +262,34 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 
 - [x] 12-05-PLAN.md — Prod chaos gate (HUMAN-UAT, zero-502 D-18) + CAP-01 saturation decision doc (D-19)
+
+### Phase 15: dashboard-economia-e-historico (from /gsd:explore 2026-06-26)
+
+**Goal:** Dar ao operador o número que mais importa — **se a GPU própria economiza de verdade vs OpenRouter** — e tornar o histórico navegável. (1) OBS-09 — destravar o painel de Economia hoje deferred: o gateway ganha uma soma `cost_local_phantom_brl` **gateway-wide** (todos tenants, query sem filtro de tenant — o blocker atual) por período, cruzada com o custo real Vast (`primary_lifecycles.total_cost_brl` para lifecycles fechados + accrual `accepted_dph × horas-desde-started` para o lifecycle aberto). O dashboard exibe **3 números lado a lado** — líquido R$ (phantom − Vast), recorte janela pod-up (só horas com pod UP; alinhamento natural pois phantom só é gravado quando servido local), e multiplicador ROI (phantom evitado por R$1 de GPU) — mais um **gráfico de economia como série temporal real** (eixo X = tempo), que de quebra resolve a queixa do gráfico atual (latency chart usa eixo = rota, não tempo). Assume preço phantom confiável (decisão da exploração: daily timer OpenRouter+forex já popula). (2) OBS-10 — `/incidents` (audit log) ganha filtro de data + busca + total count (hoje só pager limit/offset, sem range nem COUNT no handler).
+
+**Requirements:** OBS-09 (painel economia phantom vs Vast + série temporal), OBS-10 (filtro/busca/count no histórico de incidentes)
+**Depends on:** Phase 7 (dashboard base + `/admin/usage` billing_events), Phase 12 (Vast cost em `primary_lifecycles` com `total_cost_brl`/`accepted_dph` confiável)
+**Mode:** sequential (não MVP)
+**Plans:** 4/4 plans complete
+**Cost:** dev-only, sem spend Vast/GPU (lê dados existentes)
+
+Plans:
+
+**Wave 1**
+
+- [x] 15-01-PLAN.md — OBS-09 backend: no-tenant phantom/billing sums + ListPrimaryLifecyclesInRange + sqlc regen + EconomyHandler (5-metric summary + daily series) + main.go wiring
+
+**Wave 2** *(15-02 blocked on 15-01 gen tree; 15-03 blocked on 15-01 endpoint; both parallel — Go vs TS, no file overlap)*
+
+- [x] 15-02-PLAN.md — OBS-10 backend: audit.sql +from/to/search + CountAuditStateChanges + sqlc regen + audit.go handler (total)
+- [x] 15-03-PLAN.md — OBS-09 frontend: fetchEconomy wrapper + economy-panel (5 KPIs) + single-axis economy-trend-chart + /economia route + sidebar nav
+
+**Wave 3** *(blocked on 15-02 endpoint + 15-03 shared lib/gateway.ts)*
+
+- [x] 15-04-PLAN.md — OBS-10 frontend: AuditResponse.total + fetchAudit(from/to/search) + /incidents date-range + search + total-driven pager
+
+**Decisões da exploração (2026-06-26):**
+
+- Fórmula economia = `soma(phantom) − custo_real_Vast` por período
+- Confia no preço phantom — NÃO validar antes (já corrigido via daily timer)
+- Gaps NÃO incluídos nesta fase (capturados em note/seed): metering `audio_seconds`/`embeds_count`=0 não gravam; latency chart vira série temporal (seed separado); Tier 3 GPU/RAM/CPU (HANDOFF-tier3-gpu-metrics.md)

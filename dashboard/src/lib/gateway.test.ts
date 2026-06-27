@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type AuditResponse,
+  type EconomyResponse,
   GatewayError,
   fetchAudit,
+  fetchEconomy,
   fetchMetrics,
   fetchUsage,
   tenantLabel,
@@ -105,10 +108,10 @@ describe("fetchAudit", () => {
   it("hits /api/gateway/audit with limit + offset and parses AuditResponse", async () => {
     // This payload is the ACTUAL `admin.AuditResponse` shape the Go
     // handler emits (gateway/internal/admin/audit.go) — `items` (not
-    // `rows`), no `total`, and AuditRow carries the request-metadata
-    // columns (request_id, route, method, status_code, latency_ms,
-    // error_code, event_kind, reason) — no id / actor / detail.
-    const payload = {
+    // `rows`), a real `total` COUNT (15-02), and AuditRow carries the
+    // request-metadata columns (request_id, route, method, status_code,
+    // latency_ms, error_code, event_kind, reason) — no id / actor / detail.
+    const payload: AuditResponse = {
       items: [
         {
           ts: "2026-05-14T08:59:00Z",
@@ -126,6 +129,7 @@ describe("fetchAudit", () => {
       ],
       limit: 25,
       offset: 50,
+      total: 137,
     };
     const fetchMock = mockFetchOnce(payload);
     vi.stubGlobal("fetch", fetchMock);
@@ -138,6 +142,43 @@ describe("fetchAudit", () => {
     expect(result.items[0].reason).toBe("breaker_flap");
     expect(result.limit).toBe(25);
     expect(result.offset).toBe(50);
+    // 15-02 added a real COUNT(*) so the pager can derive honest bounds.
+    expect(result.total).toBe(137);
+  });
+
+  it("forwards from/to/search query params when provided", async () => {
+    // OBS-10: /incidents gains a date-range + free-text filter. The
+    // optional from/to/search must travel to the gateway as query params
+    // (the parameterized ILIKE / BRT range lives in the Go handler — 15-02).
+    const payload: AuditResponse = { items: [], limit: 50, offset: 0, total: 0 };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchAudit(50, 0, "2026-06-01", "2026-06-30", "503");
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl.startsWith("/api/gateway/audit?")).toBe(true);
+    expect(calledUrl).toContain("limit=50");
+    expect(calledUrl).toContain("offset=0");
+    expect(calledUrl).toContain("from=2026-06-01");
+    expect(calledUrl).toContain("to=2026-06-30");
+    expect(calledUrl).toContain("search=503");
+  });
+
+  it("omits from/to/search keys when they are undefined or empty", async () => {
+    // Optional params must NOT be forwarded when absent — an empty `from`
+    // would otherwise override the handler's current-month default (Pitfall 6).
+    const payload: AuditResponse = { items: [], limit: 50, offset: 0, total: 0 };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchAudit(50, 0);
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe("/api/gateway/audit?limit=50&offset=0");
+    expect(calledUrl).not.toContain("from=");
+    expect(calledUrl).not.toContain("to=");
+    expect(calledUrl).not.toContain("search=");
   });
 });
 
@@ -205,6 +246,83 @@ describe("fetchUsage", () => {
     expect(result.summary.cost_total_brl).toBe(2.0);
     expect(result.rows[0].date).toBe("2026-05-01");
     expect(result.rows[0].cost_total_brl).toBe(2.0);
+  });
+});
+
+describe("fetchEconomy", () => {
+  it("hits /api/gateway/economy with from + to query params", async () => {
+    // This payload is the ACTUAL `admin.EconomyResponse` shape the Go
+    // handler emits (gateway/internal/admin/economy.go) — verified
+    // field-for-field: range{from,to,timezone}, summary{7 fields with
+    // roi_multiplier + pct_servido_local nullable}, series[] of day rows.
+    // The handler parses from/to as YYYY-MM-DD — exactly what fetchEconomy
+    // sends. NO per-tenant fan-out: a single server-side gateway-wide sum.
+    const payload: EconomyResponse = {
+      range: {
+        from: "2026-06-01",
+        to: "2026-06-30",
+        timezone: "America/Sao_Paulo",
+      },
+      summary: {
+        phantom_brl: 120.5,
+        vast_brl: 30.0,
+        economia_liquida_brl: 90.5,
+        roi_multiplier: 4.0166,
+        custo_openrouter_brl: 12.34,
+        pct_servido_local: 0.87,
+        horas_pod_up: 56.5,
+      },
+      series: [
+        {
+          date: "2026-06-01",
+          phantom_brl: 10.0,
+          vast_brl: 2.5,
+          economia_brl: 7.5,
+        },
+      ],
+    };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchEconomy("2026-06-01", "2026-06-30");
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl.startsWith("/api/gateway/economy?")).toBe(true);
+    expect(calledUrl).toContain("from=2026-06-01");
+    expect(calledUrl).toContain("to=2026-06-30");
+    expect(result.range.timezone).toBe("America/Sao_Paulo");
+    expect(result.summary.economia_liquida_brl).toBe(90.5);
+    expect(result.summary.roi_multiplier).toBe(4.0166);
+    expect(result.summary.pct_servido_local).toBe(0.87);
+    expect(result.summary.horas_pod_up).toBe(56.5);
+    expect(result.series[0].economia_brl).toBe(7.5);
+  });
+
+  it("round-trips a fixture with roi_multiplier AND pct_servido_local null", async () => {
+    // The Go handler emits JSON null for both when their denominator is
+    // zero (vast_brl == 0 / total_requests == 0) — never Inf/NaN. The TS
+    // type must accept null for both fields.
+    const payload: EconomyResponse = {
+      range: { from: "2026-06-01", to: "2026-06-30", timezone: "America/Sao_Paulo" },
+      summary: {
+        phantom_brl: 0,
+        vast_brl: 0,
+        economia_liquida_brl: 0,
+        roi_multiplier: null,
+        custo_openrouter_brl: 0,
+        pct_servido_local: null,
+        horas_pod_up: 0,
+      },
+      series: [],
+    };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchEconomy("2026-06-01", "2026-06-30");
+
+    expect(result.summary.roi_multiplier).toBeNull();
+    expect(result.summary.pct_servido_local).toBeNull();
+    expect(result.series).toHaveLength(0);
   });
 });
 

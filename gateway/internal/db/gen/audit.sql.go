@@ -13,6 +13,31 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countAuditStateChanges = `-- name: CountAuditStateChanges :one
+SELECT COUNT(*)::bigint AS total
+FROM ai_gateway.audit_log
+WHERE event_kind IS NOT NULL
+  AND ts >= $1 AND ts < $2
+  AND ($3 = '%' OR route ILIKE $3 OR reason ILIKE $3 OR error_code ILIKE $3 OR event_kind ILIKE $3)
+`
+
+type CountAuditStateChangesParams struct {
+	Ts      time.Time   `json:"ts"`
+	Ts_2    time.Time   `json:"ts_2"`
+	Column3 interface{} `json:"column_3"`
+}
+
+// Phase 15 (OBS-10): honest total for the /incidents pager — same WHERE
+// predicate as ListAuditStateChanges ($1/$2 range, $3 search) minus the
+// LIMIT/OFFSET so the dashboard derives canNext as (offset+limit < total)
+// instead of a heuristic. COUNT is bounded by the date range (threat T-15-08).
+func (q *Queries) CountAuditStateChanges(ctx context.Context, arg CountAuditStateChangesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countAuditStateChanges, arg.Ts, arg.Ts_2, arg.Column3)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const insertAuditLogContent = `-- name: InsertAuditLogContent :exec
 INSERT INTO ai_gateway.audit_log_content (request_id, ts, prompt, response)
 VALUES ($1, $2, $3, $4)
@@ -44,13 +69,18 @@ SELECT ts, request_id, tenant_id, route, method, upstream, status_code,
        latency_ms, error_code, event_kind, reason
 FROM ai_gateway.audit_log
 WHERE event_kind IS NOT NULL
+  AND ts >= $1 AND ts < $2
+  AND ($3 = '%' OR route ILIKE $3 OR reason ILIKE $3 OR error_code ILIKE $3 OR event_kind ILIKE $3)
 ORDER BY ts DESC
-LIMIT $1 OFFSET $2
+LIMIT $4 OFFSET $5
 `
 
 type ListAuditStateChangesParams struct {
-	Limit  int32 `json:"limit"`
-	Offset int32 `json:"offset"`
+	Ts      time.Time   `json:"ts"`
+	Ts_2    time.Time   `json:"ts_2"`
+	Column3 interface{} `json:"column_3"`
+	Limit   int32       `json:"limit"`
+	Offset  int32       `json:"offset"`
 }
 
 type ListAuditStateChangesRow struct {
@@ -75,8 +105,22 @@ type ListAuditStateChangesRow struct {
 // added by migration 0021, serves the ts-leading sort.
 // `reason` (migration 0022) carries the human-readable transition cause for
 // state-change rows — distinct from error_code (request error codes).
+// Phase 15 (OBS-10): the dashboard's /incidents history needs to filter by a
+// BRT date range and a free-text search. $1/$2 bound the [from, to) window
+// (exclusive end set by the handler); $3 is the single parameterized ILIKE
+// pattern — "%" matches everything (the sentinel for "no search"), otherwise
+// "%term%". The search arg is bound once and reused across route/reason/
+// error_code/event_kind so a hostile value can never be string-concatenated
+// into SQL (threat T-15-05). The metadata-only column list is PRESERVED —
+// audit_log_content (prompts/responses) is NEVER selected (threat T-07-09).
 func (q *Queries) ListAuditStateChanges(ctx context.Context, arg ListAuditStateChangesParams) ([]ListAuditStateChangesRow, error) {
-	rows, err := q.db.Query(ctx, listAuditStateChanges, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listAuditStateChanges,
+		arg.Ts,
+		arg.Ts_2,
+		arg.Column3,
+		arg.Limit,
+		arg.Offset,
+	)
 	if err != nil {
 		return nil, err
 	}

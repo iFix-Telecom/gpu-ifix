@@ -418,10 +418,15 @@ func (r *Reconciler) cooldownElapsed(now time.Time) bool {
 }
 
 // evaluateReady triggers drain when the schedule window closes. Uses
-// IsInPeak (NOT ShouldBeProvisioned) — drain happens at the active-window
-// EXIT, not at the pre-warm-fall (pre-warm is asymmetric: only kicks in
-// before UpHour; AFTER DownHour the schedule is OFF and ShouldBeProvisioned
-// would also report false, but using IsInPeak makes intent clearer).
+// ShouldStayUp — the lead-aware keep-up gate (== ShouldBeProvisioned), NOT
+// the bare IsInPeak. The earlier IsInPeak gate disagreed with the provision
+// gate during the pre-warm lead window [UpHour-lead, UpHour): evaluateAsleep
+// provisions there (ShouldBeProvisioned=true) but IsInPeak is still false,
+// so a pod that reached Ready inside that window was drained immediately and
+// re-provisioned every tick — flapping create→destroy until UpHour
+// (debug: primary-pod-flap-prewarm-window). Aligning the keep-up gate with
+// the provision gate keeps a pre-warmed pod up through UpHour; after DownHour
+// both gates report false so drain still fires cleanly at window exit.
 //
 // UAT 14 follow-up (2026-05-19): DISABLED gates auto-drain. ScheduleRule's
 // IsInPeak returns false under Disabled, which would drain a Ready pod
@@ -476,7 +481,7 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	if r.cfg.PrimaryPodScheduleDisabled {
 		return
 	}
-	if !r.rule.IsInPeak(now) {
+	if !r.rule.ShouldStayUp(now) {
 		r.startDrain(ctx, "schedule_window_exited", log)
 		return
 	}
@@ -1015,27 +1020,61 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 }
 
 // calculatePrimaryCostBRL computes the realised cost of a primary
-// lifecycle for the close-event payload. Returns 0 when accepted_dph is
-// 0 (no instance was ever created) OR first_health_pass_at is NULL.
-// Mirrors emerg.calculateCostBRL.
+// lifecycle for the close-event payload. Returns 0 when the row's
+// accepted_dph is NULL/<=0 (no real instance) OR no open lifecycle row is
+// readable.
+//
+// DPH source = the ROW's accepted_dph, NOT the acceptedDPH param (fix #2).
+// The normal close path evaluateDestroying calls
+// closeLifecycle(..., "destroyed", 0) for schedule-driven shutdowns, so the
+// param is 0 there — relying on it would zero the cost of EVERY scheduled
+// pod and defeat the started_at fallback. The provisioning-failure
+// call-sites also pass 0, but those rows never stamped accepted_dph either,
+// so reading the row yields 0 and the early-return still holds. The param
+// is therefore ignored (retained only for closeLifecycle signature parity).
+//
+// Cost basis = first_health_pass_at when present; if it is NULL (never
+// stamped — e.g. the row is being closed before markReady wrote it), it
+// falls back to started_at. The started_at basis OVER-counts the cold-start
+// window (~5 min, bounded), keeping the persisted total_cost_brl consistent
+// with the live accrual in the /admin/operations handler (which also
+// approximates with started_at). Mirrors emerg.calculateCostBRL.
+//
+// Reads the row via GetOpenPrimaryLifecycle (the singleton open row — which
+// at close time, before ClosePrimaryLifecycle stamps ended_at, IS the row
+// identified by id) so the sqlc DBTX seam is unit-testable. Deps.DB is a
+// concrete *pgxpool.Pool that cannot be faked directly, so the override-
+// aware r.queries() handle is used instead. The id arg is retained for
+// caller/signature parity and audit clarity.
 func (r *Reconciler) calculatePrimaryCostBRL(ctx context.Context, id int64, acceptedDPH float64) float64 {
-	if acceptedDPH <= 0 || r.deps.DB == nil {
+	q := r.queries()
+	if q == nil {
 		return 0
 	}
-	var firstHealth pgtype.Timestamptz
-	row := r.deps.DB.QueryRow(ctx,
-		`SELECT first_health_pass_at FROM ai_gateway.primary_lifecycles WHERE id = $1`, id)
-	if err := row.Scan(&firstHealth); err != nil {
+	_ = id
+	_ = acceptedDPH // fix #2: DPH comes from the row, not the param.
+	row, err := q.GetOpenPrimaryLifecycle(ctx)
+	if err != nil {
 		return 0
 	}
-	if !firstHealth.Valid {
+	dph := primaryNumericToFloat(row.AcceptedDph)
+	if dph <= 0 {
 		return 0
 	}
-	hours := time.Since(firstHealth.Time).Hours()
+	var basis time.Time
+	switch {
+	case row.FirstHealthPassAt.Valid:
+		basis = row.FirstHealthPassAt.Time
+	case !row.StartedAt.IsZero():
+		basis = row.StartedAt
+	default:
+		return 0
+	}
+	hours := time.Since(basis).Hours()
 	if hours < 0 {
 		hours = 0
 	}
-	return acceptedDPH * hours * r.deps.Cfg.USDToBRLRate
+	return dph * hours * r.deps.Cfg.USDToBRLRate
 }
 
 // cancelActiveLifecycle is the triple-layer cancel pattern (parity
@@ -1713,6 +1752,40 @@ func (r *Reconciler) publishPrimaryEvent(ctx context.Context, ev redisx.PrimaryE
 // any goroutine.
 func (r *Reconciler) IsLeader() bool {
 	return r.isLeader.Load()
+}
+
+// ReconcilerSnapshot is a point-in-time, lockless view of the primary
+// reconciler's observable state, consumed by the GET /admin/operations
+// panel. State is the FSM state name ("asleep"|"provisioning"|"ready"|
+// "draining"|"destroying"), or "unknown" when the FSM is unwired (Vast
+// disabled / early boot). ActiveLifecycleID and ActiveInstanceID are 0
+// when no lifecycle is active.
+type ReconcilerSnapshot struct {
+	State             string
+	ActiveLifecycleID int64
+	ActiveInstanceID  int64
+	IsLeader          bool
+}
+
+// Snapshot composes the reconciler's observable state for the operations
+// dashboard. No data race: every read is a lockless atomic load —
+// r.deps.FSM.State() (atomic.Int32), r.activeLifecycleSnapshot() (two
+// atomic.Int64 loads), and r.isLeader.Load() — and no shared state is
+// written here. Safe to call from the /admin/operations request
+// goroutine concurrently with the reconciler loop. nil-guards
+// r.deps.FSM → State "unknown".
+func (r *Reconciler) Snapshot() ReconcilerSnapshot {
+	state := "unknown"
+	if r.deps.FSM != nil {
+		state = r.deps.FSM.State().String()
+	}
+	lid, iid := r.activeLifecycleSnapshot()
+	return ReconcilerSnapshot{
+		State:             state,
+		ActiveLifecycleID: lid,
+		ActiveInstanceID:  iid,
+		IsLeader:          r.isLeader.Load(),
+	}
 }
 
 // ReplicaID returns the per-replica identifier (deps.ReplicaID; defaults

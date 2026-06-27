@@ -65,3 +65,4 @@ pod/health-bridge/health-bridge
 
 # Playwright MCP snapshots — capture form input (passwords); never commit
 .playwright-mcp/
+.planning/clickup-active-task.json

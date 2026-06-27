@@ -1062,6 +1062,104 @@ func TestEvaluateReady_NoopWhenDisabled(t *testing.T) {
 		"DISABLED evaluateReady must NOT call RestoreTier0")
 }
 
+// Regression: primary-pod-flap-prewarm-window. A Ready pod that reaches
+// Ready inside the pre-warm lead window [UpHour-lead, UpHour) MUST NOT be
+// drained — the provision gate (ShouldBeProvisioned) already keeps it up
+// during this window, so evaluateReady must agree (ShouldStayUp), else the
+// pod flaps create→destroy every tick until the clock hits UpHour.
+func TestEvaluateReady_DoesNotDrainDuringPreWarmLead(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		// UpHour=9 DownHour=17 weekdays, lead=1800s (30 min).
+		Rule: buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 08:45 BRT — 15 min before UpHour=9, inside the 30-min lead.
+	now := time.Date(2026, 5, 13, 8, 45, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"pod inside pre-warm lead window must STAY Ready (no flap), got drain")
+	require.Nil(t, r.drainStartedAt.Load(), "drainStartedAt must NOT be populated inside lead window")
+	require.Empty(t, loader.restoredRoles(),
+		"evaluateReady must NOT RestoreTier0 inside the pre-warm lead window")
+}
+
+// Regression companion: once the window has fully exited (now >= DownHour)
+// the pod MUST still drain — the fix must not over-extend keep-up.
+func TestEvaluateReady_DrainsAfterDownHour(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 17:30 BRT — past DownHour=17, window exited.
+	now := time.Date(2026, 5, 13, 17, 30, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateDraining, r.deps.FSM.State(),
+		"pod past DownHour must drain (schedule_window_exited)")
+	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated on window-exit drain")
+}
+
+// Regression companion: a pod squarely inside peak must never drain.
+func TestEvaluateReady_DoesNotDrainDuringPeak(t *testing.T) {
+	loc := brtZone()
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
+	_ = fsm.Transition(StateProvisioning, StateReady, time.Now(), "x")
+	loader := newFakeLoader()
+	loader.OverrideTier0("llm", "http://pod:8000")
+	loader.OverrideTier0("stt", "http://pod:8001")
+	loader.OverrideTier0("tts", "http://pod:8003")
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Loader: loader,
+		Rule:   buildRule(loc, 9, 17, allWeekdays(), false, 1800),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+	r.activeLifecycleID.Store(7)
+
+	// Wed 2026-05-13 12:00 BRT — mid-peak.
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, loc)
+	r.evaluateReady(context.Background(), now, testLogger())
+
+	require.Equal(t, StateReady, r.deps.FSM.State(),
+		"pod mid-peak must STAY Ready")
+	require.Nil(t, r.drainStartedAt.Load(), "drainStartedAt must NOT be populated mid-peak")
+}
+
 // ===========================================================================
 // evaluateDraining tests
 // ===========================================================================
@@ -2791,4 +2889,92 @@ func TestMarkReady_ForceCloseBestEffort(t *testing.T) {
 		"a missing/failing Redis must NOT block markReady from reaching Ready")
 	require.Equal(t, StateReady, r.deps.FSM.State(),
 		"markReady completes the Provisioning→Ready transition despite no Redis")
+}
+
+// costOpenRow models the GetOpenPrimaryLifecycle row for
+// calculatePrimaryCostBRL tests. started_at (dest[1]) and
+// first_health_pass_at (dest[2]) drive the cost basis; accepted_dph
+// (dest[8]) drives the effective DPH (fix #2 — the calc reads the row's
+// accepted_dph, NOT the closeLifecycle param, because evaluateDestroying
+// closes schedule-driven rows with param=0).
+type costOpenRow struct {
+	startedAt   time.Time
+	firstHealth pgtype.Timestamptz
+	acceptedDph pgtype.Numeric
+}
+
+func (r costOpenRow) Scan(dest ...interface{}) error {
+	if len(dest) < 13 {
+		return fmt.Errorf("costOpenRow: expected 13 dest pointers, got %d", len(dest))
+	}
+	if p, ok := dest[1].(*time.Time); ok {
+		*p = r.startedAt
+	}
+	if p, ok := dest[2].(*pgtype.Timestamptz); ok {
+		*p = r.firstHealth
+	}
+	if p, ok := dest[8].(*pgtype.Numeric); ok {
+		*p = r.acceptedDph
+	}
+	return nil
+}
+
+// TestCalculatePrimaryCostBRL_StartedAtFallback proves two things:
+//
+//   - Cost basis falls back from first_health_pass_at to started_at when the
+//     former is NULL, so closed lifecycle rows persist a non-zero
+//     total_cost_brl (dashboard vast_cost R$0 bug). Mirrors the
+//     /admin/operations live-accrual approximation (started_at over-counts
+//     only the bounded cold-start window).
+//   - The effective DPH comes from the ROW's accepted_dph, NOT the param
+//     (fix #2). evaluateDestroying closes schedule-driven rows via
+//     closeLifecycle(..., "destroyed", 0) — a param=0 must NOT zero the cost
+//     when the row carries a real accepted_dph.
+func TestCalculatePrimaryCostBRL_StartedAtFallback(t *testing.T) {
+	cfg := testCfg(t) // USDToBRLRate = 5.0
+	started := time.Now().Add(-2 * time.Hour)
+	health := time.Now().Add(-1 * time.Hour)
+	healthTz := pgtype.Timestamptz{Time: health, Valid: true}
+
+	cases := []struct {
+		name        string
+		startedAt   time.Time
+		firstHealth pgtype.Timestamptz
+		rowDPH      pgtype.Numeric // accepted_dph stored on the lifecycle row
+		paramDPH    float64        // value passed by closeLifecycle (often 0)
+		wantHours   float64
+		wantDPH     float64
+		wantZero    bool
+	}{
+		{"first_health set uses first_health", started, healthTz, numericFromFloat(0.30), 0.30, 1.0, 0.30, false},
+		{"first_health NULL falls back to started_at", started, pgtype.Timestamptz{}, numericFromFloat(0.30), 0.30, 2.0, 0.30, false},
+		{"both timestamps NULL returns 0", time.Time{}, pgtype.Timestamptz{}, numericFromFloat(0.30), 0.30, 0, 0, true},
+		// fix #2 — schedule close: evaluateDestroying passes param=0 but row
+		// carries the real accepted_dph; cost MUST come from the row.
+		{"param dph 0 uses row accepted_dph (schedule close)", started, pgtype.Timestamptz{}, numericFromFloat(0.1888), 0, 2.0, 0.1888, false},
+		// fix #2 — provisioning failure: row never stamped accepted_dph.
+		{"row accepted_dph NULL returns 0", started, healthTz, pgtype.Numeric{}, 0, 0, 0, true},
+		{"row accepted_dph 0 returns 0", started, healthTz, numericFromFloat(0), 0, 0, 0, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dbtx := &fakeDBTX{
+				queryRowFn: func(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+					return costOpenRow{startedAt: tc.startedAt, firstHealth: tc.firstHealth, acceptedDph: tc.rowDPH}
+				},
+			}
+			r := buildReconciler(t, Deps{Cfg: cfg})
+			r.SetQueriesForTest(gen.New(dbtx))
+
+			got := r.calculatePrimaryCostBRL(context.Background(), 7, tc.paramDPH)
+			if tc.wantZero {
+				require.Equal(t, 0.0, got)
+				return
+			}
+			want := tc.wantDPH * tc.wantHours * cfg.USDToBRLRate
+			require.InDelta(t, want, got, 0.01,
+				"cost = rowDPH(%v) × hours(%v) × rate(%v)", tc.wantDPH, tc.wantHours, cfg.USDToBRLRate)
+		})
+	}
 }
