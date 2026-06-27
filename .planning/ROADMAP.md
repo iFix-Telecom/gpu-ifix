@@ -270,14 +270,14 @@ Plans:
 **Requirements:** OBS-09 (painel economia phantom vs Vast + série temporal), OBS-10 (filtro/busca/count no histórico de incidentes)
 **Depends on:** Phase 7 (dashboard base + `/admin/usage` billing_events), Phase 12 (Vast cost em `primary_lifecycles` com `total_cost_brl`/`accepted_dph` confiável)
 **Mode:** sequential (não MVP)
-**Plans:** 4 plans (3 waves)
+**Plans:** 1/4 plans executed
 **Cost:** dev-only, sem spend Vast/GPU (lê dados existentes)
 
 Plans:
 
 **Wave 1**
 
-- [ ] 15-01-PLAN.md — OBS-09 backend: no-tenant phantom/billing sums + ListPrimaryLifecyclesInRange + sqlc regen + EconomyHandler (5-metric summary + daily series) + main.go wiring
+- [x] 15-01-PLAN.md — OBS-09 backend: no-tenant phantom/billing sums + ListPrimaryLifecyclesInRange + sqlc regen + EconomyHandler (5-metric summary + daily series) + main.go wiring
 
 **Wave 2** *(15-02 blocked on 15-01 gen tree; 15-03 blocked on 15-01 endpoint; both parallel — Go vs TS, no file overlap)*
 
@@ -289,6 +289,7 @@ Plans:
 - [ ] 15-04-PLAN.md — OBS-10 frontend: AuditResponse.total + fetchAudit(from/to/search) + /incidents date-range + search + total-driven pager
 
 **Decisões da exploração (2026-06-26):**
+
 - Fórmula economia = `soma(phantom) − custo_real_Vast` por período
 - Confia no preço phantom — NÃO validar antes (já corrigido via daily timer)
 - Gaps NÃO incluídos nesta fase (capturados em note/seed): metering `audio_seconds`/`embeds_count`=0 não gravam; latency chart vira série temporal (seed separado); Tier 3 GPU/RAM/CPU (HANDOFF-tier3-gpu-metrics.md)
