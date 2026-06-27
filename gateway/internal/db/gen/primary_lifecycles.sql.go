@@ -169,6 +169,72 @@ func (q *Queries) ListPrimaryLifecycles(ctx context.Context, arg ListPrimaryLife
 	return items, nil
 }
 
+const listPrimaryLifecyclesInRange = `-- name: ListPrimaryLifecyclesInRange :many
+SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
+       vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
+       shutdown_reason, leader_replica
+FROM ai_gateway.primary_lifecycles
+WHERE started_at >= $1
+  AND started_at <  $2
+ORDER BY started_at DESC
+`
+
+type ListPrimaryLifecyclesInRangeParams struct {
+	StartedAt   time.Time `json:"started_at"`
+	StartedAt_2 time.Time `json:"started_at_2"`
+}
+
+type ListPrimaryLifecyclesInRangeRow struct {
+	ID             int64              `json:"id"`
+	StartedAt      time.Time          `json:"started_at"`
+	DrainStartedAt pgtype.Timestamptz `json:"drain_started_at"`
+	EndedAt        pgtype.Timestamptz `json:"ended_at"`
+	TriggerReason  string             `json:"trigger_reason"`
+	VastOfferID    pgtype.Int8        `json:"vast_offer_id"`
+	VastInstanceID pgtype.Int8        `json:"vast_instance_id"`
+	AcceptedDph    pgtype.Numeric     `json:"accepted_dph"`
+	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
+	ShutdownReason pgtype.Text        `json:"shutdown_reason"`
+	LeaderReplica  pgtype.Text        `json:"leader_replica"`
+}
+
+// Range-overlap variant of ListPrimaryLifecycles for GET /admin/economy
+// (OBS-09). Same compact column list (no events JSONB). Filters by the
+// lifecycle's started_at into the [from, to) window -- one lifecycle = one BRT
+// day (CONTEXT A1: pod runs 9-17h BRT same-day windows). No LIMIT -- the
+// handler reduces over every lifecycle in the period for the Vast accrual.
+func (q *Queries) ListPrimaryLifecyclesInRange(ctx context.Context, arg ListPrimaryLifecyclesInRangeParams) ([]ListPrimaryLifecyclesInRangeRow, error) {
+	rows, err := q.db.Query(ctx, listPrimaryLifecyclesInRange, arg.StartedAt, arg.StartedAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPrimaryLifecyclesInRangeRow
+	for rows.Next() {
+		var i ListPrimaryLifecyclesInRangeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StartedAt,
+			&i.DrainStartedAt,
+			&i.EndedAt,
+			&i.TriggerReason,
+			&i.VastOfferID,
+			&i.VastInstanceID,
+			&i.AcceptedDph,
+			&i.TotalCostBrl,
+			&i.ShutdownReason,
+			&i.LeaderReplica,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markPrimaryLifecycleDraining = `-- name: MarkPrimaryLifecycleDraining :exec
 UPDATE ai_gateway.primary_lifecycles
 SET drain_started_at = NOW(),

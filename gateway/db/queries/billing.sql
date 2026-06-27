@@ -75,3 +75,33 @@ FROM ai_gateway.billing_events
 WHERE tenant_id = $1
   AND ts >= $2
   AND ts <  $3;
+
+-- name: SumPhantomAllTenantsByDate :many
+-- GATEWAY-WIDE phantom series for GET /admin/economy (OBS-09). The deliberate
+-- omission of `WHERE tenant_id = $1` is the OBS-09 blocker fix: operations.go
+-- could not populate phantom_month_brl because no no-tenant-filter sum existed.
+-- Drives the daily chart series (economia_liquida per day = phantom - vast).
+-- Keep the `(ts AT TIME ZONE 'America/Sao_Paulo')::date` idiom verbatim --
+-- CURRENT_DATE + tz is invalid SQL (RESEARCH Anti-Patterns).
+SELECT
+    (ts AT TIME ZONE 'America/Sao_Paulo')::date AS date,
+    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl
+FROM ai_gateway.billing_events
+WHERE ts >= $1
+  AND ts <  $2
+GROUP BY (ts AT TIME ZONE 'America/Sao_Paulo')::date
+ORDER BY date;
+
+-- name: SumBillingAllTenantsRange :one
+-- GATEWAY-WIDE summary aggregate for GET /admin/economy (OBS-09). No tenant
+-- filter -- sums phantom + real external spend across all tenants. The
+-- INVARIANT (CONTEXT): cost_local_phantom_brl is written ONLY when a request
+-- was served local/GPU, so "served local" iff cost_local_phantom_brl > 0.
+SELECT
+    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl,
+    COALESCE(SUM(cost_external_brl), 0)::numeric(20,6)      AS external_brl,
+    COUNT(*) FILTER (WHERE cost_local_phantom_brl > 0)::bigint AS local_requests,
+    COUNT(*)::bigint                                        AS total_requests
+FROM ai_gateway.billing_events
+WHERE ts >= $1
+  AND ts <  $2;

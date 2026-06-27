@@ -185,6 +185,12 @@ type Querier interface {
 	// listing is compact for tabwriter rendering. Mirrors ListEmergencyLifecycles
 	// shape from emergency_lifecycles.sql (parity per 06.6-PATTERNS.md).
 	ListPrimaryLifecycles(ctx context.Context, arg ListPrimaryLifecyclesParams) ([]ListPrimaryLifecyclesRow, error)
+	// Range-overlap variant of ListPrimaryLifecycles for GET /admin/economy
+	// (OBS-09). Same compact column list (no events JSONB). Filters by the
+	// lifecycle's started_at into the [from, to) window -- one lifecycle = one BRT
+	// day (CONTEXT A1: pod runs 9-17h BRT same-day windows). No LIMIT -- the
+	// handler reduces over every lifecycle in the period for the Vast accrual.
+	ListPrimaryLifecyclesInRange(ctx context.Context, arg ListPrimaryLifecyclesInRangeParams) ([]ListPrimaryLifecyclesInRangeRow, error)
 	ListTenants(ctx context.Context) ([]ListTenantsRow, error)
 	// Bulk load at boot + on NOTIFY tenants_changed. Same columns as GetTenantConfig.
 	ListTenantsForLoader(ctx context.Context) ([]ListTenantsForLoaderRow, error)
@@ -211,11 +217,23 @@ type Querier interface {
 	RevokeAdminKey(ctx context.Context, id uuid.UUID) error
 	// Shortcut for enable/disable subcommands.
 	SetUpstreamEnabled(ctx context.Context, arg SetUpstreamEnabledParams) error
+	// GATEWAY-WIDE summary aggregate for GET /admin/economy (OBS-09). No tenant
+	// filter -- sums phantom + real external spend across all tenants. The
+	// INVARIANT (CONTEXT): cost_local_phantom_brl is written ONLY when a request
+	// was served local/GPU, so "served local" iff cost_local_phantom_brl > 0.
+	SumBillingAllTenantsRange(ctx context.Context, arg SumBillingAllTenantsRangeParams) (SumBillingAllTenantsRangeRow, error)
 	// Authoritative aggregation for GET /admin/usage (D-D2 -- query billing_events,
 	// NOT usage_counters cache). granularity='day' -- frontend can re-aggregate.
 	SumBillingEventsByDate(ctx context.Context, arg SumBillingEventsByDateParams) ([]SumBillingEventsByDateRow, error)
 	// Aggregate over the entire range -- for the `summary` field.
 	SumBillingEventsRange(ctx context.Context, arg SumBillingEventsRangeParams) (SumBillingEventsRangeRow, error)
+	// GATEWAY-WIDE phantom series for GET /admin/economy (OBS-09). The deliberate
+	// omission of `WHERE tenant_id = $1` is the OBS-09 blocker fix: operations.go
+	// could not populate phantom_month_brl because no no-tenant-filter sum existed.
+	// Drives the daily chart series (economia_liquida per day = phantom - vast).
+	// Keep the `(ts AT TIME ZONE 'America/Sao_Paulo')::date` idiom verbatim --
+	// CURRENT_DATE + tz is invalid SQL (RESEARCH Anti-Patterns).
+	SumPhantomAllTenantsByDate(ctx context.Context, arg SumPhantomAllTenantsByDateParams) ([]SumPhantomAllTenantsByDateRow, error)
 	// Phase 7 — per-tenant/route latency percentiles for the observability
 	// dashboard's /admin/metrics JSON (consumed by the admin handler in plan
 	// 07-03). Postgres computes percentile_cont natively over latency_ms, so
