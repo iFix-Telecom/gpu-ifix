@@ -23,6 +23,8 @@
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { admin as adminPlugin, twoFactor } from "better-auth/plugins";
+import { createAccessControl } from "better-auth/plugins/access";
+import { defaultStatements } from "better-auth/plugins/admin/access";
 import { describe, expect, it, vi } from "vitest";
 
 // Mock the Brevo SMTP mailer transport — no real SMTP in tests. Waves 1-3
@@ -58,6 +60,29 @@ function freshDb(): MemDB {
  */
 function buildAdminAuth() {
   const db = freshDb();
+  // A2 / 13-RESEARCH Pitfall 4: the admin plugin validates every entry of
+  // `adminRoles` against its `roles` access-control map AT CONSTRUCTION
+  // (admin.mjs:21-22). The custom string role `owner` is NOT in the default
+  // map (`admin`/`user`), so `adminPlugin({ adminRoles:["owner"] })` ALONE
+  // throws "Invalid admin roles: owner" before any test body runs. We mirror
+  // the exact `ac`/`roles` workaround from `lib/auth.ts` so the harness
+  // constructs a valid owner-gated instance.
+  const ac = createAccessControl(defaultStatements);
+  const ownerRole = ac.newRole({
+    user: [
+      "create",
+      "list",
+      "set-role",
+      "ban",
+      "impersonate",
+      "delete",
+      "set-password",
+      "get",
+      "update",
+    ],
+    session: ["list", "revoke", "delete"],
+  });
+  const operatorRole = ac.newRole({ user: [], session: [] });
   const auth = betterAuth({
     baseURL: "http://localhost:3001",
     secret: "test-secret-do-not-use-in-prod-aaaaaaaaaaaaaaaa",
@@ -65,7 +90,12 @@ function buildAdminAuth() {
     emailAndPassword: { enabled: true, autoSignIn: false },
     plugins: [
       twoFactor({ issuer: "Ifix AI Gateway" }),
-      adminPlugin({ adminRoles: ["owner"], defaultRole: "operator" }),
+      adminPlugin({
+        ac,
+        roles: { owner: ownerRole, operator: operatorRole },
+        adminRoles: ["owner"],
+        defaultRole: "operator",
+      }),
     ],
     advanced: { database: { generateId: () => crypto.randomUUID() } },
   });

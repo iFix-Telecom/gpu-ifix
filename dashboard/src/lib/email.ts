@@ -30,3 +30,27 @@ export const mailer = nodemailer.createTransport({
     pass: process.env.BREVO_SMTP_PASS,
   },
 });
+
+/**
+ * The single dashboard `FROM` (D-04 / CLAUDE.md §Brevo — sender id 21,
+ * domain-authenticated, no SPF/DKIM error). Used by both `auth.ts`
+ * `sendResetPassword` and the admin invite/reset ops in `admin-actions.ts`.
+ */
+export const MAIL_FROM = "'iFix AI Gateway' <noreply@ifixtelecom.com.br>";
+
+/**
+ * Thin wrapper over the Brevo transport so callers (admin-actions invite /
+ * reset-password) have ONE mail entry point that tests can mock at
+ * `@/lib/email`. Mirrors `mailer.sendMail` and always injects `MAIL_FROM`
+ * unless an explicit `from` is supplied. NEVER pass a token/password in the
+ * body — the invite/reset flows deliver a LINK only (UI-SPEC §Privacy).
+ */
+export function sendMail(message: {
+  to: string;
+  subject: string;
+  text?: string;
+  html?: string;
+  from?: string;
+}) {
+  return mailer.sendMail({ from: MAIL_FROM, ...message });
+}
