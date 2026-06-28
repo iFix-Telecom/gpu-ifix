@@ -113,3 +113,26 @@ checkpoint return for the exact human runbook.
 - Verification: `bunx tsc --noEmit` clean; `bun run test src/lib/auth.test.ts` → 8/8 passed.
 - No file deletions; no stray untracked files.
 - No DB/infra mutations; STATE.md/ROADMAP.md untouched (orchestrator owns those).
+
+## Task 3 — PROD migration COMPLETE (orchestrator-executed, human-approved 2026-06-28)
+
+Blocking-human checkpoint resolved by the operator (Pedro) via `gsd-execute-phase`.
+
+- **Staging dry-run substitute:** `bd_ai_dashboard_staging` does NOT exist on the DO cluster
+  (memory was stale). Performed a read-only introspection of live `bd_ai_dashboard_prod` and
+  diffed every table against `schema.ts` + `schema-custom.ts` → confirmed ADDITIVE-ONLY.
+  `two_factor` live columns (id/secret/backup_codes/user_id) identical to schema → NO recreation;
+  `account`/`verification` unchanged; all declared indexes/uniques already present.
+- **Applied to prod** (`drizzle-kit push --force`, DO CA pinned via `DASHBOARD_DB_CA_CERT`,
+  exit 0): `CREATE TABLE admin_audit_log` + `CREATE INDEX admin_audit_log_actor_idx`
+  + `ALTER TABLE user ADD role/banned/ban_reason/ban_expires` + `ALTER TABLE session ADD impersonated_by`.
+  Exactly the predicted additive SQL, no DROP/ALTER TYPE.
+- **Owner-seed immediately after (no gap):** `seed-owner: owners=1 operators=0 null_roles=0`.
+- **Independent SQL assert:** `role='owner'` count=1 (pedro.araujo@ifixtelecom.com.br);
+  `role IS NULL` count=0; `admin_audit_log` regclass present; `session.impersonated_by` present.
+- **BETTER_AUTH_URL** already correct in prod stack (`https://ai-dashboard.converse-ai.app`).
+- **⚠ TODO (operator):** `BREVO_SMTP_USER` / `BREVO_SMTP_PASS` NOT yet set in the `ifix-ai-dashboard`
+  container env on n8n-ia-vm (SMTP key not available to the orchestrator). invite/reset-password
+  email is INOPERANT until these are added (Brevo account 797fad001). All other Task 3 criteria met.
+
+**Plan 13-02: 3/3 tasks complete** (Task 3 prod migration applied + owner elected).
