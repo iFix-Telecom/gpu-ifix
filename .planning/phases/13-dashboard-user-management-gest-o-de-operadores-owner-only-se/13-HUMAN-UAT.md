@@ -13,12 +13,12 @@ Re-run `/gsd:verify-work 13` (or re-verify) after completing them.
 
 ## BLOCKING operational prerequisite
 
-- [ ] **BREVO SMTP creds** — Set `BREVO_SMTP_USER` + `BREVO_SMTP_PASS` (Brevo account
-  `797fad001`, `smtp-relay.brevo.com:587`) in the `ifix-ai-dashboard` container env on
-  n8n-ia-vm, then recreate the container. Until set, ALL invite/reset-password email
-  delivery (UM-06, UM-09) is inoperant — the code path is implemented + unit-tested with a
-  mocked mailer, but no real email leaves the container.
-  - `BETTER_AUTH_URL=https://ai-dashboard.converse-ai.app` is already confirmed correct.
+- [x] **BREVO SMTP creds — DONE (2026-06-28).** `BREVO_SMTP_USER=797fad001@smtp-brevo.com`
+  + `BREVO_SMTP_PASS=xsmtpsib-…` added to `/opt/ai-gateway-prod/.env` on n8n-ia-vm (backup
+  `.env.bak-pre-brevo-*`) and container recreated (`docker compose up -d ifix-ai-dashboard`).
+  Creds sourced from `converseai-dev-worker-email` (same Brevo account `797fad001`). Live
+  SMTP AUTH against `smtp-relay.brevo.com:587` verified OK. Container healthy (Next.js Ready).
+  - `BETTER_AUTH_URL=https://ai-dashboard.converse-ai.app` already confirmed correct.
 
 ## Human verification items
 
