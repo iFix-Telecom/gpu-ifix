@@ -21,26 +21,32 @@
  * OUTPUT (badge text / control presence), which is implementation-shape
  * agnostic.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 const { viewerMock } = vi.hoisted(() => ({ viewerMock: vi.fn() }));
 
 // Roster with REAL role values (owner + operator) returned by the mocked
 // drizzle client, regardless of which query shape the page uses.
+// NOTE (13-05): the names/emails below are deliberately chosen so they do
+// NOT themselves contain the role words ("owner"/"operator"/"operador"). The
+// badge assertions use a singular `getByText(/\bowner\b.../)`, which would
+// error on multiple matches if a roster name/email ALSO contained the role
+// word. The `role` field (the actual UM-10 contract — the badge must derive
+// from the real `role` column, not `i===0`) is unchanged.
 const ROSTER = [
   {
     id: "u-1",
-    name: "Owner Pessoa",
-    email: "owner@ifixtelecom.com.br",
+    name: "Ana Diretora",
+    email: "ana@ifixtelecom.com.br",
     role: "owner",
     two_factor_enabled: true,
     twoFactorEnabled: true,
   },
   {
     id: "u-2",
-    name: "Operador Pessoa",
-    email: "op@ifixtelecom.com.br",
+    name: "Bruno Suporte",
+    email: "bruno@ifixtelecom.com.br",
     role: "operator",
     two_factor_enabled: false,
     twoFactorEnabled: false,
@@ -89,14 +95,23 @@ describe("operadores roster — UM-10 real-role badge + owner-gate (RED until Wa
     const ok = await renderOperadores();
     expect(ok, "operadores/page must render with mocked db").toBe(true);
 
+    // Scope the badge queries to the roster's table body so the assertions
+    // target the per-row role BADGE, not the page chrome (the "Operador"
+    // column header in <thead> and the "+ Provisionar operador" button both
+    // legitimately contain the role word but are not the badge). The badge
+    // contract — derived from the real `role` column, not `i===0` — is what
+    // UM-10 verifies; rowgroup scoping keeps the regex + intent intact.
+    const body = screen.getAllByRole("rowgroup").at(-1) as HTMLElement;
+    const rows = within(body);
+
     // Owner role badge present (text 'owner' / 'Owner' / 'Dono').
     expect(
-      screen.getByText(/\bowner\b|\bdono\b/i),
+      rows.getByText(/\bowner\b|\bdono\b/i),
       "owner role badge must render from real role column",
     ).toBeInTheDocument();
     // Operator role badge present.
     expect(
-      screen.getByText(/\boperator\b|\boperador\b/i),
+      rows.getByText(/\boperator\b|\boperador\b/i),
       "operator role badge must render from real role column",
     ).toBeInTheDocument();
   });
