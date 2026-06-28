@@ -104,7 +104,7 @@ todas as 4 operações admin; entregar junto com a troca de senha.
 
 **Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
 **Depends on:** Phase 11 (auth/2FA base), Phase 12
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 
@@ -118,7 +118,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 13-03-PLAN.md — 4 owner-gated Server Actions (invite/remove/reset-pw/reset-2FA CR-01-safe) + audit.ts writeAuditLog (D-03/D-08/D-09)
+- [x] 13-03-PLAN.md — 4 owner-gated Server Actions (invite/remove/reset-pw/reset-2FA CR-01-safe) + audit.ts writeAuditLog (D-03/D-08/D-09)
 - [x] 13-04-PLAN.md — self-service change-password /settings (UM-01, not audited) + /reset-password/[token] set-password landing
 
 **Wave 4** *(blocked on Wave 3)*
