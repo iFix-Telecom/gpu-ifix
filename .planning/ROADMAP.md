@@ -114,7 +114,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false) — code done (Tasks 1-2); Task 3 prod migration pending human
+- [x] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false) — prod migration applied (1 owner/0 NULL); ⚠ BREVO_SMTP creds TODO in n8n-ia-vm stack
 
 **Wave 3** *(blocked on Wave 2)*
 
