@@ -104,7 +104,7 @@ todas as 4 operações admin; entregar junto com a troca de senha.
 
 **Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
 **Depends on:** Phase 11 (auth/2FA base), Phase 12
-**Plans:** 1/5 plans executed
+**Plans:** 3/5 plans executed
 
 Plans:
 
@@ -114,12 +114,12 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false)
+- [x] 13-02-PLAN.md — admin plugin (adminRoles:["owner"]) + Brevo nodemailer sendResetPassword + CLI-canonical schema regen + admin_audit_log (schema-custom) + db/drizzle wiring + seed-owner; [BLOCKING] staging-first drizzle-kit push → IMMEDIATE owner-seed (autonomous: false)
 
 **Wave 3** *(blocked on Wave 2)*
 
 - [ ] 13-03-PLAN.md — 4 owner-gated Server Actions (invite/remove/reset-pw/reset-2FA CR-01-safe) + audit.ts writeAuditLog (D-03/D-08/D-09)
-- [ ] 13-04-PLAN.md — self-service change-password /settings (UM-01, not audited) + /reset-password/[token] set-password landing
+- [x] 13-04-PLAN.md — self-service change-password /settings (UM-01, not audited) + /reset-password/[token] set-password landing
 
 **Wave 4** *(blocked on Wave 3)*
 
