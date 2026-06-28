@@ -27,10 +27,10 @@ expected: An unauthenticated visitor opening /reset-password/[token] sees the se
 result: pass
 note: |
   Was a blocker (live Playwright: /reset-password/dummy-token → 307 /login). FIXED in
-  commit b37ed6d — added `reset-password` to middleware config.matcher exclusion. Verified
-  deterministically: matcher regex now PUBLIC for /reset-password/* while /settings +
-  /settings/operadores stay GATED; tsc clean; suite 51/51. LIVE re-verify pending the
-  dashboard image rebuild+redeploy (the running container still serves the pre-fix build).
+  commit b37ed6d. LIVE RE-VERIFIED 2026-06-28 after deploying the Phase 13 dashboard build
+  (image sha a49d9a7, pushed GHCR latest-dev, recreated on n8n-ia-vm): Playwright at
+  https://ai-dashboard.converse-ai.app/reset-password/live-uat-test-token renders the
+  "Definir nova senha" form (Nova senha + Confirmar + Salvar senha) — no redirect to /login.
 
 ### 3. Invite operator end-to-end (UM-04 + UM-09)
 expected: As owner, "+ Provisionar operador" with an @ifixtelecom address → email arrives → /reset-password/[token] set password → new operator logs in.
