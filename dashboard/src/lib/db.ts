@@ -19,7 +19,15 @@
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import * as schema from "./schema";
+import * as authSchema from "./schema";
+import * as customSchema from "./schema-custom";
+
+// Merge the CLI-canonical auth schema with the hand-maintained custom
+// tables (admin_audit_log) so the drizzle client knows BOTH (13-RESEARCH
+// Pitfall 1). `schema` is still re-exported below so existing callers
+// (`import { schema } from "@/lib/db"`) keep working and gain
+// `schema.adminAuditLog`.
+const schema = { ...authSchema, ...customSchema };
 
 type DrizzleClient = ReturnType<typeof drizzle<typeof schema>>;
 

@@ -48,7 +48,10 @@ const sslConfig = isLocalhost
     };
 
 export default defineConfig({
-  schema: "./src/lib/schema.ts",
+  // Glob both the CLI-canonical auth schema (schema.ts) AND the custom
+  // table module (schema-custom.ts) so `drizzle-kit push` migrates
+  // admin_audit_log too (13-RESEARCH Pitfall 1).
+  schema: "./src/lib/schema*.ts",
   dialect: "postgresql",
   dbCredentials: {
     url,

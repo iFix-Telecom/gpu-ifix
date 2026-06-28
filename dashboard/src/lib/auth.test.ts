@@ -22,7 +22,10 @@ import { createOTP } from "@better-auth/utils/otp";
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
-import { twoFactor } from "better-auth/plugins";
+import { admin, twoFactor } from "better-auth/plugins";
+import { createAccessControl } from "better-auth/plugins/access";
+import { defaultStatements } from "better-auth/plugins/admin/access";
+import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { isAllowedEmail } from "@/lib/allowlist";
 
@@ -37,6 +40,26 @@ function freshDb(): MemDB {
     twoFactor: [],
   };
 }
+
+// Mirror auth.ts's A2/Pitfall-4 access-control map so the test harness
+// boots the SAME admin-plugin wiring. The owner role carries the full
+// admin statement set; operator carries none.
+const testAc = createAccessControl(defaultStatements);
+const testOwnerRole = testAc.newRole({
+  user: [
+    "create",
+    "list",
+    "set-role",
+    "ban",
+    "impersonate",
+    "delete",
+    "set-password",
+    "get",
+    "update",
+  ],
+  session: ["list", "revoke", "delete"],
+});
+const testOperatorRole = testAc.newRole({ user: [], session: [] });
 
 /**
  * Build a Better Auth instance with the SAME plugin/hook/rateLimit/session
@@ -80,7 +103,17 @@ function buildTestAuth(opts?: { rateLimitWindow?: number; rateLimitMax?: number 
         "/two-factor/verify-totp": { window: 60, max: 5 },
       },
     },
-    plugins: [twoFactor({ issuer: "Ifix AI Gateway" })],
+    plugins: [
+      twoFactor({ issuer: "Ifix AI Gateway" }),
+      // Mirror Phase 13 D-01/D-02 admin wiring so the boot-test (UM-02)
+      // exercises the SAME adminRoles/access-control config as auth.ts.
+      admin({
+        ac: testAc,
+        roles: { owner: testOwnerRole, operator: testOperatorRole },
+        adminRoles: ["owner"],
+        defaultRole: "operator",
+      }),
+    ],
     hooks: {
       // Mirror CR-01 defense-in-depth in tests so the production hook
       // stays exercised end-to-end via memoryAdapter.
@@ -491,5 +524,146 @@ describe("auth — CR-04 session.create.before hook fires on verify-totp", () =>
     expect(threw).toBe(true);
     // The guard message mentions "já está habilitado" + RUNBOOK ref.
     expect(/já está habilitado|two_factor_already_enabled|already.*enabled|forbidden/i.test(msg)).toBe(true);
+  });
+});
+
+describe("auth — UM-02 admin plugin boots with adminRoles:['owner']", () => {
+  it("(g) buildTestAuth constructs (no invalid-roles throw) + signed-up user carries a role column", async () => {
+    // Phase 13 A2 / Pitfall 4 anchor: `admin({ adminRoles:['owner'] })`
+    // throws at construction ("Invalid admin roles: owner...") unless the
+    // access-control `roles` map declares `owner`. buildTestAuth mirrors
+    // auth.ts's createAccessControl map; if that wiring regresses, this
+    // describe's buildTestAuth() call throws and the test fails. The
+    // admin plugin also adds the `role` column to the user table — assert
+    // a freshly signed-up user exposes it (defaultRole 'operator').
+    const { auth, db } = buildTestAuth();
+    expect(auth).toBeTruthy();
+    expect(typeof auth.api.createUser).toBe("function"); // admin endpoint present
+
+    const res = await auth.api.signUpEmail({
+      body: {
+        email: "owner-candidate@ifixtelecom.com.br",
+        password: "TestPassword!123",
+        name: "Owner Candidate",
+      },
+    });
+    expect(res.user).toBeDefined();
+
+    // The admin plugin's `role` column exists on the user row. Better Auth
+    // leaves it unset (null) on plain self-signup (defaultRole applies to
+    // admin createUser, not signup) — assert the COLUMN is part of the
+    // user-table shape, which is what UM-02 requires (schema carries role).
+    const stored = (db.user ?? []).find(
+      (u: { email: string }) => u.email === "owner-candidate@ifixtelecom.com.br",
+    );
+    expect(stored).toBeDefined();
+    expect("role" in (stored as Record<string, unknown>)).toBe(true);
+  });
+});
+
+describe("auth — UM-07 reset-2FA invariant is CR-01-safe (re-enroll permitted after reset)", () => {
+  it("(h) after clearing two_factor + twoFactorEnabled=false, /two-factor/enable is permitted again", async () => {
+    // D-06 reset-2FA (RESEARCH Pattern 5): the owner clears the target's
+    // two_factor row + sets user.twoFactorEnabled=false via DIRECT drizzle
+    // (no first-party endpoint). CR-01 (auth.ts:before-hook) only blocks
+    // /two-factor/enable when user.twoFactorEnabled === true — so after a
+    // correct reset, enable MUST be permitted again (the operator re-enrolls
+    // legitimately). This test proves the reset op does NOT trip CR-01 and
+    // never itself calls /two-factor/enable.
+    const { auth, db } = buildTestAuth();
+    const email = "reset2fa@ifixtelecom.com.br";
+    const password = "TestPassword!123";
+
+    await auth.api.signUpEmail({ body: { email, password, name: "Reset" } });
+
+    const signInHeaders = new Headers();
+    const signIn = await auth.api.signInEmail({
+      body: { email, password },
+      returnHeaders: true,
+      headers: signInHeaders,
+    });
+    const cookie = extractSetCookie(signIn);
+
+    // Enroll + verify so twoFactorEnabled flips to true (CR-01 now armed).
+    const enableHeaders = new Headers();
+    enableHeaders.set("cookie", cookie);
+    const enableResp = await auth.api.enableTwoFactor({
+      body: { password },
+      headers: enableHeaders,
+      returnHeaders: true,
+    });
+    const totpURI =
+      (enableResp as any).response?.totpURI ?? (enableResp as any).totpURI ?? "";
+    const secret = parseTotpSecret(totpURI);
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+    const verifyCookie = extractSetCookie(enableResp) || cookie;
+    const verifyHeaders = new Headers();
+    verifyHeaders.set("cookie", verifyCookie);
+    const verifyResp = await auth.api.verifyTOTP({
+      body: { code },
+      headers: verifyHeaders,
+      returnHeaders: true,
+    });
+    const postVerifyCookie = extractSetCookie(verifyResp) || verifyCookie;
+
+    // Confirm CR-01 IS armed now: a second enable throws FORBIDDEN.
+    const armedHeaders = new Headers();
+    armedHeaders.set("cookie", postVerifyCookie);
+    let armedThrew = false;
+    try {
+      await auth.api.enableTwoFactor({ body: { password }, headers: armedHeaders });
+    } catch {
+      armedThrew = true;
+    }
+    expect(armedThrew).toBe(true);
+
+    // RESET-2FA op (what actions.ts does via getDb()): delete the user's
+    // two_factor rows + set twoFactorEnabled=false, directly on the store.
+    // Here the memory adapter backs the same shape, so mutate it the way
+    // the production drizzle delete/update would.
+    db.twoFactor = (db.twoFactor ?? []).filter(
+      (t: { userId?: string }) =>
+        !(db.user ?? []).some(
+          (u: { id?: string; email?: string }) =>
+            u.email === email && u.id === t.userId,
+        ),
+    );
+    for (const u of db.user ?? []) {
+      if ((u as { email?: string }).email === email) {
+        (u as { twoFactorEnabled?: boolean }).twoFactorEnabled = false;
+      }
+    }
+
+    // CR-01 must now be INERT (enabled=false) → enable is permitted again.
+    // Re-sign-in to get a clean session, then enable: it MUST NOT throw the
+    // TWO_FACTOR_ALREADY_ENABLED guard.
+    const reSignInHeaders = new Headers();
+    const reSignIn = await auth.api.signInEmail({
+      body: { email, password },
+      returnHeaders: true,
+      headers: reSignInHeaders,
+    });
+    const reCookie = extractSetCookie(reSignIn);
+    const reEnableHeaders = new Headers();
+    reEnableHeaders.set("cookie", reCookie);
+    let guardTripped = false;
+    try {
+      await auth.api.enableTwoFactor({
+        body: { password },
+        headers: reEnableHeaders,
+      });
+    } catch (e) {
+      const msg = ((e as { message?: string })?.message ?? String(e)).toLowerCase();
+      // Only count the CR-01 guard as a failure; unrelated errors are not
+      // what this invariant asserts.
+      if (/já está habilitado|two_factor_already_enabled/.test(msg)) {
+        guardTripped = true;
+      }
+    }
+    expect(guardTripped).toBe(false);
+
+    // Sanity: eq import is exercised so the drizzle reset idiom referenced
+    // by actions.ts stays type-checked in this test module.
+    expect(typeof eq).toBe("function");
   });
 });

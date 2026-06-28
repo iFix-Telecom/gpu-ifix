@@ -5,6 +5,18 @@
  * (D-12 / D-13 / D-14 / D-15). CONTEXT.md locks this as a STANDALONE
  * instance — NOT a shared session with converseai-v4 — for ~4 Ifix admins.
  *
+ * Phase 13 reversal (D-01): Phase 11 deliberately shipped WITHOUT the
+ * Better Auth `admin` plugin ("no admin plugin, no organization plugin"
+ * — the seed-admins.sh header still documents that prior choice). Phase
+ * 13 REVERSES that: the dashboard now manages operators from the panel
+ * itself, so the `admin` plugin is registered with `adminRoles:["owner"]`
+ * + `defaultRole:"operator"` (D-01/D-02), and `emailAndPassword` gains
+ * `sendResetPassword` wired to the Brevo SMTP transport in `./email.ts`
+ * (D-04) so invite/reset links are delivered. The admin plugin adds
+ * `role`/`banned`/`banReason`/`banExpires` to the user table and
+ * `impersonatedBy` to the session table via the CLI-canonical regen of
+ * schema.ts — `banUser`/`impersonateUser` are never wired into the UI.
+ *
  * Phase 11 plugin / hook surface:
  * - twoFactor (D-12): mandatory TOTP, issuer "Ifix AI Gateway", SHA-1
  *   default (Google Authenticator + 1Password compatible).
@@ -42,9 +54,39 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
-import { twoFactor } from "better-auth/plugins";
+import { admin, twoFactor } from "better-auth/plugins";
+import { createAccessControl } from "better-auth/plugins/access";
+import { defaultStatements } from "better-auth/plugins/admin/access";
 import { isAllowedEmail } from "./allowlist";
 import { db, schema } from "./db"; // dashboard's OWN db, NOT ai_gateway
+import { mailer } from "./email"; // Brevo SMTP transport for reset/invite (D-04)
+
+// A2 / Pitfall 4 (13-RESEARCH): the admin plugin VALIDATES every entry of
+// `adminRoles` against its `roles` access-control map (admin.mjs:20-21).
+// The default roles map only knows `admin`/`user`; our custom string role
+// `owner` is NOT in it, so `admin({ adminRoles:["owner"] })` alone throws
+// at boot:  "Invalid admin roles: owner. Admin roles must be defined in
+// the 'roles' configuration."  (confirmed empirically during this plan's
+// staging boot-test via `@better-auth/cli generate`). The contained fix is
+// a createAccessControl map declaring `owner` (full admin statement set)
+// and `operator` (no admin permissions). This is the small, isolated
+// access-control config Pitfall 4 / A2 calls for — nothing else changes.
+const ac = createAccessControl(defaultStatements);
+const ownerRole = ac.newRole({
+  user: [
+    "create",
+    "list",
+    "set-role",
+    "ban",
+    "impersonate",
+    "delete",
+    "set-password",
+    "get",
+    "update",
+  ],
+  session: ["list", "revoke", "delete"],
+});
+const operatorRole = ac.newRole({ user: [], session: [] });
 
 // Rate-limit storage decision (11-REVIEWS MEDIUM #6): explicit.
 // When REDIS_URL is set, use "secondary-storage" (Better Auth's
@@ -62,7 +104,25 @@ export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET,
   database: drizzleAdapter(db, { provider: "pg", schema }),
   // D-12: never auto sign-in pre-enrollment (11-RESEARCH Pitfall 4).
-  emailAndPassword: { enabled: true, autoSignIn: false },
+  // D-04 (Phase 13): sendResetPassword delivers the invite/reset LINK via
+  // the Brevo SMTP transport (lib/email.ts). requestPasswordReset throws
+  // RESET_PASSWORD_DISABLED if this callback is absent (13-RESEARCH
+  // Pattern 4). `url` already carries the public origin from
+  // BETTER_AUTH_URL (Pitfall 6 / A4 — confirm = the public dashboard
+  // origin in the prod container, never localhost). NEVER render the
+  // token/password — link only (UI-SPEC §Privacy).
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: false,
+    sendResetPassword: async ({ user, url }) => {
+      await mailer.sendMail({
+        from: "'iFix AI Gateway' <noreply@ifixtelecom.com.br>",
+        to: user.email,
+        subject: "Defina sua senha — iFix AI Gateway",
+        text: `Acesse o link para definir sua senha: ${url}`,
+      });
+    },
+  },
   // D-15 (revised quick-260625-k17): 7-day idle session + cookieCache so
   // the Edge middleware can read twoFactor claims without a DB hit. Option A
   // — session.additionalFields
@@ -156,7 +216,21 @@ export const auth = betterAuth({
   // D-12: mandatory TOTP. issuer string locked per CONTEXT.md specifics
   // (line 159). SHA-1 default per @better-auth/utils/dist/otp.mjs:12 —
   // Google Authenticator + 1Password compatible.
-  plugins: [twoFactor({ issuer: "Ifix AI Gateway" })],
+  // D-01/D-02 (Phase 13): the admin plugin gates operator management.
+  // adminRoles:["owner"] makes role='owner' (NOT the plugin default
+  // "admin") pass the admin permission gate (13-RESEARCH Pitfall 4 — the
+  // single highest-risk config detail); defaultRole:"operator" makes
+  // createUser without an explicit role default to operator. twoFactor
+  // stays FIRST so its user-table column ordering is unchanged.
+  plugins: [
+    twoFactor({ issuer: "Ifix AI Gateway" }),
+    admin({
+      ac,
+      roles: { owner: ownerRole, operator: operatorRole },
+      adminRoles: ["owner"],
+      defaultRole: "operator",
+    }),
+  ],
   // D-13: email allowlist enforced server-side via the user-create hook
   // BEFORE Better Auth persists the row. Non-allowlisted domains are
   // rejected with a clear pt-BR message; the signup page surfaces the
