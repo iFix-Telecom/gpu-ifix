@@ -55,9 +55,38 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { admin, twoFactor } from "better-auth/plugins";
+import { createAccessControl } from "better-auth/plugins/access";
+import { defaultStatements } from "better-auth/plugins/admin/access";
 import { isAllowedEmail } from "./allowlist";
 import { db, schema } from "./db"; // dashboard's OWN db, NOT ai_gateway
 import { mailer } from "./email"; // Brevo SMTP transport for reset/invite (D-04)
+
+// A2 / Pitfall 4 (13-RESEARCH): the admin plugin VALIDATES every entry of
+// `adminRoles` against its `roles` access-control map (admin.mjs:20-21).
+// The default roles map only knows `admin`/`user`; our custom string role
+// `owner` is NOT in it, so `admin({ adminRoles:["owner"] })` alone throws
+// at boot:  "Invalid admin roles: owner. Admin roles must be defined in
+// the 'roles' configuration."  (confirmed empirically during this plan's
+// staging boot-test via `@better-auth/cli generate`). The contained fix is
+// a createAccessControl map declaring `owner` (full admin statement set)
+// and `operator` (no admin permissions). This is the small, isolated
+// access-control config Pitfall 4 / A2 calls for — nothing else changes.
+const ac = createAccessControl(defaultStatements);
+const ownerRole = ac.newRole({
+  user: [
+    "create",
+    "list",
+    "set-role",
+    "ban",
+    "impersonate",
+    "delete",
+    "set-password",
+    "get",
+    "update",
+  ],
+  session: ["list", "revoke", "delete"],
+});
+const operatorRole = ac.newRole({ user: [], session: [] });
 
 // Rate-limit storage decision (11-REVIEWS MEDIUM #6): explicit.
 // When REDIS_URL is set, use "secondary-storage" (Better Auth's
@@ -195,7 +224,12 @@ export const auth = betterAuth({
   // stays FIRST so its user-table column ordering is unchanged.
   plugins: [
     twoFactor({ issuer: "Ifix AI Gateway" }),
-    admin({ adminRoles: ["owner"], defaultRole: "operator" }),
+    admin({
+      ac,
+      roles: { owner: ownerRole, operator: operatorRole },
+      adminRoles: ["owner"],
+      defaultRole: "operator",
+    }),
   ],
   // D-13: email allowlist enforced server-side via the user-create hook
   // BEFORE Better Auth persists the row. Non-allowlisted domains are
