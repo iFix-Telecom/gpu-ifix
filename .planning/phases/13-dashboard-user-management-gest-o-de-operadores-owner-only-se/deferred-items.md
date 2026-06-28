@@ -17,3 +17,16 @@ are out of scope per the executor SCOPE BOUNDARY rule.
 Note: 13-03 made the 4 server actions + `writeAuditLog` available at
 `@/lib/admin-actions`, which is the import Plan 05's `page.tsx` needs to turn
 `page.test.tsx` green. No action required from 13-03.
+
+## From plan 13-05 (Wave 4 — operadores UI wiring)
+
+13-05 turned `operadores/page.test.tsx` (UM-10) GREEN. The following remains
+out of scope (a different wave owns it) and was RED at 13-05's base (`ff4ec34`):
+
+| Test file | Requirement | Owner | Status |
+|-----------|-------------|-------|--------|
+| `dashboard/src/lib/seed-owner.test.ts` | UM-03 (idempotent owner seed) | Wave 1 (`seed-owner.ts`) | RED — `seed-owner.ts` not yet created |
+
+`seed-owner.ts` does not exist on disk; 13-05 touches only `viewer.ts`,
+`operator-controls.tsx`, `operadores/page.tsx`, and `operadores/page.test.tsx`.
+The 2 failing `seed-owner.test.ts` assertions are unrelated to this plan.
