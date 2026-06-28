@@ -104,7 +104,7 @@ todas as 4 operações admin; entregar junto com a troca de senha.
 
 **Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
 **Depends on:** Phase 11 (auth/2FA base), Phase 12
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 
@@ -123,7 +123,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 13-05-PLAN.md — operadores/page.tsx real role (D-02) + owner-gate + + Provisionar dialog + ··· dropdown-menu + destructive alert-dialogs wired to server actions (UM-10)
+- [x] 13-05-PLAN.md — operadores/page.tsx real role (D-02) + owner-gate + + Provisionar dialog + ··· dropdown-menu + destructive alert-dialogs wired to server actions (UM-10)
 
 ### Phase 14: vram-adaptive-stt — gateway auto-decides pod STT via pod-reported whisper device (SEED-019 parts 2+3)
 
