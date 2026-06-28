@@ -108,16 +108,16 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 
 ### Dashboard User Management (Phase 13 — derived in plan-phase 2026-06-15)
 
-- [ ] **UM-01**: Self-service change-password (`/settings`, `authClient.changePassword`, exige senha atual; NÃO admin, NÃO auditado)
-- [ ] **UM-02**: Instalar admin plugin (`adminRoles:["owner"]`, `defaultRole:"operator"`) + colunas role/banned/banReason/banExpires via regen CLI-canônico
-- [ ] **UM-03**: Seed one-shot idempotente — 1º operador → `role='owner'`, demais → `operator`
-- [ ] **UM-04**: Server Action owner-gated: criar/convidar operador (`admin.createUser` random pwd + `requestPasswordReset` via Brevo SMTP)
-- [ ] **UM-05**: Server Action owner-gated: remover operador + revogar todas as sessões
-- [ ] **UM-06**: Server Action owner-gated: resetar senha de operador (link e-mail + revogar sessões)
-- [ ] **UM-07**: Server Action owner-gated: resetar 2FA (clear `two_factor` + `two_factor_enabled=false` + revogar) — CR-01 intacto
-- [ ] **UM-08**: Tabela `admin_audit_log` (D-08); toda ação admin grava 1 row; self-service change-password NÃO logado (D-09)
-- [ ] **UM-09**: Brevo SMTP via nodemailer wired em `sendResetPassword`; reachability do container confirmada
-- [ ] **UM-10**: `operadores/page.tsx` lê role real; owner-gate esconde controles para não-owners
+- [x] **UM-01**: Self-service change-password (`/settings`, `authClient.changePassword`, exige senha atual; NÃO admin, NÃO auditado)
+- [x] **UM-02**: Instalar admin plugin (`adminRoles:["owner"]`, `defaultRole:"operator"`) + colunas role/banned/banReason/banExpires via regen CLI-canônico
+- [x] **UM-03**: Seed one-shot idempotente — 1º operador → `role='owner'`, demais → `operator`
+- [x] **UM-04**: Server Action owner-gated: criar/convidar operador (`admin.createUser` random pwd + `requestPasswordReset` via Brevo SMTP)
+- [x] **UM-05**: Server Action owner-gated: remover operador + revogar todas as sessões
+- [x] **UM-06**: Server Action owner-gated: resetar senha de operador (link e-mail + revogar sessões)
+- [x] **UM-07**: Server Action owner-gated: resetar 2FA (clear `two_factor` + `two_factor_enabled=false` + revogar) — CR-01 intacto
+- [x] **UM-08**: Tabela `admin_audit_log` (D-08); toda ação admin grava 1 row; self-service change-password NÃO logado (D-09)
+- [x] **UM-09**: Brevo SMTP via nodemailer wired em `sendResetPassword`; reachability do container confirmada
+- [x] **UM-10**: `operadores/page.tsx` lê role real; owner-gate esconde controles para não-owners
 
 ## v2 Requirements
 
@@ -244,16 +244,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PRD-05 | Phase 11: prod-hardening | Complete |
 | PRD-06 | Phase 11: prod-hardening | Complete |
 | PRD-07 | Phase 10: prod-deploy-ai-gateway | Complete |
-| UM-01 | Phase 13: dashboard-user-management | Pending |
-| UM-02 | Phase 13: dashboard-user-management | Pending |
-| UM-03 | Phase 13: dashboard-user-management | Pending |
-| UM-04 | Phase 13: dashboard-user-management | Pending |
-| UM-05 | Phase 13: dashboard-user-management | Pending |
-| UM-06 | Phase 13: dashboard-user-management | Pending |
-| UM-07 | Phase 13: dashboard-user-management | Pending |
-| UM-08 | Phase 13: dashboard-user-management | Pending |
-| UM-09 | Phase 13: dashboard-user-management | Pending |
-| UM-10 | Phase 13: dashboard-user-management | Pending |
+| UM-01 | Phase 13: dashboard-user-management | Complete |
+| UM-02 | Phase 13: dashboard-user-management | Complete |
+| UM-03 | Phase 13: dashboard-user-management | Complete |
+| UM-04 | Phase 13: dashboard-user-management | Complete |
+| UM-05 | Phase 13: dashboard-user-management | Complete |
+| UM-06 | Phase 13: dashboard-user-management | Complete |
+| UM-07 | Phase 13: dashboard-user-management | Complete |
+| UM-08 | Phase 13: dashboard-user-management | Complete |
+| UM-09 | Phase 13: dashboard-user-management | Complete |
+| UM-10 | Phase 13: dashboard-user-management | Complete |
 
 <!-- 2026-05-26: Phase 10 plan-phase per D-16 split PRD-01/02/03/05/06 from Phase 10 → Phase 11; PRD-04 split into partial (Phase 10 RUNBOOK-DEPLOY.md) + full (Phase 11 incident runbook). -->
 
