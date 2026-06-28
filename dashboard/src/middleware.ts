@@ -1,6 +1,10 @@
 /**
  * Auth boundary — every dashboard route except /login, /signup, /2fa/*,
- * /first-login, /signed-out, /api/auth/* is gated. Phase 11 (PRD-06)
+ * /first-login, /signed-out, /reset-password/*, /api/auth/* is gated. The
+ * /reset-password/[token] surface MUST stay public: an invited or
+ * password-reset operator reaches it from an email link with NO session
+ * (Phase 13 UM-04/UM-06) — gating it bounces the link to /login and the
+ * set-password form never renders. Phase 11 (PRD-06)
  * extends the original session-presence check with a two-stage TOTP gate
  * (D-12 + D-15) per 11-RESEARCH §Pitfall 4.
  *
@@ -30,7 +34,7 @@
  * `config.matcher` below.
  *
  * Matcher exclusions (UI-SPEC v2 §Anchors): login, signup, 2fa, first-login,
- * signed-out, api/auth, _next, favicon.
+ * signed-out, reset-password, api/auth, _next, favicon.
  */
 import { getCookieCache, getSessionCookie } from "better-auth/cookies";
 import { type NextRequest, NextResponse } from "next/server";
@@ -118,6 +122,6 @@ export async function middleware(req: NextRequest) {
 // the Better Auth API itself.
 export const config = {
   matcher: [
-    "/((?!login|signup|2fa|first-login|signed-out|api/auth|_next|favicon).*)",
+    "/((?!login|signup|2fa|first-login|signed-out|reset-password|api/auth|_next|favicon).*)",
   ],
 };
