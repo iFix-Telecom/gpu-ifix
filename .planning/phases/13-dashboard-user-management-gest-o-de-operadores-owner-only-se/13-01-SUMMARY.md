@@ -2,7 +2,7 @@
 phase: 13-dashboard-user-management-gest-o-de-operadores-owner-only-se
 plan: 01
 subsystem: dashboard
-status: paused_at_checkpoint
+status: complete
 tags: [scaffolding, tdd-red, shadcn, user-management, owner-only]
 requires:
   - dashboard/src/lib/auth.test.ts (memoryAdapter buildTestAuth harness)
@@ -11,14 +11,19 @@ provides:
   - RED test surface for UM-01..UM-10 (4 files, 11 failing assertions)
   - shadcn dialog / dropdown-menu / alert-dialog primitives for UI waves
 affects:
-  - dashboard/package.json (nodemailer add PENDING — blocking-human checkpoint)
+  - dashboard/package.json (nodemailer ^9.0.1 + @types/nodemailer ^8.0.1 added)
 tech-stack:
   added:
+    - nodemailer ^9.0.1 (Brevo SMTP transport, D-04 invite/reset)
+    - "@types/nodemailer ^8.0.1 (devDep — nodemailer 9 ships no bundled types)"
     - shadcn dialog/dropdown-menu/alert-dialog (copied source, official registry)
   patterns:
     - "computed dynamic-import specifier to keep not-yet-built modules as RED assertions (not Vite collection errors)"
     - "vi.mock @/lib/email mailer transport — no real SMTP in tests"
 key-files:
+  modified_deps:
+    - dashboard/package.json (nodemailer + @types/nodemailer)
+    - dashboard/bun.lock
   created:
     - dashboard/src/components/ui/dialog.tsx
     - dashboard/src/components/ui/dropdown-menu.tsx
@@ -32,35 +37,42 @@ decisions:
   - "Reverted shadcn's unrelated cosmetic edit to button.tsx (out of scope; could regress existing UI)"
   - "Defeated Vite static import-analysis with a computed import specifier so the 3 not-yet-built modules fail as RED assertions, not suite-collection errors (plan acceptance criteria)"
 metrics:
-  duration: ~25m
+  duration: ~35m
   completed: 2026-06-28
-  tasks_completed: 2
+  tasks_completed: 3
   tasks_total: 3
 ---
 
 # Phase 13 Plan 01: Wave 0 Scaffolding Summary
 
-Established the failing-test surface (RED) for all ten UM-* requirements and
-installed the three net-new shadcn primitives the UI waves consume. The single
-net-new npm dependency (nodemailer, [ASSUMED]) is GATED behind a blocking-human
-checkpoint (Task 1) and is NOT yet installed — the plan is paused awaiting human
-verification of package legitimacy.
+Established the failing-test surface (RED) for all ten UM-* requirements,
+installed the three net-new shadcn primitives the UI waves consume, and added
+the single net-new npm dependency (nodemailer) after its `[ASSUMED]` legitimacy
+was cleared via a blocking-human checkpoint. Plan 13-01 is COMPLETE (3/3).
 
-## Status: PAUSED AT CHECKPOINT (Task 1 — blocking-human)
+## Status: COMPLETE (3/3 tasks)
 
 | Task | Name | Status | Commit |
 |------|------|--------|--------|
-| 1 | Gate + install nodemailer ([ASSUMED]) | ⏸ BLOCKED (human-verify) | — |
+| 1 | Gate + install nodemailer ([ASSUMED] → [OK]) | ✅ done | 61a378d |
 | 2 | Install shadcn dialog + dropdown-menu + alert-dialog | ✅ done | 68ad65e |
 | 3 | Write RED test stubs UM-01..UM-10 | ✅ done | 2398265 |
 
 Tasks 2 and 3 were executed first because neither depends on nodemailer
 (Task 3 mocks the `@/lib/email` mailer transport via `vi.mock`, so no SMTP /
-nodemailer import is exercised). Task 1 remains the only outstanding work and is
-a `gate="blocking-human"` checkpoint — `[ASSUMED]` packages are never
-auto-approved.
+nodemailer import is exercised). Task 1 — the `gate="blocking-human"` checkpoint
+— was paused for human verification, then approved and completed.
 
 ## What Was Built
+
+### Task 1 — nodemailer dependency (commit 61a378d)
+- `nodemailer@9.0.1` added to `dashboard/package.json` dependencies (`^9.0.1`)
+  — Brevo SMTP transport for D-04 invite/reset links (UM-09).
+- `@types/nodemailer@8.0.1` added as devDependency: nodemailer 9 ships NO
+  bundled types (no `types` field in its `package.json`, zero `.d.ts` under
+  `node_modules/nodemailer`), so per the plan's conditional acceptance criterion
+  the `@types` package WAS required.
+- `[ASSUMED]` legitimacy CLEARED → `[OK]` (see Package Legitimacy Decision below).
 
 ### Task 2 — shadcn primitives (commit 68ad65e)
 - `dialog.tsx` (UI-SPEC state 5: provision modal)
@@ -139,43 +151,37 @@ NOT import/collection errors:
   hook (GSD-pure skip mode already chosen by the operator) passes inside the
   worktree. Not committed.
 
-## CHECKPOINT REACHED — Task 1 (blocking-human)
+## Package Legitimacy Decision — nodemailer (T-13-SC, RESOLVED)
 
-**Type:** human-verify (`gate="blocking-human"`)
-**Plan:** 13-01
-**Progress:** 2/3 tasks complete
+**Checkpoint:** Task 1 `checkpoint:human-verify` (`gate="blocking-human"`).
+**Outcome:** APPROVED — `[ASSUMED]` → `[OK]` (not `[SLOP]`/`[SUS]`).
 
-### Current Task
-**Task 1:** Gate + install nodemailer ([ASSUMED] package legitimacy)
-**Status:** blocked — awaiting human verification
-**Blocked by:** `nodemailer` is the only net-new external npm package this
-phase (Brevo SMTP transport for D-04 invite/reset links). RESEARCH tagged it
-`[ASSUMED]` because slopcheck was unavailable at research time. Threat T-13-SC
-requires a blocking human verification before `bun add`. `[ASSUMED]` packages are
-NEVER auto-approved.
+Threat T-13-SC required a blocking human verification of the `[ASSUMED]`
+nodemailer package before `bun add` (RESEARCH could not run slopcheck at plan
+time). The executor paused at this checkpoint and did NOT auto-approve; a human
+verification was performed and approval relayed with the following registry
+evidence (`registry.npmjs.org/nodemailer/latest`):
 
-### How-to-verify (human steps)
-1. Open https://www.npmjs.com/package/nodemailer — confirm publisher
-   (nodemailer org), ~15yr age, very-high downloads, repo
-   github.com/nodemailer/nodemailer.
-2. Confirm latest is 9.0.0 and there is no install/postinstall script.
-3. Approve, then run: `cd dashboard && bun add nodemailer`.
-4. Check bundled types: `ls node_modules/nodemailer/lib/*.d.ts 2>/dev/null`.
-   Only if ABSENT: `cd dashboard && bun add -d @types/nodemailer`.
+- **v9.0.1**, author **Andris Reinman** (canonical nodemailer author).
+- Published via **GitHub Actions OIDC trusted publisher**.
+- Repo **github.com/nodemailer/nodemailer**, license **MIT-0**.
+- **No** `install` / `preinstall` / `postinstall` scripts (scripts = test /
+  format / lint / update only).
+- **Zero production dependencies.**
 
-### Acceptance (Task 1)
-- `dashboard/package.json` dependencies contains `"nodemailer"` at `^9`.
-- No `[SLOP]`/`[SUS]` verdict; install decision noted.
-- `@types/nodemailer` present ONLY if nodemailer 9 lacks bundled `.d.ts`.
+**Independent confirmation by the executor at install time:** installed
+`nodemailer@9.0.1`; nodemailer 9 ships NO bundled types (no `types` field in its
+`package.json`, zero `.d.ts` under `node_modules/nodemailer`) → `@types/nodemailer@8.0.1`
+added as devDependency per the plan's conditional acceptance criterion.
 
-### Awaiting
-Resume-signal: type **"approved"** after npmjs verification + `bun add`
-completes, or describe concerns. A continuation agent will then run Task 1's
-install, re-verify (`grep -q '"nodemailer"' dashboard/package.json`), and finalize
-the plan.
+### Acceptance (Task 1) — MET
+- `dashboard/package.json` dependencies contains `"nodemailer": "^9.0.1"` ✓
+- No `[SLOP]`/`[SUS]` verdict; legitimacy decision recorded above ✓
+- `@types/nodemailer` present BECAUSE nodemailer 9 lacks bundled `.d.ts` ✓
 
 ## Self-Check: PASSED
 
-All 7 created files verified present on disk; both task commits (68ad65e, 2398265)
-verified in `git log`. Task 1 (nodemailer add) is intentionally absent — gated
-behind the blocking-human checkpoint.
+All 7 created files verified present on disk; all 3 task commits
+(61a378d, 68ad65e, 2398265) verified in `git log`. `dashboard/package.json`
+contains `"nodemailer"` (`grep -q` passes). Full suite: 8 passed / 4 RED files
+(38 passed, 11 RED) — no regression introduced by the nodemailer add.
