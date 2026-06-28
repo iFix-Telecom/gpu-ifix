@@ -104,13 +104,13 @@ todas as 4 operações admin; entregar junto com a troca de senha.
 
 **Requirements**: UM-01, UM-02, UM-03, UM-04, UM-05, UM-06, UM-07, UM-08, UM-09, UM-10
 **Depends on:** Phase 11 (auth/2FA base), Phase 12
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 Plans:
 
 **Wave 1**
 
-- [ ] 13-01-PLAN.md — Wave 0: RED test stubs UM-01..UM-10 (reuse auth.test.ts memoryAdapter) + shadcn dialog/dropdown-menu/alert-dialog + nodemailer [ASSUMED] legitimacy gate (autonomous: false)
+- [x] 13-01-PLAN.md — Wave 0: RED test stubs UM-01..UM-10 (reuse auth.test.ts memoryAdapter) + shadcn dialog/dropdown-menu/alert-dialog + nodemailer [ASSUMED] legitimacy gate (autonomous: false)
 
 **Wave 2** *(blocked on Wave 1)*
 
