@@ -26,11 +26,14 @@
 import { count, sql } from "drizzle-orm";
 import { Bell, RefreshCw } from "lucide-react";
 import { getDb, schema } from "@/lib/db";
+import { getViewerRole } from "@/lib/viewer";
+import { OperatorRowActions, ProvisionOperatorButton } from "./operator-controls";
 
 type Operator = {
   id: string;
   name: string;
   email: string;
+  role: string;
   twoFactorEnabled: boolean;
   lastSignIn: Date | null;
   openSessions: number;
@@ -47,6 +50,7 @@ async function loadOperators(): Promise<Operator[]> {
     id: string;
     name: string;
     email: string;
+    role: string;
     twoFactorEnabled: boolean;
   }[] = [];
   try {
@@ -54,10 +58,15 @@ async function loadOperators(): Promise<Operator[]> {
       id: string;
       name: string;
       email: string;
+      role: string | null;
       two_factor_enabled: boolean | null;
     };
+    // Phase 13 (D-02): read the REAL `role` column (added by the Better Auth
+    // admin plugin via the CLI-canonical migrate). NULL until the owner seed
+    // runs → COALESCE to "operator" so the badge derivation is data-driven,
+    // never the legacy `i===0` positional heuristic.
     const result = await db.execute<Row>(
-      sql`SELECT id, name, email, COALESCE(two_factor_enabled, false) AS two_factor_enabled FROM "user" ORDER BY created_at ASC`,
+      sql`SELECT id, name, email, COALESCE(role, 'operator') AS role, COALESCE(two_factor_enabled, false) AS two_factor_enabled FROM "user" ORDER BY created_at ASC`,
     );
     // drizzle-orm/node-postgres returns the underlying pg.QueryResult
     // ({ rows: Row[], ... }) — pluck `rows`. Some adapters return the
@@ -68,6 +77,7 @@ async function loadOperators(): Promise<Operator[]> {
       id: r.id,
       name: r.name,
       email: r.email,
+      role: r.role ?? "operator",
       twoFactorEnabled: r.two_factor_enabled === true,
     }));
   } catch (_e) {
@@ -79,33 +89,44 @@ async function loadOperators(): Promise<Operator[]> {
         email: schema.user.email,
       })
       .from(schema.user);
-    users = list.map((r) => ({ ...r, twoFactorEnabled: false }));
+    users = list.map((r) => ({ ...r, role: "operator", twoFactorEnabled: false }));
   }
 
   // WR-02 fix: single grouped query for session stats — open-sessions
   // count + latest sign-in (max updated_at) per user. Previously this
   // loop issued 2 sequential SELECTs per user (classic N+1). The new
   // shape is O(1) DB roundtrips regardless of operator count.
-  const sessionStats = await db
-    .select({
-      userId: schema.session.userId,
-      openSessions: count(
-        sql`CASE WHEN ${schema.session.expiresAt} > NOW() THEN 1 END`,
-      ),
-      lastSignIn: sql<Date | null>`MAX(${schema.session.updatedAt})`,
-    })
-    .from(schema.session)
-    .groupBy(schema.session.userId);
-
+  //
+  // Session stats are SUPPLEMENTARY (last-login + open-session count). A
+  // failure here (e.g. the session schema not materialised yet) must NOT
+  // blank the whole roster — the role/2FA columns are the primary signal.
+  // Degrade gracefully to empty stats instead of aborting loadOperators().
   const statsByUser = new Map<
     string,
     { openSessions: number; lastSignIn: Date | null }
   >();
-  for (const s of sessionStats) {
-    statsByUser.set(s.userId, {
-      openSessions: Number(s.openSessions ?? 0),
-      lastSignIn: s.lastSignIn ? new Date(s.lastSignIn as unknown as string) : null,
-    });
+  try {
+    const sessionStats = await db
+      .select({
+        userId: schema.session.userId,
+        openSessions: count(
+          sql`CASE WHEN ${schema.session.expiresAt} > NOW() THEN 1 END`,
+        ),
+        lastSignIn: sql<Date | null>`MAX(${schema.session.updatedAt})`,
+      })
+      .from(schema.session)
+      .groupBy(schema.session.userId);
+
+    for (const s of sessionStats) {
+      statsByUser.set(s.userId, {
+        openSessions: Number(s.openSessions ?? 0),
+        lastSignIn: s.lastSignIn
+          ? new Date(s.lastSignIn as unknown as string)
+          : null,
+      });
+    }
+  } catch (_e) {
+    // Session schema unavailable — render the roster without session stats.
   }
 
   const operators: Operator[] = users.map((u) => {
@@ -114,6 +135,7 @@ async function loadOperators(): Promise<Operator[]> {
       id: u.id,
       name: u.name,
       email: u.email,
+      role: u.role,
       twoFactorEnabled: u.twoFactorEnabled,
       lastSignIn: stats?.lastSignIn ?? null,
       openSessions: stats?.openSessions ?? 0,
@@ -150,6 +172,12 @@ export default async function OperadoresPage() {
     loadError = (e as Error).message ?? "erro ao carregar operadores";
   }
 
+  // Owner-gate (D-03): read the acting viewer's role. UI hiding is COSMETIC —
+  // the Plan-03 server actions re-check `role === "owner"` on every admin op.
+  // A null/non-owner role hides every admin control (fail-closed).
+  const viewerRole = await getViewerRole();
+  const isOwner = viewerRole === "owner";
+
   const totalOperators = operators.length;
   const twoFAActive = operators.filter((o) => o.twoFactorEnabled).length;
   const twoFAPending = totalOperators - twoFAActive;
@@ -179,7 +207,7 @@ export default async function OperadoresPage() {
           <button
             type="button"
             className="rounded-md p-2 text-muted-foreground hover:text-foreground"
-            aria-label="Notificações"
+            aria-label="Avisos"
           >
             <Bell className="size-4" />
           </button>
@@ -252,13 +280,8 @@ export default async function OperadoresPage() {
       <section className="rounded-md border border-border">
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold">Operadores</h2>
-          <button
-            type="button"
-            className="rounded-md border bg-[color:var(--primary)] text-[color:var(--primary-foreground,white)] text-xs font-semibold"
-            style={{ padding: "5px 10px", borderRadius: 5 }}
-          >
-            + Provisionar operador
-          </button>
+          {/* Owner-gate (D-03): provision control renders ONLY for an owner. */}
+          {isOwner && <ProvisionOperatorButton />}
         </div>
         {loadError ? (
           <p className="p-4 text-xs text-destructive" role="alert">
@@ -294,7 +317,7 @@ export default async function OperadoresPage() {
               </tr>
             </thead>
             <tbody>
-              {operators.map((o, i) => (
+              {operators.map((o) => (
                 <tr
                   key={o.id}
                   className="border-t border-border hover:bg-[color:var(--row-hover,transparent)]"
@@ -322,21 +345,24 @@ export default async function OperadoresPage() {
                     </div>
                   </td>
                   <td style={{ padding: "8px 12px" }}>
+                    {/* D-02: badge derives from the REAL `role` column — owner
+                        → warning tone, operator → neutral. Preserve the
+                        color-mix styling + 2px 8px padding (no grid shift). */}
                     <span
                       className="rounded-md text-[11px] font-semibold"
                       style={{
                         padding: "2px 8px",
                         background:
-                          i === 0
+                          o.role === "owner"
                             ? "color-mix(in oklch, var(--status-warning, oklch(0.769 0.188 70.08)) 16%, var(--card))"
                             : "var(--surface-tint-strong, var(--card))",
                         color:
-                          i === 0
+                          o.role === "owner"
                             ? "var(--status-warning, oklch(0.769 0.188 70.08))"
                             : "var(--muted-foreground)",
                       }}
                     >
-                      {i === 0 ? "owner" : "operator"}
+                      {o.role === "owner" ? "owner" : "operator"}
                     </span>
                   </td>
                   <td style={{ padding: "8px 12px" }} className="text-muted-foreground">
@@ -365,13 +391,18 @@ export default async function OperadoresPage() {
                     {o.openSessions}
                   </td>
                   <td style={{ padding: "8px 12px" }} className="text-right">
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label={`Ações para ${o.name}`}
-                    >
-                      ···
-                    </button>
+                    {/* Owner-gate (D-03): the per-row ··· menu renders ONLY for
+                        an owner. OperatorRowActions replaces the literal "···"
+                        with a <MoreHorizontal/> trigger (aria-label preserved)
+                        and wires the dropdown-menu + confirms to the Plan-03
+                        server actions. Server actions re-check regardless. */}
+                    {isOwner && (
+                      <OperatorRowActions
+                        name={o.name}
+                        email={o.email}
+                        userId={o.id}
+                      />
+                    )}
                   </td>
                 </tr>
               ))}
@@ -382,9 +413,7 @@ export default async function OperadoresPage() {
           className="text-[11px] text-muted-foreground px-4 py-2 border-t border-border"
           style={{ letterSpacing: "0.01em" }}
         >
-          provisionados via{" "}
-          <span className="font-mono">scripts/dashboard/seed-admins.sh</span>{" "}
-          (11-05)
+          operadores gerenciados pelo painel
         </p>
       </section>
     </main>
