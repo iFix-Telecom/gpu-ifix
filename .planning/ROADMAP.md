@@ -143,17 +143,17 @@ Plans:
 **Goal:** Close the sole v1 code blocker (`v1-MILESTONE-AUDIT.md` re-audit 2026-06-28). `billing.RequestUsage.AudioSecondsMs10` (`gateway/internal/billing/accountant.go:31`) + `EmbedsCount` (`:32`) are declared, READ at flush (`internal/proxy/interceptor_usage.go:207-208` → event `:271-272`) and quota-gated (`internal/quota/counters.go:84,87,111,114`) but **never written by any producer** — a producer-less dangling-read. The 4 STT proxies (`NewAudioProxy` main.go:587, `buildGeminiSTTProxy` :1618, `buildGroqWhisperProxy` :1647, `buildOpenAIWhisperProxy` :1671 — plus `NewDynamicOverrideSTTProxy` :686) and 2 embed proxies (`NewEmbeddingsProxy` :576) pass ZERO usage interceptor (only chat proxies do). Wire a usage interceptor that parses the STT response `{text,duration}` and embed response `{data[],usage}`, writes `AudioSecondsMs10`/`EmbedsCount` atomics, so `billing_events.audio_seconds`/`embeds_count` populate → `usage_counters` populate → per-tenant audio/embed daily+monthly quotas (`DailyAudioMinutes`/`DailyEmbeds`/`MonthlyAudioMinutes`/`MonthlyEmbeds`) actually trip + `/consumo` + OBS-09 audio/embed dimension stop showing 0. Also handle the double-fault: `interceptor_usage.go:210-215` skips enqueue when all usage==0 — ensure audio/embed-only requests still enqueue a billing_events row. All constructors already accept variadic `...ProxyResponseInterceptor` (capability exists; main.go just never passes one). Single fix surface: `gateway/cmd/gateway/main.go` + the interceptor itself.
 **Requirements**: TEN-04 (per-tenant audio/embed quota enforcement — currently UNENFORCED), OBS-09 (audio/embed usage visibility — currently 0). Derived in plan-phase.
 **Depends on:** Phase 04 (quota schema + counters + the dangling-read consumers), Phase 11.2 (local whisper STT path), Phase 07/15 (dashboard /consumo + economy reads the counters)
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete (code VERIFIED 8/8 must-haves 2026-06-28; live-UAT DB-populate E2E deferred — human_needed, standard pattern)
 
 Plans:
 
 **Wave 1**
 
-- [ ] 16-01-PLAN.md — Request-audio duration helper + stamping middleware (auditctx) + STT/embed usage producers in interceptor_usage.go (write AudioSecondsMs10 from response-duration-ELSE-request-derived / EmbedsCount=len(data[])) + tests (90s→1min, default-format-no-duration→derived non-zero, batch→embeds, zero-token enqueue, chat no-regression)
+- [x] 16-01-PLAN.md — Request-audio duration helper + stamping middleware (auditctx) + STT/embed usage producers in interceptor_usage.go (write AudioSecondsMs10 from response-duration-ELSE-request-derived / EmbedsCount=len(data[])) + tests (90s→1min, default-format-no-duration→derived non-zero, batch→embeds, zero-token enqueue, chat no-regression)
 
 **Wave 2** *(depends on 16-01)*
 
-- [ ] 16-02-PLAN.md — Wire the 7 STT/embed proxies (incl. external openai-embed fallback) in main.go to the usageInterceptor + mount RequestAudioSecondsMiddleware on /v1/audio/transcriptions + audio/embed quota-trip tests + grep-proof producer flip (0 → present)
+- [x] 16-02-PLAN.md — Wire the 7 STT/embed proxies (incl. external openai-embed fallback) in main.go to the usageInterceptor + mount RequestAudioSecondsMiddleware on /v1/audio/transcriptions + audio/embed quota-trip tests + grep-proof producer flip (0 → present)
 
 ---
 

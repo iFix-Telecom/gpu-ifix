@@ -28,8 +28,8 @@ progress:
 ## Current Position
 
 Phase: 16
-Plan: Not planned yet — run /gsd:plan-phase 16
-Next work: Phase 16 — close v1's sole code blocker (TEN-04 audio/embed metering producer never wired). Added 2026-06-28 from v1 re-audit. All 24 prior phases executed; Phase 13 (UM-01..10) COMPLETE + deployed live 2026-06-28 (git a1c9adb). v1 re-audit (`v1-MILESTONE-AUDIT.md`, 2026-06-28) = gaps_found, 1 code blocker (TEN-04) + INT-01..06 live-UAT process gap + 47 stale checkboxes. Close Phase 16 → reconcile checkboxes → sign off 08/09 client UAT → /gsd:complete-milestone v1.
+Plan: 2/2 COMPLETE — code VERIFIED 8/8 must-haves (16-VERIFICATION.md status human_needed; live-UAT DB-populate E2E deferred, standard pattern)
+Next work: v1 milestone close. Phase 16 CLOSED the sole v1 code blocker (TEN-04 audio/embed metering producer `applyAudioEmbedUsage` wired into 7 STT/embed proxies + RequestAudioSecondsMiddleware mounted; quota-trip tests green; grep-proof 0→2). Remaining for v1 "complete": (1) live-UAT Phase 16 (real STT/embed request → billing_events row + quota block — needs live gateway+pod+Postgres); (2) reconcile 47 stale REQUIREMENTS checkboxes; (3) sign off 08/09 client UAT (INT-01..06 — operator + LGPD, process gap); (4) flip Phase 13 VERIFICATION status→passed; (5) backfill 06.5 VERIFICATION.md. Then re-run /gsd:audit-milestone → /gsd:complete-milestone v1. All 25 phases now executed.
 
 Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9adb; 14 vram-adaptive-stt passed; 15 economia/histórico passed 17/17). Earlier: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 

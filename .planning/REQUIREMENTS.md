@@ -35,7 +35,7 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [x] **TEN-01**: API key auth em `Authorization: Bearer <key>` ou `X-API-Key`; lookup em Postgres com cache Redis
 - [x] **TEN-02**: Cada API key pertence a um tenant (ConverseAI, Chat Ifix, Telefonia, Cobranças, Campanhas, voice-api) com campo `data_class` (`normal` | `sensitive`)
 - [x] **TEN-03**: Rate limiting por API key (RPS e requests/min) usando Redis Lua atomic
-- [ ] **TEN-04**: Quota diária e mensal por tenant (tokens de LLM, minutos de áudio, requests de embed); bloqueio ao atingir limite
+- [x] **TEN-04**: Quota diária e mensal por tenant (tokens de LLM, minutos de áudio, requests de embed); bloqueio ao atingir limite — audio/embed metering wired Phase 16 (`applyAudioEmbedUsage` producer, 7 proxies); quota-trip tests green; live-UAT DB-populate deferred (human_needed)
 - [x] **TEN-05**: Modo de operação configurável por tenant: `24/7` (sempre local primário) OU `peak` (08-22h local, fora de horário OpenRouter)
 - [x] **TEN-06**: Token counting + custo calculado por request e gravado em `billing_events` (append-only)
 - [x] **TEN-07**: Report de custo e uso por tenant acessível via endpoint admin
@@ -191,7 +191,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEN-01 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
 | TEN-02 | Phase 2: Gateway Core + Multi-tenant Auth | Complete |
 | TEN-03 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Complete |
-| TEN-04 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Partial (token quotas done; audio/embed quota pending metering fix) |
+| TEN-04 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing → Phase 16: STT/embed metering | Complete (code; audio/embed metering wired Phase 16, quota-trip tests green; live-UAT DB-populate deferred) |
 | TEN-05 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Complete |
 | TEN-06 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Complete |
 | TEN-07 | Phase 4: Multi-tenant Quotas, Billing & Schedule Routing | Complete |
