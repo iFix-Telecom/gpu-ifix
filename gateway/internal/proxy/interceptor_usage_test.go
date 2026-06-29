@@ -249,6 +249,45 @@ func TestApplyAudioEmbedUsageNoDurationDerivesFromRequest(t *testing.T) {
 	}
 }
 
+// TestBillingRouteResolutionPrefersCtxOverRewrittenPath is the regression for
+// the live-UAT bug (2026-06-29): gemini-stt rewrites r.URL.Path to the Gemini
+// API path, so resp.Request.URL.Path is no longer /v1/audio/* at flush time.
+// Resolving the billing route from that rewritten path misclassifies STT as
+// "chat" → applyAudioEmbedUsage no-ops → audio_seconds never written → the
+// all-zero enqueue guard drops the billing_events row entirely. The dispatcher
+// now stamps the route from the ORIGINAL path into ctx; usageJSONBuffer.Close
+// + FinalizeRequest prefer it. This test proves: (a) the rewritten path alone
+// misclassifies (the bug), and (b) the ctx-stamped route + ELSE-derive meters
+// correctly.
+func TestBillingRouteResolutionPrefersCtxOverRewrittenPath(t *testing.T) {
+	rewritten := "/v1beta/models/gemini-2.5-flash-lite:generateContent"
+
+	// (a) Prove the bug: the rewritten outbound path classifies as "chat".
+	if got := routeToBillingRoute(rewritten); got != "chat" {
+		t.Fatalf("precondition: rewritten gemini path should misclassify as chat, got %q", got)
+	}
+
+	// (b) The dispatcher stamps the route from the inbound path pre-rewrite.
+	ctx := auditctx.WithBillingRoute(context.Background(), "stt")
+	ctx = auditctx.WithRequestAudioSeconds(ctx, 3.0)
+
+	// Resolution mirrors usageJSONBuffer.Close: ctx route wins over reqPath.
+	route := auditctx.BillingRouteFrom(ctx)
+	if route == "" {
+		route = routeToBillingRoute(rewritten)
+	}
+	if route != "stt" {
+		t.Fatalf("ctx-stamped route must win over rewritten path: want stt, got %q", route)
+	}
+
+	// With the correct route, the ELSE-derive branch meters the request audio.
+	usage := &billing.RequestUsage{}
+	applyAudioEmbedUsage(usage, route, []byte(`{"text":"a a a a"}`), ctx)
+	if got := usage.AudioSecondsMs10.Load(); got != 30 {
+		t.Fatalf("AudioSecondsMs10 (3s ×10 via ctx-stamped stt route): want 30, got %d", got)
+	}
+}
+
 // TestApplyAudioEmbedUsageNoDurationNoCtxZero: no response duration AND no
 // ctx-stamped request seconds → 0, no panic (graceful degrade).
 func TestApplyAudioEmbedUsageNoDurationNoCtxZero(t *testing.T) {

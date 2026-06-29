@@ -169,6 +169,17 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			return
 		}
 
+		// Phase 16 (TEN-04/OBS-09): stamp the billing route from the ORIGINAL
+		// inbound path NOW, before any upstream director rewrites r.URL.Path
+		// (gemini-stt rewrites /v1/audio/transcriptions → the Gemini API path,
+		// which would otherwise be misclassified as "chat" at flush time and
+		// drop audio/embed metering). The usage producer + FinalizeRequest
+		// prefer this stamped route over the rewritten outbound path.
+		// In-place `*r = *...` (not `r = ...`) so the later sensitive-override
+		// mutations (which the audit middleware reads via the original *Request
+		// pointer, outside TimeoutHandler) keep operating on the same struct.
+		*r = *r.WithContext(auditctx.WithBillingRoute(r.Context(), routeToBillingRoute(r.URL.Path)))
+
 		// Phase 4 — schedule middleware override (D-C2). When a tenant is
 		// in peak mode AND outside its business window, the schedule
 		// middleware (gateway/internal/schedule/middleware.go) wrote an

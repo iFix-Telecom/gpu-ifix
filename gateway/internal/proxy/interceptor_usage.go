@@ -241,7 +241,12 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		upstream = "unknown"
 	}
 
-	routeName := routeToBillingRoute(route)
+	// Phase 16: prefer the ctx-stamped billing route (pre-rewrite) so
+	// path-rewriting upstreams (gemini-stt) record route=stt, not "chat".
+	routeName := auditctx.BillingRouteFrom(ctx)
+	if routeName == "" {
+		routeName = routeToBillingRoute(route)
+	}
 	model := usage.Model()
 
 	// Cost attribution:
@@ -605,7 +610,14 @@ func (b *usageJSONBuffer) Close() error {
 	// Phase 16 (TEN-04 + OBS-09): produce the audio + embed usage atomics from
 	// the same buffered body. Route-dispatched + ELSE-derived inside the pure
 	// helper so the unit tests can exercise it Postgres-free. No-op for chat.
-	applyAudioEmbedUsage(b.usage, routeToBillingRoute(b.reqPath), b.buf.Bytes(), b.reqCtx)
+	// Prefer the ctx-stamped billing route (set pre-rewrite by the dispatcher)
+	// over b.reqPath — path-rewriting upstreams (gemini-stt) leave reqPath
+	// pointing at the upstream API path, which would misclassify as "chat".
+	route := auditctx.BillingRouteFrom(b.reqCtx)
+	if route == "" {
+		route = routeToBillingRoute(b.reqPath)
+	}
+	applyAudioEmbedUsage(b.usage, route, b.buf.Bytes(), b.reqCtx)
 
 	source := "final"
 	if closeErr != nil || b.capped {

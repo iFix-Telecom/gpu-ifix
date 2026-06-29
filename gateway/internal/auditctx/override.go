@@ -71,6 +71,33 @@ func BillingUpstreamFrom(ctx context.Context) string {
 	return ""
 }
 
+type billingRouteKey struct{}
+
+// WithBillingRoute stashes the billing route label ("chat" | "embed" | "stt")
+// derived from the ORIGINAL inbound request path, before any upstream director
+// rewrites req.URL.Path. Consumed by the Phase 16 usage producer + FinalizeRequest
+// at flush time: path-rewriting upstreams (e.g. gemini-stt rewrites
+// /v1/audio/transcriptions → /v1beta/models/<m>:generateContent) leave
+// resp.Request.URL.Path pointing at the upstream API path, which routeToBillingRoute
+// would misclassify as "chat" — dropping audio/embed metering. Stamping the route
+// pre-rewrite makes classification independent of the outbound path. The dispatcher
+// stamps it at handler entry where r.URL.Path is still the inbound path.
+func WithBillingRoute(parent context.Context, route string) context.Context {
+	return context.WithValue(parent, billingRouteKey{}, route)
+}
+
+// BillingRouteFrom returns the stamped billing route or empty string when none
+// was set (callers fall back to deriving from the request path).
+func BillingRouteFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(billingRouteKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 type requestAudioSecondsKey struct{}
 
 // WithRequestAudioSeconds stashes the duration (in seconds) derived from the
