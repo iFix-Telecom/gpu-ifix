@@ -71,6 +71,35 @@ func BillingUpstreamFrom(ctx context.Context) string {
 	return ""
 }
 
+type requestAudioSecondsKey struct{}
+
+// WithRequestAudioSeconds stashes the duration (in seconds) derived from the
+// REQUEST audio payload on the context. Consumed by the Phase 16 billing
+// producer (proxy/interceptor_usage.go applyAudioEmbedUsage) as the ELSE
+// branch of LOCKED CONTEXT DECISION #2: audio seconds come from the upstream
+// response `duration` field WHERE PRESENT, else from this request-derived
+// value. The gateway does NOT force response_format=verbose_json, so the
+// default OpenAI/Speaches transcription response is {"text":"..."} with NO
+// duration — without this fallback the common-case STT client meters 0.
+//
+// Stamped by the RequestAudioSecondsMiddleware
+// (proxy/stt_request_audio_middleware.go) pre-proxy; read at finalize.
+//
+// Mirrors WithBillingUpstream/BillingUpstreamFrom — a separate typed key on
+// the request context, zero-dependency.
+func WithRequestAudioSeconds(parent context.Context, seconds float64) context.Context {
+	return context.WithValue(parent, requestAudioSecondsKey{}, seconds)
+}
+
+// RequestAudioSecondsFrom returns the request-derived audio duration (seconds)
+// or 0 when none was set. Safe on any context.
+func RequestAudioSecondsFrom(ctx context.Context) float64 {
+	if v, ok := ctx.Value(requestAudioSecondsKey{}).(float64); ok {
+		return v
+	}
+	return 0
+}
+
 // shedDecisionKey is a dedicated context key for the routing decision taken
 // by shed middleware (CONTEXT D-B4). Distinct from upstreamOverrideKey used
 // by schedule/dispatcher because audit needs BOTH signals — schedule routes
