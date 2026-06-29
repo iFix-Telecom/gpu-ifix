@@ -573,7 +573,7 @@ func main() {
 		os.Exit(2)
 	}
 	// Phase 06.9 R4: local-tier proxies pass-through — see comment above.
-	embedRP, err := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedURL, log)
+	embedRP, err := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedURL, log, usageInterceptor)
 	if err != nil {
 		log.Error("build embeddings proxy", "err", err)
 		os.Exit(2)
@@ -584,7 +584,7 @@ func main() {
 	// and STT routes exclusively through the openai-whisper tier-1 fallback.
 	var audioRP http.Handler
 	if cfg.UpstreamSTTURL != "" {
-		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log, resolver)
+		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log, resolver, usageInterceptor)
 		if err != nil {
 			log.Error("build audio proxy", "err", err)
 			os.Exit(2)
@@ -668,7 +668,7 @@ func main() {
 	}
 	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}
 	if u, ok := loader.Get("openai-embed"); ok && u.URL != "" {
-		oaEmbedProxy, perr := buildOpenAIEmbedProxy(u, log, resolver)
+		oaEmbedProxy, perr := buildOpenAIEmbedProxy(u, log, resolver, usageInterceptor)
 		if perr != nil {
 			log.Warn("build openai-embed proxy", "err", perr)
 		} else {
@@ -686,7 +686,7 @@ func main() {
 		"emergency_pod_stt": proxy.NewDynamicOverrideSTTProxy(
 			func() (string, bool) { return loader.Tier0OverrideURL("stt") },
 			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
-			resolver, log),
+			resolver, log, usageInterceptor),
 	}
 	// Phase 11.1: local-stt is registered ONLY if UPSTREAM_STT_URL still set
 	// (transitional compat). New deployments leave it unset and STT routes via
@@ -695,7 +695,7 @@ func main() {
 		sttRoleProxies["local-stt"] = audioRP
 	}
 	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
-		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log, resolver)
+		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log, resolver, usageInterceptor)
 		if perr != nil {
 			log.Warn("build openai-whisper proxy", "err", perr)
 		} else {
@@ -713,7 +713,7 @@ func main() {
 	// API key env vars are populated. Without the key the proxy is omitted
 	// and the dispatcher cascade simply skips gemini-stt (D-B5′ behavior).
 	if u, ok := loader.Get("gemini-stt"); ok && cfg.UpstreamSTTFallback1URL != "" && cfg.UpstreamSTTFallback1AuthBearer != "" {
-		geminiProxy, perr := buildGeminiSTTProxy(cfg.UpstreamSTTFallback1URL, cfg.UpstreamSTTFallback1AuthBearer, resolver, log)
+		geminiProxy, perr := buildGeminiSTTProxy(cfg.UpstreamSTTFallback1URL, cfg.UpstreamSTTFallback1AuthBearer, resolver, log, usageInterceptor)
 		if perr != nil {
 			log.Warn("build gemini-stt proxy", "err", perr)
 		} else {
@@ -732,7 +732,7 @@ func main() {
 			URL:        cfg.UpstreamSTTFallback2URL,
 			AuthBearer: cfg.UpstreamSTTFallback2AuthBearer,
 		}
-		groqRP, perr := buildGroqWhisperProxy(groqUpstream, log, resolver)
+		groqRP, perr := buildGroqWhisperProxy(groqUpstream, log, resolver, usageInterceptor)
 		if perr != nil {
 			log.Warn("build groq-whisper proxy", "err", perr)
 		} else {
@@ -1200,7 +1200,17 @@ func main() {
 	// TimeoutHandler controls non-streaming routes without breaking SSE.
 	chatHandler := wrapWithTimeout(chatDispatcher, cfg.WriteTimeoutChatS)
 	embedHandler := wrapWithTimeout(embedDispatcher, cfg.WriteTimeoutEmbedS)
-	audioHandler := wrapWithTimeout(audioDispatcher, cfg.WriteTimeoutAudioS)
+	// Plan 16-02 — mount RequestAudioSecondsMiddleware (Plan 16-01) on the STT
+	// dispatcher BEFORE the TimeoutHandler wrap so the request-derived audio
+	// duration is stamped on the ctx for EVERY transcription request (the
+	// default-format `{"text":...}` response carries no `duration`, so the
+	// usage producer's ELSE branch relies on this ctx value). The middleware
+	// reads the multipart body ONCE (bounded) and restores Body+GetBody
+	// byte-identical, so the dispatcher's fallback replay chain stays intact.
+	audioHandler := wrapWithTimeout(
+		proxy.RequestAudioSecondsMiddleware(log)(audioDispatcher),
+		cfg.WriteTimeoutAudioS,
+	)
 	// Phase 06.7 — TTS speech shares the audio write-timeout budget (long synth).
 	ttsHandler := wrapWithTimeout(ttsDispatcher, cfg.WriteTimeoutAudioS)
 
@@ -1581,7 +1591,7 @@ func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log
 // director rewrites model="text-embedding-3-small" + dimensions=1024 for
 // BGE-M3 parity. No streaming, no tool-call interceptor (embeddings are
 // always non-streaming JSON).
-func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver, usageInterceptor *proxy.UsageInterceptor) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(u.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse openai-embed url %q: %w", u.URL, err)
@@ -1602,6 +1612,10 @@ func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 			ResponseHeaderTimeout: 10 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("openai-embed", log),
+		// Plan 16-02 (REVISION 2 / W-3) — embeds that fail over local→OpenAI
+		// must also be metered. No prior ModifyResponse here, so composing the
+		// usage interceptor alone is correct (it Stores EmbedsCount=len(data[])).
+		ModifyResponse: proxy.ComposeInterceptors(usageInterceptor),
 	}
 	return rp, nil
 }
@@ -1615,7 +1629,7 @@ func buildOpenAIEmbedProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 // Both URL + API key come from env (UPSTREAM_STT_FALLBACK_1_URL,
 // UPSTREAM_STT_FALLBACK_1_AUTH_BEARER) rather than the loader row to
 // keep secrets out of the DB.
-func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *slog.Logger) (*httputil.ReverseProxy, error) {
+func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *slog.Logger, usageInterceptor *proxy.UsageInterceptor) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse gemini-stt url %q: %w", rawURL, err)
@@ -1625,8 +1639,22 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 	}
 	director, modifyResponse := proxy.BuildGeminiSTTDirector(parsed, apiKey, resolver, "gemini-stt", log)
 	rp := &httputil.ReverseProxy{
-		Director:       director,
-		ModifyResponse: modifyResponse,
+		Director: director,
+		// Plan 16-02 (W-1) — explicit flatten-then-usage closure. gemini's
+		// modifyResponse FLATTENS the envelope into {"text":...}, sets
+		// Content-Type=application/json, and mutates the body. The usage
+		// interceptor must observe the FLATTENED body (application/json routes
+		// it to the JSON-buffer producer path), so run modifyResponse FIRST and
+		// only call usageInterceptor.Intercept if it succeeded. Do NOT collapse
+		// into a bare ComposeInterceptors — modifyResponse is a
+		// func(*http.Response) error (not a ProxyResponseInterceptor) and its
+		// body/Content-Type mutation must complete before Intercept reads them.
+		ModifyResponse: func(resp *http.Response) error {
+			if err := modifyResponse(resp); err != nil {
+				return err
+			}
+			return usageInterceptor.Intercept(resp)
+		},
 		Transport: &http.Transport{
 			MaxIdleConns:          20,
 			MaxIdleConnsPerHost:   4,
@@ -1644,7 +1672,7 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 // only URL + bearer differ. The director resolves the model via
 // canonicalAliasForUpstream["groq-whisper"]="whisper" + upstreamEnvVarMap
 // (UPSTREAM_STT_FALLBACK_2_MODEL).
-func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver, usageInterceptor *proxy.UsageInterceptor) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(u.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse groq-whisper url %q: %w", u.URL, err)
@@ -1661,6 +1689,11 @@ func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 			ResponseHeaderTimeout: 60 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("groq-whisper", log),
+		// Plan 16-02 — no prior ModifyResponse (groq returns OpenAI-shaped JSON
+		// transcription), so composing the usage interceptor alone meters the
+		// STT response (AudioSecondsMs10 from response duration ELSE the
+		// request-derived ctx value stamped by RequestAudioSecondsMiddleware).
+		ModifyResponse: proxy.ComposeInterceptors(usageInterceptor),
 	}
 	return rp, nil
 }
@@ -1668,7 +1701,7 @@ func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 // buildOpenAIWhisperProxy constructs the openai-whisper fallback proxy.
 // The director leaves the multipart body untouched (boundary preserved);
 // only Authorization is added.
-func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolver *models.Resolver, usageInterceptor *proxy.UsageInterceptor) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(u.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse openai-whisper url %q: %w", u.URL, err)
@@ -1691,6 +1724,9 @@ func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resol
 			ResponseHeaderTimeout: 60 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("openai-whisper", log),
+		// Plan 16-02 — no prior ModifyResponse, so composing the usage
+		// interceptor alone meters the transcription response.
+		ModifyResponse: proxy.ComposeInterceptors(usageInterceptor),
 	}
 	return rp, nil
 }
