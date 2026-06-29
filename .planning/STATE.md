@@ -142,6 +142,11 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 
 ## Accumulated Context
 
+### Ops notes (2026-06-29, post-Phase-16)
+
+- **OBS-09 clarity:** `/economia` panel had no headline Vast-cost number (only "Custo OpenRouter"; vast_brl was inside Líquido + a trend-chart line). Added **"Custo Vast (GPU)"** KPI card (`economy-panel.tsx`, reads `summary.vast_brl`; grid 5→6 cols). Deployed to PROD dashboard (rebuilt :latest-dev on n8n-ia-vm). main FF'd → 722189b.
+- **Primary-pod "flap" investigated → NOT a flap.** It's provisioning RETRIES on broken Vast hosts (discriminator: `primary_lifecycles.first_health_pass_at IS NULL` = never healthy = boot failure, vs set = drained flap). ShouldStayUp fix intact. Root cause: hosts 104433 (OCI/CDI broken) + 56883 (never health-passes, burns full 3600s coldstart = R$0.61) selected because the allowlist is a PREFERENCE not a hard filter (broadens to global cheapest when no allowlisted offer below cap). Fix: appended both to PROD `PRIMARY_VAST_MACHINE_BLOCKLIST` (.env, recreated gateway). ~R$0.70 wasted 2026-06-29. Structural hardening (hard-filter during lead window / early-abort on no-model-load) = open ticket, not done. See memory [[vast-flaky-host-za-97968]].
+
 ### Roadmap Evolution
 
 - Phase 16 added (2026-06-28): CLOSURE — wire STT/embed usage metering (TEN-04). From v1 re-audit; sole remaining v1 code blocker. AudioSecondsMs10/EmbedsCount declared+read+quota-gated but no producer → audio/embed quotas unenforced + /consumo shows 0. Fix surface: gateway/cmd/gateway/main.go + usage interceptor on 4 STT + 2 embed proxies.
