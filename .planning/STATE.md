@@ -27,11 +27,11 @@ progress:
 
 ## Current Position
 
-Phase: 14
-Plan: Not started
-Next autonomous-eligible work: Phase 6.6.Y — implement cold-start + env-precedence fixes from 06.6.X-RESEARCH-COLD-START.md (Option A+B bundle recommended) + 06.6.X-RESEARCH-ENV-PRECEDENCE.md (hard fail-fast canonical PRIMARY_VAST_*_{PRIMARY,FALLBACK}). Phase 6.6.X total spend $0.040 / $1.20 cap.
+Phase: 16
+Plan: Not planned yet — run /gsd:plan-phase 16
+Next work: Phase 16 — close v1's sole code blocker (TEN-04 audio/embed metering producer never wired). Added 2026-06-28 from v1 re-audit. All 24 prior phases executed; Phase 13 (UM-01..10) COMPLETE + deployed live 2026-06-28 (git a1c9adb). v1 re-audit (`v1-MILESTONE-AUDIT.md`, 2026-06-28) = gaps_found, 1 code blocker (TEN-04) + INT-01..06 live-UAT process gap + 47 stale checkboxes. Close Phase 16 → reconcile checkboxes → sign off 08/09 client UAT → /gsd:complete-milestone v1.
 
-Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
+Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9adb; 14 vram-adaptive-stt passed; 15 economia/histórico passed 17/17). Earlier: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFERRED 2026-05-28T20:55Z — pre-flight Stage 1 gate fail: `bd_ai_gateway_prod` ~57 replayable rows over 7 days vs `[reviews LOW #4]` gate ≥1000 + 5 route classes. Re-attempt once natural traffic accumulates ≥1000 rows in a 1-hour window with chat + embed + STT + tool-call + stream coverage. See `.planning/phases/11-prod-hardening/11-06-EVIDENCE.md` pre-flight re-attempt section.
 
 - **Phases 1–5:** COMPLETE on disk (all autonomous plans + VERIFICATION). Each carries a `human_needed` / `passed_partial` live-UAT deferral — the standard pattern when the dev stack is not yet deployed:
   - Phase 1: smoke.yml Vast.ai HUMAN-UAT pending
@@ -142,6 +142,7 @@ Previously: Phase 11.2 — COMPLETE passed_partial. 11-06 + 11-07 live UATs DEFE
 
 ### Roadmap Evolution
 
+- Phase 16 added (2026-06-28): CLOSURE — wire STT/embed usage metering (TEN-04). From v1 re-audit; sole remaining v1 code blocker. AudioSecondsMs10/EmbedsCount declared+read+quota-gated but no producer → audio/embed quotas unenforced + /consumo shows 0. Fix surface: gateway/cmd/gateway/main.go + usage interceptor on 4 STT + 2 embed proxies.
 - Phase 13 added (2026-06-14): dashboard-user-management — gestão de operadores owner-only (criar/remover/reset-senha/reset-2FA) + self-service change-password. Decisões locked: owner-only, 4 ops, tudo junto. Security surface → secure-phase obrigatório.
 
 ### Key Decisions (from research + PROJECT)
