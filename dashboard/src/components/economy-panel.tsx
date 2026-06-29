@@ -1,13 +1,15 @@
 /**
  * Economia — the OBS-09 KPI panel.
  *
- * Renders the five LOCKED CONTEXT metrics side by side (CONTEXT §Números do
- * painel) over the server-computed `/admin/economy` summary:
+ * Renders the KPI metrics side by side (CONTEXT §Números do painel) over the
+ * server-computed `/admin/economy` summary:
  *   1. Líquido R$        — economia_liquida_brl (phantom − Vast; positive = saved)
  *   2. ROI multiplier    — roi_multiplier (phantom avoided per R$1 of GPU)
  *   3. Custo OpenRouter   — custo_openrouter_brl (real external spend, pod DOWN)
- *   4. % servido local    — pct_servido_local (fraction served by the GPU)
- *   5. Horas pod UP       — horas_pod_up (pod-up hours in the period)
+ *   4. Custo Vast (GPU)   — vast_brl (real Vast spend: closed primary_lifecycles
+ *                           total_cost_brl + live accrual for the open lifecycle)
+ *   5. % servido local    — pct_servido_local (fraction served by the GPU)
+ *   6. Horas pod UP       — horas_pod_up (pod-up hours in the period)
  *
  * ROI and % local are nullable server-side (denominator zero → JSON null) and
  * render "—" rather than Inf/NaN. Mirrors operacao-cost-panel.tsx's KPI grid.
@@ -60,7 +62,7 @@ export function EconomyPanel({ summary }: EconomyPanelProps) {
         <CardTitle className="text-[20px] font-semibold">Economia</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <KpiCard
             caption="Líquido R$"
             value={formatBrl(summary.economia_liquida_brl)}
@@ -75,6 +77,11 @@ export function EconomyPanel({ summary }: EconomyPanelProps) {
             caption="Custo OpenRouter"
             value={formatBrl(summary.custo_openrouter_brl)}
             hint="Fallback (pod down)"
+          />
+          <KpiCard
+            caption="Custo Vast (GPU)"
+            value={formatBrl(summary.vast_brl)}
+            hint="Gasto real Vast.ai"
           />
           <KpiCard
             caption="% servido local"
