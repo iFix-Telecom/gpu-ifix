@@ -328,6 +328,69 @@ func providerForUpstream(upstream string) string {
 	}
 }
 
+// applyAudioEmbedUsage is the PURE Phase 16 producer for the audio + embed
+// usage dimensions. It operates on a passed-in *billing.RequestUsage so the
+// unit tests can observe the Stored atomics WITHOUT a flusher / accountant
+// slot / Postgres (the production JSON-buffer Close path deletes the slot via
+// FinalizeRequest's deferred accountant.Delete, and the production flusher
+// needs a *pgxpool.Pool — so the Store is otherwise unobservable DB-free).
+//
+// Implements LOCKED CONTEXT DECISION #2 (TEN-04 + OBS-09 producer half):
+//   - route "stt": seconds = response `duration` field WHEN present and > 0,
+//     ELSE auditctx.RequestAudioSecondsFrom(reqCtx) (the request-derived
+//     fallback stamped by RequestAudioSecondsMiddleware). The gateway does NOT
+//     force response_format=verbose_json, so the default {"text":"..."}
+//     transcription response carries NO duration — without the ELSE branch the
+//     common-case client would meter 0. seconds>0 → AudioSecondsMs10.Store(
+//     int64(seconds*10)). The ×10 is mandatory for the FinalizeRequest /10.0
+//     flush + quota/counters.go /60 math.
+//   - route "embed": EmbedsCount.Store(len(data[])) — one per data[] element.
+//   - route "chat" / default / nil usage: no-op (the chat token path is
+//     produced elsewhere and MUST NOT be touched here).
+//
+// Called by usageJSONBuffer.Close ONLY (it has both reqCtx + reqPath).
+// Deliberately NOT added to ExtractFromBody: that path has no reqCtx (can't
+// read the ELSE branch), no reqPath (can't route-dispatch), and early-returns
+// on f.Usage==nil — exactly the default STT shape; per HI-02 the dispatcher
+// never calls it.
+func applyAudioEmbedUsage(usage *billing.RequestUsage, route string, body []byte, reqCtx context.Context) {
+	if usage == nil {
+		return
+	}
+	switch route {
+	case "stt":
+		var seconds float64
+		if len(body) > 0 {
+			var partial struct {
+				Duration *float64 `json:"duration"`
+			}
+			if err := json.Unmarshal(body, &partial); err == nil &&
+				partial.Duration != nil && *partial.Duration > 0 {
+				seconds = *partial.Duration
+			}
+		}
+		// ELSE branch: response carried no usable duration → request-derived.
+		if seconds <= 0 && reqCtx != nil {
+			seconds = auditctx.RequestAudioSecondsFrom(reqCtx)
+		}
+		if seconds > 0 {
+			usage.AudioSecondsMs10.Store(int64(seconds * 10))
+		}
+	case "embed":
+		if len(body) == 0 {
+			return
+		}
+		var partial struct {
+			Data []json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(body, &partial); err == nil && len(partial.Data) > 0 {
+			usage.EmbedsCount.Store(int64(len(partial.Data)))
+		}
+	default:
+		// "chat" and anything else: no-op.
+	}
+}
+
 // routeToBillingRoute maps a URL path to the billing route label used
 // by billing_events.route.
 func routeToBillingRoute(path string) string {
@@ -538,6 +601,11 @@ func (b *usageJSONBuffer) Close() error {
 			}
 		}
 	}
+
+	// Phase 16 (TEN-04 + OBS-09): produce the audio + embed usage atomics from
+	// the same buffered body. Route-dispatched + ELSE-derived inside the pure
+	// helper so the unit tests can exercise it Postgres-free. No-op for chat.
+	applyAudioEmbedUsage(b.usage, routeToBillingRoute(b.reqPath), b.buf.Bytes(), b.reqCtx)
 
 	source := "final"
 	if closeErr != nil || b.capped {
