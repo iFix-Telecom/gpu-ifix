@@ -149,11 +149,11 @@ Plans:
 
 **Wave 1**
 
-- [ ] 16-01-PLAN.md — STT + embed usage producers in interceptor_usage.go (write AudioSecondsMs10/EmbedsCount, route-dispatched) + unit-conversion tests (90s→1min, batch→embeds, zero-token enqueue, chat no-regression)
+- [ ] 16-01-PLAN.md — Request-audio duration helper + stamping middleware (auditctx) + STT/embed usage producers in interceptor_usage.go (write AudioSecondsMs10 from response-duration-ELSE-request-derived / EmbedsCount=len(data[])) + tests (90s→1min, default-format-no-duration→derived non-zero, batch→embeds, zero-token enqueue, chat no-regression)
 
 **Wave 2** *(depends on 16-01)*
 
-- [ ] 16-02-PLAN.md — Wire the 6 STT/embed proxies in main.go to the usageInterceptor + audio/embed quota-trip tests + grep-proof producer flip (0 → present)
+- [ ] 16-02-PLAN.md — Wire the 7 STT/embed proxies (incl. external openai-embed fallback) in main.go to the usageInterceptor + mount RequestAudioSecondsMiddleware on /v1/audio/transcriptions + audio/embed quota-trip tests + grep-proof producer flip (0 → present)
 
 ---
 
