@@ -1,9 +1,19 @@
 ---
 phase: 16-close-gap-ten-04-wire-stt-embed-usage-metering
-verified: 2026-06-28T00:00:00Z
-status: human_needed
-score: 8/8 must-haves verified
+verified: 2026-06-29T15:00:00Z
+status: passed
+score: 8/8 must-haves verified + live-UAT PASSED (2026-06-29)
 overrides_applied: 0
+live_uat:
+  result: passed
+  date: 2026-06-29
+  env: ai-gateway-dev (vps-ifix-vm, rev 3374999)
+  bug_found_and_fixed: "STT metering dropped on path-rewriting upstreams (gemini-stt rewrites r.URL.Path → producer/FinalizeRequest classified route from rewritten outbound path → 'chat' → no audio metering + no billing row). Fixed commit 3374999: dispatcher stamps billing route from ORIGINAL inbound path into ctx (auditctx.WithBillingRoute); producer + FinalizeRequest prefer it. Regression test TestBillingRouteResolutionPrefersCtxOverRewrittenPath added."
+  evidence:
+    - "STT 5s WAV via gemini-stt (default {text} no duration → ELSE-derive): billing_events row route=stt upstream=gemini-stt audio_seconds=5"
+    - "Embed 2 inputs via local-embed: billing_events row route=embed embeds_count=2"
+    - "usage_counters 2026-06-29 converseai: audio_seconds=5 embeds_count=5 (quota source populated — was always 0)"
+    - "Full chain proven live: request → billing_events → usage_counters (quota source) → quotas now enforce"
 human_verification:
   - test: "Send a real STT request (audio file) through the live gateway and confirm billing_events row carries non-zero audio_seconds"
     expected: "SELECT audio_seconds FROM billing_events WHERE tenant_id='<id>' ORDER BY created_at DESC LIMIT 1 returns > 0"
