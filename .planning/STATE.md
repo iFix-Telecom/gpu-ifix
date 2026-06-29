@@ -149,6 +149,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 
 ### Roadmap Evolution
 
+- Phase 17 added (2026-06-29, from /gsd:explore): Dashboard pod-config control — owner controla TODAS as configs do pod pelo dashboard. Arquitetura travada (env→DB híbrido: hot-reload + self-restart estrutural via unless-stopped; owner-edit/operator-view; bounds/confirm/audit; live lifecycle status). Ver notes/dashboard-pod-config-control-architecture.md. Research question aberta (enumerar+classificar config surface). SEED-020 (allowlist hard-filter) capturado em paralelo.
 - Phase 16 added (2026-06-28): CLOSURE — wire STT/embed usage metering (TEN-04). From v1 re-audit; sole remaining v1 code blocker. AudioSecondsMs10/EmbedsCount declared+read+quota-gated but no producer → audio/embed quotas unenforced + /consumo shows 0. Fix surface: gateway/cmd/gateway/main.go + usage interceptor on 4 STT + 2 embed proxies.
 - Phase 13 added (2026-06-14): dashboard-user-management — gestão de operadores owner-only (criar/remover/reset-senha/reset-2FA) + self-service change-password. Decisões locked: owner-only, 4 ops, tudo junto. Security surface → secure-phase obrigatório.
 

@@ -155,6 +155,17 @@ Plans:
 
 - [x] 16-02-PLAN.md — Wire the 7 STT/embed proxies (incl. external openai-embed fallback) in main.go to the usageInterceptor + mount RequestAudioSecondsMiddleware on /v1/audio/transcriptions + audio/embed quota-trip tests + grep-proof producer flip (0 → present)
 
+### Phase 17: Dashboard pod-config control (from /gsd:explore 2026-06-29)
+
+**Goal:** Owner controla TODAS as configs do pod primário pelo dashboard — fim do ciclo SSH+sed `.env`+recreate (a dor real do blocklist-append 2026-06-29). Arquitetura travada na exploração (ver `notes/dashboard-pod-config-control-architecture.md`): mover a config do pod de **env-at-boot → tabela no banco** (`pod_config`), gateway lê do DB. **Híbrido por classe de config** (enumeração + classificação é research question aberta): **quentes** (blocklist, allowlist, price cap, schedule UpHour/DownHour/lead, coldstart budget, port-bind budget) → reconciler relê do DB a cada tick, valem em segundos SEM restart; **estruturais** (NUM_GPUS/shape, template image, DCGM/DSN) → boot-only, dashboard chama `POST /admin/gateway/restart` (gateway flush + `os.Exit(0)`; docker `restart: unless-stopped` — CONFIRMADO em prod — sobe e relê o DB). O dashboard NUNCA toca docker socket nem `.env` — só fala com a admin API do gateway. **Status de inicialização ao vivo:** dashboard faz poll de `/admin/primary/lifecycle` (FSM state + event trail do `primary_lifecycles`: offer_accepted → health checks → ready/falha + shutdown_reason) pra acompanhar provisioning + diagnosticar falhas (ex: o flap de bad-hosts 2026-06-29). **Segurança/guardrails:** owner-only edita (operator só vê — mesmo padrão Phase 13); bounds de validação por campo (ex: cap $0.10–$1.50, UpHour 0–23, NUM_GPUS ∈ {1,2}) rejeitando fora do range antes de salvar; confirm explícito em mudanças perigosas (restart, baixar cap, mudar shape); audit de toda mudança (quem/quando/o-quê, igual `admin_audit_log` Phase 13). **Restart = gateway apenas** (o pod Vast já tem force-up/force-down via gatewayctl/admin).
+**Requirements**: TBD (derivar em plan-phase — provável família POD-CFG-* / cobrir hot-reload, self-restart, bounds, confirm, audit, live-status, owner-gate). Enumeração hot-vs-estrutural = research question aberta.
+**Depends on:** Phase 13 (owner/operator authz + admin_audit_log + dashboard server-action pattern), Phase 15 (dashboard /economia + admin-proxy pattern), Phase 16 (admin API surface). Gateway config.go fail-fast env-at-boot pattern é o que será refatorado para DB-backed.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 17 to break down)
+
 ---
 
 ### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
