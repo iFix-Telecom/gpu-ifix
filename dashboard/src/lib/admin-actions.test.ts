@@ -49,6 +49,12 @@ const { fetchPodConfigMock, gatewayAdminPatchMock } = vi.hoisted(() => ({
 vi.mock("@/lib/gateway", () => ({ fetchPodConfig: fetchPodConfigMock }));
 vi.mock("@/lib/gateway-admin", () => ({ gatewayAdminPatch: gatewayAdminPatchMock }));
 
+// `requireOwner`'s session path calls `next/headers` `headers()`, which throws
+// outside a Next.js request scope. Stub it so the CR-01 session-gate test can
+// exercise the owner check with an injected auth instance (the legacy seam
+// tests never hit this — they always pass an explicit `actor`).
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+
 /** A representative live pod_config snapshot for the write-action tests. */
 function buildPodConfig() {
   return {
@@ -169,7 +175,11 @@ function buildAdminAuth() {
  * missing module rejects and is caught → FAILING ASSERTION (RED).
  */
 async function importAdminActions(): Promise<Record<string, unknown> | null> {
-  const specifier = ["@/lib", "admin-actions"].join("/");
+  // CR-01/CR-02 fix: the injectable surface (actor/auth/db/deps seams) now lives
+  // in the non-`"use server"` core module. The public `@/lib/admin-actions`
+  // Server Actions take ONLY business args and derive identity from the session,
+  // so the in-process injection tests below target the `*Core` impls directly.
+  const specifier = ["@/lib", "admin-actions-core"].join("/");
   try {
     return (await import(/* @vite-ignore */ specifier)) as Record<
       string,
@@ -185,7 +195,7 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
     const mod = await importAdminActions();
     // RED: module absent today → fails here as an assertion, not import error.
     expect(mod, "@/lib/admin-actions must export inviteOperator").not.toBeNull();
-    const inviteOperator = mod?.inviteOperator as
+    const inviteOperator = mod?.inviteOperatorCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof inviteOperator).toBe("function");
@@ -226,7 +236,7 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
   it("(UM-05) removeOperator: owner-gated; removes user AND revokes all their sessions", async () => {
     const mod = await importAdminActions();
     expect(mod, "@/lib/admin-actions must export removeOperator").not.toBeNull();
-    const removeOperator = mod?.removeOperator as
+    const removeOperator = mod?.removeOperatorCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof removeOperator).toBe("function");
@@ -274,7 +284,7 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
       mod,
       "@/lib/admin-actions must export resetOperatorPassword",
     ).not.toBeNull();
-    const resetOperatorPassword = mod?.resetOperatorPassword as
+    const resetOperatorPassword = mod?.resetOperatorPasswordCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof resetOperatorPassword).toBe("function");
@@ -292,7 +302,7 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
       mod,
       "@/lib/admin-actions must export resetOperator2FA",
     ).not.toBeNull();
-    const resetOperator2FA = mod?.resetOperator2FA as
+    const resetOperator2FA = mod?.resetOperator2FACore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof resetOperator2FA).toBe("function");
@@ -337,7 +347,7 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
     const writeAuditLog = mod?.writeAuditLog as
       | ((args: unknown) => Promise<unknown> | unknown)
       | undefined;
-    const changePassword = mod?.changePassword as
+    const changePassword = mod?.changePasswordCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof writeAuditLog).toBe("function");
@@ -375,7 +385,7 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
   it("(POD-CFG-10) updatePodConfig: operator is rejected server-side — NO gateway call, NO audit row", async () => {
     const mod = await importAdminActions();
     expect(mod, "@/lib/admin-actions must export updatePodConfig").not.toBeNull();
-    const updatePodConfig = mod?.updatePodConfig as
+    const updatePodConfig = mod?.updatePodConfigCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof updatePodConfig).toBe("function");
@@ -403,7 +413,7 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
 
   it("(POD-CFG-10/11) updatePodConfig: owner success — refetches config, PATCHes the gateway, audits {field, old(from fetch), new}", async () => {
     const mod = await importAdminActions();
-    const updatePodConfig = mod?.updatePodConfig as
+    const updatePodConfig = mod?.updatePodConfigCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof updatePodConfig).toBe("function");
@@ -445,7 +455,7 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
 
   it("(POD-CFG-11) updatePodConfig: a value outside the LIVE bound throws BEFORE any gateway call", async () => {
     const mod = await importAdminActions();
-    const updatePodConfig = mod?.updatePodConfig as
+    const updatePodConfig = mod?.updatePodConfigCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof updatePodConfig).toBe("function");
@@ -472,7 +482,7 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
 
   it("(POD-CFG-07/11) updatePodConfigBound: owner success — enforces min<max, PATCHes kind=bound, audits old from bounds", async () => {
     const mod = await importAdminActions();
-    const updatePodConfigBound = mod?.updatePodConfigBound as
+    const updatePodConfigBound = mod?.updatePodConfigBoundCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof updatePodConfigBound).toBe("function");
@@ -504,7 +514,7 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
 
   it("(POD-CFG-11) updatePodConfigBound: min >= max is rejected BEFORE any gateway call", async () => {
     const mod = await importAdminActions();
-    const updatePodConfigBound = mod?.updatePodConfigBound as
+    const updatePodConfigBound = mod?.updatePodConfigBoundCore as
       | ((args: unknown) => Promise<unknown>)
       | undefined;
     expect(typeof updatePodConfigBound).toBe("function");
@@ -527,5 +537,99 @@ describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 1
     expect(rejected).toBe(true);
     expect(gatewayAdminPatchMock).not.toHaveBeenCalled();
     expect(db.adminAuditLog.length).toBe(0);
+  });
+});
+
+describe("admin-actions — CR-01/CR-02 authz hardening (session-only identity)", () => {
+  beforeEach(() => {
+    fetchPodConfigMock.mockReset();
+    gatewayAdminPatchMock.mockReset();
+  });
+
+  it("(CR-01) requireOwner() with NO actor + a non-owner session is rejected", async () => {
+    const core = await import("@/lib/admin-actions-core");
+    const requireOwner = core.requireOwner as (
+      actor?: unknown,
+      authInstance?: unknown,
+    ) => Promise<unknown>;
+    expect(typeof requireOwner).toBe("function");
+
+    // An injected auth whose live session resolves to an OPERATOR. With no
+    // `actor` argument requireOwner MUST read this session (not trust a client
+    // claim) and reject — proving the session is the only identity source.
+    const operatorSessionAuth = {
+      api: {
+        getSession: async () => ({
+          user: {
+            id: "op-1",
+            email: "op@ifixtelecom.com.br",
+            role: "operator",
+          },
+        }),
+      },
+    };
+
+    let rejected = false;
+    try {
+      await requireOwner(undefined, operatorSessionAuth);
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+
+    // Sanity: the SAME session resolving to an owner is accepted.
+    const ownerSessionAuth = {
+      api: {
+        getSession: async () => ({
+          user: { id: "ow-1", email: "ow@ifixtelecom.com.br", role: "owner" },
+        }),
+      },
+    };
+    const ok = (await requireOwner(undefined, ownerSessionAuth)) as {
+      actor: { role?: string };
+    };
+    expect(ok.actor.role).toBe("owner");
+  });
+
+  it("(CR-01) the public updatePodConfig action exposes NO actor seam — a forged actor cannot escalate", async () => {
+    // The public Server Action surface must not carry actor/auth/db/deps. A
+    // forged `actor:{role:"owner"}` is therefore ignored; identity comes from
+    // the session (absent here) so the call resolves UNAUTHENTICATED and never
+    // touches the gateway.
+    const pub = await import("@/lib/admin-actions");
+    const updatePodConfig = pub.updatePodConfig as (
+      args: unknown,
+    ) => Promise<unknown>;
+    expect(typeof updatePodConfig).toBe("function");
+
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+
+    let rejected = false;
+    try {
+      await updatePodConfig({
+        // Forged escalation attempt — there is no `actor` param to bind to.
+        actor: { role: "owner" },
+        field: "cap_primary",
+        value: 0.7,
+      } as unknown);
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPatchMock).not.toHaveBeenCalled();
+  });
+
+  it("(CR-02) requireOwner and writeAuditLog are NOT exported from the `use server` action module", async () => {
+    const pub = (await import("@/lib/admin-actions")) as Record<
+      string,
+      unknown
+    >;
+    // De-RPC proof: the audit writer and the owner gate must live ONLY in the
+    // non-`use server` core, never on the network-reachable action surface.
+    expect(pub.requireOwner).toBeUndefined();
+    expect(pub.writeAuditLog).toBeUndefined();
+    // The genuine entry points are still present.
+    expect(typeof pub.updatePodConfig).toBe("function");
+    expect(typeof pub.inviteOperator).toBe("function");
   });
 });
