@@ -16,6 +16,7 @@ import {
   Receipt,
   ScrollText,
   ServerCog,
+  SlidersHorizontal,
   TrendingUp,
   Users,
 } from "lucide-react";
@@ -37,12 +38,26 @@ const NAV_ITEMS = [
   { href: "/tenants", label: "Tenants", icon: Users },
   { href: "/consumo", label: "Consumo", icon: Receipt },
   { href: "/operacao", label: "Operação", icon: ServerCog },
+  { href: "/operacao/config", label: "Config do pod", icon: SlidersHorizontal },
   { href: "/economia", label: "Economia", icon: TrendingUp },
   { href: "/incidents", label: "Histórico de incidentes", icon: ScrollText },
 ] as const;
 
 export function AppSidebar() {
   const pathname = usePathname();
+
+  // Pick the single most-specific nav match (longest href that prefixes the
+  // current path) so `/operacao/config` lights up "Config do pod" only — not
+  // also its parent "Operação".
+  const activeHref = NAV_ITEMS.reduce<string | null>((best, item) => {
+    const matches =
+      item.href === "/"
+        ? pathname === "/"
+        : pathname === item.href || pathname.startsWith(`${item.href}/`);
+    if (!matches) return best;
+    if (best === null || item.href.length > best.length) return item.href;
+    return best;
+  }, null);
 
   return (
     <Sidebar>
@@ -61,10 +76,7 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {NAV_ITEMS.map((item) => {
-                const isActive =
-                  item.href === "/"
-                    ? pathname === "/"
-                    : pathname.startsWith(item.href);
+                const isActive = item.href === activeHref;
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton

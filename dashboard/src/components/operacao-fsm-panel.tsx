@@ -22,8 +22,8 @@ import {
 import type { OperationsFSM, OperationsSchedule } from "@/lib/gateway";
 import { cn } from "@/lib/utils";
 
-/** Primary FSM state → badge classes. */
-function primaryStateClass(state: string): string {
+/** Primary FSM state → badge classes. Shared with the pod-config live panel. */
+export function primaryStateClass(state: string): string {
   switch (state) {
     case "ready":
       return "bg-primary/15 text-primary";
@@ -37,8 +37,8 @@ function primaryStateClass(state: string): string {
   }
 }
 
-/** Primary FSM state → pt-BR label. */
-function primaryStateLabel(state: string): string {
+/** Primary FSM state → pt-BR label. Shared with the pod-config live panel. */
+export function primaryStateLabel(state: string): string {
   switch (state) {
     case "asleep":
       return "dormindo";
