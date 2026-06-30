@@ -15,6 +15,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
 
 // VastAPI is the subset of vast.Client methods the primary reconciler
@@ -140,8 +141,19 @@ type primaryPodURLs struct {
 // fields the code paths under test exercise.
 type Deps struct {
 	// Cfg holds Phase 6.6 primary-pod knobs (PrimaryPodSchedule* +
-	// PrimaryProvision* + MinIO creds + image SHAs).
+	// PrimaryProvision* + MinIO creds + image SHAs). Phase 17: STRUCTURAL
+	// reads (GPU name/num, images, weights, llama args, timezone) STILL come
+	// from here (D-02); it is also the disaster-recovery fallback when PodCfg
+	// is nil (never zero-config).
 	Cfg config.Config
+
+	// PodCfg is the Phase 17 live pod_config snapshot loader (POD-CFG-04).
+	// The reconciler reads the 16 HOT fields (caps/blocklist/allowlist/host/
+	// reject-private-ip/budgets/schedule) from PodCfg.Cfg()/Rule() so an
+	// owner dashboard edit reaches the NEXT provision/tick in seconds without
+	// a gateway restart. nil is tolerated (unit tests + DB-less boot) — the
+	// reconciler then falls back to Cfg.
+	PodCfg *podconfig.Loader
 
 	// Log is the structured logger. nil defaults to slog.Default(); the
 	// reconciler attaches `subsystem=primary.reconciler` + the replica ID
@@ -241,6 +253,20 @@ type Reconciler struct {
 	cfg  config.Config
 	rule ScheduleRule
 
+	// podCfg is the Phase 17 live pod_config snapshot loader (POD-CFG-04;
+	// copied from Deps.PodCfg). Lock-free reads via Cfg()/Rule()/Bounds().
+	// nil when not wired (unit tests / DB-less boot) — liveCfg/liveRule then
+	// fall back to cfg/rule so provisioning never reads zero-config.
+	podCfg *podconfig.Loader
+
+	// provisionCfg captures the HOT pod_config snapshot read ONCE at the top
+	// of provisionLifecycle, so an in-flight provisioning attempt keeps its
+	// captured caps/blocklist/budgets even if an operator edits the snapshot
+	// mid-provision (blocklist-append semantics — the edit lands on the NEXT
+	// provision; T-17-09). nil outside an active provision (direct test calls
+	// of the helpers fall back to liveCfg).
+	provisionCfg atomic.Pointer[podconfig.PodConfig]
+
 	// activePodURLs is the per-service URL snapshot of the running primary
 	// pod (set by markReady, cleared by closeLifecycle). Lockless read via
 	// ActivePodURLs() — safe for cross-goroutine hot-path consumers.
@@ -329,9 +355,10 @@ func NewReconciler(deps Deps) *Reconciler {
 		deps.Log = slog.Default()
 	}
 	r := &Reconciler{
-		deps: deps,
-		cfg:  deps.Cfg,
-		rule: deps.Rule,
+		deps:   deps,
+		cfg:    deps.Cfg,
+		rule:   deps.Rule,
+		podCfg: deps.PodCfg,
 	}
 	return r
 }

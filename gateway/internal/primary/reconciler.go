@@ -72,6 +72,7 @@ import (
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/vastutil"
 )
@@ -413,7 +414,9 @@ func (r *Reconciler) cooldownElapsed(now time.Time) bool {
 	if last == nil {
 		return true
 	}
-	cooldown := time.Duration(r.cfg.PrimaryProvisionFailureCooldownSeconds) * time.Second
+	// Phase 17 (POD-CFG-04): failure-cooldown is a per-tick gate (not provision-
+	// captured) — read the LIVE snapshot so an owner edit applies immediately.
+	cooldown := time.Duration(r.liveCfg().FailureCooldownS) * time.Second
 	return now.Sub(*last) >= cooldown
 }
 
@@ -1165,6 +1168,61 @@ func (r *Reconciler) spawnProvisioning(parentCtx context.Context, reason string,
 	}()
 }
 
+// bootHotCfg maps the 16 HOT pod_config fields out of the immutable boot
+// config.Config. It is the disaster-recovery fallback consumed by liveCfg
+// when podCfg is nil (unit tests / DB-less boot) so the reconciler never
+// reads zero-config (Phase 17 D-02; T-17-10). STRUCTURAL fields (GPU name/
+// num, images, weights, llama args, timezone) are NOT part of this view —
+// they stay on r.cfg.
+func bootHotCfg(cfg config.Config) podconfig.PodConfig {
+	return podconfig.PodConfig{
+		VastMachineBlocklist: cfg.PrimaryVastMachineBlocklist,
+		VastMachineAllowlist: cfg.PrimaryVastMachineAllowlist,
+		CapPrimary:           cfg.PrimaryVastPriceCapPrimary,
+		CapFallback:          cfg.PrimaryVastPriceCapFallback,
+		HostID:               cfg.PrimaryHostID,
+		RejectPrivateIP:      cfg.PrimaryVastRejectPrivateIP,
+		ColdStartBudgetS:     cfg.PrimaryProvisionColdStartBudgetSeconds,
+		PortBindBudgetS:      cfg.PrimaryPublicPortBindBudgetSeconds,
+		FailureCooldownS:     cfg.PrimaryProvisionFailureCooldownSeconds,
+		MonthlyBudgetBRL:     cfg.MonthlyPrimaryBudgetBRL,
+		ScheduleUpHour:       cfg.PrimaryPodScheduleUpHour,
+		ScheduleDownHour:     cfg.PrimaryPodScheduleDownHour,
+		ScheduleDays:         cfg.PrimaryPodScheduleDays,
+		GraceRampDownS:       cfg.PrimaryPodScheduleGraceRampDownSeconds,
+		ProvisionLeadS:       cfg.PrimaryPodScheduleProvisionLeadSeconds,
+		ScheduleDisabled:     cfg.PrimaryPodScheduleDisabled,
+	}
+}
+
+// liveCfg returns the live HOT pod_config snapshot (Phase 17 POD-CFG-04). It
+// reads podCfg.Load() once — a lock-free atomic pointer load — and falls back
+// to the boot config when podCfg is nil OR no snapshot has been swapped in yet
+// (pre-first-refresh), so the reconciler never reads zero-config. The loader's
+// own last-good-on-error invariant guarantees a non-nil snapshot stays live
+// across a transient DB hiccup (T-17-04).
+func (r *Reconciler) liveCfg() podconfig.PodConfig {
+	if r.podCfg != nil {
+		if s := r.podCfg.Load(); s != nil {
+			return r.podCfg.Cfg()
+		}
+	}
+	return bootHotCfg(r.cfg)
+}
+
+// currentProvisionCfg returns the HOT snapshot captured at the start of the
+// in-flight provision (read ONCE at provisionLifecycle top), so the budget /
+// reject-private-ip helpers downstream of offer selection observe a STABLE
+// view even if an operator edits the snapshot mid-provision (T-17-09). Outside
+// an active provision (e.g. direct test calls of waitForReadyOrDestroy) it
+// falls back to liveCfg.
+func (r *Reconciler) currentProvisionCfg() podconfig.PodConfig {
+	if p := r.provisionCfg.Load(); p != nil {
+		return *p
+	}
+	return r.liveCfg()
+}
+
 // provisionLifecycle runs SearchOffers → CreateInstance → waitForReady.
 // gpuShapeLabel renders a human-readable "<num>x<name>" label for the
 // shape index used by DefaultSearchFilters / the primary+fallback pair.
@@ -1186,21 +1244,30 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_vast_client", 0)
 		return errors.New("primary: no Vast.ai client wired")
 	}
+	// Phase 17 (POD-CFG-04): read the LIVE pod_config snapshot ONCE at the top
+	// of the provision and capture it for the rest of THIS attempt. HOT fields
+	// (caps/blocklist/allowlist/host/reject-private-ip/budgets) come from the
+	// snapshot so an owner dashboard edit changes the NEXT provision's filters;
+	// an in-flight attempt keeps these captured values (T-17-09). STRUCTURAL
+	// fields (GPU name/num) STILL come from r.cfg (D-02).
+	hot := r.liveCfg()
+	r.provisionCfg.Store(&hot)
+
 	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
 	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
 	// $0.30), fallback shape only when the primary cap returns zero
 	// qualified offers (2×3090 @ $0.60; same GPU model, deeper EU pool).
 	filters := vast.DefaultSearchFilters(
-		r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback,
-		r.cfg.PrimaryHostID,
+		hot.CapPrimary, hot.CapFallback,
+		hot.HostID,
 		r.cfg.PrimaryVastGPUNamePrimary, r.cfg.PrimaryVastGPUNameFallback,
 		r.cfg.PrimaryVastNumGPUsPrimary, r.cfg.PrimaryVastNumGPUsFallback,
-		r.cfg.PrimaryVastMachineBlocklist...,
+		hot.VastMachineBlocklist...,
 	)
 	// shapeCaps mirrors the filter pair so vastutil.FilterBelowCap can
 	// re-apply the per-shape ceiling client-side (epsilon-tolerant; UAT 17
 	// 2026-05-19 Vast inventory race regression).
-	shapeCaps := []float64{r.cfg.PrimaryVastPriceCapPrimary, r.cfg.PrimaryVastPriceCapFallback}
+	shapeCaps := []float64{hot.CapPrimary, hot.CapFallback}
 
 	// No geolocation restriction (operator decision 2026-05-21).
 	// Machine allowlist (PRIMARY_VAST_MACHINE_ALLOWLIST): PREFERENCE pass
@@ -1216,8 +1283,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 
 	for i, f := range filters {
 		// Allowlist preference pass for this shape.
-		if len(r.cfg.PrimaryVastMachineAllowlist) > 0 {
-			allowFilter := vast.WithMachineAllowlist(f, r.cfg.PrimaryVastMachineAllowlist)
+		if len(hot.VastMachineAllowlist) > 0 {
+			allowFilter := vast.WithMachineAllowlist(f, hot.VastMachineAllowlist)
 			offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
 			if err != nil {
 				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
@@ -1234,7 +1301,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 				break
 			}
 			log.Info("primary allowlist exhausted for shape; broadening to full qualified search",
-				"allowlist", r.cfg.PrimaryVastMachineAllowlist, "shape", i,
+				"allowlist", hot.VastMachineAllowlist, "shape", i,
 				"gpu_shape", gpuShapeLabel(r.cfg, i))
 		}
 
@@ -1330,7 +1397,11 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) error {
 	poll := time.NewTicker(primaryInstancePollIntervalForTest)
 	defer poll.Stop()
-	deadline := time.NewTimer(time.Duration(r.cfg.PrimaryProvisionColdStartBudgetSeconds) * time.Second)
+	// Phase 17 (POD-CFG-04): cold-start + port-bind budgets come from the
+	// provision-captured snapshot (stable for THIS attempt; an owner edit
+	// applies to the next provision).
+	hot := r.currentProvisionCfg()
+	deadline := time.NewTimer(time.Duration(hot.ColdStartBudgetS) * time.Second)
 	defer deadline.Stop()
 
 	// Counter for consecutive IsTerminal observations. Vast.ai reports
@@ -1386,7 +1457,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// under the cold-start budget — Reachable() returns true for connect /
 	// connection-refused and false only for dial timeout / no route.
 	var firstRunningAt time.Time
-	portBindBudget := time.Duration(r.cfg.PrimaryPublicPortBindBudgetSeconds) * time.Second
+	portBindBudget := time.Duration(hot.PortBindBudgetS) * time.Second
 
 	for {
 		select {
@@ -1483,7 +1554,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"ssh_host", inst.SshHost,
 					"public_ipaddr", inst.PublicIPAddr,
 					"elapsed_since_running_s", int(elapsed.Seconds()),
-					"budget_s", r.cfg.PrimaryPublicPortBindBudgetSeconds)
+					"budget_s", hot.PortBindBudgetS)
 				// `>=` (not `>`) so a budget of 0 fires on the first running
 				// poll — required for the deterministic timeout test (finding #7).
 				if elapsed >= portBindBudget {
@@ -1514,7 +1585,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"public_ipaddr", inst.PublicIPAddr,
 					"llm_url", urls.LLM,
 					"elapsed_since_running_s", int(elapsed.Seconds()),
-					"budget_s", r.cfg.PrimaryPublicPortBindBudgetSeconds)
+					"budget_s", hot.PortBindBudgetS)
 				// `>=` (not `>`) so a budget of 0 fires on the first running
 				// poll — required for the deterministic timeout test.
 				if elapsed >= portBindBudget {
@@ -1576,7 +1647,9 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 // empty public_ipaddr are KEPT (cannot prove private) — Option B is their sole
 // backstop.
 func (r *Reconciler) rejectPrivateIPOffers(offers []vast.Offer, log *slog.Logger, shape int, pass string) []vast.Offer {
-	if !r.cfg.PrimaryVastRejectPrivateIP {
+	// Phase 17 (POD-CFG-04): read reject-private-ip from the provision-captured
+	// snapshot so an owner toggle applies to the NEXT provision (stable in-flight).
+	if !r.currentProvisionCfg().RejectPrivateIP {
 		return offers
 	}
 	before := len(offers)
@@ -1811,9 +1884,10 @@ func NewReconcilerFull(deps Deps) *Reconciler {
 		deps.ReplicaID = host
 	}
 	r := &Reconciler{
-		deps: deps,
-		cfg:  deps.Cfg,
-		rule: deps.Rule,
+		deps:   deps,
+		cfg:    deps.Cfg,
+		rule:   deps.Rule,
+		podCfg: deps.PodCfg,
 	}
 	return r
 }
