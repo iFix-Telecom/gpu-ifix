@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-06-30T21:57:28.510Z"
+status: verifying
+last_updated: "2026-06-30T22:21:28.390Z"
 progress:
   total_phases: 14
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 68
-  completed_plans: 66
-  percent: 79
+  completed_plans: 68
+  percent: 86
 ---
 
 # STATE: ifix-ai-gateway
@@ -131,7 +131,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Ready to execute
+- **Status:** Phase complete — ready for verification
 
 ## Performance Metrics
 
@@ -221,10 +221,11 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 | Phase 17 P03 | 45min | 3 tasks | 9 files |
 | Phase 17 P04 | 35min | 3 tasks | 7 files |
 | Phase 17 P05 | 12min | 2 tasks | 7 files |
+| Phase 17 P06 | 30min | 3 tasks | 7 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-06-30T21:57:28.498Z
+- **Last session:** 2026-06-30T22:21:01.627Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
@@ -248,3 +249,4 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 - [Phase ?]: 17-04: three X-Admin-Key admin endpoints (lifecycle read, config read, config PATCH write); config-read reads pod_config not boot-env; write uses static field->query allowlist + live-bound validation; no restart/structural path
 - [Phase ?]: 17-05: dashboard pod-config write path — updatePodConfig/updatePodConfigBound mirror inviteOperator (requireOwner FIRST → refetch live config → validate vs refetched bound → gateway PATCH → 1 audit row {field,old,new}); admin key isolated in server-only gateway-admin.ts (2nd legit reader, key-leak guard test)
 - [Phase ?]: 17-05: vitest alias server-only → next compiled empty.js so import 'server-only' resolves in tests (no new package installed)
+- [Phase ?]: 17-06: RSC reads pod config server-side via fetchPodConfigServer (absolute self-proxy) — no new admin-key reader; structural fields render read-only (not pod_config columns)
