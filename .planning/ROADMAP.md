@@ -158,13 +158,35 @@ Plans:
 ### Phase 17: Dashboard pod-config control (from /gsd:explore 2026-06-29)
 
 **Goal:** Owner controla TODAS as configs do pod primário pelo dashboard — fim do ciclo SSH+sed `.env`+recreate (a dor real do blocklist-append 2026-06-29). Arquitetura travada na exploração (ver `notes/dashboard-pod-config-control-architecture.md`): mover a config do pod de **env-at-boot → tabela no banco** (`pod_config`), gateway lê do DB. **Híbrido por classe de config** (enumeração + classificação é research question aberta): **quentes** (blocklist, allowlist, price cap, schedule UpHour/DownHour/lead, coldstart budget, port-bind budget) → reconciler relê do DB a cada tick, valem em segundos SEM restart; **estruturais** (NUM_GPUS/shape, template image, DCGM/DSN) → boot-only, dashboard chama `POST /admin/gateway/restart` (gateway flush + `os.Exit(0)`; docker `restart: unless-stopped` — CONFIRMADO em prod — sobe e relê o DB). O dashboard NUNCA toca docker socket nem `.env` — só fala com a admin API do gateway. **Status de inicialização ao vivo:** dashboard faz poll de `/admin/primary/lifecycle` (FSM state + event trail do `primary_lifecycles`: offer_accepted → health checks → ready/falha + shutdown_reason) pra acompanhar provisioning + diagnosticar falhas (ex: o flap de bad-hosts 2026-06-29). **Segurança/guardrails:** owner-only edita (operator só vê — mesmo padrão Phase 13); bounds de validação por campo (ex: cap $0.10–$1.50, UpHour 0–23, NUM_GPUS ∈ {1,2}) rejeitando fora do range antes de salvar; confirm explícito em mudanças perigosas (restart, baixar cap, mudar shape); audit de toda mudança (quem/quando/o-quê, igual `admin_audit_log` Phase 13). **Restart = gateway apenas** (o pod Vast já tem force-up/force-down via gatewayctl/admin).
-**Requirements**: TBD (derivar em plan-phase — provável família POD-CFG-* / cobrir hot-reload, self-restart, bounds, confirm, audit, live-status, owner-gate). Enumeração hot-vs-estrutural = research question aberta.
+**Requirements**: POD-CFG-01..14 (derivadas 2026-06-30; ver REQUIREMENTS.md). Cobrem: hot-reload (01/03/04), seed env→DB (02), bounds editáveis (05/09), write+lifecycle endpoints (06/07), edição UI (08), owner-gate+validação (10), audit (11), confirm perigoso (12), estrutural read-only (13), painel ao vivo (14). NOTA: escopo NARROWED na discuss (D-01/D-02): SEM self-restart e SEM edição estrutural — só os 16 hot fields editáveis; 19 estruturais read-only.
 **Depends on:** Phase 13 (owner/operator authz + admin_audit_log + dashboard server-action pattern), Phase 15 (dashboard /economia + admin-proxy pattern), Phase 16 (admin API surface). Gateway config.go fail-fast env-at-boot pattern é o que será refatorado para DB-backed.
-**Plans:** 0 plans
+**Plans:** 6 plans (6 waves — cadeia sequencial: schema→loader→reconciler→endpoints→server-action→UI)
 
 Plans:
 
-- [ ] TBD (run /gsd:plan-phase 17 to break down)
+**Wave 1**
+
+- [ ] 17-01-PLAN.md — Migration 0031 (pod_config 16 hot + bounds + NOTIFY) + queries + sqlc regen + migration integration test
+
+**Wave 2** *(depends 17-01)*
+
+- [ ] 17-02-PLAN.md — `podconfig` package: Loader (atomic snapshot + last-good) + ListenAndReload (pod_config_changed) + reload metric + tests
+
+**Wave 3** *(depends 17-02)*
+
+- [ ] 17-03-PLAN.md — Reconciler/budget/schedule leem os 16 hot fields do snapshot (estrutural fica em cfg) + main.go wiring + seed env→DB idempotente
+
+**Wave 4** *(depends 17-03)*
+
+- [ ] 17-04-PLAN.md — Gateway admin endpoints: GET /admin/primary/lifecycle (live status) + PATCH /admin/primary/config (write+bounds-validate) + mounts
+
+**Wave 5** *(depends 17-04)*
+
+- [ ] 17-05-PLAN.md — Dashboard server actions updatePodConfig/Bound (requireOwner + validação + audit) + server-only admin-key helper + fetchPrimaryLifecycle
+
+**Wave 6** *(depends 17-05)*
+
+- [ ] 17-06-PLAN.md — Dashboard /operacao/config: painel ao vivo + editor 16 hot fields (confirm perigoso D-04) + editor de bounds + estrutural read-only + switch + nav
 
 ---
 

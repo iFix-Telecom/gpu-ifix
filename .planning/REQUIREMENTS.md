@@ -119,6 +119,23 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [x] **UM-09**: Brevo SMTP via nodemailer wired em `sendResetPassword`; reachability do container confirmada
 - [x] **UM-10**: `operadores/page.tsx` lê role real; owner-gate esconde controles para não-owners
 
+### Dashboard Pod-Config Control (Phase 17 — derived in plan-phase 2026-06-30)
+
+- [ ] **POD-CFG-01**: Migration 0031 `ai_gateway.pod_config` single-row table (16 hot fields) + `pod_config_changed` NOTIFY trigger (espelha 0009)
+- [ ] **POD-CFG-02**: Seed env→DB idempotente no 1º boot (ON CONFLICT DO NOTHING); env permanece fallback (NÃO removido) (D-02)
+- [ ] **POD-CFG-03**: `podconfig.Loader` hot-reload (LISTEN/NOTIFY + atomic snapshot + last-good-on-error) espelhando `upstreams.Loader`
+- [ ] **POD-CFG-04**: Reconciler/budget/schedule leem os 16 hot fields do snapshot (próxima provision/tick); estruturais continuam em `r.cfg` (D-01/D-02)
+- [ ] **POD-CFG-05**: Storage de bounds (min/max) owner-editável, seedado dos defaults da RESEARCH (D-03)
+- [ ] **POD-CFG-06**: Endpoint gateway `PATCH /admin/primary/config` (write, X-Admin-Key) → UpdatePodConfigField/Bound; SEM restart/estrutural (D-02)
+- [ ] **POD-CFG-07**: Endpoint gateway `GET /admin/primary/lifecycle` (FSM state + event trail da lifecycle ABERTA) (D-05)
+- [ ] **POD-CFG-08**: Dashboard editor dos 16 hot fields — owner-edit / operator read-only (D-01/D-07)
+- [ ] **POD-CFG-09**: Dashboard editor de bounds (Campo|Mín|Máx) — owner-edit / operator read-only (D-03)
+- [ ] **POD-CFG-10**: Server action owner-gated (`requireOwner` server-side) + validação do valor vs bound corrente antes de salvar (D-03a/D-07)
+- [ ] **POD-CFG-11**: Audit dashboard-side (`admin_audit_log`, action=`pod_config.update`/`pod_config_bounds.update`, metadata={field,old,new}); SEM dual-write no gateway (D-06)
+- [ ] **POD-CFG-12**: Confirm simples de um clique com string de impacto específica nas ações perigosas (cap-down, estreitar agenda, Disabled, dias vazios, allowlist restritiva); SEM type-to-confirm (D-04)
+- [ ] **POD-CFG-13**: Display read-only dos 19 campos estruturais (shape/imagens/pesos/llama args/timezone) (D-01)
+- [ ] **POD-CFG-14**: Painel ao vivo no dashboard (poll 10s de `/admin/primary/lifecycle`, FSM + event trail, reusa `fsm.ts` + `StaleIndicator`) (D-05)
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
