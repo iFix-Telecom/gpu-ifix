@@ -34,7 +34,8 @@ findings:
   warning: 2
   info: 2
   total: 6
-status: issues_found
+status: resolved
+resolution: "CR-01 + CR-02 fixed via root-cause refactor (commits c6978d2, 01445d6, e075592). admin-actions split into non-RPC server-only core (requireOwner/writeAuditLog/*Core impls) + thin use-server wrappers that derive identity from session only (no client actor/auth/db/deps). De-RPC + session-only invariants verified structurally; 63/63 tests green (incl. 3 new CR-01/CR-02 invariant tests); build exit 0; leak guard intact."
 ---
 
 # Phase 17: Code Review Report
