@@ -35,6 +35,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"math/big"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -54,6 +57,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/idempotency"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/proxy"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/quota"
@@ -904,6 +908,33 @@ func main() {
 	if cfg.VastAIAPIKey == "" {
 		log.Warn("Phase 6.6 primary reconciler DISABLED: VAST_AI_API_KEY not set (shared with emerg)")
 	} else {
+		// Phase 17 (POD-CFG-02/03/04): seed pod_config from the current env on
+		// first boot (idempotent — ON CONFLICT DO NOTHING; an existing operator-
+		// edited row WINS, T-17-07), then construct the live loader + LISTEN
+		// reload goroutine so owner dashboard edits to caps/blocklist/schedule/
+		// budgets reach the reconciler in seconds with NO restart. env stays the
+		// disaster-recovery fallback (D-02) — it is never removed.
+		if serr := gen.New(pool).SeedPodConfig(ctx, podConfigSeedParams(cfg)); serr != nil {
+			log.Error("pod_config seed failed", "err", serr)
+			os.Exit(2)
+		}
+		podCfgLoader, plerr := podconfig.NewLoader(ctx, pool, cfg.PrimaryPodScheduleTimezone, log)
+		if plerr != nil {
+			// Mirror the upstreams/prices loader fail-fast: the seed above
+			// guarantees a row, so an unreadable pod_config at boot is a hard
+			// error, not a zero-config serve.
+			log.Error("pod_config loader init failed", "err", plerr)
+			os.Exit(2)
+		}
+		// LISTEN pod_config_changed → loader.Refresh (last-good-on-error). nil
+		// onReload: the reconciler reads loader.Cfg()/Rule() live every tick, so
+		// there is no cached state to rebuild. Mirrors the upstreams LISTEN block.
+		go func() {
+			if err := podconfig.ListenAndReload(ctx, cfg.PGDSN, podCfgLoader, nil, log); err != nil {
+				log.Warn("pod_config listener exited", "err", err)
+			}
+		}()
+
 		primaryRule, perr := primary.ParseScheduleEnv(cfg)
 		if perr != nil {
 			// Pitfall #4 fail-fast — invalid IANA timezone or other schedule
@@ -1071,6 +1102,7 @@ func main() {
 
 		primaryReconciler = primary.NewReconcilerFull(primary.Deps{
 			Cfg:          cfg,
+			PodCfg:       podCfgLoader, // Phase 17: live pod_config snapshot for HOT reads
 			Log:          log.With("subsys", "primary"),
 			Vast:         primaryVastClient,
 			HealthCheck:  primaryHealthCheck,
@@ -1729,6 +1761,73 @@ func buildOpenAIWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resol
 		ModifyResponse: proxy.ComposeInterceptors(usageInterceptor),
 	}
 	return rp, nil
+}
+
+// seedNumericFromFloat builds a pgtype.Numeric for a pod_config NUMERIC column
+// from a float64 (Phase 17 boot seed). Mirrors billing.numericFromFloat: a
+// big.Float scaled to exp=-6 keeps the decimal exact to 6 digits. Negative
+// values clamp to 0 (defensive — none of the seeded values are negative).
+func seedNumericFromFloat(f float64) pgtype.Numeric {
+	if f < 0 {
+		f = 0
+	}
+	bf := new(big.Float).SetFloat64(f * 1e6)
+	intPart, _ := bf.Int(nil)
+	if intPart == nil {
+		intPart = big.NewInt(0)
+	}
+	return pgtype.Numeric{Int: intPart, Exp: -6, Valid: true}
+}
+
+// podConfigSeedParams maps the current env config.Config into the first-boot
+// SeedPodConfig params (Phase 17 POD-CFG-02/03): the 16 HOT fields from the
+// resolved env + the 10 owner-editable min/max bound pairs at the RESEARCH
+// Validation-Bounds defaults. The seed is idempotent (ON CONFLICT DO NOTHING),
+// so an existing operator-edited row is never overwritten. STRUCTURAL fields
+// (GPU name/num, images, weights, timezone) are deliberately excluded (D-02);
+// the dead PRIMARY_POD_SERVE_STT knob is NOT seeded (no reader, RESEARCH).
+func podConfigSeedParams(cfg config.Config) gen.SeedPodConfigParams {
+	return gen.SeedPodConfigParams{
+		// 16 HOT fields from the resolved env.
+		VastMachineBlocklist: cfg.PrimaryVastMachineBlocklist,
+		VastMachineAllowlist: cfg.PrimaryVastMachineAllowlist,
+		CapPrimary:           seedNumericFromFloat(cfg.PrimaryVastPriceCapPrimary),
+		CapFallback:          seedNumericFromFloat(cfg.PrimaryVastPriceCapFallback),
+		HostID:               cfg.PrimaryHostID,
+		RejectPrivateIp:      cfg.PrimaryVastRejectPrivateIP,
+		ColdstartBudgetS:     int32(cfg.PrimaryProvisionColdStartBudgetSeconds),
+		PortBindBudgetS:      int32(cfg.PrimaryPublicPortBindBudgetSeconds),
+		FailureCooldownS:     int32(cfg.PrimaryProvisionFailureCooldownSeconds),
+		MonthlyBudgetBrl:     seedNumericFromFloat(cfg.MonthlyPrimaryBudgetBRL),
+		ScheduleUpHour:       int32(cfg.PrimaryPodScheduleUpHour),
+		ScheduleDownHour:     int32(cfg.PrimaryPodScheduleDownHour),
+		ScheduleDays:         cfg.PrimaryPodScheduleDays,
+		GraceRampDownS:       int32(cfg.PrimaryPodScheduleGraceRampDownSeconds),
+		ProvisionLeadS:       int32(cfg.PrimaryPodScheduleProvisionLeadSeconds),
+		ScheduleDisabled:     cfg.PrimaryPodScheduleDisabled,
+		// 10 owner-editable bound pairs (RESEARCH Validation-Bounds defaults,
+		// identical to the Plan 17-01 integration-test seed).
+		CapPrimaryMin:       seedNumericFromFloat(0.10),
+		CapPrimaryMax:       seedNumericFromFloat(1.50),
+		CapFallbackMin:      seedNumericFromFloat(0.10),
+		CapFallbackMax:      seedNumericFromFloat(1.50),
+		ColdstartBudgetSMin: 300,
+		ColdstartBudgetSMax: 5400,
+		PortBindBudgetSMin:  30,
+		PortBindBudgetSMax:  600,
+		FailureCooldownSMin: 60,
+		FailureCooldownSMax: 1800,
+		MonthlyBudgetBrlMin: seedNumericFromFloat(0),
+		MonthlyBudgetBrlMax: seedNumericFromFloat(100000),
+		ScheduleUpHourMin:   0,
+		ScheduleUpHourMax:   23,
+		ScheduleDownHourMin: 0,
+		ScheduleDownHourMax: 23,
+		GraceRampDownSMin:   0,
+		GraceRampDownSMax:   1800,
+		ProvisionLeadSMin:   0,
+		ProvisionLeadSMax:   7200,
+	}
 }
 
 // bootstrapAdminKey seeds the ai_gateway.admin_keys table on first boot
