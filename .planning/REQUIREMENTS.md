@@ -135,6 +135,7 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [ ] **POD-CFG-12**: Confirm simples de um clique com string de impacto específica nas ações perigosas (cap-down, estreitar agenda, Disabled, dias vazios, allowlist restritiva); SEM type-to-confirm (D-04)
 - [ ] **POD-CFG-13**: Display read-only dos 19 campos estruturais (shape/imagens/pesos/llama args/timezone) (D-01)
 - [ ] **POD-CFG-14**: Painel ao vivo no dashboard (poll 10s de `/admin/primary/lifecycle`, FSM + event trail, reusa `fsm.ts` + `StaleIndicator`) (D-05)
+- [ ] **POD-CFG-15**: Endpoint gateway `GET /admin/primary/config` (read, X-Admin-Key) -> `GetPodConfig` -> 16 hot fields + 9 bounds typed JSON. Fonte de leitura para: valores correntes do editor (POD-CFG-08/09), refetch server-side do bound vivo na validacao (POD-CFG-10) e do `oldValue` do audit (POD-CFG-11). Le do `pod_config` (DIVERGE de `/admin/operations` que le o boot env). Wrapper dashboard `fetchPodConfig()` via proxy GET-only (D-07).
 
 ## v2 Requirements
 
