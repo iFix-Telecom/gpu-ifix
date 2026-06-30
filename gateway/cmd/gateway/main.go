@@ -118,6 +118,13 @@ type proxies struct {
 	// variant; production main wires it.
 	adminEconomyHandler http.Handler
 
+	// Phase 17 (POD-CFG-06/07/15) — pod-config control data sources. All
+	// mounted under the SAME admin-key-gated /admin sub-router. The write
+	// handler is nil when Vast (and thus the live loader) is disabled.
+	adminPrimaryLifecycleHandler   http.Handler
+	adminPrimaryConfigReadHandler  http.Handler
+	adminPrimaryConfigWriteHandler http.Handler
+
 	// Phase 5 — shed middleware collaborators. nil disables the shed
 	// middleware mount; production main always supplies all four
 	// pointers after the Phase 5 wiring block runs.
@@ -905,6 +912,11 @@ func main() {
 	// (Plan 06.6-04 supervisord LOCKED). The gateway sees 4 HTTP endpoints
 	// on Vast-exposed host ports regardless of orchestration mechanism.
 	var primaryReconciler *primary.Reconciler
+	// Phase 17: lifted to outer scope so the admin config read/write handlers
+	// (constructed below the Vast block) can read the same live loader the
+	// reconciler uses. nil when Vast is disabled — the write handler is then
+	// left unmounted (config editing requires the live loader).
+	var podCfgLoader *podconfig.Loader
 	if cfg.VastAIAPIKey == "" {
 		log.Warn("Phase 6.6 primary reconciler DISABLED: VAST_AI_API_KEY not set (shared with emerg)")
 	} else {
@@ -918,7 +930,8 @@ func main() {
 			log.Error("pod_config seed failed", "err", serr)
 			os.Exit(2)
 		}
-		podCfgLoader, plerr := podconfig.NewLoader(ctx, pool, cfg.PrimaryPodScheduleTimezone, log)
+		var plerr error
+		podCfgLoader, plerr = podconfig.NewLoader(ctx, pool, cfg.PrimaryPodScheduleTimezone, log)
 		if plerr != nil {
 			// Mirror the upstreams/prices loader fail-fast: the seed above
 			// guarantees a row, so an unreadable pod_config at boot is a hard
@@ -1294,6 +1307,19 @@ func main() {
 	// economy + daily series. cfg supplies USDToBRLRate for the live accrual.
 	adminEconomyHandler := admin.NewEconomyHandler(gen.New(pool), cfg, log)
 
+	// Phase 17 (POD-CFG-06/07/15) — pod-config control endpoints the dashboard
+	// consumes. GET /primary/lifecycle: live FSM + open lifecycle trail (rec +
+	// emergFSM nil-safe). GET /primary/config: the CURRENT pod_config row (16
+	// hot fields + bounds) — the read seam the editor/validation/audit use
+	// (NOT /admin/operations, whose boot-env diverges after an edit). PATCH
+	// /primary/config: the one write verb (validated vs the live bound).
+	adminPrimaryLifecycleHandler := admin.NewPrimaryLifecycleHandler(gen.New(pool), primaryReconciler, emergFSM, log)
+	adminPrimaryConfigReadHandler := admin.NewPrimaryConfigReadHandler(gen.New(pool), log)
+	var adminPrimaryConfigWriteHandler http.Handler
+	if podCfgLoader != nil {
+		adminPrimaryConfigWriteHandler = admin.NewPrimaryConfigWriteHandler(gen.New(pool), podCfgLoader, log)
+	}
+
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
 		chat:                   chatHandler,
@@ -1313,10 +1339,15 @@ func main() {
 		adminAuditHandler:      adminAuditHandler,
 		adminOperationsHandler: adminOperationsHandler,
 		adminEconomyHandler:    adminEconomyHandler,
-		adminVerifier:          adminVerifier,
-		rdb:                    rdb,
-		rateLimitFailOpen:      cfg.RateLimitFailOpen,
-		quotaFailOpen:          cfg.QuotaFailOpen,
+
+		adminPrimaryLifecycleHandler:   adminPrimaryLifecycleHandler,
+		adminPrimaryConfigReadHandler:  adminPrimaryConfigReadHandler,
+		adminPrimaryConfigWriteHandler: adminPrimaryConfigWriteHandler,
+
+		adminVerifier:     adminVerifier,
+		rdb:               rdb,
+		rateLimitFailOpen: cfg.RateLimitFailOpen,
+		quotaFailOpen:     cfg.QuotaFailOpen,
 		// Phase 5 — shed middleware wiring (D-B4).
 		upstreamsLoader: loader,
 		shedSet:         shedSet,
@@ -1539,6 +1570,21 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		// Phase 15 (OBS-09) — "Economia" panel, same X-Admin-Key gate.
 		if px.adminEconomyHandler != nil {
 			adminRouter.Method(http.MethodGet, "/economy", px.adminEconomyHandler)
+		}
+		// Phase 17 (POD-CFG-06/07/15) — pod-config control, same X-Admin-Key
+		// gate. GET /primary/lifecycle (live status) + GET /primary/config
+		// (current pod_config row, the editor/validation/audit read seam) +
+		// PATCH /primary/config (the one validated write verb → reload trigger).
+		// GET and PATCH on the same path are distinct chi method routes. NO
+		// restart route and NO structural-edit route exists (D-01/D-02).
+		if px.adminPrimaryLifecycleHandler != nil {
+			adminRouter.Method(http.MethodGet, "/primary/lifecycle", px.adminPrimaryLifecycleHandler)
+		}
+		if px.adminPrimaryConfigReadHandler != nil {
+			adminRouter.Method(http.MethodGet, "/primary/config", px.adminPrimaryConfigReadHandler)
+		}
+		if px.adminPrimaryConfigWriteHandler != nil {
+			adminRouter.Method(http.MethodPatch, "/primary/config", px.adminPrimaryConfigWriteHandler)
 		}
 		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
 		// used by `gatewayctl debug emit-error` to prove the
