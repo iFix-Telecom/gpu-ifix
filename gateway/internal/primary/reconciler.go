@@ -374,11 +374,16 @@ func (r *Reconciler) evaluateTick(ctx context.Context, now time.Time, log *slog.
 // window kicks in PrimaryPodScheduleProvisionLeadSeconds (default 1800s
 // = 30min) BEFORE the active window.
 func (r *Reconciler) evaluateAsleep(ctx context.Context, now time.Time, log *slog.Logger) {
-	if r.cfg.PrimaryPodScheduleDisabled {
+	// Phase 17 (POD-CFG-04): the DISABLED soak-gate reads the live snapshot's
+	// schedule_disabled (falls back to boot cfg when podCfg unwired); the
+	// provision decision uses the live re-parsed rule. Both come from the same
+	// snapshot in production, so they stay consistent.
+	if r.liveCfg().ScheduleDisabled {
 		// Soak-gate posture; schedule-driven provisioning is off. Force
 		// events bypass this gate via the event subscriber path.
 		return
 	}
+	rule := r.liveRule()
 	// Phase 12 Plan 02 (D-01): billing-stop suppression gate. A zero-credit
 	// pod death armed a durable suppression marker (handleConfirmedDeath). While
 	// it is active, SKIP re-provision — re-bidding a Vast pod with no account
@@ -391,7 +396,7 @@ func (r *Reconciler) evaluateAsleep(ctx context.Context, now time.Time, log *slo
 		log.Warn("primary evaluateAsleep: billing-stop suppression active; awaiting operator credit (skipping re-provision)")
 		return
 	}
-	if !r.rule.ShouldBeProvisioned(now) {
+	if !rule.ShouldBeProvisioned(now) {
 		return
 	}
 	if !r.cooldownElapsed(now) {
@@ -481,10 +486,14 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 		return
 	}
 
-	if r.cfg.PrimaryPodScheduleDisabled {
+	// Phase 17 (POD-CFG-04): DISABLED soak-gate from the live snapshot (UAT-14:
+	// don't auto-drain an operator force-up pod when schedule disabled); the
+	// keep-up decision uses the live re-parsed rule so an owner window edit
+	// drains (or keeps up) the pod on the next Ready tick.
+	if r.liveCfg().ScheduleDisabled {
 		return
 	}
-	if !r.rule.ShouldStayUp(now) {
+	if !r.liveRule().ShouldStayUp(now) {
 		r.startDrain(ctx, "schedule_window_exited", log)
 		return
 	}
@@ -750,7 +759,9 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 		r.drainStartedAt.Store(&nowCopy)
 		return
 	}
-	grace := time.Duration(r.cfg.PrimaryPodScheduleGraceRampDownSeconds) * time.Second
+	// Phase 17 (POD-CFG-04): live grace window so an owner edit applies to the
+	// in-progress drain's completion gate.
+	grace := time.Duration(r.liveCfg().GraceRampDownS) * time.Second
 	elapsed := now.Sub(*startedPtr)
 
 	inflight := int64(0)
@@ -1221,6 +1232,24 @@ func (r *Reconciler) currentProvisionCfg() podconfig.PodConfig {
 		return *p
 	}
 	return r.liveCfg()
+}
+
+// liveRule returns the live, evaluable schedule rule (Phase 17 POD-CFG-04):
+// re-parsed from the pod_config snapshot's 6 HOT schedule fields using the
+// STRUCTURAL boot-resolved timezone, so an owner schedule edit reaches the
+// NEXT tick (provision / drain) in seconds. Falls back to the immutable boot
+// rule when podCfg is nil, no snapshot exists yet, or the re-parse errors
+// (last-good — never evaluate a broken rule, T-17-06). The re-parse is a
+// cheap pure-Go computation at 1Hz; LoadLocation never re-runs (tz structural).
+func (r *Reconciler) liveRule() ScheduleRule {
+	if r.podCfg != nil {
+		if s := r.podCfg.Load(); s != nil {
+			if rule, err := ParseScheduleFromSnapshot(r.podCfg.Cfg(), r.rule.Timezone); err == nil {
+				return rule
+			}
+		}
+	}
+	return r.rule
 }
 
 // provisionLifecycle runs SearchOffers → CreateInstance → waitForReady.

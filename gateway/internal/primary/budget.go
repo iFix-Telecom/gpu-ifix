@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
 
 // primaryBudgetAlertDedupe gates Sentry primary-budget warnings to at
@@ -67,22 +68,38 @@ type monthlyPrimaryCostFn func(ctx context.Context) (pgtype.Numeric, error)
 type BudgetChecker struct {
 	cfg            config.Config
 	db             *pgxpool.Pool
+	podCfg         *podconfig.Loader
 	dedupe         *primaryBudgetAlertDedupe
 	costOverride   monthlyPrimaryCostFn
 	lastCheckUnix  atomic.Int64
 	lastEmittedSum atomic.Pointer[float64] // most recent observed month_cost_brl (for tests + ops gauges)
 }
 
-// NewBudgetChecker constructs a BudgetChecker with the given config + DB.
-// db may be nil — in that case checkBudget short-circuits with zero cost
-// (production wires the gateway's *pgxpool.Pool; the test fixtures pass
-// nil + a costOverride via SetCostOverrideForTest).
-func NewBudgetChecker(cfg config.Config, db *pgxpool.Pool) *BudgetChecker {
+// NewBudgetChecker constructs a BudgetChecker with the given config + DB +
+// live pod_config loader (Phase 17 POD-CFG-04). db may be nil — in that case
+// checkBudget short-circuits with zero cost (production wires the gateway's
+// *pgxpool.Pool; the test fixtures pass nil + a costOverride via
+// SetCostOverrideForTest). podCfg may be nil — CheckBudget then falls back to
+// the boot cfg's MonthlyPrimaryBudgetBRL (never zero-config).
+func NewBudgetChecker(cfg config.Config, db *pgxpool.Pool, podCfg *podconfig.Loader) *BudgetChecker {
 	return &BudgetChecker{
 		cfg:    cfg,
 		db:     db,
+		podCfg: podCfg,
 		dedupe: &primaryBudgetAlertDedupe{},
 	}
+}
+
+// monthlyBudgetBRL returns the live monthly-budget threshold: the pod_config
+// snapshot value when the loader is wired + has a snapshot, else the boot cfg
+// fallback (Phase 17 POD-CFG-04; never zero-config).
+func (b *BudgetChecker) monthlyBudgetBRL() float64 {
+	if b.podCfg != nil {
+		if s := b.podCfg.Load(); s != nil {
+			return b.podCfg.Cfg().MonthlyBudgetBRL
+		}
+	}
+	return b.cfg.MonthlyPrimaryBudgetBRL
 }
 
 // SetCostOverrideForTest is the test-only injection slot for the SUM
@@ -116,7 +133,8 @@ func (b *BudgetChecker) CheckBudget(ctx context.Context) float64 {
 	}
 	costFloat := primaryNumericToFloat(cost)
 	b.lastEmittedSum.Store(&costFloat)
-	if costFloat <= b.cfg.MonthlyPrimaryBudgetBRL {
+	budgetBRL := b.monthlyBudgetBRL()
+	if costFloat <= budgetBRL {
 		return costFloat
 	}
 	if !b.dedupe.shouldEmit() {
@@ -126,7 +144,7 @@ func (b *BudgetChecker) CheckBudget(ctx context.Context) float64 {
 	hub.Scope().SetTag("subsystem", "primary")
 	hub.Scope().SetTag("alert", "budget_exceeded")
 	hub.Scope().SetExtra("month_cost_brl", costFloat)
-	hub.Scope().SetExtra("budget_brl", b.cfg.MonthlyPrimaryBudgetBRL)
+	hub.Scope().SetExtra("budget_brl", budgetBRL)
 	hub.Scope().SetLevel(sentry.LevelWarning)
 	hub.CaptureMessage("monthly primary pod budget exceeded")
 	return costFloat

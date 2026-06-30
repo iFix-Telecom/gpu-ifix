@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
 
 // weekdayFromCSV maps the lowercase 3-letter day tokens used by the
@@ -130,6 +131,51 @@ func ParseScheduleEnv(cfg config.Config) (ScheduleRule, error) {
 		GraceRampDownS: cfg.PrimaryPodScheduleGraceRampDownSeconds,
 		ProvisionLeadS: cfg.PrimaryPodScheduleProvisionLeadSeconds,
 		Disabled:       cfg.PrimaryPodScheduleDisabled,
+	}, nil
+}
+
+// ParseScheduleFromSnapshot builds an evaluable primary.ScheduleRule from the
+// 6 HOT schedule fields of a LIVE pod_config snapshot (Phase 17 POD-CFG-04),
+// using the pre-resolved STRUCTURAL timezone (loc). It is the cycle-free bridge
+// from the data-only podconfig.ScheduleRule mirror into this package's rule
+// with the IsInPeak / ShouldBeProvisioned / ShouldStayUp methods.
+//
+// loc is resolved ONCE at boot (config.Load fail-fast + the loader's NewLoader)
+// and is structural (D-02/D-03a) — it never changes at runtime, so this
+// function never re-runs time.LoadLocation. The only error paths are a nil loc
+// (programmer error) or an out-of-range up/down hour; both let the caller keep
+// the previous good rule (never swap a broken rule into the live path, T-17-06).
+// Day-token parsing mirrors ParseScheduleEnv (unknown tokens silently dropped).
+func ParseScheduleFromSnapshot(cfg podconfig.PodConfig, loc *time.Location) (ScheduleRule, error) {
+	if loc == nil {
+		return ScheduleRule{}, fmt.Errorf("primary schedule from snapshot: nil structural timezone")
+	}
+	if cfg.ScheduleUpHour < 0 || cfg.ScheduleUpHour > 23 {
+		return ScheduleRule{}, fmt.Errorf("primary schedule from snapshot: up_hour out of range [0,23]: %d", cfg.ScheduleUpHour)
+	}
+	if cfg.ScheduleDownHour < 0 || cfg.ScheduleDownHour > 23 {
+		return ScheduleRule{}, fmt.Errorf("primary schedule from snapshot: down_hour out of range [0,23]: %d", cfg.ScheduleDownHour)
+	}
+	days := make(map[time.Weekday]bool, 7)
+	for _, raw := range cfg.ScheduleDays {
+		token := strings.ToLower(strings.TrimSpace(raw))
+		if token == "" {
+			continue
+		}
+		wd, ok := weekdayFromCSV[token]
+		if !ok {
+			continue
+		}
+		days[wd] = true
+	}
+	return ScheduleRule{
+		Timezone:       loc,
+		UpHour:         cfg.ScheduleUpHour,
+		DownHour:       cfg.ScheduleDownHour,
+		Days:           days,
+		GraceRampDownS: cfg.GraceRampDownS,
+		ProvisionLeadS: cfg.ProvisionLeadS,
+		Disabled:       cfg.ScheduleDisabled,
 	}, nil
 }
 
