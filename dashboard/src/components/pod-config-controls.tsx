@@ -45,7 +45,15 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { updatePodConfig } from "@/lib/admin-actions";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { updatePodConfig, updatePodConfigBound } from "@/lib/admin-actions";
 import type { PodConfigBounds, PodConfigSection } from "@/lib/gateway";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -345,7 +353,209 @@ export function PodConfigControls({
           </CardContent>
         </Card>
       ))}
+
+      {/* Surface B — owner-editable validation bounds. */}
+      <BoundsCard isOwner={isOwner} bounds={bounds} />
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Surface B — bounds editor (Campo | Mín | Máx) for the bounded numeric fields.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** The bounded numeric hot fields (those carrying a min/max pair), in order. */
+const BOUNDED: HotField[] = FIELD_GROUPS.flatMap((g) => g.fields).filter(
+  (f): f is HotField & { minKey: keyof PodConfigBounds; maxKey: keyof PodConfigBounds } =>
+    Boolean(f.minKey && f.maxKey),
+);
+
+function BoundsCard({
+  isOwner,
+  bounds: initialBounds,
+}: {
+  isOwner: boolean;
+  bounds: PodConfigBounds;
+}) {
+  const router = useRouter();
+  const [bounds, setBounds] = useState<PodConfigBounds>(initialBounds);
+
+  function onBoundSaved(
+    field: keyof PodConfigBounds,
+    value: number,
+    label: string,
+  ) {
+    setBounds((prev) => ({ ...prev, [field]: value }));
+    toast.success(`Limite de ${label} atualizado.`);
+    router.refresh();
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-[20px] font-semibold">
+          Limites de validação
+        </CardTitle>
+        <CardDescription>
+          Envelope de segurança de cada campo. O valor salvo é validado contra
+          estes limites.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Campo</TableHead>
+              <TableHead>Mín</TableHead>
+              <TableHead>Máx</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {BOUNDED.map((f) => (
+              <TableRow key={f.field}>
+                <TableCell className="text-[14px]">{f.label}</TableCell>
+                <BoundCell
+                  isOwner={isOwner}
+                  label={f.label}
+                  side="min"
+                  field={f.minKey as keyof PodConfigBounds}
+                  counterpartField={f.maxKey as keyof PodConfigBounds}
+                  bounds={bounds}
+                  onSaved={onBoundSaved}
+                />
+                <BoundCell
+                  isOwner={isOwner}
+                  label={f.label}
+                  side="max"
+                  field={f.maxKey as keyof PodConfigBounds}
+                  counterpartField={f.minKey as keyof PodConfigBounds}
+                  bounds={bounds}
+                  onSaved={onBoundSaved}
+                />
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** One Mín/Máx cell — read-only value + (owner) inline number edit. */
+function BoundCell({
+  isOwner,
+  label,
+  side,
+  field,
+  counterpartField,
+  bounds,
+  onSaved,
+}: {
+  isOwner: boolean;
+  label: string;
+  side: "min" | "max";
+  field: keyof PodConfigBounds;
+  counterpartField: keyof PodConfigBounds;
+  bounds: PodConfigBounds;
+  onSaved: (field: keyof PodConfigBounds, value: number, label: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = bounds[field] as number;
+  const counterpart = bounds[counterpartField] as number;
+
+  function begin() {
+    setDraft(String(value));
+    setError(null);
+    setEditing(true);
+  }
+
+  async function save() {
+    const num = Number(draft);
+    if (draft.trim() === "" || Number.isNaN(num)) {
+      setError("Informe um número válido.");
+      return;
+    }
+    // Cross-field rule (server-authoritative): min < max.
+    if (
+      (side === "min" && num >= counterpart) ||
+      (side === "max" && num <= counterpart)
+    ) {
+      setError("O mínimo precisa ser menor que o máximo.");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await updatePodConfigBound({ field, value: num });
+      onSaved(field, num, label);
+      setEditing(false);
+    } catch (err) {
+      setError(mapSaveError(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  if (!isOwner || !editing) {
+    return (
+      <TableCell className="tabular-nums">
+        <div className="flex items-center gap-2">
+          <span>{value}</span>
+          {isOwner ? (
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              aria-label={`Editar limite de ${label}`}
+              onClick={begin}
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+      </TableCell>
+    );
+  }
+
+  return (
+    <TableCell className="tabular-nums">
+      <div className="flex flex-col gap-2">
+        <Input
+          type="number"
+          value={draft}
+          disabled={pending}
+          onChange={(e) => setDraft(e.target.value)}
+          className="h-8 w-24 tabular-nums"
+        />
+        <div className="flex items-center gap-2">
+          <Button type="button" size="sm" disabled={pending} onClick={save}>
+            {pending ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner />
+                Salvando…
+              </span>
+            ) : (
+              "Salvar"
+            )}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={pending}
+            onClick={() => setEditing(false)}
+          >
+            Cancelar
+          </Button>
+        </div>
+        {error ? (
+          <span className="text-[12px] text-destructive">{error}</span>
+        ) : null}
+      </div>
+    </TableCell>
   );
 }
 
