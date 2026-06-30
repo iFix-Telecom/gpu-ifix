@@ -112,6 +112,21 @@ var UpstreamsReloadTotal = promauto.NewCounterVec(
 	[]string{"result"},
 )
 
+// PodConfigReloadTotal counts podconfig.Loader.Refresh invocations,
+// labelled by outcome ("ok" | "error"). Phase 17 — incremented at boot
+// Refresh and on each LISTEN pod_config_changed NOTIFY. Mirrors
+// UpstreamsReloadTotal. A persistent "error" rate means the reconciler is
+// serving the last-good snapshot (T-17-04 last-good-on-error invariant)
+// rather than a fresh read — operators watch this to detect a stuck
+// pod_config read without provisioning ever stalling on a DB hiccup.
+var PodConfigReloadTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_pod_config_reload_total",
+		Help: "Hot-reload attempts from LISTEN pod_config_changed. result=ok|error.",
+	},
+	[]string{"result"},
+)
+
 // UpstreamThrottledTotal counts HTTP 429 responses per upstream.
 // Tracked separately from breaker failures (CONTEXT.md D-A4).
 var UpstreamThrottledTotal = promauto.NewCounterVec(
