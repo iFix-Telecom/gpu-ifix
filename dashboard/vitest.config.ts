@@ -13,6 +13,15 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "./src"),
+      // `server-only` is a Next.js marker package (a dep of `next`, not hoisted
+      // to the root node_modules) that throws when imported into a client
+      // bundle. Under vitest there is no client/server split, so map it to
+      // Next's own compiled no-op so `import "server-only"` in the server-only
+      // helpers (gateway-admin.ts) resolves cleanly in tests.
+      "server-only": resolve(
+        __dirname,
+        "./node_modules/next/dist/compiled/server-only/empty.js",
+      ),
     },
   },
 });

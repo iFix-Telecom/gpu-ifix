@@ -1,11 +1,17 @@
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type AuditResponse,
   type EconomyResponse,
   GatewayError,
+  type PodConfigResponse,
+  type PrimaryLifecycleResponse,
   fetchAudit,
   fetchEconomy,
   fetchMetrics,
+  fetchPodConfig,
+  fetchPrimaryLifecycle,
   fetchUsage,
   tenantLabel,
 } from "@/lib/gateway";
@@ -323,6 +329,170 @@ describe("fetchEconomy", () => {
     expect(result.summary.roi_multiplier).toBeNull();
     expect(result.summary.pct_servido_local).toBeNull();
     expect(result.series).toHaveLength(0);
+  });
+});
+
+describe("fetchPrimaryLifecycle", () => {
+  it("hits /api/gateway/primary/lifecycle and parses PrimaryLifecycleResponse", async () => {
+    // This payload is the ACTUAL `admin.LifecycleResponse` shape the Go
+    // handler emits (gateway/internal/admin/lifecycle.go) — fsm_state,
+    // leader, emergency_state, and open_lifecycle (null when asleep, else the
+    // OPEN lifecycle's event-trail columns with nullable fields as JSON null).
+    const payload: PrimaryLifecycleResponse = {
+      fsm_state: "ready",
+      leader: true,
+      emergency_state: "unknown",
+      open_lifecycle: {
+        id: 42,
+        trigger_reason: "schedule_up",
+        started_at: "2026-06-30T12:00:00Z",
+        first_health_pass_at: "2026-06-30T12:09:00Z",
+        drain_started_at: null,
+        ended_at: null,
+        accepted_dph: 0.76,
+        total_cost_brl: null,
+        shutdown_reason: null,
+        events: [{ at: "2026-06-30T12:00:00Z", kind: "provision" }],
+      },
+    };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchPrimaryLifecycle();
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe("/api/gateway/primary/lifecycle");
+    expect(calledUrl.startsWith("/api/gateway/")).toBe(true);
+    expect(result.fsm_state).toBe("ready");
+    expect(result.leader).toBe(true);
+    expect(result.emergency_state).toBe("unknown");
+    expect(result.open_lifecycle?.id).toBe(42);
+    expect(result.open_lifecycle?.accepted_dph).toBe(0.76);
+    expect(result.open_lifecycle?.total_cost_brl).toBeNull();
+    expect(result.open_lifecycle?.ended_at).toBeNull();
+  });
+
+  it("round-trips a null open_lifecycle (pod asleep)", async () => {
+    const payload: PrimaryLifecycleResponse = {
+      fsm_state: "asleep",
+      leader: false,
+      emergency_state: "unknown",
+      open_lifecycle: null,
+    };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchPrimaryLifecycle();
+    expect(result.open_lifecycle).toBeNull();
+    expect(result.fsm_state).toBe("asleep");
+  });
+});
+
+describe("fetchPodConfig", () => {
+  it("hits /api/gateway/primary/config and parses PodConfigResponse", async () => {
+    // This payload is the ACTUAL `admin.ConfigReadResponse` shape the Go
+    // handler emits (gateway/internal/admin/config_read.go) — config{16 hot
+    // fields, typed} + bounds{min/max pairs for the numeric fields}.
+    const payload: PodConfigResponse = {
+      config: {
+        vast_machine_blocklist: [55942, 45778],
+        vast_machine_allowlist: [43803, 55158],
+        cap_primary: 0.6,
+        cap_fallback: 1.0,
+        host_id: 0,
+        reject_private_ip: true,
+        coldstart_budget_s: 3600,
+        port_bind_budget_s: 300,
+        failure_cooldown_s: 120,
+        monthly_budget_brl: 2400,
+        schedule_up_hour: 9,
+        schedule_down_hour: 17,
+        schedule_days: ["mon", "tue", "wed", "thu", "fri"],
+        grace_ramp_down_s: 300,
+        provision_lead_s: 600,
+        schedule_disabled: false,
+      },
+      bounds: {
+        cap_primary_min: 0.1,
+        cap_primary_max: 1.5,
+        cap_fallback_min: 0.1,
+        cap_fallback_max: 3.0,
+        coldstart_budget_s_min: 600,
+        coldstart_budget_s_max: 7200,
+        port_bind_budget_s_min: 60,
+        port_bind_budget_s_max: 900,
+        failure_cooldown_s_min: 30,
+        failure_cooldown_s_max: 600,
+        monthly_budget_brl_min: 200,
+        monthly_budget_brl_max: 8000,
+        schedule_up_hour_min: 0,
+        schedule_up_hour_max: 23,
+        schedule_down_hour_min: 0,
+        schedule_down_hour_max: 23,
+        grace_ramp_down_s_min: 0,
+        grace_ramp_down_s_max: 1800,
+        provision_lead_s_min: 0,
+        provision_lead_s_max: 3600,
+      },
+    };
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchPodConfig();
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe("/api/gateway/primary/config");
+    expect(calledUrl.startsWith("/api/gateway/")).toBe(true);
+    expect(result.config.cap_primary).toBe(0.6);
+    expect(result.config.schedule_days).toEqual([
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri",
+    ]);
+    expect(result.config.vast_machine_allowlist).toEqual([43803, 55158]);
+    expect(result.bounds.cap_primary_min).toBe(0.1);
+    expect(result.bounds.cap_primary_max).toBe(1.5);
+    expect(result.bounds.schedule_down_hour_max).toBe(23);
+  });
+});
+
+describe("T-07-24 admin-key leak guard", () => {
+  it("GATEWAY_ADMIN_KEY is referenced ONLY in the two server-only files", () => {
+    // The admin key may be read by EXACTLY the two server-only readers:
+    // the GET-only proxy (route.ts) and the PATCH helper (gateway-admin.ts).
+    // It must NEVER appear in a client-facing module (gateway.ts, any page or
+    // component). Test files are excluded — they do not ship to the browser
+    // bundle. The needle is assembled at runtime so this assertion file is not
+    // itself a literal match.
+    const needle = ["GATEWAY", "ADMIN", "KEY"].join("_");
+    // vitest runs from the dashboard package root; scan its src/ tree.
+    const srcRoot = join(process.cwd(), "src");
+    const allowed = new Set([
+      join("app", "api", "gateway", "[...path]", "route.ts"),
+      join("lib", "gateway-admin.ts"),
+    ]);
+
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.(ts|tsx)$/.test(entry)) continue;
+        if (/\.test\.(ts|tsx)$/.test(entry)) continue; // not shipped to browser
+        const rel = full.slice(srcRoot.length + 1);
+        if (readFileSync(full, "utf8").includes(needle) && !allowed.has(rel)) {
+          offenders.push(rel);
+        }
+      }
+    };
+    walk(srcRoot);
+
+    expect(offenders).toEqual([]);
   });
 });
 

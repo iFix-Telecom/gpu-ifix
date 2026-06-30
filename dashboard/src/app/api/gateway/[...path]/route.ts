@@ -1,18 +1,21 @@
 /**
  * Server-side gateway proxy — /api/gateway/<anything> → ${GATEWAY_BASE_URL}/admin/<anything>.
  *
- * This is the ONLY file in the dashboard that reads GATEWAY_ADMIN_KEY. It runs
- * exclusively on the Next.js server (a route handler — never bundled into
- * client code), injects the `X-Admin-Key` header, forwards to the gateway's
- * admin API, and streams the JSON response back to the browser.
+ * This is ONE of exactly TWO server-only files in the dashboard that read
+ * GATEWAY_ADMIN_KEY — this GET-only proxy, and `src/lib/gateway-admin.ts` (the
+ * server-only PATCH helper the owner write actions use, Plan 17-05). Both run
+ * exclusively on the Next.js server (this is a route handler — never bundled
+ * into client code), inject the `X-Admin-Key` header, forward to the gateway's
+ * admin API, and stream the JSON response back to the browser.
  *
  * Threat T-07-24 (admin-key disclosure): the browser only ever sees relative
  * `/api/gateway/*` paths. The admin key never crosses the browser boundary —
- * no NEXT_PUBLIC_ exposure, no client-component reference. An acceptance
- * criterion greps the whole src/ tree and asserts GATEWAY_ADMIN_KEY appears
- * in exactly this file.
+ * no NEXT_PUBLIC_ exposure, no client-component reference. An acceptance test
+ * (gateway.test.ts "admin-key leak guard") greps the whole src/ tree and
+ * asserts GATEWAY_ADMIN_KEY appears in EXACTLY these two server-only files.
  *
- * The dashboard is read-only (UI-SPEC) — only GET is proxied.
+ * This proxy stays GET-only (D-07) — the write path goes through the dedicated
+ * server-only gateway-admin.ts helper, NOT this proxy.
  */
 import { type NextRequest, NextResponse } from "next/server";
 

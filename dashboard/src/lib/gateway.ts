@@ -309,6 +309,105 @@ export interface EconomyResponse {
   series: EconomyDayRow[];
 }
 
+// --- /admin/primary/lifecycle (POD-CFG-07, Plan 17-04) --------------------
+//
+// Mirrors the Go handler `admin.LifecycleResponse` / `admin.OpenLifecycleSection`
+// in gateway/internal/admin/lifecycle.go FIELD-FOR-FIELD (the Go struct is the
+// source of truth — Plan 17-04 SUMMARY). Nullable pgtype columns render as JSON
+// null → typed `T | null` here. `open_lifecycle` is null when the pod is asleep.
+// This is a plain GET read through the server-side proxy — it carries NO admin
+// key (the key lives in route.ts + gateway-admin.ts only).
+
+/** The OPEN primary lifecycle's event trail. Mirrors `admin.OpenLifecycleSection`. */
+export interface PrimaryLifecycleOpen {
+  id: number;
+  trigger_reason: string;
+  /** RFC3339. */
+  started_at: string;
+  first_health_pass_at: string | null;
+  drain_started_at: string | null;
+  /** null = still running. */
+  ended_at: string | null;
+  accepted_dph: number | null;
+  total_cost_brl: number | null;
+  shutdown_reason: string | null;
+  /** jsonb event trail; null when empty. */
+  events: unknown;
+}
+
+/**
+ * `/admin/primary/lifecycle` JSON — the live-status panel poll (D-05).
+ * Mirrors `admin.LifecycleResponse`.
+ */
+export interface PrimaryLifecycleResponse {
+  fsm_state: string;
+  leader: boolean;
+  emergency_state: string;
+  open_lifecycle: PrimaryLifecycleOpen | null;
+}
+
+// --- /admin/primary/config (POD-CFG-06/07, Plan 17-04) --------------------
+//
+// Mirrors the Go handler `admin.ConfigReadResponse` / `admin.ConfigSection` /
+// `admin.BoundsSection` in gateway/internal/admin/config_read.go FIELD-FOR-FIELD.
+// The read seam the editor uses for current values, the owner server action
+// re-reads to refetch the LIVE bound during validation, and the audit sources
+// `old` from. Reads pod_config ONLY (NOT the boot env). 16 hot fields + 10
+// numeric min/max bound pairs.
+
+/** The 16 hot pod_config fields, typed. Mirrors `admin.ConfigSection`. */
+export interface PodConfigSection {
+  vast_machine_blocklist: number[];
+  vast_machine_allowlist: number[];
+  cap_primary: number;
+  cap_fallback: number;
+  host_id: number;
+  reject_private_ip: boolean;
+  coldstart_budget_s: number;
+  port_bind_budget_s: number;
+  failure_cooldown_s: number;
+  monthly_budget_brl: number;
+  schedule_up_hour: number;
+  schedule_down_hour: number;
+  schedule_days: string[];
+  grace_ramp_down_s: number;
+  provision_lead_s: number;
+  schedule_disabled: boolean;
+}
+
+/** The owner-editable min/max gate pairs. Mirrors `admin.BoundsSection`. */
+export interface PodConfigBounds {
+  cap_primary_min: number;
+  cap_primary_max: number;
+  cap_fallback_min: number;
+  cap_fallback_max: number;
+  coldstart_budget_s_min: number;
+  coldstart_budget_s_max: number;
+  port_bind_budget_s_min: number;
+  port_bind_budget_s_max: number;
+  failure_cooldown_s_min: number;
+  failure_cooldown_s_max: number;
+  monthly_budget_brl_min: number;
+  monthly_budget_brl_max: number;
+  schedule_up_hour_min: number;
+  schedule_up_hour_max: number;
+  schedule_down_hour_min: number;
+  schedule_down_hour_max: number;
+  grace_ramp_down_s_min: number;
+  grace_ramp_down_s_max: number;
+  provision_lead_s_min: number;
+  provision_lead_s_max: number;
+}
+
+/**
+ * `/admin/primary/config` JSON — current pod_config row + bounds.
+ * Mirrors `admin.ConfigReadResponse`.
+ */
+export interface PodConfigResponse {
+  config: PodConfigSection;
+  bounds: PodConfigBounds;
+}
+
 /**
  * Error envelope surfaced by the proxy or the gateway.
  *
@@ -425,4 +524,24 @@ export function fetchOperations(): Promise<OperationsResponse> {
  */
 export function fetchEconomy(from: string, to: string): Promise<EconomyResponse> {
   return proxyGet<EconomyResponse>("economy", { from, to });
+}
+
+/**
+ * GET /admin/primary/lifecycle — live FSM state + leadership + emergency state
+ * + the OPEN primary lifecycle event trail (D-05). Powers the live-status panel
+ * poll (Plan 17-06). Read-only through the proxy (D-07) — carries no admin key.
+ */
+export function fetchPrimaryLifecycle(): Promise<PrimaryLifecycleResponse> {
+  return proxyGet<PrimaryLifecycleResponse>("primary/lifecycle");
+}
+
+/**
+ * GET /admin/primary/config — the CURRENT pod_config row (16 hot fields) + the
+ * numeric min/max bounds. This is the read path the owner server action uses
+ * server-side to refetch the LIVE bound for validation and to source the audit
+ * `old` value, and the page (Plan 17-06) uses for current values. Read-only
+ * through the proxy (D-07) — carries no admin key.
+ */
+export function fetchPodConfig(): Promise<PodConfigResponse> {
+  return proxyGet<PodConfigResponse>("primary/config");
 }
