@@ -70,6 +70,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0028_remove_local_stt_upstream.sql",
 		"0029_readd_whisper_add_gemini_groq.sql",
 		"0030_probe_status_allow_config.sql",
+		"0031_create_pod_config.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)

@@ -75,6 +75,10 @@ type Querier interface {
 	// Returns the single open lifecycle row (ended_at IS NULL) or pgx.ErrNoRows.
 	// Bounded LIMIT 1 because primary_live_singleton unique index guarantees at most 1.
 	GetOpenPrimaryLifecycle(ctx context.Context) (AiGatewayPrimaryLifecycle, error)
+	// Hot-path single-row read at boot and on every pod_config_changed NOTIFY
+	// (Phase 17 D-01). The boolean PK CHECK (id = TRUE) guarantees at most one row;
+	// returns pgx.ErrNoRows when the table is still empty (pre-seed).
+	GetPodConfig(ctx context.Context) (AiGatewayPodConfig, error)
 	GetTenantBySlug(ctx context.Context, slug string) (GetTenantBySlugRow, error)
 	// Hot-path: single PK lookup of full tenant config including Phase 4 + Phase 5 columns.
 	GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantConfigRow, error)
@@ -228,6 +232,11 @@ type Querier interface {
 	ResetUsageCountersForReconcile(ctx context.Context, arg ResetUsageCountersForReconcileParams) error
 	RevokeAPIKey(ctx context.Context, id uuid.UUID) error
 	RevokeAdminKey(ctx context.Context, id uuid.UUID) error
+	// Idempotent env->DB first-boot seed (Plan 17-03). Inserts the 16 hot fields +
+	// 10 numeric bound pairs from the current env-derived config. ON CONFLICT (id)
+	// DO NOTHING makes a second boot a no-op so operator edits are NEVER overwritten
+	// (T-17-01). The id column defaults to TRUE (single-row guard).
+	SeedPodConfig(ctx context.Context, arg SeedPodConfigParams) error
 	// Shortcut for enable/disable subcommands.
 	SetUpstreamEnabled(ctx context.Context, arg SetUpstreamEnabledParams) error
 	// GATEWAY-WIDE summary aggregate for GET /admin/economy (OBS-09). No tenant
@@ -275,6 +284,51 @@ type Querier interface {
 	// offer_id, instance_id, and accepted dph price; appends an event to the JSONB
 	// timeline. event_json is a single object {ts, from_state, to_state, reason, payload}.
 	UpdateEmergencyLifecycleVastIDs(ctx context.Context, arg UpdateEmergencyLifecycleVastIDsParams) error
+	UpdatePodConfigBoundCapFallbackMax(ctx context.Context, capFallbackMax pgtype.Numeric) error
+	UpdatePodConfigBoundCapFallbackMin(ctx context.Context, capFallbackMin pgtype.Numeric) error
+	UpdatePodConfigBoundCapPrimaryMax(ctx context.Context, capPrimaryMax pgtype.Numeric) error
+	// ----------------------------------------------------------------------------
+	// UpdatePodConfigBound — one :exec per owner-editable bound column (D-03). The
+	// bounds gate operator-supplied config values; they are themselves editable.
+	// ----------------------------------------------------------------------------
+	UpdatePodConfigBoundCapPrimaryMin(ctx context.Context, capPrimaryMin pgtype.Numeric) error
+	UpdatePodConfigBoundColdstartBudgetSMax(ctx context.Context, coldstartBudgetSMax int32) error
+	UpdatePodConfigBoundColdstartBudgetSMin(ctx context.Context, coldstartBudgetSMin int32) error
+	UpdatePodConfigBoundFailureCooldownSMax(ctx context.Context, failureCooldownSMax int32) error
+	UpdatePodConfigBoundFailureCooldownSMin(ctx context.Context, failureCooldownSMin int32) error
+	UpdatePodConfigBoundGraceRampDownSMax(ctx context.Context, graceRampDownSMax int32) error
+	UpdatePodConfigBoundGraceRampDownSMin(ctx context.Context, graceRampDownSMin int32) error
+	UpdatePodConfigBoundMonthlyBudgetBRLMax(ctx context.Context, monthlyBudgetBrlMax pgtype.Numeric) error
+	UpdatePodConfigBoundMonthlyBudgetBRLMin(ctx context.Context, monthlyBudgetBrlMin pgtype.Numeric) error
+	UpdatePodConfigBoundPortBindBudgetSMax(ctx context.Context, portBindBudgetSMax int32) error
+	UpdatePodConfigBoundPortBindBudgetSMin(ctx context.Context, portBindBudgetSMin int32) error
+	UpdatePodConfigBoundProvisionLeadSMax(ctx context.Context, provisionLeadSMax int32) error
+	UpdatePodConfigBoundProvisionLeadSMin(ctx context.Context, provisionLeadSMin int32) error
+	UpdatePodConfigBoundScheduleDownHourMax(ctx context.Context, scheduleDownHourMax int32) error
+	UpdatePodConfigBoundScheduleDownHourMin(ctx context.Context, scheduleDownHourMin int32) error
+	UpdatePodConfigBoundScheduleUpHourMax(ctx context.Context, scheduleUpHourMax int32) error
+	UpdatePodConfigBoundScheduleUpHourMin(ctx context.Context, scheduleUpHourMin int32) error
+	UpdatePodConfigFieldAllowlist(ctx context.Context, vastMachineAllowlist []int64) error
+	// ----------------------------------------------------------------------------
+	// UpdatePodConfigField — one :exec per editable HOT column (Plan 17-04). One
+	// column per query keeps the dashboard audit diff clean (PATTERNS.md line 184).
+	// Every UPDATE sets updated_at = now() and targets the single row (id = TRUE).
+	// ----------------------------------------------------------------------------
+	UpdatePodConfigFieldBlocklist(ctx context.Context, vastMachineBlocklist []int64) error
+	UpdatePodConfigFieldCapFallback(ctx context.Context, capFallback pgtype.Numeric) error
+	UpdatePodConfigFieldCapPrimary(ctx context.Context, capPrimary pgtype.Numeric) error
+	UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, coldstartBudgetS int32) error
+	UpdatePodConfigFieldFailureCooldownS(ctx context.Context, failureCooldownS int32) error
+	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, graceRampDownS int32) error
+	UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) error
+	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error
+	UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, portBindBudgetS int32) error
+	UpdatePodConfigFieldProvisionLeadS(ctx context.Context, provisionLeadS int32) error
+	UpdatePodConfigFieldRejectPrivateIP(ctx context.Context, rejectPrivateIp bool) error
+	UpdatePodConfigFieldScheduleDays(ctx context.Context, scheduleDays []string) error
+	UpdatePodConfigFieldScheduleDisabled(ctx context.Context, scheduleDisabled bool) error
+	UpdatePodConfigFieldScheduleDownHour(ctx context.Context, scheduleDownHour int32) error
+	UpdatePodConfigFieldScheduleUpHour(ctx context.Context, scheduleUpHour int32) error
 	// Called immediately after vast.create_instance succeeds. Records the Vast
 	// offer_id, instance_id, and accepted dph price; appends an event to the JSONB
 	// timeline. event_json is a single object {ts, from_state, to_state, reason, payload}.

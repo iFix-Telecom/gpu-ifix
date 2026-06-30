@@ -129,6 +129,48 @@ type AiGatewayModelAlias struct {
 	UpstreamName string `json:"upstream_name"`
 }
 
+// Single-row DB-backed primary-pod HOT config (Phase 17). 16 hot fields + 10 numeric bound pairs. Seeded from env at boot (Plan 17-03); owner-edited via PATCH /admin/primary/config (Plan 17-04). pod_config_changed NOTIFY drives the in-memory loader reload.
+type AiGatewayPodConfig struct {
+	ID                   bool           `json:"id"`
+	VastMachineBlocklist []int64        `json:"vast_machine_blocklist"`
+	VastMachineAllowlist []int64        `json:"vast_machine_allowlist"`
+	CapPrimary           pgtype.Numeric `json:"cap_primary"`
+	CapFallback          pgtype.Numeric `json:"cap_fallback"`
+	HostID               int64          `json:"host_id"`
+	RejectPrivateIp      bool           `json:"reject_private_ip"`
+	ColdstartBudgetS     int32          `json:"coldstart_budget_s"`
+	PortBindBudgetS      int32          `json:"port_bind_budget_s"`
+	FailureCooldownS     int32          `json:"failure_cooldown_s"`
+	MonthlyBudgetBrl     pgtype.Numeric `json:"monthly_budget_brl"`
+	ScheduleUpHour       int32          `json:"schedule_up_hour"`
+	ScheduleDownHour     int32          `json:"schedule_down_hour"`
+	ScheduleDays         []string       `json:"schedule_days"`
+	GraceRampDownS       int32          `json:"grace_ramp_down_s"`
+	ProvisionLeadS       int32          `json:"provision_lead_s"`
+	ScheduleDisabled     bool           `json:"schedule_disabled"`
+	CapPrimaryMin        pgtype.Numeric `json:"cap_primary_min"`
+	CapPrimaryMax        pgtype.Numeric `json:"cap_primary_max"`
+	CapFallbackMin       pgtype.Numeric `json:"cap_fallback_min"`
+	CapFallbackMax       pgtype.Numeric `json:"cap_fallback_max"`
+	ColdstartBudgetSMin  int32          `json:"coldstart_budget_s_min"`
+	ColdstartBudgetSMax  int32          `json:"coldstart_budget_s_max"`
+	PortBindBudgetSMin   int32          `json:"port_bind_budget_s_min"`
+	PortBindBudgetSMax   int32          `json:"port_bind_budget_s_max"`
+	FailureCooldownSMin  int32          `json:"failure_cooldown_s_min"`
+	FailureCooldownSMax  int32          `json:"failure_cooldown_s_max"`
+	MonthlyBudgetBrlMin  pgtype.Numeric `json:"monthly_budget_brl_min"`
+	MonthlyBudgetBrlMax  pgtype.Numeric `json:"monthly_budget_brl_max"`
+	ScheduleUpHourMin    int32          `json:"schedule_up_hour_min"`
+	ScheduleUpHourMax    int32          `json:"schedule_up_hour_max"`
+	ScheduleDownHourMin  int32          `json:"schedule_down_hour_min"`
+	ScheduleDownHourMax  int32          `json:"schedule_down_hour_max"`
+	GraceRampDownSMin    int32          `json:"grace_ramp_down_s_min"`
+	GraceRampDownSMax    int32          `json:"grace_ramp_down_s_max"`
+	ProvisionLeadSMin    int32          `json:"provision_lead_s_min"`
+	ProvisionLeadSMax    int32          `json:"provision_lead_s_max"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+}
+
 type AiGatewayPrice struct {
 	ID          uuid.UUID          `json:"id"`
 	Model       string             `json:"model"`

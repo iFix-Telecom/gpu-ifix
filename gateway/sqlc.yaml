@@ -15,6 +15,7 @@ sql:
       - db/queries/admin_keys.sql
       - db/queries/emergency_lifecycles.sql
       - db/queries/primary_lifecycles.sql
+      - db/queries/pod_config.sql
       - db/queries/voices.sql
     schema: db/migrations
     gen:
