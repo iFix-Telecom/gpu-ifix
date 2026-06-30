@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-last_updated: "2026-06-30T20:34:43.746Z"
+status: executing
+last_updated: "2026-06-30T20:55:37.870Z"
 progress:
   total_phases: 14
   completed_phases: 11
   total_plans: 68
-  completed_plans: 62
+  completed_plans: 63
   percent: 79
 ---
 
@@ -27,8 +27,8 @@ progress:
 
 ## Current Position
 
-Phase: 16
-Plan: 2/2 COMPLETE + live-UAT PASSED (2026-06-29). status: passed. TEN-04 fully closed (code + live).
+Phase: 17 (dashboard-pod-config-control-owner-controla-todas-as-configs) — EXECUTING
+Plan: 2 of 6
 Next work: v1 milestone close. Phase 16 CLOSED the sole v1 code blocker AND live-proved it. Producer `applyAudioEmbedUsage` wired into 7 STT/embed proxies + RequestAudioSecondsMiddleware mounted. Live-UAT on ai-gateway-dev (rev 3374999) found+fixed a path-rewrite bug (gemini-stt rewrites URL.Path → route misclassified 'chat' → metering dropped; fix commit 3374999 stamps billing route from inbound path pre-rewrite into ctx). Verified live: billing_events route=stt audio_seconds=5 + route=embed embeds_count=2; usage_counters audio_seconds=5 embeds_count=5 (quota source populated, was 0). Remaining for v1 "complete": (1) reconcile remaining stale REQUIREMENTS checkboxes (40 done 2026-06-27); (2) sign off 08/09 client UAT (INT-01..06 — operator + LGPD, process gap); (3) flip Phase 13 VERIFICATION status→passed; (4) backfill 06.5 VERIFICATION.md. Then re-run /gsd:audit-milestone → /gsd:complete-milestone v1. All 25 phases executed.
 
 PROD PROMOTED 2026-06-29: main FF'd develop→72ffcb5 (pushed). Gateway :main rebuilt on n8n-ia-vm (manual recipe, context=repo root, -f gateway/Dockerfile) + recreated (--pull never). Prod healthy, leadership reacquired, primary pod UP (Mon 9-17 BRT). TEN-04 metering LIVE-PROVEN in PROD against REAL traffic: bd_ai_gateway_prod billing_events shows stt/gemini-stt audio_seconds=0.6/0.8/1.4 (real prod STT calls now metered via the fixed path-rewrite path; were 0/dropped) + embed/local-embed embeds_count=2 (smoke). Rollback tag ghcr.io/...:rollback-pre-ten04. NOTE: manual VM build bakes no git-rev label (version="dev") — confirm prod deploys via behavior/billing rows, not rev label. PROD dashboard NOT rebuilt (Phase 16 has no dashboard change).
@@ -131,7 +131,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Ready to plan
+- **Status:** Ready to execute
 
 ## Performance Metrics
 
@@ -216,10 +216,11 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 | Phase 11.2 P06 | 35min | 3 tasks | 8 files |
 | Phase 11.2 P07 | 8m | 2 tasks | 3 files |
 | Phase 11.2 P08 | 2h 20min | 3 tasks | 10 files |
+| Phase 17 P01 | 20min | 2 tasks | 9 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-06-30T20:34:43.731Z
+- **Last session:** 2026-06-30T20:55:10.757Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
@@ -236,3 +237,5 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 - [Phase ?]: Phase 11.2 Plan 07 — created docs/RUNBOOK-OPS.md as canonical STT cascade operator playbook
 - [Phase ?]: Phase 11.2 Plan 07 — gateway/.env.example created mirroring pod/.env.example parity
 - [Phase 14]: 14-02 — pod self-decides whisper device at onstart via nvidia-smi total-VRAM sum (awk, no bc): >=30000 MiB → cuda pinned to the max-free GPU index (WHISPER__DEVICE_INDEX; llama --split-mode layer leaves no Qwen-free card so max-free, not non-Qwen, is the headroom pick); below threshold / nvidia-smi absent → cpu. Exports precede exec supervisord so [program:speaches] inherits the device (supervisord.conf:46 cpu pin removed, HF_HUB_CACHE kept — env inheritance Option A, fail-open). Minimal python3 :9100 /whisper_device responder (NOT health-bridge — that's compose-only) + -p 9100:9100 forwarded; fulfills the Plan 14-01 device-report contract. Image rebuild + live UAT gated in 14-03.
+- [Phase ?]: pod_config columns all NOT NULL — env seed always supplies all 36 values; no optional knobs
+- [Phase ?]: Generated model is gen.AiGatewayPodConfig (schema-qualified), not gen.PodConfig — downstream 17-02..06 must use it
