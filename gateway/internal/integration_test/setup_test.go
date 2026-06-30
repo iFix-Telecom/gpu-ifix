@@ -168,7 +168,13 @@ func freshSchema(t *testing.T, ctx context.Context) (*pgxpool.Pool, *redis.Clien
 	// asserts and colliding with the emergency_live_singleton partial
 	// unique index (which would abort FSM transitions). RESTART IDENTITY
 	// resets its BIGSERIAL id sequence so ids stay deterministic per test.
-	for _, tbl := range []string{"api_keys", "audit_log", "audit_log_content", "usage_counters", "tenants"} {
+	// pod_config (Phase 17, migration 0031) is a single-row table that no
+	// migration seeds — it starts EMPTY and is populated only by the Go-side
+	// SeedPodConfig at boot. Truncate it between cases so the shared package
+	// container starts clean (parity with the lifecycle tables below); the
+	// empty-before-seed assertion in pod_config_test stays deterministic on
+	// re-runs.
+	for _, tbl := range []string{"api_keys", "audit_log", "audit_log_content", "usage_counters", "tenants", "pod_config"} {
 		if _, err := pool.Exec(ctx, "TRUNCATE ai_gateway."+tbl+" CASCADE"); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
