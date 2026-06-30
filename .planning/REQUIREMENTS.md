@@ -123,7 +123,7 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 
 - [x] **POD-CFG-01**: Migration 0031 `ai_gateway.pod_config` single-row table (16 hot fields) + `pod_config_changed` NOTIFY trigger (espelha 0009)
 - [x] **POD-CFG-02**: Seed env→DB idempotente no 1º boot (ON CONFLICT DO NOTHING); env permanece fallback (NÃO removido) (D-02)
-- [ ] **POD-CFG-03**: `podconfig.Loader` hot-reload (LISTEN/NOTIFY + atomic snapshot + last-good-on-error) espelhando `upstreams.Loader`
+- [x] **POD-CFG-03**: `podconfig.Loader` hot-reload (LISTEN/NOTIFY + atomic snapshot + last-good-on-error) espelhando `upstreams.Loader`
 - [ ] **POD-CFG-04**: Reconciler/budget/schedule leem os 16 hot fields do snapshot (próxima provision/tick); estruturais continuam em `r.cfg` (D-01/D-02)
 - [x] **POD-CFG-05**: Storage de bounds (min/max) owner-editável, seedado dos defaults da RESEARCH (D-03)
 - [ ] **POD-CFG-06**: Endpoint gateway `PATCH /admin/primary/config` (write, X-Admin-Key) → UpdatePodConfigField/Bound; SEM restart/estrutural (D-02)
