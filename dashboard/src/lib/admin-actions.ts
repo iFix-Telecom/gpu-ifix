@@ -43,6 +43,11 @@ import { isAllowedEmail } from "@/lib/allowlist";
 import { auth as realAuth } from "@/lib/auth";
 import { getDb, schema } from "@/lib/db";
 import { sendMail } from "@/lib/email";
+import {
+  fetchPodConfig as realFetchPodConfig,
+  type PodConfigResponse,
+} from "@/lib/gateway";
+import { gatewayAdminPatch as realGatewayAdminPatch } from "@/lib/gateway-admin";
 
 type Role = "owner" | "operator" | string;
 
@@ -368,6 +373,268 @@ export async function changePassword(args: {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// POD-CFG-10/11/07 — owner-gated pod-config write actions (Plan 17-05).
+//
+// Mirror inviteOperator EXACTLY: requireOwner FIRST (D-07, server-side) →
+// refetch the LIVE pod_config (the single source for the current value AND the
+// validation bound — never trust a client-passed value) → validate against the
+// refetched bound BEFORE any gateway call (D-03a, defense-in-depth with the
+// gateway's own check) → PATCH the gateway via the server-only key helper (D-07,
+// NOT the read-only proxy) → write EXACTLY one audit row (D-06) → revalidate.
+// ──────────────────────────────────────────────────────────────────────────
+
+type PodConfigSection = PodConfigResponse["config"];
+type PodConfigBoundsT = PodConfigResponse["bounds"];
+
+/**
+ * Spec for one editable hot config field. `configKey` is where the audit `old`
+ * value is read from the refetched snapshot (the PATCH `field` name and the GET
+ * config key diverge only for the two list fields). When `min`/`max` are set
+ * the value is range-validated against those refetched bounds; `hour` adds the
+ * 0-23 + up≠down cross-field rule.
+ */
+interface ConfigFieldSpec {
+  configKey: keyof PodConfigSection;
+  min?: keyof PodConfigBoundsT;
+  max?: keyof PodConfigBoundsT;
+  hour?: boolean;
+}
+
+/** The 16 hot fields, keyed by their gateway PATCH `field` name. */
+const CONFIG_FIELDS: Record<string, ConfigFieldSpec> = {
+  blocklist: { configKey: "vast_machine_blocklist" },
+  allowlist: { configKey: "vast_machine_allowlist" },
+  cap_primary: {
+    configKey: "cap_primary",
+    min: "cap_primary_min",
+    max: "cap_primary_max",
+  },
+  cap_fallback: {
+    configKey: "cap_fallback",
+    min: "cap_fallback_min",
+    max: "cap_fallback_max",
+  },
+  host_id: { configKey: "host_id" },
+  reject_private_ip: { configKey: "reject_private_ip" },
+  coldstart_budget_s: {
+    configKey: "coldstart_budget_s",
+    min: "coldstart_budget_s_min",
+    max: "coldstart_budget_s_max",
+  },
+  port_bind_budget_s: {
+    configKey: "port_bind_budget_s",
+    min: "port_bind_budget_s_min",
+    max: "port_bind_budget_s_max",
+  },
+  failure_cooldown_s: {
+    configKey: "failure_cooldown_s",
+    min: "failure_cooldown_s_min",
+    max: "failure_cooldown_s_max",
+  },
+  monthly_budget_brl: {
+    configKey: "monthly_budget_brl",
+    min: "monthly_budget_brl_min",
+    max: "monthly_budget_brl_max",
+  },
+  schedule_up_hour: {
+    configKey: "schedule_up_hour",
+    min: "schedule_up_hour_min",
+    max: "schedule_up_hour_max",
+    hour: true,
+  },
+  schedule_down_hour: {
+    configKey: "schedule_down_hour",
+    min: "schedule_down_hour_min",
+    max: "schedule_down_hour_max",
+    hour: true,
+  },
+  schedule_days: { configKey: "schedule_days" },
+  grace_ramp_down_s: {
+    configKey: "grace_ramp_down_s",
+    min: "grace_ramp_down_s_min",
+    max: "grace_ramp_down_s_max",
+  },
+  provision_lead_s: {
+    configKey: "provision_lead_s",
+    min: "provision_lead_s_min",
+    max: "provision_lead_s_max",
+  },
+  schedule_disabled: { configKey: "schedule_disabled" },
+};
+
+/** Spec for one editable bound: its counterpart + which side this field is. */
+interface BoundFieldSpec {
+  counterpart: keyof PodConfigBoundsT;
+  side: "min" | "max";
+}
+
+/** The 20 bound fields, keyed by their gateway PATCH `field` name. */
+const BOUND_FIELDS: Record<string, BoundFieldSpec> = {
+  cap_primary_min: { counterpart: "cap_primary_max", side: "min" },
+  cap_primary_max: { counterpart: "cap_primary_min", side: "max" },
+  cap_fallback_min: { counterpart: "cap_fallback_max", side: "min" },
+  cap_fallback_max: { counterpart: "cap_fallback_min", side: "max" },
+  coldstart_budget_s_min: { counterpart: "coldstart_budget_s_max", side: "min" },
+  coldstart_budget_s_max: { counterpart: "coldstart_budget_s_min", side: "max" },
+  port_bind_budget_s_min: { counterpart: "port_bind_budget_s_max", side: "min" },
+  port_bind_budget_s_max: { counterpart: "port_bind_budget_s_min", side: "max" },
+  failure_cooldown_s_min: { counterpart: "failure_cooldown_s_max", side: "min" },
+  failure_cooldown_s_max: { counterpart: "failure_cooldown_s_min", side: "max" },
+  monthly_budget_brl_min: { counterpart: "monthly_budget_brl_max", side: "min" },
+  monthly_budget_brl_max: { counterpart: "monthly_budget_brl_min", side: "max" },
+  schedule_up_hour_min: { counterpart: "schedule_up_hour_max", side: "min" },
+  schedule_up_hour_max: { counterpart: "schedule_up_hour_min", side: "max" },
+  schedule_down_hour_min: { counterpart: "schedule_down_hour_max", side: "min" },
+  schedule_down_hour_max: { counterpart: "schedule_down_hour_min", side: "max" },
+  grace_ramp_down_s_min: { counterpart: "grace_ramp_down_s_max", side: "min" },
+  grace_ramp_down_s_max: { counterpart: "grace_ramp_down_s_min", side: "max" },
+  provision_lead_s_min: { counterpart: "provision_lead_s_max", side: "min" },
+  provision_lead_s_max: { counterpart: "provision_lead_s_min", side: "max" },
+};
+
+/** Injectable seams for unit tests (mock the gateway read + write). */
+interface PodConfigDeps {
+  fetchConfig?: () => Promise<PodConfigResponse>;
+  patch?: (path: string, body: unknown) => Promise<void>;
+}
+
+/**
+ * Edit ONE hot pod_config field. Owner-gated (D-07). The value is validated
+ * against the REFETCHED live bound BEFORE the gateway PATCH (D-03a); the audit
+ * `old` is sourced from that SAME refetch (never a client-passed value). Writes
+ * exactly one `pod_config.update` audit row with metadata `{field, old, new}` —
+ * NEVER any secret. One field per call (clean audit diff).
+ */
+export async function updatePodConfig(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  field: string;
+  value: unknown;
+  deps?: PodConfigDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  const spec = CONFIG_FIELDS[args.field];
+  if (!spec) {
+    throw new Error(`Campo de configuração desconhecido: ${args.field}`);
+  }
+
+  const fetchConfig = args.deps?.fetchConfig ?? realFetchPodConfig;
+  const patch = args.deps?.patch ?? realGatewayAdminPatch;
+
+  // Refetch the LIVE config: the single source for both the bound and the
+  // audit `old`. Done AFTER the owner gate, BEFORE validation.
+  const current = await fetchConfig();
+
+  // Range-validate numeric fields against the refetched bound (D-03a).
+  if (spec.min && spec.max) {
+    if (typeof args.value !== "number" || Number.isNaN(args.value)) {
+      throw new Error(`Valor inválido para ${args.field}.`);
+    }
+    const lo = current.bounds[spec.min] as number;
+    const hi = current.bounds[spec.max] as number;
+    if (args.value < lo || args.value > hi) {
+      throw new Error(
+        `Valor ${args.value} fora do limite permitido [${lo}, ${hi}] para ${args.field}.`,
+      );
+    }
+    if (spec.hour) {
+      if (args.value < 0 || args.value > 23) {
+        throw new Error("A hora deve estar entre 0 e 23.");
+      }
+      const other =
+        args.field === "schedule_up_hour"
+          ? current.config.schedule_down_hour
+          : current.config.schedule_up_hour;
+      if (args.value === other) {
+        throw new Error(
+          "schedule_up_hour e schedule_down_hour devem ser diferentes.",
+        );
+      }
+    }
+  }
+
+  await patch("primary/config", {
+    field: args.field,
+    value: args.value,
+    kind: "config",
+  });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "pod_config.update",
+    metadata: {
+      field: args.field,
+      old: current.config[spec.configKey],
+      new: args.value,
+    },
+  });
+
+  safeRevalidatePodConfig();
+}
+
+/**
+ * Edit ONE owner-editable bound. Owner-gated (D-07). Enforces min < max against
+ * the REFETCHED counterpart bound BEFORE the gateway PATCH; the audit `old` is
+ * sourced from the same refetch. Writes exactly one `pod_config_bounds.update`
+ * audit row with metadata `{field, old, new}`.
+ */
+export async function updatePodConfigBound(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  field: string;
+  value: unknown;
+  deps?: PodConfigDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  const spec = BOUND_FIELDS[args.field];
+  if (!spec) {
+    throw new Error(`Limite desconhecido: ${args.field}`);
+  }
+  if (typeof args.value !== "number" || Number.isNaN(args.value)) {
+    throw new Error(`Valor inválido para ${args.field}.`);
+  }
+
+  const fetchConfig = args.deps?.fetchConfig ?? realFetchPodConfig;
+  const patch = args.deps?.patch ?? realGatewayAdminPatch;
+
+  const current = await fetchConfig();
+  const counterpart = current.bounds[spec.counterpart] as number;
+
+  if (spec.side === "min" && args.value >= counterpart) {
+    throw new Error(`O limite mínimo deve ser menor que o máximo (${counterpart}).`);
+  }
+  if (spec.side === "max" && args.value <= counterpart) {
+    throw new Error(`O limite máximo deve ser maior que o mínimo (${counterpart}).`);
+  }
+
+  await patch("primary/config", {
+    field: args.field,
+    value: args.value,
+    kind: "bound",
+  });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "pod_config_bounds.update",
+    metadata: {
+      field: args.field,
+      old: current.bounds[args.field as keyof PodConfigBoundsT],
+      new: args.value,
+    },
+  });
+
+  safeRevalidatePodConfig();
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Shared helpers.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -380,6 +647,18 @@ export async function changePassword(args: {
 function safeRevalidate(): void {
   try {
     revalidatePath("/settings/operadores");
+  } catch {
+    // Not inside a Next.js request scope (unit test) — nothing to revalidate.
+  }
+}
+
+/**
+ * Revalidate the pod-config page after an owner edit (Plan 17-05/17-06).
+ * Swallowed outside a Next.js request scope (unit test), like safeRevalidate.
+ */
+function safeRevalidatePodConfig(): void {
+  try {
+    revalidatePath("/operacao/config");
   } catch {
     // Not inside a Next.js request scope (unit test) — nothing to revalidate.
   }

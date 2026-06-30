@@ -3,7 +3,7 @@
  *
  * This is ONE of exactly TWO server-only files in the dashboard that read
  * GATEWAY_ADMIN_KEY — this GET-only proxy, and `src/lib/gateway-admin.ts` (the
- * server-only PATCH helper the owner write actions use, Plan 17-05). Both run
+ * server-only write helper the owner write actions use, Plan 17-05). Both run
  * exclusively on the Next.js server (this is a route handler — never bundled
  * into client code), inject the `X-Admin-Key` header, forward to the gateway's
  * admin API, and stream the JSON response back to the browser.
