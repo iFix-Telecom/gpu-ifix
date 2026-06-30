@@ -25,7 +25,7 @@ import { memoryAdapter } from "better-auth/adapters/memory";
 import { admin as adminPlugin, twoFactor } from "better-auth/plugins";
 import { createAccessControl } from "better-auth/plugins/access";
 import { defaultStatements } from "better-auth/plugins/admin/access";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the Brevo SMTP mailer transport — no real SMTP in tests. Waves 1-3
 // will create `src/lib/email.ts` exporting `sendMail` (the nodemailer
@@ -37,6 +37,63 @@ vi.mock("@/lib/email", () => ({
   // nodemailer transporter object directly.
   mailer: { sendMail: sendMailMock },
 }));
+
+// Mock the pod-config read wrapper (the LIVE-bound + audit-old source) and the
+// server-only PATCH helper. The owner write actions (Plan 17-05) refetch the
+// config via fetchPodConfig server-side, validate, then PATCH via
+// gatewayAdminPatch — both are mocked so no proxy/network/admin-key is touched.
+const { fetchPodConfigMock, gatewayAdminPatchMock } = vi.hoisted(() => ({
+  fetchPodConfigMock: vi.fn(),
+  gatewayAdminPatchMock: vi.fn(),
+}));
+vi.mock("@/lib/gateway", () => ({ fetchPodConfig: fetchPodConfigMock }));
+vi.mock("@/lib/gateway-admin", () => ({ gatewayAdminPatch: gatewayAdminPatchMock }));
+
+/** A representative live pod_config snapshot for the write-action tests. */
+function buildPodConfig() {
+  return {
+    config: {
+      vast_machine_blocklist: [55942],
+      vast_machine_allowlist: [43803, 55158],
+      cap_primary: 0.5,
+      cap_fallback: 1.0,
+      host_id: 0,
+      reject_private_ip: true,
+      coldstart_budget_s: 3600,
+      port_bind_budget_s: 300,
+      failure_cooldown_s: 120,
+      monthly_budget_brl: 2400,
+      schedule_up_hour: 9,
+      schedule_down_hour: 17,
+      schedule_days: ["mon", "tue", "wed", "thu", "fri"],
+      grace_ramp_down_s: 300,
+      provision_lead_s: 600,
+      schedule_disabled: false,
+    },
+    bounds: {
+      cap_primary_min: 0.1,
+      cap_primary_max: 1.5,
+      cap_fallback_min: 0.1,
+      cap_fallback_max: 3.0,
+      coldstart_budget_s_min: 600,
+      coldstart_budget_s_max: 7200,
+      port_bind_budget_s_min: 60,
+      port_bind_budget_s_max: 900,
+      failure_cooldown_s_min: 30,
+      failure_cooldown_s_max: 600,
+      monthly_budget_brl_min: 200,
+      monthly_budget_brl_max: 8000,
+      schedule_up_hour_min: 0,
+      schedule_up_hour_max: 23,
+      schedule_down_hour_min: 0,
+      schedule_down_hour_max: 23,
+      grace_ramp_down_s_min: 0,
+      grace_ramp_down_s_max: 1800,
+      provision_lead_s_min: 0,
+      provision_lead_s_max: 3600,
+    },
+  };
+}
 
 type MemDB = { [k: string]: any[] };
 
@@ -305,5 +362,170 @@ describe("admin-actions — UM-04..UM-08 owner-gated server actions (RED until W
       newPassword: "new",
     });
     expect(db.adminAuditLog.length).toBe(before);
+  });
+});
+
+describe("admin-actions — POD-CFG owner-gated pod-config write actions (Plan 17-05)", () => {
+  beforeEach(() => {
+    fetchPodConfigMock.mockReset();
+    gatewayAdminPatchMock.mockReset();
+    sendMailMock.mockReset();
+  });
+
+  it("(POD-CFG-10) updatePodConfig: operator is rejected server-side — NO gateway call, NO audit row", async () => {
+    const mod = await importAdminActions();
+    expect(mod, "@/lib/admin-actions must export updatePodConfig").not.toBeNull();
+    const updatePodConfig = mod?.updatePodConfig as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof updatePodConfig).toBe("function");
+
+    const db = freshDb();
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+
+    let rejected = false;
+    try {
+      await updatePodConfig?.({
+        actor: { role: "operator" },
+        db,
+        field: "cap_primary",
+        value: 0.7,
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    // requireOwner throws FIRST — the gateway is never called and nothing is
+    // audited.
+    expect(gatewayAdminPatchMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("(POD-CFG-10/11) updatePodConfig: owner success — refetches config, PATCHes the gateway, audits {field, old(from fetch), new}", async () => {
+    const mod = await importAdminActions();
+    const updatePodConfig = mod?.updatePodConfig as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof updatePodConfig).toBe("function");
+
+    const db = freshDb();
+    // cap_primary current value is 0.5 — the audit `old` MUST come from here,
+    // not from any client-passed value.
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+    gatewayAdminPatchMock.mockResolvedValue(undefined);
+
+    await updatePodConfig?.({
+      actor: { id: "owner-1", email: "owner@ifixtelecom.com.br", role: "owner" },
+      db,
+      field: "cap_primary",
+      value: 0.7,
+    });
+
+    // Refetch happened BEFORE the gateway write (live-bound + audit-old source).
+    expect(fetchPodConfigMock).toHaveBeenCalledTimes(1);
+    expect(gatewayAdminPatchMock).toHaveBeenCalledTimes(1);
+    expect(
+      fetchPodConfigMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(gatewayAdminPatchMock.mock.invocationCallOrder[0]);
+
+    // PATCH carries the field/value with kind="config".
+    const [path, body] = gatewayAdminPatchMock.mock.calls[0];
+    expect(path).toBe("primary/config");
+    expect(body).toMatchObject({ field: "cap_primary", value: 0.7, kind: "config" });
+
+    // Exactly one audit row, action="pod_config.update", metadata {field, old, new}
+    // where `old` is the REFETCHED current value (0.5), not the client value.
+    expect(db.adminAuditLog.length).toBe(1);
+    const row = db.adminAuditLog[0];
+    expect(row.action).toBe("pod_config.update");
+    expect(row.metadata).toEqual({ field: "cap_primary", old: 0.5, new: 0.7 });
+    // No secret key ever lands in metadata.
+    expect(JSON.stringify(row.metadata)).not.toContain("Admin");
+  });
+
+  it("(POD-CFG-11) updatePodConfig: a value outside the LIVE bound throws BEFORE any gateway call", async () => {
+    const mod = await importAdminActions();
+    const updatePodConfig = mod?.updatePodConfig as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof updatePodConfig).toBe("function");
+
+    const db = freshDb();
+    // cap_primary_max is 1.5 — 9.9 is out of range.
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+
+    let rejected = false;
+    try {
+      await updatePodConfig?.({
+        actor: { role: "owner" },
+        db,
+        field: "cap_primary",
+        value: 9.9,
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPatchMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("(POD-CFG-07/11) updatePodConfigBound: owner success — enforces min<max, PATCHes kind=bound, audits old from bounds", async () => {
+    const mod = await importAdminActions();
+    const updatePodConfigBound = mod?.updatePodConfigBound as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof updatePodConfigBound).toBe("function");
+
+    const db = freshDb();
+    // cap_primary_min current value is 0.1 (the audit `old`); new 0.2 < max 1.5.
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+    gatewayAdminPatchMock.mockResolvedValue(undefined);
+
+    await updatePodConfigBound?.({
+      actor: { id: "owner-1", email: "owner@ifixtelecom.com.br", role: "owner" },
+      db,
+      field: "cap_primary_min",
+      value: 0.2,
+    });
+
+    const [path, body] = gatewayAdminPatchMock.mock.calls[0];
+    expect(path).toBe("primary/config");
+    expect(body).toMatchObject({
+      field: "cap_primary_min",
+      value: 0.2,
+      kind: "bound",
+    });
+    expect(db.adminAuditLog.length).toBe(1);
+    const row = db.adminAuditLog[0];
+    expect(row.action).toBe("pod_config_bounds.update");
+    expect(row.metadata).toEqual({ field: "cap_primary_min", old: 0.1, new: 0.2 });
+  });
+
+  it("(POD-CFG-11) updatePodConfigBound: min >= max is rejected BEFORE any gateway call", async () => {
+    const mod = await importAdminActions();
+    const updatePodConfigBound = mod?.updatePodConfigBound as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof updatePodConfigBound).toBe("function");
+
+    const db = freshDb();
+    // cap_primary_max is 1.5 — setting cap_primary_min=2.0 violates min<max.
+    fetchPodConfigMock.mockResolvedValue(buildPodConfig());
+
+    let rejected = false;
+    try {
+      await updatePodConfigBound?.({
+        actor: { role: "owner" },
+        db,
+        field: "cap_primary_min",
+        value: 2.0,
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPatchMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
   });
 });
