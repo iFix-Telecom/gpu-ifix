@@ -11,7 +11,92 @@ import (
 	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
+
+// --- ParseScheduleFromSnapshot (Phase 17 POD-CFG-04) --------------------
+
+// TestParseScheduleFromSnapshot_HappyPath: a valid live snapshot + the
+// structural (boot-resolved) timezone yields a primary.ScheduleRule whose
+// IsInPeak / ShouldBeProvisioned behave exactly like the env-built rule.
+func TestParseScheduleFromSnapshot_HappyPath(t *testing.T) {
+	loc := brtZone()
+	snap := podconfig.PodConfig{
+		ScheduleUpHour:   8,
+		ScheduleDownHour: 22,
+		ScheduleDays:     []string{"mon", "tue", "wed", "thu", "fri"},
+		GraceRampDownS:   300,
+		ProvisionLeadS:   1800,
+		ScheduleDisabled: false,
+	}
+	rule, err := ParseScheduleFromSnapshot(snap, loc)
+	if err != nil {
+		t.Fatalf("ParseScheduleFromSnapshot returned err=%v, want nil", err)
+	}
+	if rule.Timezone != loc {
+		t.Fatalf("rule.Timezone = %v, want the structural loc", rule.Timezone)
+	}
+	if rule.UpHour != 8 || rule.DownHour != 22 {
+		t.Fatalf("rule up/down = %d/%d, want 8/22", rule.UpHour, rule.DownHour)
+	}
+	if rule.GraceRampDownS != 300 || rule.ProvisionLeadS != 1800 {
+		t.Fatalf("rule grace/lead = %d/%d, want 300/1800", rule.GraceRampDownS, rule.ProvisionLeadS)
+	}
+	// Wed 2026-05-13 12:00 BRT — squarely in peak.
+	inPeak := time.Date(2026, 5, 13, 12, 0, 0, 0, loc)
+	if !rule.IsInPeak(inPeak) {
+		t.Fatalf("expected IsInPeak=true at Wed 12:00 BRT for an 08-22 weekday window")
+	}
+	// Sun 2026-05-17 12:00 BRT — weekend excluded.
+	weekend := time.Date(2026, 5, 17, 12, 0, 0, 0, loc)
+	if rule.IsInPeak(weekend) {
+		t.Fatalf("expected IsInPeak=false on Sunday (weekday-only window)")
+	}
+}
+
+// TestParseScheduleFromSnapshot_NarrowedWindowFlipsInPeak: narrowing the
+// window in the snapshot flips IsInPeak false on the next evaluation.
+func TestParseScheduleFromSnapshot_NarrowedWindowFlipsInPeak(t *testing.T) {
+	loc := brtZone()
+	now := time.Date(2026, 5, 13, 21, 0, 0, 0, loc) // Wed 21:00 BRT
+	wide := podconfig.PodConfig{ScheduleUpHour: 8, ScheduleDownHour: 22, ScheduleDays: []string{"wed"}}
+	narrow := podconfig.PodConfig{ScheduleUpHour: 8, ScheduleDownHour: 20, ScheduleDays: []string{"wed"}}
+	wr, err := ParseScheduleFromSnapshot(wide, loc)
+	if err != nil {
+		t.Fatalf("wide parse err=%v", err)
+	}
+	nr, err := ParseScheduleFromSnapshot(narrow, loc)
+	if err != nil {
+		t.Fatalf("narrow parse err=%v", err)
+	}
+	if !wr.IsInPeak(now) {
+		t.Fatalf("wide window (08-22) must be in peak at 21:00")
+	}
+	if nr.IsInPeak(now) {
+		t.Fatalf("narrowed window (08-20) must NOT be in peak at 21:00")
+	}
+}
+
+// TestParseScheduleFromSnapshot_NilLocErrors: a nil timezone is a programmer
+// error and must surface (keeps the loader's last-good snapshot).
+func TestParseScheduleFromSnapshot_NilLocErrors(t *testing.T) {
+	_, err := ParseScheduleFromSnapshot(podconfig.PodConfig{ScheduleUpHour: 8, ScheduleDownHour: 22}, nil)
+	if err == nil {
+		t.Fatalf("nil loc must return an error")
+	}
+}
+
+// TestParseScheduleFromSnapshot_OutOfRangeHourErrors: an out-of-range hour is
+// the testable bad-rule path (tz is structural, can't fail post-boot).
+func TestParseScheduleFromSnapshot_OutOfRangeHourErrors(t *testing.T) {
+	loc := brtZone()
+	if _, err := ParseScheduleFromSnapshot(podconfig.PodConfig{ScheduleUpHour: 24, ScheduleDownHour: 22}, loc); err == nil {
+		t.Fatalf("up_hour=24 must return an out-of-range error")
+	}
+	if _, err := ParseScheduleFromSnapshot(podconfig.PodConfig{ScheduleUpHour: 8, ScheduleDownHour: -1}, loc); err == nil {
+		t.Fatalf("down_hour=-1 must return an out-of-range error")
+	}
+}
 
 // brt returns a fixed-offset BRT zone (-3h). Brazil abolished DST in 2019,
 // so a fixed offset is sufficient for the documented BRT semantics. For

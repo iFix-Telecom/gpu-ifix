@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
 
 // primaryRecordingTransport is a sentry.Transport implementation that
@@ -73,7 +74,7 @@ func budgetCfg() config.Config {
 // constructing a BudgetChecker that returns ONLY the primary-lifecycle
 // sum (550) and assert the check observes 550 (not 1050 = 550 + 500).
 func TestBudget_PrimarySeparateFromEmerg(t *testing.T) {
-	b := NewBudgetChecker(budgetCfg(), nil)
+	b := NewBudgetChecker(budgetCfg(), nil, nil)
 	b.SetCostOverrideForTest(func(_ context.Context) (pgtype.Numeric, error) {
 		// In production the SQL aggregates ONLY primary_lifecycles. The
 		// emergency 500 BRL spend is invisible to this aggregator.
@@ -84,11 +85,38 @@ func TestBudget_PrimarySeparateFromEmerg(t *testing.T) {
 		"primary budget aggregator must observe ONLY primary_lifecycles SUM (Pitfall #12)")
 }
 
+// TestBudget_ReadsSnapshotNotCfg (Phase 17 POD-CFG-04): CheckBudget must read
+// MonthlyPrimaryBudgetBRL from the LIVE pod_config snapshot, not b.cfg. The
+// snapshot budget (500) is BELOW the observed cost (700), while the boot cfg
+// budget (2000) is ABOVE it — the alert fires ONLY if the snapshot value wins.
+func TestBudget_ReadsSnapshotNotCfg(t *testing.T) {
+	transport := installPrimarySentryTestTransport(t)
+	cfg := budgetCfg()
+	cfg.MonthlyPrimaryBudgetBRL = 2000 // boot cfg budget — would NOT alert at cost 700
+	loader := podconfig.NewStaticLoaderForTest(
+		podconfig.PodConfig{MonthlyBudgetBRL: 500}, // snapshot budget — alerts at 700
+		podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+	b := NewBudgetChecker(cfg, nil, loader)
+	b.SetCostOverrideForTest(func(_ context.Context) (pgtype.Numeric, error) {
+		return numericFromFloat(700), nil
+	})
+	got := b.CheckBudget(context.Background())
+	require.InDelta(t, 700.0, got, 0.01)
+	sentry.Flush(2 * time.Second)
+	select {
+	case ev := <-transport.events:
+		require.NotNil(t, ev, "alert must fire because the SNAPSHOT budget (500) < cost (700)")
+		require.Equal(t, "budget_exceeded", ev.Tags["alert"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckBudget must read the snapshot budget (500), not the boot cfg budget (2000)")
+	}
+}
+
 func TestBudget_UnderBudget_NoAlert(t *testing.T) {
 	transport := installPrimarySentryTestTransport(t)
 	cfg := budgetCfg()
 	cfg.MonthlyPrimaryBudgetBRL = 800
-	b := NewBudgetChecker(cfg, nil)
+	b := NewBudgetChecker(cfg, nil, nil)
 	b.SetCostOverrideForTest(func(_ context.Context) (pgtype.Numeric, error) {
 		return numericFromFloat(400), nil
 	})
@@ -105,7 +133,7 @@ func TestBudget_OverBudget_AlertFires(t *testing.T) {
 	transport := installPrimarySentryTestTransport(t)
 	cfg := budgetCfg()
 	cfg.MonthlyPrimaryBudgetBRL = 800
-	b := NewBudgetChecker(cfg, nil)
+	b := NewBudgetChecker(cfg, nil, nil)
 	b.SetCostOverrideForTest(func(_ context.Context) (pgtype.Numeric, error) {
 		return numericFromFloat(900), nil
 	})
@@ -126,7 +154,7 @@ func TestBudget_DedupeAlert(t *testing.T) {
 	transport := installPrimarySentryTestTransport(t)
 	cfg := budgetCfg()
 	cfg.MonthlyPrimaryBudgetBRL = 800
-	b := NewBudgetChecker(cfg, nil)
+	b := NewBudgetChecker(cfg, nil, nil)
 	b.SetCostOverrideForTest(func(_ context.Context) (pgtype.Numeric, error) {
 		return numericFromFloat(900), nil
 	})
