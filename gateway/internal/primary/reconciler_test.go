@@ -57,6 +57,7 @@ import (
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
 
@@ -1005,6 +1006,141 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// Phase 17 (POD-CFG-04): the offer-selection block must read the HOT fields
+// (caps/host/blocklist/allowlist/reject-private-ip + budgets) from the LIVE
+// pod_config snapshot (podCfg.Load()), NOT the immutable boot cfg — while
+// STRUCTURAL fields (GPU name/num) STILL come from r.cfg (D-02). This test
+// wires a static loader whose blocklist + cap DIFFER from the boot cfg and
+// asserts: (a) the snapshot blocklist reaches the Vast SearchFilter, (b) the
+// boot cfg's blocklist does NOT, (c) the structural GPU name still comes from
+// r.cfg.
+func TestProvisionLifecycle_OfferSelectionReadsSnapshotNotCfg(t *testing.T) {
+	cfg := testCfg(t)
+	// Boot cfg carries a DISTINCT blocklist + allowlist-disabled.
+	cfg.PrimaryVastMachineBlocklist = []int64{11111}
+	cfg.PrimaryVastMachineAllowlist = nil
+
+	// Live snapshot carries a DIFFERENT blocklist + the same per-shape caps.
+	snapCfg := podconfig.PodConfig{
+		CapPrimary:           0.30,
+		CapFallback:          0.60,
+		HostID:               0,
+		VastMachineBlocklist: []int64{99999}, // <- snapshot wins
+		RejectPrivateIP:      false,
+		ColdStartBudgetS:     60,
+		PortBindBudgetS:      600,
+		FailureCooldownS:     120,
+	}
+	loader := podconfig.NewStaticLoaderForTest(snapCfg, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var seenBlocklist atomic.Pointer[[]any]
+	var seenGPUName atomic.Pointer[string]
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			// Capture the gpu_name eq (structural) + machine_id notin (hot).
+			if gn, ok := filter["gpu_name"].(map[string]any); ok {
+				if name, ok := gn["eq"].(string); ok {
+					n := name
+					seenGPUName.Store(&n)
+				}
+			}
+			if mid, ok := filter["machine_id"].(map[string]any); ok {
+				if notin, ok := mid["notin"].([]any); ok {
+					cp := notin
+					seenBlocklist.Store(&cp)
+				}
+			}
+			// Return an offer below the snapshot's primary cap so provisioning
+			// proceeds to CreateInstance (then bails quickly on non-running).
+			return []vast.Offer{{ID: 7777, MachineID: 43803, HostID: 99001, DphTotal: 0.25}}, nil
+		},
+		createInstanceFn: func(_ context.Context, _ int64, _ vast.CreateRequest) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+	}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Vast:   fakeV,
+		PodCfg: loader,
+		Rule:   alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool {
+			return false
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	// (a)+(b) the SNAPSHOT blocklist (99999) reached the filter, boot's (11111) did not.
+	bl := seenBlocklist.Load()
+	require.NotNil(t, bl, "SearchOffers must have been called with a machine_id notin clause")
+	require.Contains(t, *bl, int64(99999),
+		"offer selection must apply the LIVE snapshot blocklist (99999), not the boot cfg blocklist")
+	require.NotContains(t, *bl, int64(11111),
+		"offer selection must NOT apply the boot cfg blocklist (11111) once a snapshot exists")
+
+	// (c) structural GPU name still resolves from r.cfg (NOT the snapshot — the
+	// snapshot deliberately carries no GPU name).
+	gn := seenGPUName.Load()
+	require.NotNil(t, gn)
+	require.Equal(t, cfg.PrimaryVastGPUNamePrimary, *gn,
+		"structural GPU name must STILL come from r.cfg (D-02), never moved to the snapshot")
+}
+
+// Phase 17 (POD-CFG-04): with podCfg nil (defensive / pre-first-refresh), the
+// reconciler must fall back to the boot cfg's HOT fields so provisioning never
+// reads zero-config (never sends an empty blocklist + cap=0 that rejects every
+// offer). Proves the never-zero-config invariant.
+func TestProvisionLifecycle_NilPodCfgFallsBackToBootCfg(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.PrimaryVastMachineBlocklist = []int64{22222}
+	cfg.PrimaryVastMachineAllowlist = nil
+
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var seenBlocklist atomic.Pointer[[]any]
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			if mid, ok := filter["machine_id"].(map[string]any); ok {
+				if notin, ok := mid["notin"].([]any); ok {
+					cp := notin
+					seenBlocklist.Store(&cp)
+				}
+			}
+			return nil, nil // no offers → bail fast
+		},
+	}
+	dbtx := &fakeDBTX{}
+	r := buildReconciler(t, Deps{
+		Cfg:  cfg,
+		FSM:  fsm,
+		Vast: fakeV,
+		// PodCfg intentionally omitted (nil).
+		Rule: alwaysInPeakRule(),
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	bl := seenBlocklist.Load()
+	require.NotNil(t, bl, "SearchOffers must have been called even with podCfg nil")
+	require.Contains(t, *bl, int64(22222),
+		"podCfg nil must fall back to the boot cfg blocklist (never zero-config)")
 }
 
 // ===========================================================================

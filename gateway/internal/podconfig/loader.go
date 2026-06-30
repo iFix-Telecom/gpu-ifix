@@ -134,3 +134,21 @@ func (l *Loader) Bounds() PodConfigBounds {
 	}
 	return s.bounds
 }
+
+// NewStaticLoaderForTest builds a Loader whose snapshot is FIXED to the given
+// values, with no DB pool and no LISTEN wiring. It exists for unit tests in
+// downstream packages (e.g. primary's reconciler tests) that need to inject a
+// deterministic pod_config snapshot — including one whose hot fields DIFFER
+// from the boot config — without standing up Postgres. Production code never
+// calls this; it uses NewLoader (DB-backed, last-good-on-error).
+func NewStaticLoaderForTest(cfg PodConfig, rule ScheduleRule, bounds PodConfigBounds, log *slog.Logger) *Loader {
+	if log == nil {
+		log = slog.Default()
+	}
+	l := &Loader{
+		log: log.With("module", "PODCONFIG"),
+		tz:  rule.Timezone,
+	}
+	l.snap.Store(&snapshot{cfg: cfg, rule: rule, bounds: bounds})
+	return l
+}
