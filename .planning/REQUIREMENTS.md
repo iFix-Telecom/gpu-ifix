@@ -126,8 +126,8 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [x] **POD-CFG-03**: `podconfig.Loader` hot-reload (LISTEN/NOTIFY + atomic snapshot + last-good-on-error) espelhando `upstreams.Loader`
 - [x] **POD-CFG-04**: Reconciler/budget/schedule leem os 16 hot fields do snapshot (próxima provision/tick); estruturais continuam em `r.cfg` (D-01/D-02)
 - [x] **POD-CFG-05**: Storage de bounds (min/max) owner-editável, seedado dos defaults da RESEARCH (D-03)
-- [ ] **POD-CFG-06**: Endpoint gateway `PATCH /admin/primary/config` (write, X-Admin-Key) → UpdatePodConfigField/Bound; SEM restart/estrutural (D-02)
-- [ ] **POD-CFG-07**: Endpoint gateway `GET /admin/primary/lifecycle` (FSM state + event trail da lifecycle ABERTA) (D-05)
+- [x] **POD-CFG-06**: Endpoint gateway `PATCH /admin/primary/config` (write, X-Admin-Key) → UpdatePodConfigField/Bound; SEM restart/estrutural (D-02)
+- [x] **POD-CFG-07**: Endpoint gateway `GET /admin/primary/lifecycle` (FSM state + event trail da lifecycle ABERTA) (D-05)
 - [ ] **POD-CFG-08**: Dashboard editor dos 16 hot fields — owner-edit / operator read-only (D-01/D-07)
 - [ ] **POD-CFG-09**: Dashboard editor de bounds (Campo|Mín|Máx) — owner-edit / operator read-only (D-03)
 - [ ] **POD-CFG-10**: Server action owner-gated (`requireOwner` server-side) + validação do valor vs bound corrente antes de salvar (D-03a/D-07)
@@ -135,7 +135,7 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [ ] **POD-CFG-12**: Confirm simples de um clique com string de impacto específica nas ações perigosas (cap-down, estreitar agenda, Disabled, dias vazios, allowlist restritiva); SEM type-to-confirm (D-04)
 - [ ] **POD-CFG-13**: Display read-only dos 19 campos estruturais (shape/imagens/pesos/llama args/timezone) (D-01)
 - [ ] **POD-CFG-14**: Painel ao vivo no dashboard (poll 10s de `/admin/primary/lifecycle`, FSM + event trail, reusa `fsm.ts` + `StaleIndicator`) (D-05)
-- [ ] **POD-CFG-15**: Endpoint gateway `GET /admin/primary/config` (read, X-Admin-Key) -> `GetPodConfig` -> 16 hot fields + 9 bounds typed JSON. Fonte de leitura para: valores correntes do editor (POD-CFG-08/09), refetch server-side do bound vivo na validacao (POD-CFG-10) e do `oldValue` do audit (POD-CFG-11). Le do `pod_config` (DIVERGE de `/admin/operations` que le o boot env). Wrapper dashboard `fetchPodConfig()` via proxy GET-only (D-07).
+- [x] **POD-CFG-15**: Endpoint gateway `GET /admin/primary/config` (read, X-Admin-Key) -> `GetPodConfig` -> 16 hot fields + 9 bounds typed JSON. Fonte de leitura para: valores correntes do editor (POD-CFG-08/09), refetch server-side do bound vivo na validacao (POD-CFG-10) e do `oldValue` do audit (POD-CFG-11). Le do `pod_config` (DIVERGE de `/admin/operations` que le o boot env). Wrapper dashboard `fetchPodConfig()` via proxy GET-only (D-07).
 
 ## v2 Requirements
 
