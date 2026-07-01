@@ -1,7 +1,8 @@
 ---
 phase: 17-dashboard-pod-config-control-owner-controla-todas-as-configs
 verified: 2026-06-30T20:05:00Z
-status: human_needed
+status: passed
+human_verification_outcome: "approved 2026-07-01 — 3/3 live UAT items passed on dashboard-dev (hot-reload e2e, live panel, owner-vs-operator RBAC). 5 integration bugs found + fixed during UAT (see 17-HUMAN-UAT.md): RSC cookie, server-action relative URL, /operacao budget source, sidebar logout/nav, /settings route-group."
 score: 15/15 must-haves verified
 overrides_applied: 0
 human_verification:

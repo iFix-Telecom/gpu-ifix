@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-last_updated: "2026-06-30T22:21:28.390Z"
+status: completed
+last_updated: "2026-07-01T14:31:10.994Z"
 progress:
   total_phases: 14
   completed_phases: 12
@@ -27,8 +27,8 @@ progress:
 
 ## Current Position
 
-Phase: 17 (dashboard-pod-config-control-owner-controla-todas-as-configs) — EXECUTING
-Plan: 6 of 6
+Phase: 17
+Plan: Not started
 Next work: v1 milestone close. Phase 16 CLOSED the sole v1 code blocker AND live-proved it. Producer `applyAudioEmbedUsage` wired into 7 STT/embed proxies + RequestAudioSecondsMiddleware mounted. Live-UAT on ai-gateway-dev (rev 3374999) found+fixed a path-rewrite bug (gemini-stt rewrites URL.Path → route misclassified 'chat' → metering dropped; fix commit 3374999 stamps billing route from inbound path pre-rewrite into ctx). Verified live: billing_events route=stt audio_seconds=5 + route=embed embeds_count=2; usage_counters audio_seconds=5 embeds_count=5 (quota source populated, was 0). Remaining for v1 "complete": (1) reconcile remaining stale REQUIREMENTS checkboxes (40 done 2026-06-27); (2) sign off 08/09 client UAT (INT-01..06 — operator + LGPD, process gap); (3) flip Phase 13 VERIFICATION status→passed; (4) backfill 06.5 VERIFICATION.md. Then re-run /gsd:audit-milestone → /gsd:complete-milestone v1. All 25 phases executed.
 
 PROD PROMOTED 2026-06-29: main FF'd develop→72ffcb5 (pushed). Gateway :main rebuilt on n8n-ia-vm (manual recipe, context=repo root, -f gateway/Dockerfile) + recreated (--pull never). Prod healthy, leadership reacquired, primary pod UP (Mon 9-17 BRT). TEN-04 metering LIVE-PROVEN in PROD against REAL traffic: bd_ai_gateway_prod billing_events shows stt/gemini-stt audio_seconds=0.6/0.8/1.4 (real prod STT calls now metered via the fixed path-rewrite path; were 0/dropped) + embed/local-embed embeds_count=2 (smoke). Rollback tag ghcr.io/...:rollback-pre-ten04. NOTE: manual VM build bakes no git-rev label (version="dev") — confirm prod deploys via behavior/billing rows, not rev label. PROD dashboard NOT rebuilt (Phase 16 has no dashboard change).
@@ -131,7 +131,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Phase complete — ready for verification
+- **Status:** Milestone complete
 
 ## Performance Metrics
 
