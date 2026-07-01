@@ -16,6 +16,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 )
 
 // fakeOperationsQueries is an in-memory operationsQueries double — no
@@ -167,7 +168,7 @@ func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
 
 	bset := newOpBreakerSet(t, []string{"primary", "tier1-openrouter"})
 	cfg := opTestCfg()
-	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, cfg, discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, cfg, discardLog())
 
 	rec, body := doOperationsRequest(t, h)
 
@@ -269,10 +270,34 @@ func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
 func TestOperationsHandler_QueryError_500(t *testing.T) {
 	fake := &fakeOperationsQueries{err: context.DeadlineExceeded}
 	bset := newOpBreakerSet(t, []string{"primary"})
-	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, opTestCfg(), discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, opTestCfg(), discardLog())
 
 	rec, _ := doOperationsRequest(t, h)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// TestOperationsHandler_BudgetFromPodConfig: Phase-17 gap fix — when a
+// podconfig loader is present, the /operacao cost bar reports the LIVE
+// pod_config monthly budget (owner-editable, hot-reloaded), not the stale
+// boot cfg value. opTestCfg budget is 800; the loader overrides to 1234.
+func TestOperationsHandler_BudgetFromPodConfig(t *testing.T) {
+	fake := &fakeOperationsQueries{} // no rows → month/today 0, budget from loader
+	bset := newOpBreakerSet(t, []string{"primary"})
+	loader := podconfig.NewStaticLoaderForTest(
+		podconfig.PodConfig{MonthlyBudgetBRL: 1234.0},
+		podconfig.ScheduleRule{},
+		podconfig.PodConfigBounds{},
+		discardLog(),
+	)
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, loader, opTestCfg(), discardLog())
+
+	rec, body := doOperationsRequest(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if body.VastCost.BudgetBRL != 1234.0 {
+		t.Errorf("budget_brl = %v, want 1234 (from pod_config snapshot, not boot cfg 800)", body.VastCost.BudgetBRL)
 	}
 }

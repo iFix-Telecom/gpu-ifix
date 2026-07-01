@@ -1301,7 +1301,7 @@ func main() {
 	// Set effective states, the schedule rule (recomputed from cfg), and
 	// aggregates Vast cost over the month's primary_lifecycles. rec +
 	// emergFSM may be nil when Vast/Phase-6 is disabled → "unknown".
-	adminOperationsHandler := admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, cfg, log)
+	adminOperationsHandler := admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, podCfgLoader, cfg, log)
 
 	// Phase 15 (OBS-09) — "Economia" panel: gateway-wide phantom vs Vast
 	// economy + daily series. cfg supplies USDToBRLRate for the live accrual.

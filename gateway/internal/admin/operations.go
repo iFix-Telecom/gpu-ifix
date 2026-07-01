@@ -37,6 +37,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 )
 
@@ -120,15 +121,17 @@ type OperationsHandler struct {
 	breakers *breaker.Set
 	rec      *primary.Reconciler // nil-safe: Vast off
 	emergFSM *emerg.FSM          // nil-safe
+	podCfg   *podconfig.Loader   // nil-safe: Phase 17 live budget; falls back to boot cfg
 	cfg      config.Config
 	log      *slog.Logger
 }
 
 // NewOperationsHandler wires the production dependencies. Accepts the
-// concrete *gen.Queries; rec and emergFSM may be nil when Vast/Phase-6 is
-// disabled — the handler reports "unknown" rather than panicking.
+// concrete *gen.Queries; rec, emergFSM and podCfg may be nil when
+// Vast/Phase-6/Phase-17 is disabled — the handler reports "unknown"
+// (or falls back to the boot budget) rather than panicking.
 func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconciler,
-	emergFSM *emerg.FSM, cfg config.Config, log *slog.Logger) *OperationsHandler {
+	emergFSM *emerg.FSM, podCfg *podconfig.Loader, cfg config.Config, log *slog.Logger) *OperationsHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -137,6 +140,7 @@ func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconcile
 		breakers: b,
 		rec:      rec,
 		emergFSM: emergFSM,
+		podCfg:   podCfg,
 		cfg:      cfg,
 		log:      log.With("module", "ADMIN_OPERATIONS"),
 	}
@@ -145,7 +149,7 @@ func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconcile
 // newOperationsHandlerWithQueries is the test constructor: accepts any
 // operationsQueries (fake or real) plus the rest of the deps.
 func newOperationsHandlerWithQueries(q operationsQueries, b *breaker.Set, rec *primary.Reconciler,
-	emergFSM *emerg.FSM, cfg config.Config, log *slog.Logger) *OperationsHandler {
+	emergFSM *emerg.FSM, podCfg *podconfig.Loader, cfg config.Config, log *slog.Logger) *OperationsHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -154,6 +158,7 @@ func newOperationsHandlerWithQueries(q operationsQueries, b *breaker.Set, rec *p
 		breakers: b,
 		rec:      rec,
 		emergFSM: emergFSM,
+		podCfg:   podCfg,
 		cfg:      cfg,
 		log:      log.With("module", "ADMIN_OPERATIONS"),
 	}
@@ -244,7 +249,14 @@ func (h *OperationsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Phase 17: the monthly budget is a HOT pod_config field the owner edits
+	// live. Read it from the podconfig snapshot (same source the reconciler
+	// enforces) so the /operacao cost bar reflects edits without a restart;
+	// fall back to the boot cfg when the loader is absent (Phase 17 disabled).
 	budget := h.cfg.MonthlyPrimaryBudgetBRL
+	if h.podCfg != nil {
+		budget = h.podCfg.Cfg().MonthlyBudgetBRL
+	}
 	pctUsed := 0.0
 	if budget > 0 {
 		pctUsed = monthBRL / budget * 100
