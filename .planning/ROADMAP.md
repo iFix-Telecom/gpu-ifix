@@ -188,6 +188,17 @@ Plans:
 
 - [x] 17-06-PLAN.md — Dashboard /operacao/config: painel ao vivo + editor 16 hot fields (confirm perigoso D-04) + editor de bounds + estrutural read-only + switch + nav
 
+### Phase 18: Tenant management UI no dashboard — owner-gated (padrão Phase 17 pod-config / Phase 13 operadores): listar tenants, criar tenant (slug+name), gerar/revogar API key, definir data-class (normal|sensitive), quotas/mode opcionais. Backend expõe gatewayctl (tenant/key create·revoke·list) via admin API (X-Admin-Key) consumida pelo proxy server-only /api/gateway. Motivação: criar tenant hoje é só CLI (pedido 2026-07-01, criados transcricao-voip + analise-transcr-voip via CLI). Depende de Phase 13 + Phase 17.
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 17
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 18 to break down)
+
 ---
 
 ### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
