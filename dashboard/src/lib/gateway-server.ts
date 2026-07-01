@@ -44,9 +44,21 @@ export async function fetchPodConfigServer(): Promise<PodConfigResponse> {
   const proto = h.get("x-forwarded-proto") ?? "http";
   const url = `${proto}://${host}/api/gateway/primary/config`;
 
+  // Forward the inbound session cookie. This request re-enters the app through
+  // the public origin, so it passes back through `middleware.ts`, which gates
+  // /api/gateway/* behind the auth + 2FA session. Without the cookie the
+  // self-call is unauthenticated → middleware 307-redirects to /login and the
+  // fetch follows it to an HTML page, making `res.json()` throw
+  // "Unexpected token '<'". The page only renders after the caller's session is
+  // fully verified, so forwarding that cookie is always valid here.
+  const cookie = h.get("cookie");
+
   const res = await fetch(url, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
     cache: "no-store",
   });
 
