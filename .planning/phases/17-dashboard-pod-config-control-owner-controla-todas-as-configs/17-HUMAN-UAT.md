@@ -1,5 +1,5 @@
 ---
-status: partial
+status: resolved
 phase: 17-dashboard-pod-config-control-owner-controla-todas-as-configs
 source: [17-VERIFICATION.md]
 started: 2026-06-30T20:08:00Z
@@ -18,20 +18,27 @@ result: PASS (parcial — mecanismo hot-reload provado no gateway-dev 2026-07-01
 
 ### 2. Painel ao vivo /operacao/config (FSM + poll 10s)
 expected: Painel renderiza fsm_state, leader e event trail (started_at → first_health_pass → drain → ended) com tiers de fsm.ts; StaleIndicator marca dados parados; poll de 10s reflete transições de estado em tempo real; estados skeleton/erro aparecem corretamente.
-result: [pending]
+result: PASS (2026-07-01, dashboard-dev). Painel ao vivo renderiza FSM (dormindo/líder/emergency healthy) + schedule + atualiza a cada 10s.
 
 ### 3. Diferenciação owner vs operator nas 4 superfícies
 expected: Login como owner → afordâncias de edição (lápis) por campo + bounds editáveis; login como operator → MESMOS valores read-only, zero controles de edição nas 4 superfícies; tentativa de edição via server action como operator continua barrada server-side (CR-01 fix).
-result: [pending]
+result: PASS (2026-07-01). Owner edita (lápis + save persiste no pod_config, ex monthly_budget_brl 2400→1000 propagou p/ enforcement + display /operacao); operator só vê valores, sem lápis. Confirmado pelo usuário.
 
 ## Summary
 
 total: 3
-passed: 1
+passed: 3
 issues: 0
-pending: 2
+pending: 0
 skipped: 0
 blocked: 0
+
+## Fixes de integração achados no UAT (todos em develop, testados + deployados dev)
+1. 3afad16 — config não carregava: fetchPodConfigServer (RSC) não repassava cookie → middleware bounce /login HTML.
+2. 4161423 — save do owner falhava: refetch-de-validação usava fetchPodConfig (URL relativa) → ERR_INVALID_URL server-side; trocado p/ fetchPodConfigServer.
+3. 1660f19 — /operacao budget stale: GET /admin/operations lia h.cfg (env boot) em vez do snapshot pod_config; wired o loader no OperationsHandler.
+4. 6834255 — sidebar sem logout/nav de conta: adicionado SidebarFooter (identidade + Sair + Configurações + Operadores owner-only).
+5. a729369 — /settings sem sidebar: movido p/ dentro do route group (dashboard) (URL idêntica).
 
 notas:
 - Deploy dev 2026-07-01: gateway-dev (vps-ifix-vm, stack 34) rodando imagem Phase 17 (6df75b33, version=dev), migration 0031 aplicada, podconfig LISTEN ativo. GHCR latest-dev = digest d5e85f5a (Phase 17). Rollback: tag pre-p17-3dcc083 (imagem antiga) na VM.
