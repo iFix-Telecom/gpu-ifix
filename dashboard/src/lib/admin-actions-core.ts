@@ -46,11 +46,14 @@ import { isAllowedEmail } from "@/lib/allowlist";
 import { auth as realAuth } from "@/lib/auth";
 import { getDb, schema } from "@/lib/db";
 import { sendMail } from "@/lib/email";
-import {
-  fetchPodConfig as realFetchPodConfig,
-  type PodConfigResponse,
-} from "@/lib/gateway";
+import type { PodConfigResponse } from "@/lib/gateway";
 import { gatewayAdminPatch as realGatewayAdminPatch } from "@/lib/gateway-admin";
+// The owner write actions run ONLY in a server (server-action) context, so the
+// refetch-for-validation must use the server-safe reader: `fetchPodConfig`
+// (gateway.ts) hits the RELATIVE proxy path `/api/gateway/*`, which throws
+// ERR_INVALID_URL server-side (no origin). `fetchPodConfigServer` rebuilds the
+// absolute proxy URL from request headers + forwards the session cookie.
+import { fetchPodConfigServer as realFetchPodConfig } from "@/lib/gateway-server";
 
 export type Role = "owner" | "operator" | string;
 

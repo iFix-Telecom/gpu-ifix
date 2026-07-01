@@ -46,7 +46,12 @@ const { fetchPodConfigMock, gatewayAdminPatchMock } = vi.hoisted(() => ({
   fetchPodConfigMock: vi.fn(),
   gatewayAdminPatchMock: vi.fn(),
 }));
-vi.mock("@/lib/gateway", () => ({ fetchPodConfig: fetchPodConfigMock }));
+// The owner write actions refetch live config via `fetchPodConfigServer`
+// (gateway-server.ts) — the server-safe reader. Mock THAT, and leave
+// `@/lib/gateway` real so `GatewayError` (imported by gateway-server) resolves.
+vi.mock("@/lib/gateway-server", () => ({
+  fetchPodConfigServer: fetchPodConfigMock,
+}));
 vi.mock("@/lib/gateway-admin", () => ({ gatewayAdminPatch: gatewayAdminPatchMock }));
 
 // `requireOwner`'s session path calls `next/headers` `headers()`, which throws
