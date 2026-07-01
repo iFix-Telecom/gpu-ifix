@@ -36,6 +36,12 @@ blocked: 0
 notas:
 - Deploy dev 2026-07-01: gateway-dev (vps-ifix-vm, stack 34) rodando imagem Phase 17 (6df75b33, version=dev), migration 0031 aplicada, podconfig LISTEN ativo. GHCR latest-dev = digest d5e85f5a (Phase 17). Rollback: tag pre-p17-3dcc083 (imagem antiga) na VM.
 - Admin key temp UAT: id 00aff493-fbd7-4258-af25-77fc35fa4d31 (label uat-17-hotreload) — REVOGAR após UAT.
-- Tests 2+3 bloqueados por falta de dashboard-dev (não existe; prod-only). Precisa standup (DB + auth + owner/operator users + domínio).
+- Dashboard-dev PROVISIONADO 2026-07-01 pra Tests 2+3:
+  - URL: https://ai-dashboard-dev.ifixtelecom.com.br (aponta pro gateway-dev)
+  - Owner: owner-uat@ifixtelecom.com.br / UatOwner@2026 (role owner)
+  - Operator: operator-uat@ifixtelecom.com.br / UatOperator@2026 (role operator)
+  - GOTCHA: 1º login exige enroll de 2FA (TOTP) — escanear QR em /2fa/enroll antes de chegar em /operacao/config (gate por design, igual PROD).
+  - Infra (teardown pós-UAT): container ifix-ai-dashboard-dev (vps-ifix-vm), DB bd_ai_dashboard_dev (DO), CF A record ai-dashboard-dev (id 510d59a4475afbe9f9d5652c21f8e3c4), imagem ifix-ai-dashboard:dev-p17.
+  - Admin keys temp a revogar pós-UAT: 00aff493 (uat-17-hotreload), 03a7027a (dashboard-dev-p17).
 
 ## Gaps
