@@ -78,7 +78,7 @@ vi.mock("@/lib/viewer", () => ({
 /** Render the awaited async Server Component output. */
 async function renderOperadores(): Promise<boolean> {
   try {
-    const mod = (await import("@/app/settings/operadores/page")) as {
+    const mod = (await import("@/app/(dashboard)/settings/operadores/page")) as {
       default: (props?: unknown) => Promise<React.ReactElement> | React.ReactElement;
     };
     const el = await mod.default({});

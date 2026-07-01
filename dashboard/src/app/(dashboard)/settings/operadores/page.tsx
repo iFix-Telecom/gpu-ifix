@@ -184,7 +184,7 @@ export default async function OperadoresPage() {
   const openSessionsAll = operators.reduce((s, o) => s + o.openSessions, 0);
 
   return (
-    <main className="flex min-h-screen flex-col p-6 gap-6 bg-background">
+    <main className="flex flex-col gap-6">
       {/* Page header */}
       <header className="flex items-start justify-between">
         <div>

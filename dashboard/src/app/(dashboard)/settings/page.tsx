@@ -99,7 +99,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col p-6 gap-6 bg-background">
+    <main className="flex flex-col gap-6">
       {/* Page header (mirrors operadores/page.tsx) */}
       <header className="flex items-start justify-between">
         <div>

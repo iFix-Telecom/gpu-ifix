@@ -51,7 +51,7 @@ afterEach(() => {
  * runtime the missing page rejects and is caught → FAILING ASSERTION.
  */
 async function loadSettingsPage(): Promise<React.ComponentType | null> {
-  const specifier = ["@/app/settings", "page"].join("/");
+  const specifier = ["@/app/(dashboard)/settings", "page"].join("/");
   try {
     const mod = (await import(/* @vite-ignore */ specifier)) as {
       default?: React.ComponentType;
@@ -68,7 +68,7 @@ describe("Settings self-service change-password (RED until Wave 3)", () => {
     // RED: page absent today → fails here as an assertion, not import error.
     expect(
       SettingsPage,
-      "@/app/settings/page must default-export a change-password form",
+      "@/app/(dashboard)/settings/page must default-export a change-password form",
     ).not.toBeNull();
     if (!SettingsPage) return;
 
