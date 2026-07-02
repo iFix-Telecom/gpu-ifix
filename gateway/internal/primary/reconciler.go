@@ -1282,6 +1282,27 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	hot := r.liveCfg()
 	r.provisionCfg.Store(&hot)
 
+	// quick-260702-nse cheapest-market provisioning policy. Count the newest
+	// contiguous run of FAILED primary lifecycles. Attempts 1-2 (failStreak < 2)
+	// go straight to the cheapest qualified open market; only from attempt 3+
+	// (failStreak >= 2, two consecutive failures prove the cheap market is flaky
+	// right now) does the reconciler prefer the known-good allowlisted hosts. A
+	// count failure must NEVER block the pod coming up → default to failStreak 0
+	// (market_cheapest) on any error / missing DB.
+	var failStreak int64
+	if q := r.queries(); q != nil {
+		fs, ferr := q.CountConsecutiveFailedPrimaryProvisions(ctx)
+		if ferr != nil {
+			log.Warn("primary failstreak count failed; defaulting to market_cheapest", "err", ferr)
+		} else {
+			failStreak = fs
+		}
+	}
+	mode := "market_cheapest"
+	if failStreak >= 2 {
+		mode = "allowlist_preferred"
+	}
+
 	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
 	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
 	// $0.30), fallback shape only when the primary cap returns zero
@@ -1311,8 +1332,11 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	var pickedShape int
 
 	for i, f := range filters {
-		// Allowlist preference pass for this shape.
-		if len(hot.VastMachineAllowlist) > 0 {
+		// Allowlist preference pass for this shape — quick-260702-nse: ONLY
+		// when failStreak >= 2 (allowlist_preferred mode). At failStreak < 2
+		// (market_cheapest) this block is skipped entirely and each shape goes
+		// straight to the full qualified broaden search below.
+		if failStreak >= 2 && len(hot.VastMachineAllowlist) > 0 {
 			allowFilter := vast.WithMachineAllowlist(f, hot.VastMachineAllowlist)
 			offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
 			if err != nil {
@@ -1326,7 +1350,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 				pickedShape = i
 				log.Info("primary offers found for shape (allowlist pass)",
 					"shape", i, "offer_count", len(candidates),
-					"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+					"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i),
+					"fail_streak", failStreak, "mode", mode)
 				break
 			}
 			log.Info("primary allowlist exhausted for shape; broadening to full qualified search",
@@ -1347,7 +1372,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			pickedShape = i
 			log.Info("primary offers found for shape",
 				"shape", i, "offer_count", len(candidates),
-				"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+				"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i),
+				"fail_streak", failStreak, "mode", mode)
 			break
 		}
 		log.Info("primary shape returned no qualified offers; trying next",
@@ -1372,7 +1398,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		"dph", offer.DphTotal,
 		"geo", offer.Geolocation,
 		"shape", pickedShape,
-		"gpu_shape", gpuShapeLabel(r.cfg, pickedShape))
+		"gpu_shape", gpuShapeLabel(r.cfg, pickedShape),
+		"fail_streak", failStreak, "mode", mode)
 	req, err := r.buildCreateRequest(offer, lifecycleID)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "build_create_request_failed:"+err.Error(), 0)
