@@ -75,6 +75,33 @@ WHERE started_at >= $1
 ORDER BY started_at DESC
 LIMIT $2;
 
+-- name: CountConsecutiveFailedPrimaryProvisions :one
+-- quick-260702-nse cheapest-market provisioning policy. Returns the length of
+-- the most-recent contiguous run of FAILED primary lifecycles. A failed
+-- lifecycle = first_health_pass_at IS NULL AND ended_at IS NOT NULL; a success
+-- = first_health_pass_at IS NOT NULL. The currently-open row (ended_at IS NULL)
+-- is excluded. Failures are counted from the newest ended row and the count
+-- stops at the first success (older failures beyond that success do not count).
+-- Used by the reconciler to gate the allowlist-first preference pass: attempts
+-- 1-2 (fail_streak < 2) search the cheapest qualified open market; attempt 3+
+-- (fail_streak >= 2) prefer the known-good PRIMARY_VAST_MACHINE_ALLOWLIST hosts.
+WITH ended AS (
+    SELECT id,
+           first_health_pass_at,
+           ROW_NUMBER() OVER (ORDER BY id DESC) AS rn
+    FROM ai_gateway.primary_lifecycles
+    WHERE ended_at IS NOT NULL
+),
+newest_success AS (
+    SELECT MIN(rn) AS min_success_rn
+    FROM ended
+    WHERE first_health_pass_at IS NOT NULL
+)
+SELECT COUNT(*)::bigint AS fail_streak
+FROM ended
+WHERE first_health_pass_at IS NULL
+  AND rn < COALESCE((SELECT min_success_rn FROM newest_success), 9223372036854775807);
+
 -- name: ListPrimaryLifecyclesInRange :many
 -- Range-overlap variant of ListPrimaryLifecycles for GET /admin/economy
 -- (OBS-09). Same compact column list (no events JSONB). Filters by the
