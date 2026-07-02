@@ -29,6 +29,16 @@ type Querier interface {
 	// LIMIT/OFFSET so the dashboard derives canNext as (offset+limit < total)
 	// instead of a heuristic. COUNT is bounded by the date range (threat T-15-08).
 	CountAuditStateChanges(ctx context.Context, arg CountAuditStateChangesParams) (int64, error)
+	// quick-260702-nse cheapest-market provisioning policy. Returns the length of
+	// the most-recent contiguous run of FAILED primary lifecycles. A failed
+	// lifecycle = first_health_pass_at IS NULL AND ended_at IS NOT NULL; a success
+	// = first_health_pass_at IS NOT NULL. The currently-open row (ended_at IS NULL)
+	// is excluded. Failures are counted from the newest ended row and the count
+	// stops at the first success (older failures beyond that success do not count).
+	// Used by the reconciler to gate the allowlist-first preference pass: attempts
+	// 1-2 (fail_streak < 2) search the cheapest qualified open market; attempt 3+
+	// (fail_streak >= 2) prefer the known-good PRIMARY_VAST_MACHINE_ALLOWLIST hosts.
+	CountConsecutiveFailedPrimaryProvisions(ctx context.Context) (int64, error)
 	// Boot-time defensive check (D-C1 path 3). The CHECK constraint should make
 	// this impossible. If COUNT > 0, gateway os.Exit(1).
 	CountSensitivePeakInvariant(ctx context.Context) (int64, error)

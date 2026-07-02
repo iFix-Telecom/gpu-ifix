@@ -39,6 +39,7 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -304,6 +305,20 @@ func (r insertReturningRow) Scan(dest ...interface{}) error {
 	}
 	if p, ok := dest[1].(*time.Time); ok {
 		*p = r.startedAt
+	}
+	return nil
+}
+
+// countRow scans a single int64 into dest[0]. Models the :one COUNT(*)::bigint
+// shape used by CountConsecutiveFailedPrimaryProvisions (quick-260702-nse).
+type countRow struct{ n int64 }
+
+func (r countRow) Scan(dest ...interface{}) error {
+	if len(dest) < 1 {
+		return errors.New("countRow: expected 1 dest pointer")
+	}
+	if p, ok := dest[0].(*int64); ok {
+		*p = r.n
 	}
 	return nil
 }
@@ -997,6 +1012,113 @@ func TestReconcilerVastFallback(t *testing.T) {
 		"reconciler must call SearchOffers for both [primary, fallback] shapes")
 	require.Equal(t, int64(7777), createdFor.Load(),
 		"CreateInstance must receive the fallback offer's ID (7777)")
+}
+
+// runAllowlistGateProbe (quick-260702-nse) drives provisionLifecycle with a
+// NON-empty machine allowlist on BOTH the boot cfg and the live pod_config
+// snapshot, scripts the CountConsecutiveFailedPrimaryProvisions count to the
+// given failStreak, and reports whether the FIRST SearchOffers call carried a
+// machine_id {in} (allowlist-preferred) and/or {notin} (blocklist) clause.
+func runAllowlistGateProbe(t *testing.T, failStreak int64) (firstHasIn bool, firstHasNotin bool) {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.PrimaryVastMachineAllowlist = []int64{43803, 55158}
+	cfg.PrimaryVastMachineBlocklist = []int64{55942}
+
+	snapCfg := podconfig.PodConfig{
+		CapPrimary:           0.30,
+		CapFallback:          0.60,
+		HostID:               0,
+		VastMachineAllowlist: []int64{43803, 55158},
+		VastMachineBlocklist: []int64{55942},
+		RejectPrivateIP:      false,
+		ColdStartBudgetS:     60,
+		PortBindBudgetS:      600,
+		FailureCooldownS:     120,
+	}
+	loader := podconfig.NewStaticLoaderForTest(snapCfg, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var callN atomic.Int32
+	var seenIn, seenNotin, firstCaptured atomic.Bool
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			if callN.Add(1) == 1 {
+				if mid, ok := filter["machine_id"].(map[string]any); ok {
+					if _, ok := mid["in"]; ok {
+						seenIn.Store(true)
+					}
+					if _, ok := mid["notin"]; ok {
+						seenNotin.Store(true)
+					}
+				}
+				firstCaptured.Store(true)
+			}
+			// One offer below the primary cap so the producing pass wins and
+			// the shape loop stops after a single SearchOffers call.
+			return []vast.Offer{{ID: 7777, MachineID: 43803, HostID: 99001, DphTotal: 0.20}}, nil
+		},
+		createInstanceFn: func(_ context.Context, _ int64, _ vast.CreateRequest) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 12345, ActualStatus: "loading"}, nil
+		},
+	}
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+			if strings.Contains(sql, "fail_streak") {
+				return countRow{n: failStreak}
+			}
+			return errRow{err: errors.New("fakeDBTX: unexpected QueryRow in gate probe")}
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg:    cfg,
+		FSM:    fsm,
+		Vast:   fakeV,
+		PodCfg: loader,
+		Rule:   alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool {
+			return false
+		},
+	})
+	r.SetQueriesForTest(gen.New(dbtx))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	require.True(t, firstCaptured.Load(), "SearchOffers must have been called at least once")
+	return seenIn.Load(), seenNotin.Load()
+}
+
+// TestReconcilerAllowlistGate_FailStreak0_MarketOnly: attempt 1 (fail_streak 0)
+// searches the cheapest open market — NO machine_id {in} clause even though the
+// allowlist is non-empty.
+func TestReconcilerAllowlistGate_FailStreak0_MarketOnly(t *testing.T) {
+	hasIn, _ := runAllowlistGateProbe(t, 0)
+	require.False(t, hasIn,
+		"fail_streak 0 must NOT emit machine_id {in} on the first SearchOffers call (market-cheapest)")
+}
+
+// TestReconcilerAllowlistGate_FailStreak1_MarketOnly: attempt 2 (fail_streak 1)
+// still market-only.
+func TestReconcilerAllowlistGate_FailStreak1_MarketOnly(t *testing.T) {
+	hasIn, _ := runAllowlistGateProbe(t, 1)
+	require.False(t, hasIn,
+		"fail_streak 1 must NOT emit machine_id {in} on the first SearchOffers call (market-cheapest)")
+}
+
+// TestReconcilerAllowlistGate_FailStreak2_AllowlistFirst: attempt 3+
+// (fail_streak 2) runs the allowlist-first preference pass — the FIRST
+// SearchOffers call carries machine_id {in: allowlist}.
+func TestReconcilerAllowlistGate_FailStreak2_AllowlistFirst(t *testing.T) {
+	hasIn, _ := runAllowlistGateProbe(t, 2)
+	require.True(t, hasIn,
+		"fail_streak 2 must emit machine_id {in} on the first SearchOffers call (allowlist-preferred)")
 }
 
 func contains(s, substr string) bool {
