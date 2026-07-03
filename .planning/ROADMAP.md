@@ -211,11 +211,11 @@ Plans:
 Plans:
 
 - [ ] 19-01-PLAN.md — Wave 1: worker-vm foundation — ai-gateway overlay network + infra-redis-1 alias + confirm Portainer swarm-string API route (A1) + internal Traefik :80 Host routing (A2)
-- [ ] 19-02-PLAN.md — Wave 2: deploy consolidated gateway + embed swarm stacks (Portainer compose-string, endpoint 6) → bd_ai_gateway + R2 + infra-redis-1 + local embed; validate green with DEV tenant (parallel to live prod)
-- [ ] 19-03-PLAN.md — Wave 2: deploy dashboard + rerank swarm stacks + additively reconcile prod-only client-facing model_aliases into bd_ai_gateway (close Pitfall 6 404 drift)
-- [ ] 19-04-PLAN.md — Wave 3: DB migration (BLOCKING checkpoint) — DELETE-dev-first + COPY 18 tenants/19 api_keys/admin_keys/usage_counters prod→bd_ai_gateway hash-verbatim; prove every prod key authenticates against worker-vm gateway; billing archived in _prod
-- [ ] 19-05-PLAN.md — Wave 4: cutover (BLOCKING checkpoint) — flip edge Traefik file-provider line 10.10.10.20:80 → 10.10.10.50:80 (hot-reload, DNS-stable); public smoke with real tenant keys; one-line rollback held open
-- [ ] 19-06-PLAN.md — Wave 5: decommission (BLOCKING soak checkpoint) — repoint ops-claude timers; tear down n8n-ia-vm gateway/embed/rerank/redis + delete dev stack 34; retain bd_ai_gateway_prod archive; update topology docs
+- [ ] 19-02-PLAN.md — Wave 2: deploy consolidated gateway + embed swarm stacks (Portainer compose-string, endpoint 6, DIGEST-pinned) → bd_ai_gateway + R2 + fresh infra-redis-1 + local embed (verified from gateway netns); 172.18.0.1:18000 documented tier-1-only; validate green with DEV tenant (parallel to live prod)
+- [ ] 19-03-PLAN.md — Wave 2: deploy dashboard (login/DB-connectivity proven) + rerank swarm stacks (public /rerank route verified) + classify & additively reconcile prod-only client-facing model_aliases into bd_ai_gateway, each real-call-verified (close Pitfall 6 404 drift)
+- [ ] 19-04-PLAN.md — Wave 3: DB migration (BLOCKING checkpoint) — collision-preflight + staging schema ai_gateway_migration + ONE atomic migrate.sql (BEGIN…scoped DELETE…INSERT…SELECT…in-tx byte-for-byte hash proof=19…COMMIT) for 18 tenants/19 api_keys/admin_keys/current-period usage_counters; exact prod keys proven (auth preserved + behavior parity); root-600 backups; billing archived in _prod
+- [ ] 19-05-PLAN.md — Wave 4: cutover (BLOCKING checkpoint + edge preflight) — flip edge Traefik file-provider line 10.10.10.20:80 → 10.10.10.50:80 (hot-reload, DNS-stable); record cutover_ts; public smoke (chat+embed+dashboard) with real keys; live monitoring + rollback thresholds + billing/usage reconciliation procedure; one-line rollback held open
+- [ ] 19-06-PLAN.md — Wave 5: decommission (BLOCKING measurable-soak checkpoint, 24h/business-cycle) — pre-archive old runtime config (root-600) + emergency rebuild procedure; unmask+repoint ops-claude timers; tear down n8n-ia-vm gateway/embed/rerank/redis (retain dirs+volumes, no -v) + delete dev stack 34; retain bd_ai_gateway_prod archive; update topology docs
 
 ---
 
