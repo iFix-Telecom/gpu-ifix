@@ -201,6 +201,19 @@ Plans:
 
 ---
 
+### Phase 19: Gateway consolidation → worker-vm — unificar TODAS as stacks ai-gateway numa VM única (worker-vm 10.10.10.50, Docker Swarm sem GPU), tornando-a o gateway único (dev+prod fundidos). Descomissiona n8n-ia-vm (prod) + vps-ifix-vm (dev). Migra 6 containers (ifix-ai-gateway prod, ifix-ai-dashboard, ai-gateway-embed, ai-gateway-rerank, redis-gateway-prod, ai-gateway-dev). Gateway novo → DB bd_ai_gateway (migrar 18 tenants + api_keys de bd_ai_gateway_prod preservando hash das keys) + weights R2 + redis infra-redis-1 (criar) + upstream LLM/STT/health 172.18.0.1:18000 (pod local, tier-1 fallback enquanto down). Todas as stacks Portainer-managed (endpoint 6) e editáveis via UI. Env-alvo = estilo dev (fornecido pelo usuário, secrets no .env root-600). Decisões travadas + recon completo em 19-CONTEXT.md. Pedido 2026-07-03.
+
+**Goal:** [To be planned]
+**Requirements**: ver 19-CONTEXT.md (LOCKED decisions)
+**Depends on:** Phase 17 (failStreak provisioning policy — quick 260702-nse, herdada pelo gateway consolidado)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 19 to break down)
+
+---
+
 ### Phase 11.1: shrink-pod-remove-whisper (INSERTED)
 
 **Goal:** Shrink the primary pod by removing the Speaches/faster-whisper-large-v3 tier-0 STT service (workflow batch volume insufficient to justify GPU residency — tier-1 OpenAI whisper-1 absorbs all STT via existing fallback chain). Bundles Phase 06.7 D-03 Infinity venv dead-code rollback. Refactors PRIMARY_GPU_SHAPE to 1×RTX 3090 primary (cap $0.30/h) + 1×RTX 4090 fallback (cap $0.40/h), unlocking -50% Vast cost, -5GB cold-start weight download, -3-5GB VRAM, and 1-GPU footprint vs current 2×3090.
