@@ -203,14 +203,19 @@ Plans:
 
 ### Phase 19: Gateway consolidation → worker-vm — unificar TODAS as stacks ai-gateway numa VM única (worker-vm 10.10.10.50, Docker Swarm sem GPU), tornando-a o gateway único (dev+prod fundidos). Descomissiona n8n-ia-vm (prod) + vps-ifix-vm (dev). Migra 6 containers (ifix-ai-gateway prod, ifix-ai-dashboard, ai-gateway-embed, ai-gateway-rerank, redis-gateway-prod, ai-gateway-dev). Gateway novo → DB bd_ai_gateway (migrar 18 tenants + api_keys de bd_ai_gateway_prod preservando hash das keys) + weights R2 + redis infra-redis-1 (criar) + upstream LLM/STT/health 172.18.0.1:18000 (pod local, tier-1 fallback enquanto down). Todas as stacks Portainer-managed (endpoint 6) e editáveis via UI. Env-alvo = estilo dev (fornecido pelo usuário, secrets no .env root-600). Decisões travadas + recon completo em 19-CONTEXT.md. Pedido 2026-07-03.
 
-**Goal:** [To be planned]
-**Requirements**: ver 19-CONTEXT.md (LOCKED decisions)
+**Goal:** worker-vm (10.10.10.50) becomes the single, Portainer-managed, consolidated ai-gateway (gateway + embed + rerank + dashboard + infra-redis-1 on Docker Swarm), serving all ~18 production tenants over the unchanged public hostname ai-gateway.converse-ai.app — with prod tenant/key hashes migrated verbatim into bd_ai_gateway, a reversible edge-Traefik-line cutover, and the old n8n-ia-vm (prod) + vps-ifix-vm (dev) gateways decommissioned.
+**Requirements**: CONS-01 (unify all stacks on worker-vm), CONS-02 (dev-style env: bd_ai_gateway + R2 + infra-redis-1), NET-01 (create infra-redis-1 alias), EMB-01 (embed moved to worker-vm pre-decommission), UI-01 (all stacks Portainer-managed endpoint 6, UI-editable), DB-01 (migrate 18 tenants + 19 api_keys hash-verbatim), DB-02 (admin_keys + usage_counters + model_aliases reconcile; billing archived), CUT-01 (reversible edge-Traefik-line cutover, DNS-stable), DEC-01 (decommission n8n-ia-vm + vps-ifix-vm gateways) — LOCKED decisions in 19-CONTEXT.md
 **Depends on:** Phase 17 (failStreak provisioning policy — quick 260702-nse, herdada pelo gateway consolidado)
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
 
-- [ ] TBD (run /gsd:plan-phase 19 to break down)
+- [ ] 19-01-PLAN.md — Wave 1: worker-vm foundation — ai-gateway overlay network + infra-redis-1 alias + confirm Portainer swarm-string API route (A1) + internal Traefik :80 Host routing (A2)
+- [ ] 19-02-PLAN.md — Wave 2: deploy consolidated gateway + embed swarm stacks (Portainer compose-string, endpoint 6) → bd_ai_gateway + R2 + infra-redis-1 + local embed; validate green with DEV tenant (parallel to live prod)
+- [ ] 19-03-PLAN.md — Wave 2: deploy dashboard + rerank swarm stacks + additively reconcile prod-only client-facing model_aliases into bd_ai_gateway (close Pitfall 6 404 drift)
+- [ ] 19-04-PLAN.md — Wave 3: DB migration (BLOCKING checkpoint) — DELETE-dev-first + COPY 18 tenants/19 api_keys/admin_keys/usage_counters prod→bd_ai_gateway hash-verbatim; prove every prod key authenticates against worker-vm gateway; billing archived in _prod
+- [ ] 19-05-PLAN.md — Wave 4: cutover (BLOCKING checkpoint) — flip edge Traefik file-provider line 10.10.10.20:80 → 10.10.10.50:80 (hot-reload, DNS-stable); public smoke with real tenant keys; one-line rollback held open
+- [ ] 19-06-PLAN.md — Wave 5: decommission (BLOCKING soak checkpoint) — repoint ops-claude timers; tear down n8n-ia-vm gateway/embed/rerank/redis + delete dev stack 34; retain bd_ai_gateway_prod archive; update topology docs
 
 ---
 
