@@ -1,0 +1,1 @@
+- [19-06] worker-vm has a scaled-to-zero swarm service `ai-gateway-dev_gateway` (0/0 replicas) leftover from an earlier phase — unrelated to Portainer stack 34 (which was on vps-ifix-vm). Left as-is; out of 19-06 teardown scope. Consider removing in a cleanup pass: `ssh worker-vm docker service rm ai-gateway-dev_gateway`.

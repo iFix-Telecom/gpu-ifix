@@ -206,7 +206,7 @@ Plans:
 **Goal:** worker-vm (10.10.10.50) becomes the single, Portainer-managed, consolidated ai-gateway (gateway + embed + rerank + dashboard + infra-redis-1 on Docker Swarm), serving all ~18 production tenants over the unchanged public hostname ai-gateway.converse-ai.app — with prod tenant/key hashes migrated verbatim into bd_ai_gateway, a reversible edge-Traefik-line cutover, and the old n8n-ia-vm (prod) + vps-ifix-vm (dev) gateways decommissioned.
 **Requirements**: CONS-01 (unify all stacks on worker-vm), CONS-02 (dev-style env: bd_ai_gateway + R2 + infra-redis-1), NET-01 (create infra-redis-1 alias), EMB-01 (embed moved to worker-vm pre-decommission), UI-01 (all stacks Portainer-managed endpoint 6, UI-editable), DB-01 (migrate 18 tenants + 19 api_keys hash-verbatim), DB-02 (admin_keys + usage_counters + model_aliases reconcile; billing archived), CUT-01 (reversible edge-Traefik-line cutover, DNS-stable), DEC-01 (decommission n8n-ia-vm + vps-ifix-vm gateways) — LOCKED decisions in 19-CONTEXT.md
 **Depends on:** Phase 17 (failStreak provisioning policy — quick 260702-nse, herdada pelo gateway consolidado)
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 
@@ -215,7 +215,7 @@ Plans:
 - [x] 19-03-PLAN.md — Wave 2: dashboard (stack 40, login/DB-connectivity proven — clean 401 sign-in vs bd_ai_dashboard_prod; AI_GATEWAY_PG_DSN→bd_ai_gateway) + rerank (stack 41, direct /v1/rerank 200; gateway is NOT rerank-fronted, host port 7998) swarm stacks (endpoint 6, digest-pinned, UI-editable) + additively reconciled 9 prod-only client-facing model_aliases into bd_ai_gateway (10→19, all PORT, real-call-verified chat/embed/STT 200) — Pitfall 6 404 drift closed; bd_ai_gateway_prod unchanged (17); prod gateway unaffected
 - [x] 19-04-PLAN.md — Wave 3: DB migration (BLOCKING checkpoint APPROVED w/ admin-purge adjustment) — ONE atomic migrate.sql COMMITted: dev billing_events 928 pre-deleted (NO-ACTION FK parent+3 partitions), 4 dev tenants DELETEd (CASCADE api_keys/usage_counters/voices), 5 dev admin_keys purged, then INSERT 18 tenants + 19 api_keys (hash-verbatim JOIN=19) + 2 prod admin_keys + 31 usage_counters; in-tx guards passed (admin_total=2). Live auth proofs pre-cutover: chat-ifix 200 + billing row, prod admin ****613f /admin/metrics 200, telefonia/cobrancas sensitive-503 (RES-08 auth-OK, api_keys.data_class), bogus key 401. Staging dropped; CSVs shredded; root-600 dumps retained; bd_ai_gateway_prod read-only untouched
 - [x] 19-05-PLAN.md — Wave 4: cutover (BLOCKING checkpoint + edge preflight) — flip edge Traefik file-provider line 10.10.10.20:80 → 10.10.10.50:80 (hot-reload, DNS-stable); record cutover_ts; public smoke (chat+embed+dashboard) with real keys; live monitoring + rollback thresholds + billing/usage reconciliation procedure; one-line rollback held open
-- [ ] 19-06-PLAN.md — Wave 5: decommission (BLOCKING measurable-soak checkpoint, 24h/business-cycle) — pre-archive old runtime config (root-600) + emergency rebuild procedure; unmask+repoint ops-claude timers; tear down n8n-ia-vm gateway/embed/rerank/redis (retain dirs+volumes, no -v) + delete dev stack 34; retain bd_ai_gateway_prod archive; update topology docs
+- [x] 19-06-PLAN.md — Wave 5: decommission (BLOCKING measurable-soak checkpoint, 24h/business-cycle) — pre-archive old runtime config (root-600) + emergency rebuild procedure; unmask+repoint ops-claude timers; tear down n8n-ia-vm gateway/embed/rerank/redis (retain dirs+volumes, no -v) + delete dev stack 34; retain bd_ai_gateway_prod archive; update topology docs
 
 ---
 

@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-07-04T19:43:33.133Z"
+status: verifying
+last_updated: "2026-07-04T20:27:42.846Z"
 progress:
   total_phases: 16
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 74
-  completed_plans: 73
-  percent: 75
+  completed_plans: 74
+  percent: 81
 ---
 
 # STATE: ifix-ai-gateway
@@ -131,7 +131,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Ready to execute
+- **Status:** Phase complete — ready for verification
 
 ## Performance Metrics
 
@@ -224,10 +224,11 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 | Phase 17 P05 | 12min | 2 tasks | 7 files |
 | Phase 17 P06 | 30min | 3 tasks | 7 files |
 | Phase 19 P01 | 5m 4s | 3 tasks | 1 files |
+| Phase 19 P06 | 50min | 3 tasks | 3 files |
 
 ## Session Continuity
 
-- **Last session:** 2026-07-04T01:12:49.071Z
+- **Last session:** 2026-07-04T20:26:40.935Z
 - **Next session should:** Execute Phase 12 Plan 04 Task 2 — the **BLOCKING human-verify dev chaos UAT**. Plan 12-04 Task 1 is DONE (commit `431f351`: `12-04-DEV-CHAOS-UAT.md` — 5-scenario dev chaos sheet S1-S5 with Vast-credit + tier-1/OpenRouter preflight + price-first pod selection D-17). **Task 2 is a BLOCKING human-verify checkpoint** — operator must run the live dev chaos kill against `ai-gateway-dev` (vps-ifix-vm) per `12-04-DEV-CHAOS-UAT.md`: record PF-1 (Vast credit) + PF-2 (tier-1/OpenRouter health) + PF-3 (new image digest) BEFORE the kill; provision cheapest qualified pod; drive ~20-concurrency load incl. one sensitive stream; `bash scripts/chaos/vast-delete.sh` (set `GATEWAYCTL_SSH=vps-ifix-vm` + `GATEWAY_BASE_URL=dev`); sign S1 (RES-11 death detection), S2 (RES-13 zero connection-class 502 via audit_log, cross-ref PF-2), S3 (RES-08/D-10 sensitive 503), S4 (RES-12 health truth + D-13 force-close), S5 (cleanup count=0 + spend). Real Vast spend + destructive kill → autonomous mode cannot satisfy it. After all S1-S5 signed PASS + preflight recorded: type "dev-chaos approved", then write `12-04-SUMMARY.md` + advance. Any FAIL → `/gsd:plan-phase 12 --gaps`. Phase 12 Plan stays at 04 (NOT advanced — plan incomplete until UAT signed).
 
 ---
@@ -254,3 +255,4 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 - [Phase ?]: 17-06: RSC reads pod config server-side via fetchPodConfigServer (absolute self-proxy) — no new admin-key reader; structural fields render read-only (not pod_config columns)
 - [Phase 19]: Portainer swarm-string create route confirmed = POST /api/stacks/create/swarm/string?endpointId=6 (legacy ?type=1 is 405); endpoint-6 swarmID=wg4ns7gcgbf0lygbmah5k3vxv; env vars go in body env[]
 - [Phase 19]: worker-vm internal Traefik = docker/swarmMode watching worker_intra, entrypoint web:80, needs deploy.labels; ai-gateway overlay created (attachable); infra-redis-1 alias proven (PONG)
+- [Phase 19]: 19-06: gateway consolidation COMPLETE — worker-vm is the single ai-gateway; n8n-ia-vm prod stacks + vps-ifix-vm dev stack 34 decommissioned (volumes/dirs/bd_ai_gateway_prod retained); ops timers unmasked+repointed at worker-vm; rollback=rebuild via ~/gw-decomm-archive-19
