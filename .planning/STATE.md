@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-07-04T01:13:53.282Z"
+last_updated: "2026-07-04T01:45:00.000Z"
 progress:
   total_phases: 16
   completed_phases: 12
   total_plans: 74
-  completed_plans: 69
-  percent: 75
+  completed_plans: 70
+  percent: 76
 ---
 
 # STATE: ifix-ai-gateway
@@ -28,8 +28,8 @@ progress:
 ## Current Position
 
 Phase: 19 (gateway-consolidation-worker-vm) — EXECUTING
-Plan: 2 of 6
-Next work: v1 milestone close. Phase 16 CLOSED the sole v1 code blocker AND live-proved it. Producer `applyAudioEmbedUsage` wired into 7 STT/embed proxies + RequestAudioSecondsMiddleware mounted. Live-UAT on ai-gateway-dev (rev 3374999) found+fixed a path-rewrite bug (gemini-stt rewrites URL.Path → route misclassified 'chat' → metering dropped; fix commit 3374999 stamps billing route from inbound path pre-rewrite into ctx). Verified live: billing_events route=stt audio_seconds=5 + route=embed embeds_count=2; usage_counters audio_seconds=5 embeds_count=5 (quota source populated, was 0). Remaining for v1 "complete": (1) reconcile remaining stale REQUIREMENTS checkboxes (40 done 2026-06-27); (2) sign off 08/09 client UAT (INT-01..06 — operator + LGPD, process gap); (3) flip Phase 13 VERIFICATION status→passed; (4) backfill 06.5 VERIFICATION.md. Then re-run /gsd:audit-milestone → /gsd:complete-milestone v1. All 25 phases executed.
+Plan: 3 of 6
+Next work: 19-03 (dashboard + rerank stacks on worker-vm + additively reconcile prod-only client-facing model_aliases into bd_ai_gateway). 19-02 DONE 2026-07-04: consolidated gateway + embed live on worker-vm as Portainer swarm stacks 38 (ai-gateway-prod: gateway digest-pinned ghcr.io/ifixtelecom/ifix-ai-gateway@sha256:382a0fc + fresh redis alias infra-redis-1) + 39 (ai-gateway-embed: bge-m3 CPU digest-pinned @sha256:11e8b3), endpoint 6, UI-editable, reading bd_ai_gateway (goose v31) + R2 + infra-redis-1 + local embed(embed:7997). Pre-cutover green baseline with DEV tenant via internal Traefik (Host route 10.10.10.50:80): chat 200 tier-1 openrouter-chat/deepseek (172.18.0.1:18000 dormant tier-1-only, GPU-less), embed 200 bge-m3 from gateway netns (~0.5s CPU), admin 200; billing_events 918→923 (route=chat + route=embed upstream=local-embed). worker-vm .env root-600 derived from prod secrets (NOT committed). LIVE PROD gateway (n8n-ia-vm) untouched throughout — Up 27h healthy, public /health 200. SCHEME A routing (zero Traefik mutation). Validation creds: dev tenant ifix_sk_****fyei + admin ifix_admin_****eb79 (superseded by 19-04 migration). --- v1 milestone close (separate track). Phase 16 CLOSED the sole v1 code blocker AND live-proved it. Producer `applyAudioEmbedUsage` wired into 7 STT/embed proxies + RequestAudioSecondsMiddleware mounted. Live-UAT on ai-gateway-dev (rev 3374999) found+fixed a path-rewrite bug (gemini-stt rewrites URL.Path → route misclassified 'chat' → metering dropped; fix commit 3374999 stamps billing route from inbound path pre-rewrite into ctx). Verified live: billing_events route=stt audio_seconds=5 + route=embed embeds_count=2; usage_counters audio_seconds=5 embeds_count=5 (quota source populated, was 0). Remaining for v1 "complete": (1) reconcile remaining stale REQUIREMENTS checkboxes (40 done 2026-06-27); (2) sign off 08/09 client UAT (INT-01..06 — operator + LGPD, process gap); (3) flip Phase 13 VERIFICATION status→passed; (4) backfill 06.5 VERIFICATION.md. Then re-run /gsd:audit-milestone → /gsd:complete-milestone v1. All 25 phases executed.
 
 PROD PROMOTED 2026-06-29: main FF'd develop→72ffcb5 (pushed). Gateway :main rebuilt on n8n-ia-vm (manual recipe, context=repo root, -f gateway/Dockerfile) + recreated (--pull never). Prod healthy, leadership reacquired, primary pod UP (Mon 9-17 BRT). TEN-04 metering LIVE-PROVEN in PROD against REAL traffic: bd_ai_gateway_prod billing_events shows stt/gemini-stt audio_seconds=0.6/0.8/1.4 (real prod STT calls now metered via the fixed path-rewrite path; were 0/dropped) + embed/local-embed embeds_count=2 (smoke). Rollback tag ghcr.io/...:rollback-pre-ten04. NOTE: manual VM build bakes no git-rev label (version="dev") — confirm prod deploys via behavior/billing rows, not rev label. PROD dashboard NOT rebuilt (Phase 16 has no dashboard change).
 
