@@ -299,9 +299,17 @@ func extractAudioFromMultipart(body []byte, contentType string) ([]byte, string,
 			if rerr != nil {
 				return nil, "", rerr
 			}
-			mimeType := part.Header.Get("Content-Type")
-			if mimeType == "" {
-				mimeType = "audio/wav"
+			// Trust the declared Content-Type ONLY if it's a concrete audio/*
+			// type. Otherwise (empty, application/octet-stream, or any
+			// non-audio/* value) sniff the real format from magic bytes —
+			// Gemini rejects generic MIME (application/octet-stream) with
+			// HTTP 502 INVALID_ARGUMENT even for perfectly valid audio.
+			declared := part.Header.Get("Content-Type")
+			var mimeType string
+			if strings.HasPrefix(declared, "audio/") {
+				mimeType = declared
+			} else {
+				mimeType = sniffAudioMIME(audio)
 			}
 			return audio, mimeType, nil
 		}
@@ -309,4 +317,47 @@ func extractAudioFromMultipart(body []byte, contentType string) ([]byte, string,
 		_ = part.Close()
 	}
 	return nil, "", fmt.Errorf("no file part")
+}
+
+// sniffAudioMIME detects the audio container/codec from the leading magic
+// bytes and returns the matching audio/* MIME type. It is used when the
+// multipart "file" part carries no (or a non-audio/*) Content-Type — Gemini
+// rejects a generic MIME (e.g. application/octet-stream) even for valid audio.
+// Unknown or too-short buffers fall back to "audio/wav" (a safe default that
+// Gemini accepts). All length checks are guarded before indexing.
+func sniffAudioMIME(audio []byte) string {
+	n := len(audio)
+
+	// OggS — Ogg (Opus/Vorbis). 0x4F 0x67 0x67 0x53.
+	if n >= 4 && bytes.HasPrefix(audio, []byte("OggS")) {
+		return "audio/ogg"
+	}
+	// RIFF....WAVE — WAV. "RIFF" at 0-3, "WAVE" at 8-11.
+	if n >= 12 && bytes.Equal(audio[0:4], []byte("RIFF")) && bytes.Equal(audio[8:12], []byte("WAVE")) {
+		return "audio/wav"
+	}
+	// fLaC — native FLAC. 0x66 0x4C 0x61 0x43.
+	if n >= 4 && bytes.HasPrefix(audio, []byte("fLaC")) {
+		return "audio/flac"
+	}
+	// EBML header 0x1A 0x45 0xDF 0xA3 — Matroska/WebM.
+	if n >= 4 && audio[0] == 0x1A && audio[1] == 0x45 && audio[2] == 0xDF && audio[3] == 0xA3 {
+		return "audio/webm"
+	}
+	// ....ftyp — ISO-BMFF (M4A/mp4/isom). "ftyp" at offset 4-7.
+	if n >= 8 && bytes.Equal(audio[4:8], []byte("ftyp")) {
+		return "audio/mp4"
+	}
+	// ID3 tag — MP3 with metadata. 0x49 0x44 0x33.
+	if n >= 3 && audio[0] == 'I' && audio[1] == 'D' && audio[2] == '3' {
+		return "audio/mpeg"
+	}
+	// MPEG frame sync — MP3 without ID3. 0xFF followed by 0xE0-mask top bits
+	// set (0xFB/0xF3/0xF2/0xFA/0xF9/... — top 3 bits of byte 1 all 1s).
+	if n >= 2 && audio[0] == 0xFF && (audio[1]&0xE0) == 0xE0 {
+		return "audio/mpeg"
+	}
+
+	// Unknown / too short — safe fallback Gemini accepts.
+	return "audio/wav"
 }
