@@ -244,6 +244,86 @@ func TestBuildGeminiSTTDirector_FlattenResponse(t *testing.T) {
 	}
 }
 
+func TestSniffAudioMIME(t *testing.T) {
+	cases := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{"ogg", []byte("OggS\x00\x02\x00\x00"), "audio/ogg"},
+		{"wav", []byte("RIFF\x24\x00\x00\x00WAVEfmt "), "audio/wav"},
+		{"flac", []byte("fLaC\x00\x00\x00\x22"), "audio/flac"},
+		{"webm", []byte{0x1A, 0x45, 0xDF, 0xA3, 0x00}, "audio/webm"},
+		{"mp4_ftyp", []byte("\x00\x00\x00\x18ftypM4A "), "audio/mp4"},
+		{"mp3_id3", []byte("ID3\x04\x00\x00\x00"), "audio/mpeg"},
+		{"mp3_framesync", []byte{0xFF, 0xFB, 0x90, 0x00}, "audio/mpeg"},
+		{"unknown", []byte("not-audio-bytes-here"), "audio/wav"},
+		{"empty", []byte{}, "audio/wav"},
+		{"short_1byte", []byte{0xFF}, "audio/wav"},
+		{"short_riff_only", []byte("RIFF"), "audio/wav"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sniffAudioMIME(tc.input)
+			if got != tc.want {
+				t.Fatalf("sniffAudioMIME(%q)=%q; want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// forwardedInlineMime drives a request through the fixture and returns the
+// inline_data.mime_type the director forwarded to the (fake) Gemini upstream.
+func forwardedInlineMime(t *testing.T, f *geminiTestFixture, body []byte, ct string) string {
+	t.Helper()
+	_ = doRequest(t, f, body, ct)
+	f.mu.Lock()
+	captured := append([]byte(nil), f.capturedBody...)
+	f.mu.Unlock()
+	var payload geminiRequest
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("unmarshal forwarded body: %v; raw=%s", err, string(captured))
+	}
+	if len(payload.Contents) != 1 || len(payload.Contents[0].Parts) < 2 {
+		t.Fatalf("contents shape wrong: %+v", payload)
+	}
+	inline := payload.Contents[0].Parts[1].InlineData
+	if inline == nil {
+		t.Fatalf("inline_data missing in part[1]")
+	}
+	return inline.MimeType
+}
+
+func TestExtractAudioFromMultipart_MissingContentTypeSniffsOgg(t *testing.T) {
+	f := newGeminiFixture(t, "k", nil)
+	// Content-Type absent on the file part + Ogg magic bytes → sniff audio/ogg
+	// (pre-fix this returned the hardcoded audio/wav fallback).
+	body, ct := buildMultipart(t, "whisper", []byte("OggS\x00\x02\x00\x00opusdata"), "")
+	if got := forwardedInlineMime(t, f, body, ct); got != "audio/ogg" {
+		t.Fatalf("mime_type=%q; want audio/ogg (sniffed from OggS magic)", got)
+	}
+}
+
+func TestExtractAudioFromMultipart_OctetStreamSniffsWav(t *testing.T) {
+	f := newGeminiFixture(t, "k", nil)
+	// Generic application/octet-stream + RIFF/WAVE magic → sniff audio/wav
+	// (must NOT forward octet-stream, which Gemini 502s on).
+	body, ct := buildMultipart(t, "whisper", []byte("RIFF\x24\x00\x00\x00WAVEfmt "), "application/octet-stream")
+	if got := forwardedInlineMime(t, f, body, ct); got != "audio/wav" {
+		t.Fatalf("mime_type=%q; want audio/wav (sniffed, not octet-stream)", got)
+	}
+}
+
+func TestExtractAudioFromMultipart_ConcreteAudioMimePassthrough(t *testing.T) {
+	f := newGeminiFixture(t, "k", nil)
+	// A concrete audio/* declared MIME is trusted verbatim even if the bytes
+	// don't self-describe (no sniff override).
+	body, ct := buildMultipart(t, "whisper", []byte("opaque-audio-bytes"), "audio/mpeg")
+	if got := forwardedInlineMime(t, f, body, ct); got != "audio/mpeg" {
+		t.Fatalf("mime_type=%q; want audio/mpeg (declared passthrough)", got)
+	}
+}
+
 func TestBuildGeminiSTTDirector_TranslatesGeminiErrorEnvelope(t *testing.T) {
 	f := newGeminiFixture(t, "k", nil)
 	f.mu.Lock()
