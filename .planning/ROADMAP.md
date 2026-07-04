@@ -206,11 +206,11 @@ Plans:
 **Goal:** worker-vm (10.10.10.50) becomes the single, Portainer-managed, consolidated ai-gateway (gateway + embed + rerank + dashboard + infra-redis-1 on Docker Swarm), serving all ~18 production tenants over the unchanged public hostname ai-gateway.converse-ai.app — with prod tenant/key hashes migrated verbatim into bd_ai_gateway, a reversible edge-Traefik-line cutover, and the old n8n-ia-vm (prod) + vps-ifix-vm (dev) gateways decommissioned.
 **Requirements**: CONS-01 (unify all stacks on worker-vm), CONS-02 (dev-style env: bd_ai_gateway + R2 + infra-redis-1), NET-01 (create infra-redis-1 alias), EMB-01 (embed moved to worker-vm pre-decommission), UI-01 (all stacks Portainer-managed endpoint 6, UI-editable), DB-01 (migrate 18 tenants + 19 api_keys hash-verbatim), DB-02 (admin_keys + usage_counters + model_aliases reconcile; billing archived), CUT-01 (reversible edge-Traefik-line cutover, DNS-stable), DEC-01 (decommission n8n-ia-vm + vps-ifix-vm gateways) — LOCKED decisions in 19-CONTEXT.md
 **Depends on:** Phase 17 (failStreak provisioning policy — quick 260702-nse, herdada pelo gateway consolidado)
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 Plans:
 
-- [ ] 19-01-PLAN.md — Wave 1: worker-vm foundation — ai-gateway overlay network + infra-redis-1 alias + confirm Portainer swarm-string API route (A1) + internal Traefik :80 Host routing (A2)
+- [x] 19-01-PLAN.md — Wave 1: worker-vm foundation — ai-gateway overlay network + infra-redis-1 alias + confirm Portainer swarm-string API route (A1) + internal Traefik :80 Host routing (A2)
 - [ ] 19-02-PLAN.md — Wave 2: deploy consolidated gateway + embed swarm stacks (Portainer compose-string, endpoint 6, DIGEST-pinned) → bd_ai_gateway + R2 + fresh infra-redis-1 + local embed (verified from gateway netns); 172.18.0.1:18000 documented tier-1-only; validate green with DEV tenant (parallel to live prod)
 - [ ] 19-03-PLAN.md — Wave 2: deploy dashboard (login/DB-connectivity proven) + rerank swarm stacks (public /rerank route verified) + classify & additively reconcile prod-only client-facing model_aliases into bd_ai_gateway, each real-call-verified (close Pitfall 6 404 drift)
 - [ ] 19-04-PLAN.md — Wave 3: DB migration (BLOCKING checkpoint) — collision-preflight + staging schema ai_gateway_migration + ONE atomic migrate.sql (BEGIN…scoped DELETE…INSERT…SELECT…in-tx byte-for-byte hash proof=19…COMMIT) for 18 tenants/19 api_keys/admin_keys/current-period usage_counters; exact prod keys proven (auth preserved + behavior parity); root-600 backups; billing archived in _prod
