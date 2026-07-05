@@ -17,6 +17,7 @@ import {
   LogOut,
   Receipt,
   ScrollText,
+  KeyRound,
   ServerCog,
   Settings,
   SlidersHorizontal,
@@ -42,6 +43,7 @@ import {
 const NAV_ITEMS = [
   { href: "/", label: "Visão geral", icon: Activity },
   { href: "/tenants", label: "Tenants", icon: Users },
+  { href: "/tenants/gerenciar", label: "Tenants (gestão)", icon: KeyRound },
   { href: "/consumo", label: "Consumo", icon: Receipt },
   { href: "/operacao", label: "Operação", icon: ServerCog },
   { href: "/operacao/config", label: "Config do pod", icon: SlidersHorizontal },
