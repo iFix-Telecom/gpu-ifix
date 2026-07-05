@@ -545,3 +545,42 @@ export function fetchPrimaryLifecycle(): Promise<PrimaryLifecycleResponse> {
 export function fetchPodConfig(): Promise<PodConfigResponse> {
   return proxyGet<PodConfigResponse>("primary/config");
 }
+
+// --- /admin/tenants + /admin/tenants/{slug}/keys (TEN-UI-06/07, Plan 18-01) --
+//
+// These interfaces mirror the Go handlers `admin.tenantRow` (tenants_admin_http.go)
+// and `admin.keyRow` (keys_admin_http.go) FIELD-FOR-FIELD. Nullable pgtype
+// columns render as JSON null → `T | null` here. Reads go through the GET-only
+// proxy — they carry NO admin key (the key lives in route.ts + gateway-admin.ts
+// only, T-18-03). Mutations (create/revoke) go through gateway-admin.ts in the
+// Plan 18-03 server actions, NOT here.
+
+/** One tenant row. Mirrors `admin.tenantRow`. */
+export interface TenantRow {
+  id: string;
+  slug: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One API-key row for a tenant. Mirrors `admin.keyRow` (`last_used_at` nullable). */
+export interface TenantKeyRow {
+  id: string;
+  tenant_slug: string;
+  key_prefix: string;
+  status: string;
+  data_class: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** GET /admin/tenants — all tenants, newest-first (owner-gated in the page). */
+export function fetchTenants(): Promise<TenantRow[]> {
+  return proxyGet<TenantRow[]>("tenants");
+}
+
+/** GET /admin/tenants/{slug}/keys — every API key for one tenant. */
+export function fetchTenantKeys(slug: string): Promise<TenantKeyRow[]> {
+  return proxyGet<TenantKeyRow[]>(`tenants/${encodeURIComponent(slug)}/keys`);
+}

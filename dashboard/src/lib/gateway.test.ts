@@ -7,11 +7,15 @@ import {
   GatewayError,
   type PodConfigResponse,
   type PrimaryLifecycleResponse,
+  type TenantKeyRow,
+  type TenantRow,
   fetchAudit,
   fetchEconomy,
   fetchMetrics,
   fetchPodConfig,
   fetchPrimaryLifecycle,
+  fetchTenantKeys,
+  fetchTenants,
   fetchUsage,
   tenantLabel,
 } from "@/lib/gateway";
@@ -455,6 +459,72 @@ describe("fetchPodConfig", () => {
     expect(result.bounds.cap_primary_min).toBe(0.1);
     expect(result.bounds.cap_primary_max).toBe(1.5);
     expect(result.bounds.schedule_down_hour_max).toBe(23);
+  });
+});
+
+describe("fetchTenants", () => {
+  it("hits /api/gateway/tenants and parses TenantRow[]", async () => {
+    // Mirrors the Go handler `admin.tenantRow` (tenants_admin_http.go) —
+    // id/slug/name/created_at/updated_at. Read through the GET-only proxy.
+    const payload: TenantRow[] = [
+      {
+        id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+        slug: "converseai",
+        name: "ConverseAI",
+        created_at: "2026-05-26T20:53:00Z",
+        updated_at: "2026-05-26T20:53:00Z",
+      },
+    ];
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTenants();
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe("/api/gateway/tenants");
+    expect(calledUrl.startsWith("/api/gateway/")).toBe(true);
+    expect(result[0].slug).toBe("converseai");
+    expect(result[0].name).toBe("ConverseAI");
+  });
+});
+
+describe("fetchTenantKeys", () => {
+  it("hits /api/gateway/tenants/<slug>/keys and parses TenantKeyRow[]", async () => {
+    // Mirrors the Go handler `admin.keyRow` (keys_admin_http.go) —
+    // last_used_at is nullable (JSON null when never used).
+    const payload: TenantKeyRow[] = [
+      {
+        id: "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+        tenant_slug: "converseai",
+        key_prefix: "ifix_sk_****kfwv",
+        status: "active",
+        data_class: "normal",
+        created_at: "2026-05-26T20:53:00Z",
+        last_used_at: null,
+      },
+    ];
+    const fetchMock = mockFetchOnce(payload);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTenantKeys("converseai");
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe("/api/gateway/tenants/converseai/keys");
+    expect(calledUrl.startsWith("/api/gateway/")).toBe(true);
+    expect(result[0].tenant_slug).toBe("converseai");
+    expect(result[0].last_used_at).toBeNull();
+  });
+
+  it("encodeURIComponent-encodes the slug in the path", async () => {
+    const fetchMock = mockFetchOnce([] as TenantKeyRow[]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchTenantKeys("weird slug/../x");
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe(
+      "/api/gateway/tenants/weird%20slug%2F..%2Fx/keys",
+    );
   });
 });
 

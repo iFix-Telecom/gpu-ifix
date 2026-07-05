@@ -18,7 +18,11 @@ import "server-only";
 
 import { headers } from "next/headers";
 
-import { GatewayError, type PodConfigResponse } from "@/lib/gateway";
+import {
+  GatewayError,
+  type PodConfigResponse,
+  type TenantRow,
+} from "@/lib/gateway";
 
 /** Error-envelope shape the proxy/gateway emit (mirrors gateway.ts). */
 interface ErrorEnvelope {
@@ -26,34 +30,28 @@ interface ErrorEnvelope {
 }
 
 /**
- * GET /admin/primary/config from a SERVER context (RSC / server action). Routes
- * through the request-derived absolute `/api/gateway/primary/config` proxy URL
- * so the admin key stays server-only. Throws GatewayError on non-2xx, surfacing
- * the specific envelope message when present.
+ * GET a `/api/gateway/*` proxy path from a SERVER context (RSC / server action).
+ * Rebuilds the ABSOLUTE proxy URL from the inbound request headers (a Server
+ * Component cannot fetch a relative URL) and forwards the session cookie so the
+ * self-call passes back through `middleware.ts` auth (without it the middleware
+ * 307-redirects to /login and `res.json()` throws on the HTML). The admin key
+ * still lives ONLY in the proxy + gateway-admin.ts (this module reads NO key —
+ * leak-guard invariant holds, T-07-24). `fallbackMsg` labels the generic error.
  */
-export async function fetchPodConfigServer(): Promise<PodConfigResponse> {
+async function proxyGetServer<T>(path: string, fallbackMsg: string): Promise<T> {
   const h = await headers();
   const host = h.get("x-forwarded-host") ?? h.get("host");
   if (!host) {
     throw new GatewayError(
       500,
-      "Não foi possível resolver o host da requisição para ler a configuração do pod.",
+      "Não foi possível resolver o host da requisição.",
       "configuration_error",
     );
   }
   const proto = h.get("x-forwarded-proto") ?? "http";
-  const url = `${proto}://${host}/api/gateway/primary/config`;
-
-  // Forward the inbound session cookie. This request re-enters the app through
-  // the public origin, so it passes back through `middleware.ts`, which gates
-  // /api/gateway/* behind the auth + 2FA session. Without the cookie the
-  // self-call is unauthenticated → middleware 307-redirects to /login and the
-  // fetch follows it to an HTML page, making `res.json()` throw
-  // "Unexpected token '<'". The page only renders after the caller's session is
-  // fully verified, so forwarding that cookie is always valid here.
   const cookie = h.get("cookie");
 
-  const res = await fetch(url, {
+  const res = await fetch(`${proto}://${host}/api/gateway/${path}`, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -63,7 +61,7 @@ export async function fetchPodConfigServer(): Promise<PodConfigResponse> {
   });
 
   if (!res.ok) {
-    let message = "Não foi possível carregar a configuração do pod.";
+    let message = fallbackMsg;
     let type: string | null = null;
     try {
       const body = (await res.json()) as ErrorEnvelope;
@@ -75,5 +73,28 @@ export async function fetchPodConfigServer(): Promise<PodConfigResponse> {
     throw new GatewayError(res.status, message, type);
   }
 
-  return (await res.json()) as PodConfigResponse;
+  return (await res.json()) as T;
+}
+
+/**
+ * GET /admin/primary/config from a SERVER context — the `/operacao/config` RSC
+ * reads the current pod config server-side. Routes through the same GET-only
+ * proxy so the admin key stays server-only.
+ */
+export function fetchPodConfigServer(): Promise<PodConfigResponse> {
+  return proxyGetServer<PodConfigResponse>(
+    "primary/config",
+    "Não foi possível carregar a configuração do pod.",
+  );
+}
+
+/**
+ * GET /admin/tenants from a SERVER context — the tenant-management RSC (Plan
+ * 18-03) reads the tenant list server-side after the owner check.
+ */
+export function fetchTenantsServer(): Promise<TenantRow[]> {
+  return proxyGetServer<TenantRow[]>(
+    "tenants",
+    "Não foi possível carregar a lista de tenants.",
+  );
 }
