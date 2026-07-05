@@ -125,6 +125,13 @@ type proxies struct {
 	adminPrimaryConfigReadHandler  http.Handler
 	adminPrimaryConfigWriteHandler http.Handler
 
+	// Phase 18 (TEN-UI-01..05) — tenant/key management data sources. Each
+	// serves multiple methods (List/Create, List/Create/Revoke) so it is a
+	// concrete pointer, not http.Handler; mounted under the SAME
+	// X-Admin-Key-gated /admin sub-router. nil in the scaffold test variant.
+	adminTenantHandler *admin.TenantAdminHandler
+	adminKeysHandler   *admin.KeysAdminHandler
+
 	// Phase 5 — shed middleware collaborators. nil disables the shed
 	// middleware mount; production main always supplies all four
 	// pointers after the Phase 5 wiring block runs.
@@ -1338,6 +1345,14 @@ func main() {
 		adminPrimaryConfigWriteHandler = admin.NewPrimaryConfigWriteHandler(gen.New(pool), podCfgLoader, log)
 	}
 
+	// Phase 18 (TEN-UI-01..05) — tenant/key management endpoints the dashboard
+	// consumes via its owner server action. GET/POST /tenants (list + create,
+	// slug dup → 409) + GET/POST /tenants/{slug}/keys (list operator-safe + mint
+	// raw once) + POST /keys/{id}/revoke (idempotent). Thin over existing sqlc
+	// queries + auth.GenerateAPIKey — no new migration.
+	adminTenantHandler := admin.NewTenantAdminHandler(gen.New(pool), log)
+	adminKeysHandler := admin.NewKeysAdminHandler(gen.New(pool), log)
+
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
 		chat:                   chatHandler,
@@ -1361,6 +1376,9 @@ func main() {
 		adminPrimaryLifecycleHandler:   adminPrimaryLifecycleHandler,
 		adminPrimaryConfigReadHandler:  adminPrimaryConfigReadHandler,
 		adminPrimaryConfigWriteHandler: adminPrimaryConfigWriteHandler,
+
+		adminTenantHandler: adminTenantHandler,
+		adminKeysHandler:   adminKeysHandler,
 
 		adminVerifier:     adminVerifier,
 		rdb:               rdb,
@@ -1603,6 +1621,19 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		}
 		if px.adminPrimaryConfigWriteHandler != nil {
 			adminRouter.Method(http.MethodPatch, "/primary/config", px.adminPrimaryConfigWriteHandler)
+		}
+		// Phase 18 (TEN-UI-01..05) — tenant/key management, same X-Admin-Key
+		// gate. One guard per handler field (each handler serves several
+		// method routes). chi resolves {slug}/{id} path params the handlers
+		// read via chi.URLParam.
+		if px.adminTenantHandler != nil {
+			adminRouter.Method(http.MethodGet, "/tenants", http.HandlerFunc(px.adminTenantHandler.List))
+			adminRouter.Method(http.MethodPost, "/tenants", http.HandlerFunc(px.adminTenantHandler.Create))
+		}
+		if px.adminKeysHandler != nil {
+			adminRouter.Method(http.MethodGet, "/tenants/{slug}/keys", http.HandlerFunc(px.adminKeysHandler.List))
+			adminRouter.Method(http.MethodPost, "/tenants/{slug}/keys", http.HandlerFunc(px.adminKeysHandler.Create))
+			adminRouter.Method(http.MethodPost, "/keys/{id}/revoke", http.HandlerFunc(px.adminKeysHandler.Revoke))
 		}
 		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
 		// used by `gatewayctl debug emit-error` to prove the
