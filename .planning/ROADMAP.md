@@ -203,7 +203,7 @@ Plans:
 
 **Wave 2** *(depends 18-01)*
 
-- [ ] 18-02-PLAN.md — Dashboard server-side: generaliza gateway-admin.ts p/ POST + fetchTenants/fetchTenantKeys via proxy GET-only + fetchTenantsServer (RSC) + leak-guard; confirma stack 40 → gateway consolidado (TEN-UI-06/07)
+- [x] 18-02-PLAN.md — Dashboard server-side: generaliza gateway-admin.ts p/ POST + fetchTenants/fetchTenantKeys via proxy GET-only + fetchTenantsServer (RSC) + leak-guard; confirma stack 40 → gateway consolidado (TEN-UI-06/07)
 
 **Wave 3** *(depends 18-02)*
 
