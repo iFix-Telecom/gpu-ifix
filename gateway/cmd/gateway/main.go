@@ -753,12 +753,16 @@ func main() {
 		}
 		_ = u
 	}
-	// Phase 06.7 — tts role proxies. tier-0 (local-tts) = the JSON->binary
-	// reverse proxy whose upstream the reconciler overrides; tier-1
-	// (voice-api-piper) = the GATE-3 Option A adapter against UpstreamTTSPiperURL.
-	// The tier-1 adapter is OPTIONAL: if UPSTREAM_TTS_PIPER_URL is unset the
-	// fallback is dropped from the map and the dispatcher returns 503 when
-	// tier-0 is OPEN (mirrors the openrouter/openai fallback semantics).
+	// Phase 06.7 / quick 260704-ubt — tts role proxies. tier-0 (local-tts) =
+	// the JSON->binary reverse proxy whose upstream the reconciler overrides;
+	// tier-1 is now kokoro-tts (Kokoro-FastAPI, OpenAI-compatible
+	// POST /v1/audio/speech) wired via the passthrough NewTTSProxy — the old
+	// voice-api-piper adapter is DEPRECATED (dead Piper removed from vps-ifix-vm,
+	// migration 0032 repoints the DB row piper->kokoro-tts). The Piper block below
+	// stays inert (UPSTREAM_TTS_PIPER_URL is not set in prod).
+	// Both tier-1 fallbacks are OPTIONAL: if the env URL is unset the fallback is
+	// dropped from the map and the dispatcher returns 503 when tier-0 is OPEN
+	// (mirrors the openrouter/openai fallback semantics).
 	ttsRoleProxies := map[string]http.Handler{"local-tts": ttsRP}
 	// D-11/D-13 — when the primary reconciler overrides tts with the live pod
 	// URL, loader.Resolve("tts",0) returns name "emergency_pod_tts". Register a
@@ -767,6 +771,20 @@ func main() {
 	// 503s ("Upstream proxy not registered") on every pod-routed TTS request.
 	ttsRoleProxies["emergency_pod_tts"] = proxy.NewDynamicTTSProxy(
 		func() (string, bool) { return loader.Tier0OverrideURL("tts") }, log)
+	// tier-1 kokoro-tts (Kokoro-FastAPI OpenAI-compat): passthrough NewTTSProxy
+	// (NOT the Piper adapter — Kokoro speaks OpenAI 1:1, base URL + inbound
+	// /v1/audio/speech resolves via BuildDirector). Registered only when
+	// UPSTREAM_TTS_KOKORO_URL is set (migration 0032 names the DB row kokoro-tts).
+	if cfg.UpstreamTTSKokoroURL != "" {
+		kokoroRP, kerr := proxy.NewTTSProxy(cfg.UpstreamTTSKokoroURL, log)
+		if kerr != nil {
+			log.Warn("build kokoro-tts proxy", "err", kerr)
+		} else {
+			ttsRoleProxies["kokoro-tts"] = kokoroRP
+		}
+	}
+	// DEPRECATED — voice-api-piper: dead Piper removed from vps-ifix-vm.
+	// Inert in prod (UPSTREAM_TTS_PIPER_URL unset); kept for old .env compat.
 	if cfg.UpstreamTTSPiperURL != "" {
 		piperAdapter, perr := proxy.NewPiperTTSAdapter(cfg.UpstreamTTSPiperURL, log)
 		if perr != nil {
