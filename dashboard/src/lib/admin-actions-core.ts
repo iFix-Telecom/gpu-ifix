@@ -47,7 +47,10 @@ import { auth as realAuth } from "@/lib/auth";
 import { getDb, schema } from "@/lib/db";
 import { sendMail } from "@/lib/email";
 import type { PodConfigResponse } from "@/lib/gateway";
-import { gatewayAdminPatch as realGatewayAdminPatch } from "@/lib/gateway-admin";
+import {
+  gatewayAdminPatch as realGatewayAdminPatch,
+  gatewayAdminPost as realGatewayAdminPost,
+} from "@/lib/gateway-admin";
 // The owner write actions run ONLY in a server (server-action) context, so the
 // refetch-for-validation must use the server-safe reader: `fetchPodConfig`
 // (gateway.ts) hits the RELATIVE proxy path `/api/gateway/*`, which throws
@@ -650,6 +653,152 @@ export async function updatePodConfigBoundCore(args: {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// TEN-UI-08/09 — owner-gated tenant / key mutations (Plan 18-03).
+//
+// Mirror updatePodConfigCore EXACTLY: requireOwner FIRST (D-03, server-side,
+// identity only from the session via the wrappers) → server-side validation
+// (defense-in-depth with the Go handler, Plan 18-01) BEFORE any gateway call →
+// mutate via `gatewayAdminPost` (server-only, X-Admin-Key) → EXACTLY one audit
+// row (never a secret in metadata) → revalidate. The `gatewayAdminPost` helper
+// (Plan 18-02) returns the gateway JSON body verbatim; this module only CONSUMES
+// it and NEVER edits gateway-admin.ts (leak-guard invariant, owned by 18-02).
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Injectable gateway-POST seam for unit tests (mock the mutation). */
+export interface TenantMutationDeps {
+  post?: typeof realGatewayAdminPost;
+}
+
+/** Response shape of the create-key gateway POST (raw `key` shown once). */
+export interface CreatedKey {
+  id?: string;
+  key_prefix?: string;
+  data_class?: string;
+  key?: string;
+}
+
+/** Slug must be lowercase url-safe: leading alnum then alnum/hyphen. */
+const TENANT_SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** The only accepted data classes (whitelist — Plan 18-01 parity). */
+const KEY_DATA_CLASSES = new Set(["normal", "sensitive"]);
+
+/**
+ * Create a tenant. Owner-gated; the `slug` (url-safe) and non-empty `name` are
+ * validated SERVER-SIDE before the gateway POST. Writes one `tenant.create`
+ * audit row with metadata `{slug, name}` — no secret.
+ */
+export async function createTenantCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  slug: string;
+  name: string;
+  deps?: TenantMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  const slug = (args.slug ?? "").trim();
+  const name = (args.name ?? "").trim();
+  if (!TENANT_SLUG_RE.test(slug)) {
+    throw new Error(
+      "Slug inválido — use apenas letras minúsculas, números e hífens.",
+    );
+  }
+  if (name === "") {
+    throw new Error("O nome do tenant não pode ser vazio.");
+  }
+
+  const post = args.deps?.post ?? realGatewayAdminPost;
+  await post("tenants", { slug, name });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "tenant.create",
+    metadata: { slug, name },
+  });
+
+  safeRevalidateTenants();
+}
+
+/**
+ * Mint an API key for a tenant. Owner-gated; `dataClass` is whitelist-validated
+ * SERVER-SIDE before the gateway POST. The gateway returns the raw `key` once —
+ * it is RETURNED to the caller for ephemeral display but NEVER audited/logged.
+ * Writes one `key.create` audit row with metadata `{tenant, data_class,
+ * key_prefix}` (the prefix, never the raw key).
+ */
+export async function createTenantKeyCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  slug: string;
+  dataClass: string;
+  deps?: TenantMutationDeps;
+}): Promise<CreatedKey> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  if (!KEY_DATA_CLASSES.has(args.dataClass)) {
+    throw new Error('data_class inválido — use "normal" ou "sensitive".');
+  }
+
+  const post = args.deps?.post ?? realGatewayAdminPost;
+  const created = await post<CreatedKey>(
+    `tenants/${encodeURIComponent(args.slug)}/keys`,
+    { data_class: args.dataClass },
+  );
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "key.create",
+    // NEVER `created.key` (the raw secret) — only the safe prefix (T-18-04).
+    metadata: {
+      tenant: args.slug,
+      data_class: args.dataClass,
+      key_prefix: created?.key_prefix,
+    },
+  });
+
+  safeRevalidateTenants();
+  return created;
+}
+
+/**
+ * Revoke an API key by id. Owner-gated; `keyId` must be non-empty. Writes one
+ * `key.revoke` audit row with metadata `{key_id}`.
+ */
+export async function revokeKeyCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  keyId: string;
+  deps?: TenantMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  const keyId = (args.keyId ?? "").trim();
+  if (keyId === "") {
+    throw new Error("ID da chave é obrigatório.");
+  }
+
+  const post = args.deps?.post ?? realGatewayAdminPost;
+  await post(`keys/${encodeURIComponent(keyId)}/revoke`, {});
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "key.revoke",
+    metadata: { key_id: keyId },
+  });
+
+  safeRevalidateTenants();
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Shared helpers.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -674,6 +823,18 @@ function safeRevalidate(): void {
 function safeRevalidatePodConfig(): void {
   try {
     revalidatePath("/operacao/config");
+  } catch {
+    // Not inside a Next.js request scope (unit test) — nothing to revalidate.
+  }
+}
+
+/**
+ * Revalidate the tenant-management page after a tenant/key mutation (Plan
+ * 18-03/18-04). Swallowed outside a Next.js request scope (unit test).
+ */
+function safeRevalidateTenants(): void {
+  try {
+    revalidatePath("/tenants/gerenciar");
   } catch {
     // Not inside a Next.js request scope (unit test) — nothing to revalidate.
   }
