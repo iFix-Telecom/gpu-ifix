@@ -51,11 +51,12 @@ type Config struct {
 	// REVIEWS action #6 — explicit enumerated env). UpstreamTTSURL is a tier-0
 	// placeholder overwritten by the reconciler's dynamic override (D-11);
 	// UpstreamTTSPiperURL is the tier-1 Piper fallback target (GATE 3 Option A).
-	UpstreamTTSURL      string // UPSTREAM_TTS_URL (tier-0 placeholder; reconciler override target for the pod Chatterbox server)
-	UpstreamTTSPiperURL string // UPSTREAM_TTS_PIPER_URL (tier-1 Piper fallback per GATE 3 Option A — ulaw 8kHz -> WAV 16kHz adapter)
-	TTSMaxInputChars    int    // TTS_MAX_INPUT_CHARS (synth-text DoS cap; default 4000)
-	VoiceMaxUploadBytes int64  // VOICE_MAX_UPLOAD_BYTES (reference-WAV upload DoS cap; default 10485760 = 10 MiB)
-	S3VoicePrefix       string // S3_VOICE_PREFIX (S3 key prefix for reference WAVs; default "voices"; MUST match the pod server CHATTERBOX_S3_VOICE_PREFIX, Plan 05)
+	UpstreamTTSURL       string // UPSTREAM_TTS_URL (tier-0 placeholder; reconciler override target for the pod Chatterbox server)
+	UpstreamTTSPiperURL  string // UPSTREAM_TTS_PIPER_URL (DEPRECATED — dead voice-api Piper removed from vps-ifix-vm; kept for old .env compat, no longer wired when empty)
+	UpstreamTTSKokoroURL string // UPSTREAM_TTS_KOKORO_URL (tier-1 Kokoro-FastAPI OpenAI-compat TTS, replaces dead Piper — passthrough via NewTTSProxy)
+	TTSMaxInputChars     int    // TTS_MAX_INPUT_CHARS (synth-text DoS cap; default 4000)
+	VoiceMaxUploadBytes  int64  // VOICE_MAX_UPLOAD_BYTES (reference-WAV upload DoS cap; default 10485760 = 10 MiB)
+	S3VoicePrefix        string // S3_VOICE_PREFIX (S3 key prefix for reference WAVs; default "voices"; MUST match the pod server CHATTERBOX_S3_VOICE_PREFIX, Plan 05)
 
 	// Phase 3 — External fallback upstreams (optional at boot; warn-log if a
 	// row in ai_gateway.upstreams is enabled but the env it points to is missing)
@@ -376,11 +377,12 @@ func Load() (Config, error) {
 		UpstreamHealthBridgeURL: os.Getenv("UPSTREAM_HEALTH_BRIDGE_URL"),
 
 		// Phase 06.7 — TTS + voice-clone surface (Plan 07).
-		UpstreamTTSURL:      os.Getenv("UPSTREAM_TTS_URL"),
-		UpstreamTTSPiperURL: os.Getenv("UPSTREAM_TTS_PIPER_URL"),
-		TTSMaxInputChars:    atoiOr(os.Getenv("TTS_MAX_INPUT_CHARS"), 4000),
-		VoiceMaxUploadBytes: atoi64Or(os.Getenv("VOICE_MAX_UPLOAD_BYTES"), 10485760),
-		S3VoicePrefix:       strOr(os.Getenv("S3_VOICE_PREFIX"), "voices"),
+		UpstreamTTSURL:       os.Getenv("UPSTREAM_TTS_URL"),
+		UpstreamTTSPiperURL:  os.Getenv("UPSTREAM_TTS_PIPER_URL"),
+		UpstreamTTSKokoroURL: os.Getenv("UPSTREAM_TTS_KOKORO_URL"),
+		TTSMaxInputChars:     atoiOr(os.Getenv("TTS_MAX_INPUT_CHARS"), 4000),
+		VoiceMaxUploadBytes:  atoi64Or(os.Getenv("VOICE_MAX_UPLOAD_BYTES"), 10485760),
+		S3VoicePrefix:        strOr(os.Getenv("S3_VOICE_PREFIX"), "voices"),
 
 		// Phase 3 external upstreams (optional at boot)
 		UpstreamOpenRouterChatURL:        os.Getenv("UPSTREAM_LLM_OPENROUTER_URL"),

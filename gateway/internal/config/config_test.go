@@ -326,6 +326,35 @@ func TestLoad_Phase3CustomValues(t *testing.T) {
 	}
 }
 
+// TestLoad_UpstreamTTSKokoroURL asserts UPSTREAM_TTS_KOKORO_URL is parsed into
+// UpstreamTTSKokoroURL (tier-1 Kokoro-FastAPI OpenAI-compat TTS replacing the
+// dead Piper), and that it defaults to empty when unset (fallback disabled).
+func TestLoad_UpstreamTTSKokoroURL(t *testing.T) {
+	clearAll(t)
+	unsetLegacyPrimary(t)
+	setAllRequired(t)
+
+	// Unset → empty (kokoro fallback disabled, mirrors Piper optional semantics).
+	t.Setenv("UPSTREAM_TTS_KOKORO_URL", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.UpstreamTTSKokoroURL != "" {
+		t.Errorf("UpstreamTTSKokoroURL = %q, want empty when unset", cfg.UpstreamTTSKokoroURL)
+	}
+
+	// Set → parsed through verbatim.
+	t.Setenv("UPSTREAM_TTS_KOKORO_URL", "http://kokoro-tts:8880")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.UpstreamTTSKokoroURL != "http://kokoro-tts:8880" {
+		t.Errorf("UpstreamTTSKokoroURL = %q, want http://kokoro-tts:8880", cfg.UpstreamTTSKokoroURL)
+	}
+}
+
 // TestLoad_Phase3ExternalURLsOptional asserts the Phase-3 external upstream
 // env vars (OpenRouter, OpenAI Whisper/Embed) are NOT required at boot.
 // The Loader will warn-log if a row in ai_gateway.upstreams is enabled but
