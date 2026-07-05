@@ -193,7 +193,7 @@ Plans:
 **Goal:** Owner cria/gerencia tenants e API keys pelo dashboard — fim do "criar tenant é só CLI" (dor real 2026-07-01, transcricao-voip/analise-transcr-voip criados na mão). Backend: handlers HTTP admin NOVOS no gateway (`GET/POST /admin/tenants`, `GET/POST /admin/tenants/{slug}/keys`, `POST /admin/keys/{id}/revoke`, X-Admin-Key) finos sobre queries sqlc já existentes (sem migration). Dashboard: proxy server-only GET + write helper server-only + server actions owner-gated auditadas + página `/tenants/gerenciar` (rota nova, não sobrescreve a `/tenants` de métricas). data_class é por-KEY (api_keys.data_class, autoritativa RES-08) → pertence ao fluxo de gerar key, não ao criar tenant. Revoke com confirm de impacto (padrão POD-CFG-12). Owner edita / operator read-only. Espelha 1:1 Phase 17 (endpoints→actions→UI) + Phase 13 (owner-gate+audit).
 **Requirements**: TEN-UI-01..11 (derivadas 2026-07-05; ver REQUIREMENTS.md). TEN-UI-12 (set-mode/set-quota) DEFERIDO — opcional, é vertical slice própria (ROADMAP "quotas/mode opcionais"). Cobrem: gateway endpoints tenant/key CRUD (01..05), dashboard reads+write-helper (06/07), server actions owner-gated+audit (08/09), UI+confirm perigoso (10/11).
 **Depends on:** Phase 13 (owner/operator authz + admin_audit_log + server-action pattern), Phase 17 (proxy + gateway-admin.ts + handler templates config_read/config_write), Phase 19 (gateway consolidado worker-vm = alvo prod).
-**Plans:** 1/4 plans executed
+**Plans:** 3/4 plans executed
 
 Plans:
 
@@ -207,7 +207,7 @@ Plans:
 
 **Wave 3** *(depends 18-02)*
 
-- [ ] 18-03-PLAN.md — Dashboard server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º + validação + 1 audit/ação sem raw) + wrappers + testes (TEN-UI-08/09)
+- [x] 18-03-PLAN.md — Dashboard server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º + validação + 1 audit/ação sem raw) + wrappers + testes (TEN-UI-08/09)
 
 **Wave 4** *(depends 18-03)*
 

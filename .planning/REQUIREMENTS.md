@@ -151,8 +151,8 @@ dashboard = proxy server-only + server actions owner-gated auditadas (padrão Ph
 - [x] **TEN-UI-05**: Gateway `POST /admin/keys/{id}/revoke` (idempotente) via X-Admin-Key
 - [x] **TEN-UI-06**: Dashboard read wrappers fetchTenants/fetchTenantKeys via proxy GET-only (sem admin key no browser)
 - [x] **TEN-UI-07**: Dashboard write helper server-only generalizado (POST/PATCH) — leak-guard: key só em {route.ts, gateway-admin.ts}
-- [ ] **TEN-UI-08**: Server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º, validação server-side data_class/slug)
-- [ ] **TEN-UI-09**: Audit: 1 admin_audit_log row por ação (tenant.create/key.create/key.revoke), metadata sem segredo/raw
+- [x] **TEN-UI-08**: Server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º, validação server-side data_class/slug)
+- [x] **TEN-UI-09**: Audit: 1 admin_audit_log row por ação (tenant.create/key.create/key.revoke), metadata sem segredo/raw
 - [ ] **TEN-UI-10**: UI /tenants/gerenciar: listar tenants + criar tenant + gerar key (mostra raw 1×) + revogar key + seletor data-class; owner-edita/operator read-only (rota nova, não sobrescreve /tenants métricas)
 - [ ] **TEN-UI-11**: Confirm perigoso (revoke key ativa) com string de impacto — sem type-to-confirm (padrão POD-CFG-12)
 - [ ] **TEN-UI-12**: (DEFERIDO — opcional, ROADMAP "quotas/mode opcionais") set-mode/set-quota do tenant via gateway PATCH + action owner-gated auditada. NÃO no escopo da Phase 18 (MVP = TEN-UI-01..11); é uma vertical slice própria (gateway+dashboard+UI) sobre UpdateTenantMode/UpdateTenantQuota. Reabrir em fase futura se pedido.
