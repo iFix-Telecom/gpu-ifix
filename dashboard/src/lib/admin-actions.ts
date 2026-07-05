@@ -31,11 +31,15 @@
 
 import {
   changePasswordCore,
+  type CreatedKey,
+  createTenantCore,
+  createTenantKeyCore,
   inviteOperatorCore,
   removeOperatorCore,
   requireOwner,
   resetOperator2FACore,
   resetOperatorPasswordCore,
+  revokeKeyCore,
   updatePodConfigBoundCore,
   updatePodConfigCore,
 } from "@/lib/admin-actions-core";
@@ -140,4 +144,34 @@ export async function updatePodConfigBound(args: {
     field: args.field,
     value: args.value,
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// TEN-UI-08/09 — owner-gated tenant / key mutations. Identity from session.
+// ──────────────────────────────────────────────────────────────────────────
+
+export async function createTenant(args: {
+  slug: string;
+  name: string;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await createTenantCore({ actor, slug: args.slug, name: args.name });
+}
+
+export async function createTenantKey(args: {
+  slug: string;
+  dataClass: string;
+}): Promise<CreatedKey> {
+  const { actor } = await requireOwner();
+  // Returns the raw `key` so the UI can show it exactly once — never persisted.
+  return await createTenantKeyCore({
+    actor,
+    slug: args.slug,
+    dataClass: args.dataClass,
+  });
+}
+
+export async function revokeKey(args: { keyId: string }): Promise<void> {
+  const { actor } = await requireOwner();
+  await revokeKeyCore({ actor, keyId: args.keyId });
 }

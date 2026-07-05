@@ -42,17 +42,25 @@ vi.mock("@/lib/email", () => ({
 // server-only PATCH helper. The owner write actions (Plan 17-05) refetch the
 // config via fetchPodConfig server-side, validate, then PATCH via
 // gatewayAdminPatch — both are mocked so no proxy/network/admin-key is touched.
-const { fetchPodConfigMock, gatewayAdminPatchMock } = vi.hoisted(() => ({
-  fetchPodConfigMock: vi.fn(),
-  gatewayAdminPatchMock: vi.fn(),
-}));
+const { fetchPodConfigMock, gatewayAdminPatchMock, gatewayAdminPostMock } =
+  vi.hoisted(() => ({
+    fetchPodConfigMock: vi.fn(),
+    gatewayAdminPatchMock: vi.fn(),
+    gatewayAdminPostMock: vi.fn(),
+  }));
 // The owner write actions refetch live config via `fetchPodConfigServer`
 // (gateway-server.ts) — the server-safe reader. Mock THAT, and leave
 // `@/lib/gateway` real so `GatewayError` (imported by gateway-server) resolves.
 vi.mock("@/lib/gateway-server", () => ({
   fetchPodConfigServer: fetchPodConfigMock,
 }));
-vi.mock("@/lib/gateway-admin", () => ({ gatewayAdminPatch: gatewayAdminPatchMock }));
+// Both server-only gateway mutation verbs are mocked so no proxy / network /
+// admin-key is touched: PATCH for pod-config (Plan 17-05), POST for tenant/key
+// mutations (Plan 18-03).
+vi.mock("@/lib/gateway-admin", () => ({
+  gatewayAdminPatch: gatewayAdminPatchMock,
+  gatewayAdminPost: gatewayAdminPostMock,
+}));
 
 // `requireOwner`'s session path calls `next/headers` `headers()`, which throws
 // outside a Next.js request scope. Stub it so the CR-01 session-gate test can
@@ -636,5 +644,182 @@ describe("admin-actions — CR-01/CR-02 authz hardening (session-only identity)"
     // The genuine entry points are still present.
     expect(typeof pub.updatePodConfig).toBe("function");
     expect(typeof pub.inviteOperator).toBe("function");
+  });
+});
+
+describe("admin-actions — TEN-UI-08/09 tenant management (Plan 18-03)", () => {
+  beforeEach(() => {
+    gatewayAdminPostMock.mockReset();
+  });
+
+  it("(TEN-UI-08) createTenant: operator rejected — NO gateway call, NO audit row", async () => {
+    const mod = await importAdminActions();
+    const createTenant = mod?.createTenantCore as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof createTenant).toBe("function");
+
+    const db = freshDb();
+    let rejected = false;
+    try {
+      await createTenant?.({
+        actor: { role: "operator" },
+        db,
+        slug: "acme",
+        name: "Acme",
+      });
+    } catch {
+      rejected = true;
+    }
+    // requireOwner throws FIRST — the gateway is never called, nothing audited.
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPostMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("(TEN-UI-08) createTenant: owner success — POST tenants + one tenant.create audit row", async () => {
+    const mod = await importAdminActions();
+    const createTenant = mod?.createTenantCore as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof createTenant).toBe("function");
+
+    const db = freshDb();
+    gatewayAdminPostMock.mockResolvedValue({ slug: "acme", name: "Acme" });
+
+    await createTenant?.({
+      actor: { id: "ow-1", email: "ow@ifixtelecom.com.br", role: "owner" },
+      db,
+      slug: "acme",
+      name: "Acme",
+    });
+
+    expect(gatewayAdminPostMock).toHaveBeenCalledTimes(1);
+    const [path, body] = gatewayAdminPostMock.mock.calls[0];
+    expect(path).toBe("tenants");
+    expect(body).toMatchObject({ slug: "acme", name: "Acme" });
+
+    expect(db.adminAuditLog.length).toBe(1);
+    const row = db.adminAuditLog[0];
+    expect(row.action).toBe("tenant.create");
+    expect(row.metadata).toEqual({ slug: "acme", name: "Acme" });
+  });
+
+  it("(TEN-UI-08) createTenant: invalid slug throws BEFORE any gateway call", async () => {
+    const mod = await importAdminActions();
+    const createTenant = mod?.createTenantCore as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof createTenant).toBe("function");
+
+    const db = freshDb();
+    let rejected = false;
+    try {
+      await createTenant?.({
+        actor: { role: "owner" },
+        db,
+        slug: "Acme Corp!", // not url-safe
+        name: "Acme",
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPostMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("(TEN-UI-09) createTenantKey: owner returns the raw key to the caller but NEVER audits it", async () => {
+    const mod = await importAdminActions();
+    const createTenantKey = mod?.createTenantKeyCore as
+      | ((args: unknown) => Promise<{ key?: string }>)
+      | undefined;
+    expect(typeof createTenantKey).toBe("function");
+
+    const db = freshDb();
+    const RAW = "ifix_sk_supersecretrawvalue000000000000";
+    gatewayAdminPostMock.mockResolvedValue({
+      id: "k1",
+      key_prefix: "ifix_sk_****0000",
+      data_class: "normal",
+      key: RAW,
+    });
+
+    const out = await createTenantKey?.({
+      actor: { id: "ow-1", email: "ow@ifixtelecom.com.br", role: "owner" },
+      db,
+      slug: "acme",
+      dataClass: "normal",
+    });
+
+    // Raw key handed back to the caller for one-time ephemeral display.
+    expect(out?.key).toBe(RAW);
+
+    const [path, body] = gatewayAdminPostMock.mock.calls[0];
+    expect(path).toBe("tenants/acme/keys");
+    expect(body).toMatchObject({ data_class: "normal" });
+
+    // Exactly one audit row; metadata carries the prefix but NEVER the raw key.
+    expect(db.adminAuditLog.length).toBe(1);
+    const row = db.adminAuditLog[0];
+    expect(row.action).toBe("key.create");
+    expect(row.metadata).toEqual({
+      tenant: "acme",
+      data_class: "normal",
+      key_prefix: "ifix_sk_****0000",
+    });
+    // The raw secret never leaks into the audit metadata (T-18-04).
+    expect(Object.keys(row.metadata)).not.toContain("key");
+    expect(JSON.stringify(row.metadata)).not.toContain(RAW);
+  });
+
+  it("(TEN-UI-09) createTenantKey: invalid data_class throws BEFORE any gateway call", async () => {
+    const mod = await importAdminActions();
+    const createTenantKey = mod?.createTenantKeyCore as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof createTenantKey).toBe("function");
+
+    const db = freshDb();
+    let rejected = false;
+    try {
+      await createTenantKey?.({
+        actor: { role: "owner" },
+        db,
+        slug: "acme",
+        dataClass: "public", // not in {normal, sensitive}
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(gatewayAdminPostMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("(TEN-UI-09) revokeKey: owner success — POST keys/<id>/revoke + one key.revoke audit row", async () => {
+    const mod = await importAdminActions();
+    const revokeKey = mod?.revokeKeyCore as
+      | ((args: unknown) => Promise<unknown>)
+      | undefined;
+    expect(typeof revokeKey).toBe("function");
+
+    const db = freshDb();
+    gatewayAdminPostMock.mockResolvedValue(undefined);
+
+    await revokeKey?.({
+      actor: { id: "ow-1", email: "ow@ifixtelecom.com.br", role: "owner" },
+      db,
+      keyId: "key-123",
+    });
+
+    expect(gatewayAdminPostMock).toHaveBeenCalledTimes(1);
+    const [path] = gatewayAdminPostMock.mock.calls[0];
+    expect(path).toBe("keys/key-123/revoke");
+
+    expect(db.adminAuditLog.length).toBe(1);
+    const row = db.adminAuditLog[0];
+    expect(row.action).toBe("key.revoke");
+    expect(row.metadata).toEqual({ key_id: "key-123" });
   });
 });
