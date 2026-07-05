@@ -144,11 +144,11 @@ handlers HTTP novos no gateway `/admin/*` (X-Admin-Key) finos sobre queries sqlc
 dashboard = proxy server-only + server actions owner-gated auditadas (padrão Phase 17). data_class
 é por-KEY (api_keys.data_class, autoritativa RES-08) — pertence ao fluxo de gerar key, não ao criar tenant.
 
-- [ ] **TEN-UI-01**: Gateway `GET /admin/tenants` (lista todos os tenants, inclusive sem tráfego) via X-Admin-Key
-- [ ] **TEN-UI-02**: Gateway `POST /admin/tenants` (create slug+name; 409 em slug dup) via X-Admin-Key
-- [ ] **TEN-UI-03**: Gateway `GET /admin/tenants/{slug}/keys` (lista keys sem key_hash/raw) via X-Admin-Key
-- [ ] **TEN-UI-04**: Gateway `POST /admin/tenants/{slug}/keys` (gera key; data_class∈{normal,sensitive}; retorna raw 1×, nunca key_hash) via X-Admin-Key
-- [ ] **TEN-UI-05**: Gateway `POST /admin/keys/{id}/revoke` (idempotente) via X-Admin-Key
+- [x] **TEN-UI-01**: Gateway `GET /admin/tenants` (lista todos os tenants, inclusive sem tráfego) via X-Admin-Key
+- [x] **TEN-UI-02**: Gateway `POST /admin/tenants` (create slug+name; 409 em slug dup) via X-Admin-Key
+- [x] **TEN-UI-03**: Gateway `GET /admin/tenants/{slug}/keys` (lista keys sem key_hash/raw) via X-Admin-Key
+- [x] **TEN-UI-04**: Gateway `POST /admin/tenants/{slug}/keys` (gera key; data_class∈{normal,sensitive}; retorna raw 1×, nunca key_hash) via X-Admin-Key
+- [x] **TEN-UI-05**: Gateway `POST /admin/keys/{id}/revoke` (idempotente) via X-Admin-Key
 - [ ] **TEN-UI-06**: Dashboard read wrappers fetchTenants/fetchTenantKeys via proxy GET-only (sem admin key no browser)
 - [ ] **TEN-UI-07**: Dashboard write helper server-only generalizado (POST/PATCH) — leak-guard: key só em {route.ts, gateway-admin.ts}
 - [ ] **TEN-UI-08**: Server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º, validação server-side data_class/slug)
