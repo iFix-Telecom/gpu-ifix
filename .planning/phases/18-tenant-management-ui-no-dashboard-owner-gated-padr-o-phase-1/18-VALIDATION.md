@@ -1,8 +1,8 @@
 ---
 phase: 18
 slug: tenant-management-ui-no-dashboard-owner-gated-padr-o-phase-1
-status: draft
-nyquist_compliant: false
+status: derived
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-07-05
 ---
@@ -38,15 +38,18 @@ created: 2026-07-05
 
 ## Per-Task Verification Map
 
-> Stub — o planner preenche 1 linha por task ao derivar os PLANs (IDs TEN-UI-xx).
-
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 18-01-01 | 01 | 1 | TEN-UI-02 | T-18-01 (slug dup / injection) | POST /admin/tenants cria tenant; 409 em slug duplicado; sem key_hash no response | unit | `go test ./internal/admin/ -run TestCreateTenant` | ❌ W0 | ⬜ pending |
-| 18-01-02 | 01 | 1 | TEN-UI-04 | T-18-02 (raw key leak) | POST create-key retorna raw 1× no JSON; DB só hash; response NUNCA serializa `key_hash` | unit | `go test ./internal/admin/ -run TestCreateKey` | ❌ W0 | ⬜ pending |
-| 18-01-03 | 01 | 1 | TEN-UI-05 | — | POST /admin/keys/{id}/revoke idempotente (2ª chamada = 200/no-op) | unit | `go test ./internal/admin/ -run TestRevokeKey` | ❌ W0 | ⬜ pending |
-| 18-02-01 | 02 | 2 | TEN-UI-08 | T-18-03 (owner bypass) | server action nega non-owner ANTES de qualquer mutação (requireOwner 1º) | integration/behavior | dashboard test ou UAT | ❌ W0 | ⬜ pending |
-| 18-02-02 | 02 | 2 | TEN-UI-07 | T-18-04 (admin key leak) | X-Admin-Key só referenciada em `route.ts` + `gateway-admin.ts`; grep no bundle client = 0 | source assertion | `grep -rL` guard | ❌ W0 | ⬜ pending |
+| 18-01-01 | 01 | 1 | TEN-UI-01, TEN-UI-02 | T-18-05 (slug dup/injection) | GET lista todos os tenants; POST cria (slug+name); slug dup → 409; slug vazio → 400 sem query | unit | `go test ./internal/admin/ -run TestTenant -count=1` | ✅ criado na task | ⬜ pending |
+| 18-01-02 | 01 | 1 | TEN-UI-03, TEN-UI-04, TEN-UI-05 | T-18-04 (raw/hash leak) | create-key retorna raw 1× no JSON, NUNCA key_hash/key_lookup_hash; data_class inválida → 400; revoke idempotente; list sem hash | unit | `go test ./internal/admin/ -run TestKey -count=1` | ✅ criado na task | ⬜ pending |
+| 18-01-03 | 01 | 1 | TEN-UI-01..05 | T-18-02 (endpoint sem auth) | 5 rotas montadas DENTRO do adminRouter (X-Admin-Key); build+test verdes; gofmt limpo | build+unit | `cd gateway && go build ./... && go test ./internal/admin/... -count=1` | ✅ | ⬜ pending |
+| 18-02-01 | 02 | 2 | TEN-UI-07, TEN-UI-10 (env) | T-18-03, T-18-10 | gateway-admin POST+PATCH server-only; leak-guard {route.ts,gateway-admin.ts}; stack 40 → gateway consolidado | source+behavior | `bunx vitest run src/lib/gateway.test.ts -t leak` | ✅ existente | ⬜ pending |
+| 18-02-02 | 02 | 2 | TEN-UI-06 | T-18-03 (admin key leak) | fetchTenants/fetchTenantKeys via proxy GET-only relativo; wrappers de leitura NÃO leem a key | unit | `bunx vitest run src/lib/gateway.test.ts -count=1` | ✅ | ⬜ pending |
+| 18-03-01 | 03 | 3 | TEN-UI-08, TEN-UI-09 | T-18-01, T-18-08 | createTenant/createTenantKey/revokeKey: requireOwner 1º; operator → 0 gateway + 0 audit; 1 audit/ação | unit/behavior | `bunx vitest run src/lib/admin-actions.test.ts -t TEN-UI` | ❌ W0 (task cria testes) | ⬜ pending |
+| 18-03-02 | 03 | 3 | TEN-UI-08, TEN-UI-09 | T-18-04 (raw em audit) | wrappers use-server thin; metadata de key.create sem raw; requireOwner não exportado | unit | `bunx vitest run src/lib/admin-actions.test.ts -count=1` | ❌ W0 | ⬜ pending |
+| 18-04-01 | 04 | 4 | TEN-UI-10 | T-18-01 (operator vê controles) | RSC /tenants/gerenciar (getViewerRole+fetchTenantsServer); nav nova; /tenants métricas intacta | typecheck | `bunx tsc --noEmit` | ✅ | ⬜ pending |
+| 18-04-02 | 04 | 4 | TEN-UI-10, TEN-UI-11 | T-18-04, T-18-09 | island: raw 1× (não persiste), revoke confirm-impacto sem type-to-confirm, data-class no fluxo de key, operator read-only | typecheck+human | `bunx tsc --noEmit` + checkpoint | ✅ | ⬜ pending |
+| 18-04-03 | 04 | 4 | TEN-UI-10, TEN-UI-11 | T-18-01, T-18-04 | E2E owner (criar/gerar-raw/revogar/data-class) + operator read-only + audit sem raw | human-verify | manual UAT (dashboard live) | — | ⬜ pending |
 
 ---
 
@@ -76,6 +79,6 @@ created: 2026-07-05
 - [ ] Wave 0 covers all MISSING references
 - [ ] No watch-mode flags
 - [ ] Feedback latency < 90s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** derived 2026-07-05 (planner). Todas as tasks têm `<verify><automated>` (go test / vitest / tsc) exceto o checkpoint human-verify final (18-04-03, E2E owner/operator + audit — só observável no dashboard live, mesmo gate manual da Phase 17). Sem 3 tasks consecutivas sem automated verify. Os testes Go (18-01) e admin-actions (18-03) são criados dentro das próprias tasks (fake-queries / mocks hoisted, sem DB), padrão config_write_test.go / admin-actions.test.ts.

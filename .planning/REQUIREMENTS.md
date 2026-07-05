@@ -137,6 +137,26 @@ Requirements para o release inicial. Cada item mapeia para um phase do roadmap.
 - [x] **POD-CFG-14**: Painel ao vivo no dashboard (poll 10s de `/admin/primary/lifecycle`, FSM + event trail, reusa `fsm.ts` + `StaleIndicator`) (D-05)
 - [x] **POD-CFG-15**: Endpoint gateway `GET /admin/primary/config` (read, X-Admin-Key) -> `GetPodConfig` -> 16 hot fields + 9 bounds typed JSON. Fonte de leitura para: valores correntes do editor (POD-CFG-08/09), refetch server-side do bound vivo na validacao (POD-CFG-10) e do `oldValue` do audit (POD-CFG-11). Le do `pod_config` (DIVERGE de `/admin/operations` que le o boot env). Wrapper dashboard `fetchPodConfig()` via proxy GET-only (D-07).
 
+### Dashboard Tenant Management (Phase 18 — derived in plan-phase 2026-07-05)
+
+Owner-gated CRUD de tenant/API-key pelo dashboard (fim do "criar tenant é só CLI"). Backend =
+handlers HTTP novos no gateway `/admin/*` (X-Admin-Key) finos sobre queries sqlc existentes;
+dashboard = proxy server-only + server actions owner-gated auditadas (padrão Phase 17). data_class
+é por-KEY (api_keys.data_class, autoritativa RES-08) — pertence ao fluxo de gerar key, não ao criar tenant.
+
+- [ ] **TEN-UI-01**: Gateway `GET /admin/tenants` (lista todos os tenants, inclusive sem tráfego) via X-Admin-Key
+- [ ] **TEN-UI-02**: Gateway `POST /admin/tenants` (create slug+name; 409 em slug dup) via X-Admin-Key
+- [ ] **TEN-UI-03**: Gateway `GET /admin/tenants/{slug}/keys` (lista keys sem key_hash/raw) via X-Admin-Key
+- [ ] **TEN-UI-04**: Gateway `POST /admin/tenants/{slug}/keys` (gera key; data_class∈{normal,sensitive}; retorna raw 1×, nunca key_hash) via X-Admin-Key
+- [ ] **TEN-UI-05**: Gateway `POST /admin/keys/{id}/revoke` (idempotente) via X-Admin-Key
+- [ ] **TEN-UI-06**: Dashboard read wrappers fetchTenants/fetchTenantKeys via proxy GET-only (sem admin key no browser)
+- [ ] **TEN-UI-07**: Dashboard write helper server-only generalizado (POST/PATCH) — leak-guard: key só em {route.ts, gateway-admin.ts}
+- [ ] **TEN-UI-08**: Server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º, validação server-side data_class/slug)
+- [ ] **TEN-UI-09**: Audit: 1 admin_audit_log row por ação (tenant.create/key.create/key.revoke), metadata sem segredo/raw
+- [ ] **TEN-UI-10**: UI /tenants/gerenciar: listar tenants + criar tenant + gerar key (mostra raw 1×) + revogar key + seletor data-class; owner-edita/operator read-only (rota nova, não sobrescreve /tenants métricas)
+- [ ] **TEN-UI-11**: Confirm perigoso (revoke key ativa) com string de impacto — sem type-to-confirm (padrão POD-CFG-12)
+- [ ] **TEN-UI-12**: (DEFERIDO — opcional, ROADMAP "quotas/mode opcionais") set-mode/set-quota do tenant via gateway PATCH + action owner-gated auditada. NÃO no escopo da Phase 18 (MVP = TEN-UI-01..11); é uma vertical slice própria (gateway+dashboard+UI) sobre UpdateTenantMode/UpdateTenantQuota. Reabrir em fase futura se pedido.
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.

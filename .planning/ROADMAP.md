@@ -190,14 +190,28 @@ Plans:
 
 ### Phase 18: Tenant management UI no dashboard — owner-gated (padrão Phase 17 pod-config / Phase 13 operadores): listar tenants, criar tenant (slug+name), gerar/revogar API key, definir data-class (normal|sensitive), quotas/mode opcionais. Backend expõe gatewayctl (tenant/key create·revoke·list) via admin API (X-Admin-Key) consumida pelo proxy server-only /api/gateway. Motivação: criar tenant hoje é só CLI (pedido 2026-07-01, criados transcricao-voip + analise-transcr-voip via CLI). Depende de Phase 13 + Phase 17.
 
-**Goal:** [To be planned]
-**Requirements**: TBD
-**Depends on:** Phase 17
-**Plans:** 0 plans
+**Goal:** Owner cria/gerencia tenants e API keys pelo dashboard — fim do "criar tenant é só CLI" (dor real 2026-07-01, transcricao-voip/analise-transcr-voip criados na mão). Backend: handlers HTTP admin NOVOS no gateway (`GET/POST /admin/tenants`, `GET/POST /admin/tenants/{slug}/keys`, `POST /admin/keys/{id}/revoke`, X-Admin-Key) finos sobre queries sqlc já existentes (sem migration). Dashboard: proxy server-only GET + write helper server-only + server actions owner-gated auditadas + página `/tenants/gerenciar` (rota nova, não sobrescreve a `/tenants` de métricas). data_class é por-KEY (api_keys.data_class, autoritativa RES-08) → pertence ao fluxo de gerar key, não ao criar tenant. Revoke com confirm de impacto (padrão POD-CFG-12). Owner edita / operator read-only. Espelha 1:1 Phase 17 (endpoints→actions→UI) + Phase 13 (owner-gate+audit).
+**Requirements**: TEN-UI-01..11 (derivadas 2026-07-05; ver REQUIREMENTS.md). TEN-UI-12 (set-mode/set-quota) DEFERIDO — opcional, é vertical slice própria (ROADMAP "quotas/mode opcionais"). Cobrem: gateway endpoints tenant/key CRUD (01..05), dashboard reads+write-helper (06/07), server actions owner-gated+audit (08/09), UI+confirm perigoso (10/11).
+**Depends on:** Phase 13 (owner/operator authz + admin_audit_log + server-action pattern), Phase 17 (proxy + gateway-admin.ts + handler templates config_read/config_write), Phase 19 (gateway consolidado worker-vm = alvo prod).
+**Plans:** 4/4 plans complete
 
 Plans:
 
-- [ ] TBD (run /gsd:plan-phase 18 to break down)
+**Wave 1**
+
+- [ ] 18-01-PLAN.md — Gateway: handlers admin de tenant (list/create 409-dup) + key (list/create raw-1×-sem-hash/revoke-idempotente) + mounts no adminRouter + testes fake-queries (TEN-UI-01..05)
+
+**Wave 2** *(depends 18-01)*
+
+- [ ] 18-02-PLAN.md — Dashboard server-side: generaliza gateway-admin.ts p/ POST + fetchTenants/fetchTenantKeys via proxy GET-only + fetchTenantsServer (RSC) + leak-guard; confirma stack 40 → gateway consolidado (TEN-UI-06/07)
+
+**Wave 3** *(depends 18-02)*
+
+- [ ] 18-03-PLAN.md — Dashboard server actions owner-gated createTenant/createTenantKey/revokeKey (requireOwner 1º + validação + 1 audit/ação sem raw) + wrappers + testes (TEN-UI-08/09)
+
+**Wave 4** *(depends 18-03)*
+
+- [ ] 18-04-PLAN.md — Dashboard UI /tenants/gerenciar: listar + criar tenant + gerar key (raw 1×) + revogar (confirm impacto) + seletor data-class + nav; owner-edita/operator read-only; checkpoint human-verify E2E (TEN-UI-10/11)
 
 ---
 
