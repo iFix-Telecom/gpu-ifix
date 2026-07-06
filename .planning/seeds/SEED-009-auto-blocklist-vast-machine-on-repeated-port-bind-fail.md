@@ -31,6 +31,20 @@ Add an in-FSM failure memory that auto-appends a `machine_id` to the effective b
 
 Design open question: **persist to pod_config (durable, human-visible, but grows and needs pruning) vs ephemeral per-leader set with TTL (self-healing, but lost on gateway restart / leader change).** Leaning ephemeral+TTL for the auto path, keeping the DB `vast_machine_blocklist` for deliberate operator bans — the two lists union at search time.
 
+## Companion problem — slow/stuck coldstart burns money; no fast-fail, no abort control (2026-07-06, same session)
+
+After blocklisting the SA host, the picker chose Norway machine `24953` (instance `44032205`, `51.175.30.169`). It **pulled the image fine** (~4min) then the onstart went **silent** — Vast `actual_status` stuck at `created` (never `running`), zero onstart output after `"Successfully loaded image"` (13:42:35), and the gateway never logged `running, ports published` for it. It sat there **16min** with the instance billing the whole time, and the FSM would have waited the full `coldstart_budget_s` (**3600s / 60min**) before auto-destroying + retrying. A human had to `DELETE /instances/44032205` via the Vast API directly to stop the bleed.
+
+Gaps this exposes (operator words: "ficar à mercê esperando +10min pra ver se deu certo é ruim, gasta dinheiro demais"):
+
+1. **`coldstart_budget_s=3600` is far too long as a stall ceiling.** A container stuck at docker `created` (no process, no port, no health) is indistinguishable from a live-but-slow weights download only if we have no progress signal. We bill up to 60min on a dead container.
+2. **No coldstart progress/liveness signal → no fast-fail.** The reconciler polls Vast `get_instance` for `actual_status==running` but does not bound the `created→running` transition separately. Add a short **`created→running` sub-budget** (e.g. 90–180s): if Vast never reports `running` in that window, destroy + retry immediately (distinct from the longer weights-load budget that only starts once the pod process is actually up and health-polling).
+3. **No admin abort / force-retry endpoint.** `main.go` mounts only `GET /primary/lifecycle`, `GET/PATCH /primary/config`. To kill a doomed provision I had to go around the gateway to the Vast API. Add `POST /admin/primary/abort` (destroy current instance + close lifecycle + cooldown) so ops (and the dashboard) can one-click retry without raw Vast credentials.
+4. **No real-time coldstart monitoring/alerting.** The stall is only visible by manually polling `/admin/primary/lifecycle` + Vast `get_instance` + the S3 onstart log. Surface `elapsed_in_state` per FSM phase + fire an alerter event when `provisioning`/`created` exceeds a threshold, so a stuck coldstart pages instead of silently burning budget.
+5. **Open risk — is it the machine or the pod image?** Only ONE reachable machine has been observed and it stalled at `created` with no onstart output. If the NEXT reachable machine also stalls identically, the fault is the **pod image / entrypoint** (weights-load hang, bad R2 creds, OOM on 3090), NOT the host — and blocklisting machines is useless. Needs one clean run to disambiguate. (SA never got far enough to tell; it failed at TCP-reach, a different stage.)
+
+These belong together with the auto-blocklist above under a "primary-pod provisioning resilience + observability" phase.
+
 ## Not in scope
 
 - Reporting the bad host to Vast.ai. The Vast client exposes only `search/create/get/destroy/ping` — there is **no** "report/rate host" API call, and Vast's site-side host rating would require a new endpoint the gateway doesn't implement. Out of scope for this seed (would be a separate integration).
