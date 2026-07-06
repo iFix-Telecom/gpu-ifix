@@ -99,12 +99,13 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	// alias. 0026's R3 guard would then RAISE EXCEPTION and abort the chain.
 	// Manually DELETE the restored row before continuing the Down march so
 	// the clean-path round-trip can be exercised.
-	// HEAD is now 0031 (create_pod_config, row-neutral on model_aliases).
+	// HEAD is now 0032 (replace_piper_with_kokoro_tts, row-neutral on model_aliases).
 	// quick-260702-nse: bumped Down(3)→Down(4) when 0031 landed on HEAD.
-	// Down(4) peels 0031+0030+0029+0028 to reach the same point the old Down(2) did
+	// 260704-ubt HEAD bump: Down(4)→Down(5) when 0032 landed on HEAD.
+	// Down(5) peels 0032+0031+0030+0029+0028 to reach the same point the old Down(2) did
 	// when 0029 was HEAD.
-	if err := db.Down(ctx, pool, 4); err != nil {
-		t.Fatalf("db.Down(4) revert 0031+0030+0029+0028: %v", err)
+	if err := db.Down(ctx, pool, 5); err != nil {
+		t.Fatalf("db.Down(5) revert 0032+0031+0030+0029+0028: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
 		`DELETE FROM ai_gateway.model_aliases WHERE alias='whisper' AND upstream_name='local-stt'`); err != nil {
@@ -229,12 +230,13 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	// guard. db.Down returns the failing step's error.
 	// Phase 11.1: was Down(2); bumped to Down(3) when 0028 landed on HEAD.
 	// Phase 11.2: bumped to Down(4) when 0029 landed on HEAD.
-	// HEAD is now 0031 (create_pod_config, row-neutral). quick-260702-nse:
-	// bumped Down(5)→Down(6) when 0031 landed on HEAD. Down(6) peels
-	// 0031+0030+0029+0028+0027 then fires 0026's R3 guard (was Down(5) when 0030 HEAD).
-	err := db.Down(ctx, pool, 6)
+	// HEAD is now 0032 (replace_piper_with_kokoro_tts, row-neutral). quick-260702-nse:
+	// bumped Down(5)→Down(6) when 0031 landed on HEAD. 260704-ubt HEAD bump:
+	// Down(6)→Down(7) when 0032 landed on HEAD. Down(7) peels
+	// 0032+0031+0030+0029+0028+0027 then fires 0026's R3 guard.
+	err := db.Down(ctx, pool, 7)
 	if err == nil {
-		t.Fatal("db.Down(6) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
+		t.Fatal("db.Down(7) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {

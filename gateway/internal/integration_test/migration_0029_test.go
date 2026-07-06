@@ -179,11 +179,12 @@ func TestIntegration_Migration0029_Down_Symmetric(t *testing.T) {
 	defer cancel()
 	pool, _ := freshSchema(t, ctx)
 
-	// HEAD is now 0031 (create_pod_config, row-neutral on STT rows).
+	// HEAD is now 0032 (replace_piper_with_kokoro_tts, row-neutral on STT rows).
 	// quick-260702-nse: bumped Down(2)→Down(3) when 0031 landed on HEAD.
-	// Down(3) peels 0031+0030 then 0029 to exercise 0029's symmetric Down.
-	if err := db.Down(ctx, pool, 3); err != nil {
-		t.Fatalf("db.Down(3) revert 0031+0030+0029: %v", err)
+	// 260704-ubt HEAD bump: Down(3)→Down(4) when 0032 landed on HEAD.
+	// Down(4) peels 0032+0031+0030 then 0029 to exercise 0029's symmetric Down.
+	if err := db.Down(ctx, pool, 4); err != nil {
+		t.Fatalf("db.Down(4) revert 0032+0031+0030+0029: %v", err)
 	}
 
 	for _, name := range []string{"local-stt", "gemini-stt", "groq-whisper"} {
