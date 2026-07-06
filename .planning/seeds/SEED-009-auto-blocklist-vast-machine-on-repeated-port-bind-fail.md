@@ -45,6 +45,23 @@ Gaps this exposes (operator words: "ficar à mercê esperando +10min pra ver se 
 
 These belong together with the auto-blocklist above under a "primary-pod provisioning resilience + observability" phase.
 
+## Companion problem 2 — cost model ignores storage + bandwidth; cold pulls dominate (2026-07-06)
+
+While chasing a reachable host we hit 3 distinct failure modes on cheap RTX 3090s in a row:
+`97859` (SA, TCP-unreachable), `24953` (Norway, stuck at docker `created`), `43503` (15min+ still `Pulling from ...` — slow host). The `allowlist=[43803,55158]` (hosts that would have weights cached) had **no live offers**, so every attempt cold-pulls from scratch.
+
+Cost findings:
+
+1. **Cap checks `dph` (GPU only), not `dph_total`.** The picker/cap uses the offer `dph` (e.g. $0.116/h GPU). The real Vast rate is `dph_total` = GPU + storage: for machine 43503, `dph_base=$0.107` + `storage_total_cost=$0.060` = **`dph_total=$0.167/h`** for a 50GB disk. On a machine with a big/expensive disk this gap grows and the "under-cap" pick can blow the real budget. Cap should be evaluated against `dph_total` (+ a bandwidth estimate), not `dph`. (The operator's reported "$0.61" was a decimal misread of the console's `$0.061/h` disk line — real running rate ≈ $0.168/h, ~$51/mo at 14h×22d. Not unviable steady-state.)
+
+2. **Every cold host re-pulls the 7.46 GB pod image** (`ghcr.io/ifixtelecom/converseai-primary-pod:main`, 30 layers, compressed) **plus the model weights from R2** (Qwen3-30B + Whisper + BGE-M3, tens of GB). Vast bills inet at ~$0.016/GB down → **~$0.5-1 one-time per coldstart just in download**, and **every failed retry re-pays it**. With a tight retry loop against bad hosts this is the dominant burn, not the GPU-hour. Mitigations: (a) fast-fail (companion problem 1) to stop paying downloads on doomed hosts; (b) actually leverage the cached-weights **allowlist** — but it's empty, so either widen it, or bake weights into a Vast **template/volume** that survives, or accept R2 egress and just minimize coldstarts.
+
+3. **Disk billed while allocated.** Console shows 50GB disk = **$43.3/mo if kept allocated 24/7**. Confirm the schedule down-cycle **destroys** the instance (not just stops it) so disk isn't paid overnight/weekends. If it only stops, that's ~$43/mo of pure idle disk.
+
+4. **No admin abort meant manual Vast API `DELETE`** three times this session to stop billing on stuck/slow instances — reinforces companion problem 1's `POST /admin/primary/abort` ask.
+
+**Decision this session (2026-07-06):** paused the primary pod — `schedule_disabled=true` restored, `failure_cooldown_s` restored to 300, all Vast instances destroyed (zero billing), tier-1 openrouter serving 100% of LLM (200 OK). Re-enable only after the provisioning-resilience + cost-model work above lands. `97859` left in the persistent blocklist.
+
 ## Not in scope
 
 - Reporting the bad host to Vast.ai. The Vast client exposes only `search/create/get/destroy/ping` — there is **no** "report/rate host" API call, and Vast's site-side host rating would require a new endpoint the gateway doesn't implement. Out of scope for this seed (would be a separate integration).
