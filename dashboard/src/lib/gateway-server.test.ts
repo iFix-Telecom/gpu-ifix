@@ -1,73 +1,45 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { GatewayError } from "@/lib/gateway";
-
-// Mutable header bag the mocked next/headers `headers()` returns.
-let inboundHeaders = new Headers();
-vi.mock("next/headers", () => ({
-  headers: async () => inboundHeaders,
+// gateway-server now reads the gateway DIRECTLY via gatewayAdminGet (no
+// self-fetch hairpin through the public proxy URL — that redirected to /login
+// and made res.json() throw on HTML). Mock the direct reader and assert
+// delegation + path.
+const { gatewayAdminGetMock } = vi.hoisted(() => ({
+  gatewayAdminGetMock: vi.fn(),
+}));
+vi.mock("@/lib/gateway-admin", () => ({
+  gatewayAdminGet: gatewayAdminGetMock,
 }));
 
-import { fetchPodConfigServer } from "@/lib/gateway-server";
-
-const okBody = { config: {}, bounds: {} };
+import { fetchPodConfigServer, fetchTenantsServer } from "@/lib/gateway-server";
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  inboundHeaders = new Headers();
+  vi.clearAllMocks();
 });
 
-describe("fetchPodConfigServer — RSC self-fetch", () => {
-  it("forwards the inbound session Cookie to the proxy (else middleware bounces to /login HTML)", async () => {
-    inboundHeaders = new Headers({
-      host: "dash.example",
-      "x-forwarded-proto": "https",
-      cookie: "better-auth.session_token=abc; better-auth.session_data=xyz",
-    });
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify(okBody), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+describe("gateway-server — direct server-side gateway reads", () => {
+  it("fetchPodConfigServer reads /admin/primary/config directly (no self-fetch)", async () => {
+    const body = { config: {}, bounds: {} };
+    gatewayAdminGetMock.mockResolvedValue(body);
 
     const res = await fetchPodConfigServer();
-    expect(res).toEqual(okBody);
 
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("https://dash.example/api/gateway/primary/config");
-    const sent = new Headers(init?.headers);
-    expect(sent.get("Cookie")).toBe(
-      "better-auth.session_token=abc; better-auth.session_data=xyz",
-    );
+    expect(res).toEqual(body);
+    expect(gatewayAdminGetMock).toHaveBeenCalledWith("primary/config");
   });
 
-  it("omits the Cookie header when the inbound request has none", async () => {
-    inboundHeaders = new Headers({ host: "dash.example" });
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify(okBody), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+  it("fetchTenantsServer reads /admin/tenants directly", async () => {
+    const rows = [{ id: "1", slug: "t", name: "T" }];
+    gatewayAdminGetMock.mockResolvedValue(rows);
 
-    await fetchPodConfigServer();
-    const [, init] = fetchMock.mock.calls[0];
-    expect(new Headers(init?.headers).has("Cookie")).toBe(false);
+    const res = await fetchTenantsServer();
+
+    expect(res).toEqual(rows);
+    expect(gatewayAdminGetMock).toHaveBeenCalledWith("tenants");
   });
 
-  it("throws GatewayError with the envelope message on non-2xx", async () => {
-    inboundHeaders = new Headers({ host: "dash.example" });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: { message: "boom", type: "x" } }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    await expect(fetchPodConfigServer()).rejects.toBeInstanceOf(GatewayError);
+  it("propagates errors from the direct reader", async () => {
+    gatewayAdminGetMock.mockRejectedValue(new Error("boom"));
+    await expect(fetchTenantsServer()).rejects.toThrow("boom");
   });
 });

@@ -1,5 +1,7 @@
 import "server-only";
 
+import { GatewayError } from "@/lib/gateway";
+
 /**
  * Server-only gateway admin WRITE helper (Plan 17-05, generalized 18-02).
  *
@@ -79,6 +81,65 @@ async function gatewayAdminMutate<T = void>(
   if (res.status === 204) return undefined as T;
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) return undefined as T;
+  return (await res.json()) as T;
+}
+
+/**
+ * GET the gateway admin API at `${GATEWAY_BASE_URL}/admin/<path>` with the
+ * `X-Admin-Key` header, server-side only. The RSC server readers
+ * (gateway-server.ts) call this so a Server Component reads the gateway
+ * DIRECTLY instead of hair-pinning through its own PUBLIC `/api/gateway/*`
+ * proxy URL — that round-trip re-enters `middleware.ts`, which 307-redirects
+ * the self-call to /login, and `res.json()` then throws on the login HTML
+ * ("Unexpected token '<'"). Reading here keeps the admin key inside this
+ * blessed server-only file (leak-guard invariant T-07-24 / T-18-03). Throws
+ * GatewayError on a non-2xx response, surfacing the gateway `{error:{message}}`
+ * envelope so the page can show the specific failure.
+ */
+export async function gatewayAdminGet<T>(path: string): Promise<T> {
+  const base = process.env.GATEWAY_BASE_URL;
+  const adminKey = process.env.GATEWAY_ADMIN_KEY;
+
+  if (!base || !adminKey) {
+    throw new GatewayError(
+      500,
+      "Gateway admin não configurado — defina GATEWAY_BASE_URL e GATEWAY_ADMIN_KEY.",
+      "configuration_error",
+    );
+  }
+
+  const target = `${base.replace(/\/$/, "")}/admin/${path}`;
+
+  let res: Response;
+  try {
+    res = await fetch(target, {
+      method: "GET",
+      headers: { "X-Admin-Key": adminKey, Accept: "application/json" },
+      cache: "no-store",
+    });
+  } catch {
+    throw new GatewayError(
+      502,
+      "Não foi possível alcançar o gateway. Verifique se o gateway está no ar.",
+      "upstream_unreachable",
+    );
+  }
+
+  if (!res.ok) {
+    let message = "Falha ao ler do gateway.";
+    let type: string | null = null;
+    try {
+      const env = (await res.json()) as {
+        error?: { message?: string; type?: string };
+      };
+      if (env.error?.message) message = env.error.message;
+      if (env.error?.type) type = env.error.type;
+    } catch {
+      // Non-JSON / empty body — keep the generic fallback message.
+    }
+    throw new GatewayError(res.status, message, type);
+  }
+
   return (await res.json()) as T;
 }
 
