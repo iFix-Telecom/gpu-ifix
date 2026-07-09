@@ -303,7 +303,7 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// Pre-byte connection-class dial failure on tier-0.
 			// D-09: record a failure on the tier-0 breaker so it opens
 			// naturally after N dials.
-			cfg.recordDialFailure(t0.Name)
+			cfg.recordUpstreamFailure(t0.Name)
 
 			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
 			// to an external tier-1 — emit the sensitive 503 block.
@@ -361,7 +361,7 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// still 503-block, never fall through (D-10 HARD GATE).
 			res := cfg.dispatchTo(w, r, t0.Name, streaming, log)
 			if res.fallthrough_ && !res.wrote {
-				cfg.recordDialFailure(t0.Name)
+				cfg.recordUpstreamFailure(t0.Name)
 				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
 				cfg.writeSensitiveBlock(w, r)
 			}
@@ -409,7 +409,7 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 		if res.fallthrough_ && !res.wrote {
 			// This tier-1 candidate dial-failed pre-byte: record its breaker
 			// failure and try the next CLOSED candidate.
-			cfg.recordDialFailure(t1.Name)
+			cfg.recordUpstreamFailure(t1.Name)
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
@@ -534,14 +534,18 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	return *res
 }
 
-// recordDialFailure records a single failure on the named tier-0 breaker so
-// it opens naturally after N dials (D-09). breaker.Set exposes no direct
-// "record failure" API; we drive one failure through Execute with a non-4xx
-// error that IsSuccessful classifies as a failure. The fn never makes a real
-// network call — it returns the synthetic error immediately.
-func (cfg DispatcherConfig) recordDialFailure(name string) {
+// recordUpstreamFailure records a single failure on the named breaker so it
+// opens naturally after N failures (D-09). Fed on BOTH a pre-byte dial failure
+// (errDialFailedFallthrough) AND a retryable upstream error response
+// (errUpstreamRetryable — Gap B: real-traffic 5xx/provider errors now count
+// toward the breaker, previously only the probe loop + synthetic dials did, so
+// a degraded tier-1 like gemini-stt stayed CLOSED forever). breaker.Set exposes
+// no direct "record failure" API; we drive one failure through Execute with a
+// non-4xx error that IsSuccessful classifies as a failure. The fn never makes a
+// real network call — it returns the synthetic error immediately.
+func (cfg DispatcherConfig) recordUpstreamFailure(name string) {
 	_, _ = cfg.Breaker.Execute(name, func() (*http.Response, error) {
-		return nil, &breaker.HTTPError{Status: http.StatusBadGateway, Msg: "tier-0 dial failed (fallthrough)"}
+		return nil, &breaker.HTTPError{Status: http.StatusBadGateway, Msg: "upstream failure (fallthrough)"}
 	})
 }
 
@@ -559,9 +563,27 @@ func prepareReplayBody(r *http.Request) (func(), bool) {
 	if r.ContentLength > maxSTTBodyBuffer {
 		return func() {}, false
 	}
+	// Snapshot the request line/headers that an upstream Director mutates
+	// in place before the first dispatch (RES-13 intra-tier failover). The
+	// gemini-stt Director rewrites multipart → JSON: it overwrites
+	// Content-Type/Content-Length and sets Method=POST on the SHARED
+	// http.Request (ServeHTTP's WithContext shallow-copies the struct but
+	// shares the Header map). Without restoring these, the NEXT STT candidate
+	// (openai-whisper) would receive JSON headers over the original multipart
+	// bytes and fail to parse. restoreHeaders re-applies the original snapshot
+	// on every cascade hop, in lockstep with the body restore below.
+	origHeader := r.Header.Clone()
+	origMethod := r.Method
+	origContentLength := r.ContentLength
+	restoreHeaders := func() {
+		r.Header = origHeader.Clone()
+		r.Method = origMethod
+		r.ContentLength = origContentLength
+	}
 	// Common case: the HTTP server / middleware already set GetBody. Use it.
 	if r.GetBody != nil {
 		restore := func() {
+			restoreHeaders()
 			if b, err := r.GetBody(); err == nil {
 				r.Body = b
 			}
@@ -584,6 +606,7 @@ func prepareReplayBody(r *http.Request) (func(), bool) {
 		return io.NopCloser(bytes.NewReader(buf)), nil
 	}
 	restore := func() {
+		restoreHeaders()
 		b, _ := r.GetBody()
 		r.Body = b
 	}

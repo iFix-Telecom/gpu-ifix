@@ -43,6 +43,22 @@ var ErrContextLengthExceeded = errors.New("proxy: context length exceeded")
 // this package needs it.
 var errDialFailedFallthrough = errors.New("proxy: dial failed, fall through to tier-1")
 
+// errUpstreamRetryable is the typed sentinel a Director's ModifyResponse
+// returns (STT only — see gemini_stt_director.go) when the upstream connected
+// but returned a retryable failure (non-200 / provider error envelope such as
+// Gemini UNAVAILABLE). ModifyResponse runs AFTER the full upstream response is
+// buffered but BEFORE any byte is copied to the client, so returning an error
+// here is pre-byte-safe for non-streaming STT — nothing reached the client and
+// the dispatcher may re-route to the next tier-1 candidate. The sentinel-aware
+// ErrorHandler treats it exactly like errDialFailedFallthrough: suppress the
+// write, record fallthrough_ so cascadeTier1 advances AND records the upstream's
+// breaker failure (Gap B — real-traffic 5xx now opens the tier-1 breaker).
+//
+// Streaming responses NEVER reach this path (STT is always non-stream); a chat
+// director must NOT emit this sentinel — doing so would break D-07 once the SSE
+// tee has flushed bytes.
+var errUpstreamRetryable = errors.New("proxy: upstream retryable error, fall through to next candidate")
+
 // ErrorHandler returns a ReverseProxy ErrorHandler that emits a 502
 // with the OpenAI error envelope and logs the cause + request id.
 //
@@ -66,14 +82,15 @@ func ErrorHandler(upstreamName string, log *slog.Logger) func(http.ResponseWrite
 		// standalone (no dispatcher → no dispatchResult), nobody will
 		// re-dispatch, so we MUST fall through to the normal 502 write below
 		// rather than leave the client with a bare 200.
-		if errors.Is(err, errDialFailedFallthrough) {
+		if errors.Is(err, errDialFailedFallthrough) || errors.Is(err, errUpstreamRetryable) {
 			if res := dispatchResultFrom(r.Context()); res != nil {
 				res.fallthrough_ = true
 				res.wrote = false
 				res.err = err
-				log.DebugContext(r.Context(), "tier-0 dial failed; suppressing 502 for fallthrough",
+				log.DebugContext(r.Context(), "upstream failure; suppressing 502 for fallthrough",
 					"request_id", httpx.RequestIDFrom(r.Context()),
 					"path", r.URL.Path,
+					"err", err,
 				)
 				return
 			}

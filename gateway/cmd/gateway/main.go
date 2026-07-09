@@ -1783,10 +1783,13 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 			return usageInterceptor.Intercept(resp)
 		},
 		Transport: &http.Transport{
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
+			MaxIdleConns:        20,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     90 * time.Second,
+			// RES-13 intra-tier failover: 25s (< the request deadline) so a
+			// hung gemini-stt leaves budget for the openai-whisper fallback
+			// hop instead of consuming the whole 60s and starving it.
+			ResponseHeaderTimeout: 25 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("gemini-stt", log),
 	}

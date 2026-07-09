@@ -623,6 +623,108 @@ func TestDispatcher_STTOverCapSkipsFallthrough(t *testing.T) {
 	}
 }
 
+// newRetryableErrorProxy builds a proxy that CONNECTS to a live target (no dial
+// failure) but whose ModifyResponse returns errUpstreamRetryable — simulating
+// gemini-stt returning a provider UNAVAILABLE envelope. The sentinel-aware
+// ErrorHandler must suppress the write and signal fallthrough so the dispatcher
+// cascades to the next candidate (RES-13 intra-tier failover, Gap A) and records
+// this upstream's breaker failure (Gap B).
+func newRetryableErrorProxy(t *testing.T, target, name string) http.Handler {
+	t.Helper()
+	u, _ := url.Parse(target)
+	return &httputil.ReverseProxy{
+		Director: BuildDirector(u),
+		Transport: fallthroughRoundTripper{base: &http.Transport{
+			ResponseHeaderTimeout: 2 * time.Second,
+		}},
+		ModifyResponse: func(*http.Response) error { return errUpstreamRetryable },
+		ErrorHandler:   ErrorHandler(name, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+}
+
+// TestDispatcher_RetryableUpstreamErrorCascades — the reported STT bug. tier-0
+// dial-fails; the first tier-1 candidate CONNECTS but returns a retryable error
+// (errUpstreamRetryable, like gemini-stt UNAVAILABLE) → the dispatcher does NOT
+// serve that 502; it falls through to the second candidate (openai-whisper),
+// which serves 200. The erroring candidate's breaker records a failure (Gap B)
+// so it opens after N and gets skipped proactively.
+func TestDispatcher_RetryableUpstreamErrorCascades(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	t0 := closedPortURL(t) // tier-0 dead → dial fail
+	// fb1 (gemini-like): live server, but its proxy ModifyResponse errors.
+	var fb1Hits int64
+	fb1srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&fb1Hits, 1)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"error":{"status":"UNAVAILABLE"}}`))
+	}))
+	defer fb1srv.Close()
+	// fb2 (openai-whisper-like): healthy.
+	var fb2Hits int64
+	fb2srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&fb2Hits, 1)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"text":"served by fb2"}`))
+	}))
+	defer fb2srv.Close()
+
+	loader := upstreams.NewLoaderInMemory(
+		upstreams.UpstreamConfig{Name: "local-stt", Role: "stt", Tier: 0, URL: t0, Enabled: true},
+		upstreams.UpstreamConfig{Name: "gemini-stt", Role: "stt", Tier: 1, TierPriority: 10, URL: fb1srv.URL, Enabled: true},
+		upstreams.UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 1, TierPriority: 20, URL: fb2srv.URL, Enabled: true},
+	)
+	bs := breaker.NewSet(rdb, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		breaker.Options{ConsecutiveFailures: 5, Cooldown: 30 * time.Second}, loader.Names())
+	cfg := DispatcherConfig{
+		Role: "stt", Loader: loader, Breaker: bs,
+		Proxies: map[string]http.Handler{
+			"local-stt":      newFallthroughProxy(t, t0, "local-stt"),
+			"gemini-stt":     newRetryableErrorProxy(t, fb1srv.URL, "gemini-stt"),
+			"openai-whisper": newFallthroughProxy(t, fb2srv.URL, "openai-whisper"),
+		},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	mux := NewDispatcher(cfg)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		strings.NewReader("multipart-audio-bytes"))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=test")
+	r = r.WithContext(auth.WithContext(r.Context(), auth.AuthContext{
+		TenantID: "tenant-1", APIKeyID: "key-1", DataClass: auth.DataClassNormal,
+	}))
+
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, r)
+
+	if rw.Code != 200 {
+		t.Fatalf("status=%d want 200 (openai-whisper served after gemini error); body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "served by fb2") {
+		t.Fatalf("expected openai-whisper body; got %s", rw.Body.String())
+	}
+	if atomic.LoadInt64(&fb1Hits) != 1 {
+		t.Fatalf("gemini-stt hits=%d want 1 (attempted before fallthrough)", atomic.LoadInt64(&fb1Hits))
+	}
+	if atomic.LoadInt64(&fb2Hits) != 1 {
+		t.Fatalf("openai-whisper hits=%d want 1 (cascade advanced on error)", atomic.LoadInt64(&fb2Hits))
+	}
+	// Gap B: the erroring gemini-stt must record a breaker failure.
+	cb, ok := bs.Get("gemini-stt")
+	if !ok || cb == nil {
+		t.Fatalf("gemini-stt breaker missing")
+	}
+	if cb.Counts().ConsecutiveFailures == 0 {
+		t.Fatalf("Gap B: retryable upstream error must record a breaker failure; ConsecutiveFailures=0")
+	}
+}
+
 // counterVal reads the current value of DialFallthroughTotal{role,outcome}.
 func counterVal(t *testing.T, role, outcome string) float64 {
 	t.Helper()

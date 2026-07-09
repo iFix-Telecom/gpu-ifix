@@ -239,14 +239,22 @@ func BuildGeminiSTTDirector(
 			resp.StatusCode = http.StatusBadGateway
 			resp.Header.Set("Content-Type", "application/json")
 			resp.Header.Set("Content-Length", strconv.Itoa(len(oa)))
-			return nil
+			// RES-13 intra-tier failover: a provider error (e.g. Gemini
+			// UNAVAILABLE) is retryable. Return the sentinel so the
+			// dispatcher's ErrorHandler suppresses this 502 and cascadeTier1
+			// advances to the next STT candidate (openai-whisper) AND records
+			// gemini-stt's breaker failure. Pre-byte-safe: STT never streams,
+			// so no byte reached the client yet.
+			return errUpstreamRetryable
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			// Non-error, non-200 — pass through unchanged.
+			// Non-error, non-200 (no parseable envelope) — still a failure;
+			// fall through to the next STT candidate rather than serving the
+			// raw non-200 body to the client.
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 			resp.ContentLength = int64(len(body))
-			return nil
+			return errUpstreamRetryable
 		}
 
 		// Flatten candidates[0].content.parts[*].text. Concatenate parts to

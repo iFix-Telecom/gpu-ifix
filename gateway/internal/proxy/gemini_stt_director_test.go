@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -325,25 +326,39 @@ func TestExtractAudioFromMultipart_ConcreteAudioMimePassthrough(t *testing.T) {
 }
 
 func TestBuildGeminiSTTDirector_TranslatesGeminiErrorEnvelope(t *testing.T) {
-	f := newGeminiFixture(t, "k", nil)
-	f.mu.Lock()
-	// Upstream returns 200 but with an error envelope (Gemini sometimes does
-	// this); the director MUST translate to 502 + OpenAI envelope.
-	f.respStatus = http.StatusOK
-	f.respBody = []byte(`{"error":{"code":429,"message":"quota exceeded","status":"RESOURCE_EXHAUSTED"}}`)
-	f.mu.Unlock()
+	// New contract (RES-13 intra-tier failover): on a Gemini error envelope the
+	// ModifyResponse (a) mutates resp to a 502 + OpenAI upstream_error envelope
+	// (so a STANDALONE consumer still gets a meaningful body) AND (b) returns
+	// errUpstreamRetryable so the dispatcher's ErrorHandler suppresses the write
+	// and cascadeTier1 falls through to the next STT candidate. We drive
+	// ModifyResponse directly (not through the ReverseProxy, whose default
+	// ErrorHandler would discard the body on the returned error).
+	gURL, _ := url.Parse("https://gemini.example/v1")
+	_, modifyResponse := BuildGeminiSTTDirector(
+		gURL, "k",
+		newDirectorTestResolver(nil),
+		"gemini-stt", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
 
-	body, ct := buildMultipart(t, "whisper", []byte("AUDIO"), "audio/wav")
-	rw := doRequest(t, f, body, ct)
-
-	if rw.Code != http.StatusBadGateway {
-		t.Fatalf("response status=%d; want 502", rw.Code)
+	resp := &http.Response{
+		StatusCode: http.StatusOK, // Gemini often 200s with an error envelope
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"message":"quota exceeded","status":"RESOURCE_EXHAUSTED"}}`)),
 	}
-	bodyStr := rw.Body.String()
+	err := modifyResponse(resp)
+
+	if !errors.Is(err, errUpstreamRetryable) {
+		t.Fatalf("modifyResponse err=%v; want errUpstreamRetryable (fall through)", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("resp.StatusCode=%d; want 502", resp.StatusCode)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	bodyStr := string(out)
 	if !strings.Contains(bodyStr, `"type":"upstream_error"`) {
-		t.Fatalf("response body missing OpenAI envelope type=upstream_error; got: %s", bodyStr)
+		t.Fatalf("resp body missing OpenAI envelope type=upstream_error; got: %s", bodyStr)
 	}
 	if !strings.Contains(bodyStr, "quota exceeded") {
-		t.Fatalf("response body missing translated message; got: %s", bodyStr)
+		t.Fatalf("resp body missing translated message; got: %s", bodyStr)
 	}
 }
