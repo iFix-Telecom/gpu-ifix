@@ -326,3 +326,17 @@ func TestApplyAudioEmbedUsageChatNoOp(t *testing.T) {
 		t.Fatalf("chat route must not write EmbedsCount, got %d", got)
 	}
 }
+
+func TestSttBillingModel(t *testing.T) {
+	cases := map[string]string{
+		"gemini-stt":     "gemini-2.5-flash-lite",
+		"openai-whisper": "whisper-1", // reuses existing seed price row
+		"groq-whisper":   "whisper-large-v3",
+		"local-stt":      "local-stt", // default passthrough
+	}
+	for up, want := range cases {
+		if got := sttBillingModel(up); got != want {
+			t.Errorf("sttBillingModel(%q)=%q want %q", up, got, want)
+		}
+	}
+}

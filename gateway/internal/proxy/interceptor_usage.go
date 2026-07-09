@@ -333,6 +333,23 @@ func providerForUpstream(upstream string) string {
 	}
 }
 
+// sttBillingModel maps an STT upstream to the model string used as the price
+// lookup key when the transcription response carries no "model" field (the
+// common {"text":...} shape). Keeps openai-whisper on its existing whisper-1
+// seed row; gives gemini-stt / groq-whisper a stable, settable key.
+func sttBillingModel(upstream string) string {
+	switch upstream {
+	case "gemini-stt":
+		return "gemini-2.5-flash-lite"
+	case "openai-whisper":
+		return "whisper-1"
+	case "groq-whisper":
+		return "whisper-large-v3"
+	default:
+		return upstream
+	}
+}
+
 // applyAudioEmbedUsage is the PURE Phase 16 producer for the audio + embed
 // usage dimensions. It operates on a passed-in *billing.RequestUsage so the
 // unit tests can observe the Stored atomics WITHOUT a flusher / accountant
@@ -618,6 +635,18 @@ func (b *usageJSONBuffer) Close() error {
 		route = routeToBillingRoute(b.reqPath)
 	}
 	applyAudioEmbedUsage(b.usage, route, b.buf.Bytes(), b.reqCtx)
+
+	// STT transcription responses ({"text":...}) carry no "model" field, so
+	// usage.Model() stays "" and the {model,provider,audio_second} price lookup
+	// can never match (gatewayctl also rejects an empty -model, so the row is
+	// un-settable). Fall back to a stable per-upstream model key so STT cost
+	// attribution works. Affects every flatten-to-text STT upstream (gemini-stt
+	// was billing R$0; openai-whisper reuses its existing whisper-1 seed row).
+	if route == "stt" && b.usage != nil && b.usage.Model() == "" {
+		if up := auditctx.BillingUpstreamFrom(b.reqCtx); up != "" {
+			b.usage.SetModel(sttBillingModel(up))
+		}
+	}
 
 	source := "final"
 	if closeErr != nil || b.capped {
