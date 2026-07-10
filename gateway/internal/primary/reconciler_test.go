@@ -3308,7 +3308,7 @@ func newCloseReasonDBTX(rr *reasonRecorder) *fakeDBTX {
 
 const dlPrefix = "[2026-07-10T00:00:00+00:00] [download-weights] "
 
-func dlFetching(key string) string  { return dlPrefix + "fetching " + key + " -> /weights/" + key }
+func dlFetching(key string) string { return dlPrefix + "fetching " + key + " -> /weights/" + key }
 func dlProgress(key string, b int64) string {
 	return dlPrefix + "progress key=" + key + " bytes=" + strconv.FormatInt(b, 10)
 }

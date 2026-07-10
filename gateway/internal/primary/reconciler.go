@@ -1565,7 +1565,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// UNKNOWN → ride to the coldstart ceiling, never a false kill (Codex #3).
 	var downloadArmed bool
 	var downloadDone bool
-	var maxBytes int64        // highest total dest bytes seen while armed
+	var maxBytes int64           // highest total dest bytes seen while armed
 	var lastProgressAt time.Time // anchor of the last byte ADVANCE
 	var lastLogFetchAt time.Time // sub-cadence gate
 	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
