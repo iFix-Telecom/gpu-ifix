@@ -12,7 +12,7 @@ import (
 )
 
 const getPodConfig = `-- name: GetPodConfig :one
-SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at FROM ai_gateway.pod_config WHERE id = TRUE
+SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max FROM ai_gateway.pod_config WHERE id = TRUE
 `
 
 // Hot-path single-row read at boot and on every pod_config_changed NOTIFY
@@ -60,6 +60,12 @@ func (q *Queries) GetPodConfig(ctx context.Context) (AiGatewayPodConfig, error) 
 		&i.ProvisionLeadSMin,
 		&i.ProvisionLeadSMax,
 		&i.UpdatedAt,
+		&i.CreatedBudgetS,
+		&i.CreatedBudgetSMin,
+		&i.CreatedBudgetSMax,
+		&i.ProgressStallBudgetS,
+		&i.ProgressStallBudgetSMin,
+		&i.ProgressStallBudgetSMax,
 	)
 	return i, err
 }
@@ -74,7 +80,9 @@ INSERT INTO ai_gateway.pod_config (
     coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max,
     failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max,
     schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max,
-    grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max
+    grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max,
+    created_budget_s, created_budget_s_min, created_budget_s_max,
+    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
@@ -84,48 +92,56 @@ INSERT INTO ai_gateway.pod_config (
     $21, $22, $23, $24,
     $25, $26, $27, $28,
     $29, $30, $31, $32,
-    $33, $34, $35, $36
+    $33, $34, $35, $36,
+    $37, $38, $39,
+    $40, $41, $42
 )
 ON CONFLICT (id) DO NOTHING
 `
 
 type SeedPodConfigParams struct {
-	VastMachineBlocklist []int64        `json:"vast_machine_blocklist"`
-	VastMachineAllowlist []int64        `json:"vast_machine_allowlist"`
-	CapPrimary           pgtype.Numeric `json:"cap_primary"`
-	CapFallback          pgtype.Numeric `json:"cap_fallback"`
-	HostID               int64          `json:"host_id"`
-	RejectPrivateIp      bool           `json:"reject_private_ip"`
-	ColdstartBudgetS     int32          `json:"coldstart_budget_s"`
-	PortBindBudgetS      int32          `json:"port_bind_budget_s"`
-	FailureCooldownS     int32          `json:"failure_cooldown_s"`
-	MonthlyBudgetBrl     pgtype.Numeric `json:"monthly_budget_brl"`
-	ScheduleUpHour       int32          `json:"schedule_up_hour"`
-	ScheduleDownHour     int32          `json:"schedule_down_hour"`
-	ScheduleDays         []string       `json:"schedule_days"`
-	GraceRampDownS       int32          `json:"grace_ramp_down_s"`
-	ProvisionLeadS       int32          `json:"provision_lead_s"`
-	ScheduleDisabled     bool           `json:"schedule_disabled"`
-	CapPrimaryMin        pgtype.Numeric `json:"cap_primary_min"`
-	CapPrimaryMax        pgtype.Numeric `json:"cap_primary_max"`
-	CapFallbackMin       pgtype.Numeric `json:"cap_fallback_min"`
-	CapFallbackMax       pgtype.Numeric `json:"cap_fallback_max"`
-	ColdstartBudgetSMin  int32          `json:"coldstart_budget_s_min"`
-	ColdstartBudgetSMax  int32          `json:"coldstart_budget_s_max"`
-	PortBindBudgetSMin   int32          `json:"port_bind_budget_s_min"`
-	PortBindBudgetSMax   int32          `json:"port_bind_budget_s_max"`
-	FailureCooldownSMin  int32          `json:"failure_cooldown_s_min"`
-	FailureCooldownSMax  int32          `json:"failure_cooldown_s_max"`
-	MonthlyBudgetBrlMin  pgtype.Numeric `json:"monthly_budget_brl_min"`
-	MonthlyBudgetBrlMax  pgtype.Numeric `json:"monthly_budget_brl_max"`
-	ScheduleUpHourMin    int32          `json:"schedule_up_hour_min"`
-	ScheduleUpHourMax    int32          `json:"schedule_up_hour_max"`
-	ScheduleDownHourMin  int32          `json:"schedule_down_hour_min"`
-	ScheduleDownHourMax  int32          `json:"schedule_down_hour_max"`
-	GraceRampDownSMin    int32          `json:"grace_ramp_down_s_min"`
-	GraceRampDownSMax    int32          `json:"grace_ramp_down_s_max"`
-	ProvisionLeadSMin    int32          `json:"provision_lead_s_min"`
-	ProvisionLeadSMax    int32          `json:"provision_lead_s_max"`
+	VastMachineBlocklist    []int64        `json:"vast_machine_blocklist"`
+	VastMachineAllowlist    []int64        `json:"vast_machine_allowlist"`
+	CapPrimary              pgtype.Numeric `json:"cap_primary"`
+	CapFallback             pgtype.Numeric `json:"cap_fallback"`
+	HostID                  int64          `json:"host_id"`
+	RejectPrivateIp         bool           `json:"reject_private_ip"`
+	ColdstartBudgetS        int32          `json:"coldstart_budget_s"`
+	PortBindBudgetS         int32          `json:"port_bind_budget_s"`
+	FailureCooldownS        int32          `json:"failure_cooldown_s"`
+	MonthlyBudgetBrl        pgtype.Numeric `json:"monthly_budget_brl"`
+	ScheduleUpHour          int32          `json:"schedule_up_hour"`
+	ScheduleDownHour        int32          `json:"schedule_down_hour"`
+	ScheduleDays            []string       `json:"schedule_days"`
+	GraceRampDownS          int32          `json:"grace_ramp_down_s"`
+	ProvisionLeadS          int32          `json:"provision_lead_s"`
+	ScheduleDisabled        bool           `json:"schedule_disabled"`
+	CapPrimaryMin           pgtype.Numeric `json:"cap_primary_min"`
+	CapPrimaryMax           pgtype.Numeric `json:"cap_primary_max"`
+	CapFallbackMin          pgtype.Numeric `json:"cap_fallback_min"`
+	CapFallbackMax          pgtype.Numeric `json:"cap_fallback_max"`
+	ColdstartBudgetSMin     int32          `json:"coldstart_budget_s_min"`
+	ColdstartBudgetSMax     int32          `json:"coldstart_budget_s_max"`
+	PortBindBudgetSMin      int32          `json:"port_bind_budget_s_min"`
+	PortBindBudgetSMax      int32          `json:"port_bind_budget_s_max"`
+	FailureCooldownSMin     int32          `json:"failure_cooldown_s_min"`
+	FailureCooldownSMax     int32          `json:"failure_cooldown_s_max"`
+	MonthlyBudgetBrlMin     pgtype.Numeric `json:"monthly_budget_brl_min"`
+	MonthlyBudgetBrlMax     pgtype.Numeric `json:"monthly_budget_brl_max"`
+	ScheduleUpHourMin       int32          `json:"schedule_up_hour_min"`
+	ScheduleUpHourMax       int32          `json:"schedule_up_hour_max"`
+	ScheduleDownHourMin     int32          `json:"schedule_down_hour_min"`
+	ScheduleDownHourMax     int32          `json:"schedule_down_hour_max"`
+	GraceRampDownSMin       int32          `json:"grace_ramp_down_s_min"`
+	GraceRampDownSMax       int32          `json:"grace_ramp_down_s_max"`
+	ProvisionLeadSMin       int32          `json:"provision_lead_s_min"`
+	ProvisionLeadSMax       int32          `json:"provision_lead_s_max"`
+	CreatedBudgetS          int32          `json:"created_budget_s"`
+	CreatedBudgetSMin       int32          `json:"created_budget_s_min"`
+	CreatedBudgetSMax       int32          `json:"created_budget_s_max"`
+	ProgressStallBudgetS    int32          `json:"progress_stall_budget_s"`
+	ProgressStallBudgetSMin int32          `json:"progress_stall_budget_s_min"`
+	ProgressStallBudgetSMax int32          `json:"progress_stall_budget_s_max"`
 }
 
 // Idempotent env->DB first-boot seed (Plan 17-03). Inserts the 16 hot fields +
@@ -170,6 +186,12 @@ func (q *Queries) SeedPodConfig(ctx context.Context, arg SeedPodConfigParams) er
 		arg.GraceRampDownSMax,
 		arg.ProvisionLeadSMin,
 		arg.ProvisionLeadSMax,
+		arg.CreatedBudgetS,
+		arg.CreatedBudgetSMin,
+		arg.CreatedBudgetSMax,
+		arg.ProgressStallBudgetS,
+		arg.ProgressStallBudgetSMin,
+		arg.ProgressStallBudgetSMax,
 	)
 	return err
 }
@@ -230,6 +252,24 @@ UPDATE ai_gateway.pod_config SET coldstart_budget_s_min = $1, updated_at = NOW()
 
 func (q *Queries) UpdatePodConfigBoundColdstartBudgetSMin(ctx context.Context, coldstartBudgetSMin int32) error {
 	_, err := q.db.Exec(ctx, updatePodConfigBoundColdstartBudgetSMin, coldstartBudgetSMin)
+	return err
+}
+
+const updatePodConfigBoundCreatedBudgetSMax = `-- name: UpdatePodConfigBoundCreatedBudgetSMax :exec
+UPDATE ai_gateway.pod_config SET created_budget_s_max = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigBoundCreatedBudgetSMax(ctx context.Context, createdBudgetSMax int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigBoundCreatedBudgetSMax, createdBudgetSMax)
+	return err
+}
+
+const updatePodConfigBoundCreatedBudgetSMin = `-- name: UpdatePodConfigBoundCreatedBudgetSMin :exec
+UPDATE ai_gateway.pod_config SET created_budget_s_min = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigBoundCreatedBudgetSMin(ctx context.Context, createdBudgetSMin int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigBoundCreatedBudgetSMin, createdBudgetSMin)
 	return err
 }
 
@@ -302,6 +342,24 @@ UPDATE ai_gateway.pod_config SET port_bind_budget_s_min = $1, updated_at = NOW()
 
 func (q *Queries) UpdatePodConfigBoundPortBindBudgetSMin(ctx context.Context, portBindBudgetSMin int32) error {
 	_, err := q.db.Exec(ctx, updatePodConfigBoundPortBindBudgetSMin, portBindBudgetSMin)
+	return err
+}
+
+const updatePodConfigBoundProgressStallBudgetSMax = `-- name: UpdatePodConfigBoundProgressStallBudgetSMax :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s_max = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigBoundProgressStallBudgetSMax(ctx context.Context, progressStallBudgetSMax int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigBoundProgressStallBudgetSMax, progressStallBudgetSMax)
+	return err
+}
+
+const updatePodConfigBoundProgressStallBudgetSMin = `-- name: UpdatePodConfigBoundProgressStallBudgetSMin :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s_min = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigBoundProgressStallBudgetSMin(ctx context.Context, progressStallBudgetSMin int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigBoundProgressStallBudgetSMin, progressStallBudgetSMin)
 	return err
 }
 
@@ -410,6 +468,15 @@ func (q *Queries) UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, cold
 	return err
 }
 
+const updatePodConfigFieldCreatedBudgetS = `-- name: UpdatePodConfigFieldCreatedBudgetS :exec
+UPDATE ai_gateway.pod_config SET created_budget_s = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigFieldCreatedBudgetS(ctx context.Context, createdBudgetS int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldCreatedBudgetS, createdBudgetS)
+	return err
+}
+
 const updatePodConfigFieldFailureCooldownS = `-- name: UpdatePodConfigFieldFailureCooldownS :exec
 UPDATE ai_gateway.pod_config SET failure_cooldown_s = $1, updated_at = NOW() WHERE id = TRUE
 `
@@ -452,6 +519,15 @@ UPDATE ai_gateway.pod_config SET port_bind_budget_s = $1, updated_at = NOW() WHE
 
 func (q *Queries) UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, portBindBudgetS int32) error {
 	_, err := q.db.Exec(ctx, updatePodConfigFieldPortBindBudgetS, portBindBudgetS)
+	return err
+}
+
+const updatePodConfigFieldProgressStallBudgetS = `-- name: UpdatePodConfigFieldProgressStallBudgetS :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigFieldProgressStallBudgetS(ctx context.Context, progressStallBudgetS int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldProgressStallBudgetS, progressStallBudgetS)
 	return err
 }
 

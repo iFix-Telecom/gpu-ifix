@@ -304,6 +304,8 @@ type Querier interface {
 	UpdatePodConfigBoundCapPrimaryMin(ctx context.Context, capPrimaryMin pgtype.Numeric) error
 	UpdatePodConfigBoundColdstartBudgetSMax(ctx context.Context, coldstartBudgetSMax int32) error
 	UpdatePodConfigBoundColdstartBudgetSMin(ctx context.Context, coldstartBudgetSMin int32) error
+	UpdatePodConfigBoundCreatedBudgetSMax(ctx context.Context, createdBudgetSMax int32) error
+	UpdatePodConfigBoundCreatedBudgetSMin(ctx context.Context, createdBudgetSMin int32) error
 	UpdatePodConfigBoundFailureCooldownSMax(ctx context.Context, failureCooldownSMax int32) error
 	UpdatePodConfigBoundFailureCooldownSMin(ctx context.Context, failureCooldownSMin int32) error
 	UpdatePodConfigBoundGraceRampDownSMax(ctx context.Context, graceRampDownSMax int32) error
@@ -312,6 +314,8 @@ type Querier interface {
 	UpdatePodConfigBoundMonthlyBudgetBRLMin(ctx context.Context, monthlyBudgetBrlMin pgtype.Numeric) error
 	UpdatePodConfigBoundPortBindBudgetSMax(ctx context.Context, portBindBudgetSMax int32) error
 	UpdatePodConfigBoundPortBindBudgetSMin(ctx context.Context, portBindBudgetSMin int32) error
+	UpdatePodConfigBoundProgressStallBudgetSMax(ctx context.Context, progressStallBudgetSMax int32) error
+	UpdatePodConfigBoundProgressStallBudgetSMin(ctx context.Context, progressStallBudgetSMin int32) error
 	UpdatePodConfigBoundProvisionLeadSMax(ctx context.Context, provisionLeadSMax int32) error
 	UpdatePodConfigBoundProvisionLeadSMin(ctx context.Context, provisionLeadSMin int32) error
 	UpdatePodConfigBoundScheduleDownHourMax(ctx context.Context, scheduleDownHourMax int32) error
@@ -328,11 +332,13 @@ type Querier interface {
 	UpdatePodConfigFieldCapFallback(ctx context.Context, capFallback pgtype.Numeric) error
 	UpdatePodConfigFieldCapPrimary(ctx context.Context, capPrimary pgtype.Numeric) error
 	UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, coldstartBudgetS int32) error
+	UpdatePodConfigFieldCreatedBudgetS(ctx context.Context, createdBudgetS int32) error
 	UpdatePodConfigFieldFailureCooldownS(ctx context.Context, failureCooldownS int32) error
 	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, graceRampDownS int32) error
 	UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) error
 	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error
 	UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, portBindBudgetS int32) error
+	UpdatePodConfigFieldProgressStallBudgetS(ctx context.Context, progressStallBudgetS int32) error
 	UpdatePodConfigFieldProvisionLeadS(ctx context.Context, provisionLeadS int32) error
 	UpdatePodConfigFieldRejectPrivateIP(ctx context.Context, rejectPrivateIp bool) error
 	UpdatePodConfigFieldScheduleDays(ctx context.Context, scheduleDays []string) error
