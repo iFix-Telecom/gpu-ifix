@@ -52,7 +52,25 @@ download_and_verify() {
   local key="$1" dest="$2" expected="$3"
   local url="ifix/${MINIO_BUCKET}/${key}"
   log "fetching ${key} -> ${dest}"
-  if ! mc cp --quiet "${url}" "${dest}"; then
+  # Byte-bearing heartbeat so FF-02 (plan 20-04) can detect a mid-file stall:
+  # a fresh timestamp alone proves only "loop alive"; the bytes= token proves
+  # PROGRESS — a frozen transfer emits a flat bytes= across samples. Runs while
+  # `mc cp` copies (its CR-updated progress bar won't line-flush through the
+  # tee'd onstart.log pipe, hence this loop); killed on every return path so it can't leak.
+  # ponytail: stat -c%s polling is the coarse-but-sufficient progress signal;
+  # upgrade path = `mc --json` structured progress if byte-size proves too coarse.
+  ( while :; do
+      log "progress key=${key} bytes=$(stat -c%s "${dest}" 2>/dev/null || echo 0)"
+      sleep 15
+    done ) &
+  local hb_pid=$!
+  local rc=0
+  mc cp "${url}" "${dest}" || rc=$?
+  # Kill the loop so it stops emitting progress lines. ponytail: an in-flight
+  # `sleep` child may linger up to one interval (reparented, logs nothing) then
+  # self-exits — harmless; the LOOP is dead so no further heartbeats emit.
+  kill "${hb_pid}" 2>/dev/null || true
+  if [[ "${rc}" -ne 0 ]]; then
     log "ERROR: mc cp failed for ${key}"
     return 2
   fi
