@@ -72,6 +72,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0030_probe_status_allow_config.sql",
 		"0031_create_pod_config.sql",
 		"0032_replace_piper_with_kokoro_tts.sql",
+		"0033_pod_config_coldstart_fastfail_budgets.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)
