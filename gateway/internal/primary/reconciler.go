@@ -1452,7 +1452,13 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			return err
 		}
 	}
-	return r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, offer.DphTotal, log)
+	reason, werr := r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, offer.DphTotal, log)
+	// BL-01/AL-01: maintain the machine block/allow lists from the outcome.
+	// Best-effort — a list-write failure never changes werr (the provision's
+	// result). failStreak is pre-attempt (the open row is excluded from the
+	// count), so failStreak>=1 here means THIS failure is the 2nd consecutive.
+	r.recordProvisionOutcome(ctx, offer.MachineID, failStreak, reason, werr, log)
+	return werr
 }
 
 // waitForReadyOrDestroy polls GetInstance every primaryInstancePollInterval
@@ -1467,7 +1473,10 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // container ports (8000/8001/8003/9400) but share the SAME container's
 // network namespace. The reconciler does not need to know this — it polls
 // 4 URLs via the Vast.ai-exposed host port mapping.
-func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) error {
+// Returns the close REASON string alongside the error so the caller's
+// recordProvisionOutcome hook (BL-01) can classify machine-attributable
+// failures. Success returns ("ready", nil).
+func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) (string, error) {
 	poll := time.NewTicker(primaryInstancePollIntervalForTest)
 	defer poll.Stop()
 	// Phase 17 (POD-CFG-04): cold-start + port-bind budgets come from the
@@ -1566,11 +1575,11 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 		case <-ctx.Done():
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
-			return ctx.Err()
+			return "cancelled_in_flight", ctx.Err()
 		case <-deadline.C:
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
-			return errors.New("primary: cold-start budget exhausted")
+			return "health_timeout", errors.New("primary: cold-start budget exhausted")
 		case <-poll.C:
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
@@ -1585,7 +1594,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					if notFoundStrikes >= terminalConfirmStrikes {
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
-						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+						return "instance_terminal_state_confirmed", errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
 					}
 					continue
 				}
@@ -1612,7 +1621,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 						"instance_id", instanceID, "status_msg", msg)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
-					return errors.New(forensicsReason)
+					return forensicsReason, errors.New(forensicsReason)
 				}
 			}
 			if inst.IsTerminal() {
@@ -1623,7 +1632,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if terminalStrikes >= terminalConfirmStrikes {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					return errors.New("primary: instance terminal")
+					return "instance_terminal_state", errors.New("primary: instance terminal")
 				}
 				continue
 			}
@@ -1666,7 +1675,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 							"budget_s", hot.ProgressStallBudgetS)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
-						return errors.New("primary: download progress stalled (regime 3)")
+						return "progress_stall_timeout", errors.New("primary: download progress stalled (regime 3)")
 					}
 				}
 				// NotReady / FetchError / Empty → UNKNOWN: skip non-fatally.
@@ -1698,7 +1707,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					if elapsed >= createdBudget {
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
-						return errors.New("primary: created-state budget exhausted (host morto)")
+						return "created_state_timeout", errors.New("primary: created-state budget exhausted (host morto)")
 					}
 					continue
 				}
@@ -1735,7 +1744,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
-					return errors.New("primary: public port bind timeout")
+					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
 				}
 				continue
 			}
@@ -1766,7 +1775,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
-					return errors.New("primary: public port bind timeout")
+					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
 				}
 				continue
 			}
@@ -1791,9 +1800,9 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			}
 			if err := r.markReady(ctx, lifecycleID, urls, acceptedDPH, log); err != nil {
 				log.Error("primary markReady failed", "lifecycle_id", lifecycleID, "err", err)
-				return err
+				return "", err
 			}
-			return nil
+			return "ready", nil
 		}
 	}
 }
@@ -2171,18 +2180,125 @@ func parseDownloadProgress(text string) (fetching bool, okCount int, totalBytes 
 }
 
 // machineAttributableReason reports whether a close reason indicts the HOST
-// (safe to auto-blocklist) vs. a global / our-side / ambiguous cause.
-func machineAttributableReason(reason string) bool { return false }
+// (safe to auto-blocklist) vs. a global / our-side / ambiguous cause. Only an
+// ALLOWLIST of reasons is machine-attributable; everything else — including
+// progress_stall_timeout (a download stall's root cause is the shared weights
+// store + network, potentially GLOBAL: a broken R2 stalls EVERY host, so
+// blocklisting on it would cascade-poison the market — Codex #9),
+// cancelled_in_flight, health_timeout, and all create/config/status_msg/R2-auth
+// errors — returns false.
+//
+// ponytail: promote progress_stall_timeout to machine-attributable only with
+// cross-lifecycle correlation (this machine stalled while OTHERS succeeded in
+// the same window ⇒ host-attributable); a single bytes-frozen signal cannot
+// distinguish a host fault from a global store/network outage.
+func machineAttributableReason(reason string) bool {
+	switch reason {
+	case "created_state_timeout",
+		"instance_terminal_state",
+		"instance_terminal_state_confirmed",
+		"public_port_bind_timeout":
+		return true
+	}
+	return false
+}
 
 // appendDedupCap appends id to list unless already present; when capacity > 0
-// and the result exceeds it, the oldest entries are dropped (FIFO).
-func appendDedupCap(list []int64, id int64, capacity int) []int64 { return list }
+// and the result exceeds it, the oldest entries are dropped (FIFO). Returns the
+// input unchanged when id is already present (dedup — no double-add).
+func appendDedupCap(list []int64, id int64, capacity int) []int64 {
+	for _, x := range list {
+		if x == id {
+			return list
+		}
+	}
+	out := append(append([]int64{}, list...), id)
+	if capacity > 0 && len(out) > capacity {
+		out = out[len(out)-capacity:]
+	}
+	return out
+}
 
-// removeFromList returns list with every occurrence of id removed.
-func removeFromList(list []int64, id int64) []int64 { return list }
+// removeFromList returns a copy of list with every occurrence of id removed.
+func removeFromList(list []int64, id int64) []int64 {
+	out := make([]int64, 0, len(list))
+	for _, x := range list {
+		if x != id {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// int64SliceEqual reports element-wise equality (order-sensitive).
+func int64SliceEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // recordProvisionOutcome maintains the vast_machine_{block,allow}list from a
-// finished provision: success → allowlist (+ un-blocklist); a machine-
-// attributable failure at failStreak>=1 → blocklist (+ un-allowlist).
+// finished provision (BL-01/AL-01):
+//   - success (provErr == nil) → allowlist (dedup, FIFO cap allowlistCap) AND
+//     remove from the blocklist (a degraded-then-recovered host self-heals).
+//     UNGATED by reason — success is always allowlist-worthy.
+//   - failure AND failStreak>=1 AND a machine-attributable reason → blocklist
+//     (dedup) AND remove from the allowlist. A 1st failure (failStreak==0) or a
+//     non-machine-attributable reason mutates NEITHER list.
+//
+// A DB read/write error is logged and swallowed — never block/crash the
+// reconciler on a list write (matches the failStreak-count "never block the
+// pod" rule).
+//
+// ponytail: fresh read + up to 2 writes; the primary is leader-gated (single
+// reconciler, PRV-03) so there is no real contention — go per-field CAS only if
+// that ever changes. No TTL/expiry on the blocklist — manual prune; upgrade
+// path = a 24h expiry column if the list rots.
 func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, failStreak int64, reason string, provErr error, log *slog.Logger) {
+	if machineID <= 0 {
+		return
+	}
+	q := r.queries()
+	if q == nil {
+		return
+	}
+	cfg, err := q.GetPodConfig(ctx)
+	if err != nil {
+		log.Warn("primary recordProvisionOutcome: GetPodConfig failed", "err", err, "machine_id", machineID)
+		return
+	}
+	block := cfg.VastMachineBlocklist
+	allow := cfg.VastMachineAllowlist
+
+	var newBlock, newAllow []int64
+	switch {
+	case provErr == nil:
+		newAllow = appendDedupCap(allow, machineID, allowlistCap)
+		newBlock = removeFromList(block, machineID)
+	case failStreak >= 1 && machineAttributableReason(reason):
+		newBlock = appendDedupCap(block, machineID, 0) // no cap on the blocklist
+		newAllow = removeFromList(allow, machineID)
+	default:
+		// 1st-failure grace OR non-machine-attributable reason → no mutation.
+		return
+	}
+
+	if !int64SliceEqual(newAllow, allow) {
+		if err := q.UpdatePodConfigFieldAllowlist(ctx, newAllow); err != nil {
+			log.Warn("primary recordProvisionOutcome: allowlist write failed", "err", err, "machine_id", machineID)
+			return
+		}
+	}
+	if !int64SliceEqual(newBlock, block) {
+		if err := q.UpdatePodConfigFieldBlocklist(ctx, newBlock); err != nil {
+			log.Warn("primary recordProvisionOutcome: blocklist write failed", "err", err, "machine_id", machineID)
+			return
+		}
+	}
 }

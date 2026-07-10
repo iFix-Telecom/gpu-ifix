@@ -2180,7 +2180,7 @@ func TestWaitForReady_PublicPortBindTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+	_, err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
 
 	require.Error(t, err, "running-but-unbound-ports past budget MUST return a non-nil error")
 	require.Contains(t, err.Error(), "public port bind timeout",
@@ -2231,7 +2231,7 @@ func TestWaitForReady_BindsBeforeBudget_NoFalseClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+	_, err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
 
 	require.NoError(t, err,
 		"a pod that binds all 4 URLs before budget MUST promote to Ready, not false-close on port-bind timeout")
@@ -2296,7 +2296,7 @@ func TestWaitForReady_RunningPortsBoundButTCPUnreachable_DestroysWithinBudget(t 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+	_, err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
 
 	require.Error(t, err,
 		"running + ports-bound + TCP-unreachable past budget MUST return a non-nil error")
@@ -2357,7 +2357,7 @@ func TestWaitForReady_ReachableButNotReady_NoFalseClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
+	_, err := r.waitForReadyOrDestroy(ctx, 99, 42, 0.30, testLogger())
 
 	require.NoError(t, err,
 		"a TCP-reachable but still-warming pod MUST NOT false-close on port-bind timeout; it keeps polling and promotes")
@@ -3261,7 +3261,8 @@ func TestCalculatePrimaryCostBRL_StartedAtFallback(t *testing.T) {
 // returned close-reason string in Task 4) touches ONE call site, not every FF
 // test. Returns the provision error only.
 func runWait(r *Reconciler, ctx context.Context, lifecycleID, instanceID int64, dph float64, log *slog.Logger) error {
-	return r.waitForReadyOrDestroy(ctx, lifecycleID, instanceID, dph, log)
+	_, err := r.waitForReadyOrDestroy(ctx, lifecycleID, instanceID, dph, log)
+	return err
 }
 
 // setProvisionCfgForTest stashes a provision-cfg snapshot so
