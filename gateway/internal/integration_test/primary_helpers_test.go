@@ -137,6 +137,13 @@ func (f *fakeVastPrimary) DestroyInstance(ctx context.Context, id int64) error {
 	return nil
 }
 
+// OnstartLog satisfies the primary.VastAPI interface (grown in 20-03 for the
+// FF-02 download-stall signal). Default: telemetry not ready — non-fatal, so
+// these existing primary integration tests are unaffected (UNKNOWN ⇒ ride).
+func (f *fakeVastPrimary) OnstartLog(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+	return vast.OnstartLogResult{Status: vast.OnstartLogNotReady}, nil
+}
+
 // HasDestroyed returns true if DestroyInstance was called with id.
 func (f *fakeVastPrimary) HasDestroyed(id int64) bool {
 	_, ok := f.Destroyed.Load(id)

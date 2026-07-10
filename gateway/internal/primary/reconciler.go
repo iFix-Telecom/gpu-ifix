@@ -116,6 +116,23 @@ const (
 // in production code paths.
 var primaryInstancePollIntervalForTest = primaryInstancePollInterval
 
+// primaryOnstartLogIntervalForTest is the sub-cadence at which
+// waitForReadyOrDestroy fetches the Vast onstart log for the FF-02 download-
+// stall detector. The Vast logs API is async (~seconds); fetching it on every
+// ~5s poll tick would stretch the tick, so the fetch is throttled to ~30s.
+// Overridden only in unit tests. Never mutated in production code paths.
+var primaryOnstartLogIntervalForTest = 30 * time.Second
+
+const (
+	// allowlistCap bounds the auto-populated machine allowlist (FIFO, dedup):
+	// the newest 20 known-good hosts. Decision #5 (20-CONTEXT.md).
+	allowlistCap = 20
+	// expectedWeightFiles is the number of weights download-weights.sh fetches
+	// (qwen + whisper + bge-m3). FF-02 disarms the download-stall detector once
+	// all N files have logged `ok`.
+	expectedWeightFiles = 3
+)
+
 // Start begins the reconciler. Spawns three goroutines:
 //
 //   - recovery: ONE-SHOT call to recoverOpenLifecycle BEFORE the loops
@@ -1435,7 +1452,13 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			return err
 		}
 	}
-	return r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, offer.DphTotal, log)
+	reason, werr := r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, offer.DphTotal, log)
+	// BL-01/AL-01: maintain the machine block/allow lists from the outcome.
+	// Best-effort — a list-write failure never changes werr (the provision's
+	// result). failStreak is pre-attempt (the open row is excluded from the
+	// count), so failStreak>=1 here means THIS failure is the 2nd consecutive.
+	r.recordProvisionOutcome(ctx, offer.MachineID, failStreak, reason, werr, log)
+	return werr
 }
 
 // waitForReadyOrDestroy polls GetInstance every primaryInstancePollInterval
@@ -1450,7 +1473,10 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // container ports (8000/8001/8003/9400) but share the SAME container's
 // network namespace. The reconciler does not need to know this — it polls
 // 4 URLs via the Vast.ai-exposed host port mapping.
-func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) error {
+// Returns the close REASON string alongside the error so the caller's
+// recordProvisionOutcome hook (BL-01) can classify machine-attributable
+// failures. Success returns ("ready", nil).
+func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) (string, error) {
 	poll := time.NewTicker(primaryInstancePollIntervalForTest)
 	defer poll.Stop()
 	// Phase 17 (POD-CFG-04): cold-start + port-bind budgets come from the
@@ -1515,16 +1541,45 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var firstRunningAt time.Time
 	portBindBudget := time.Duration(hot.PortBindBudgetS) * time.Second
 
+	// FF-01 (regime 1 — host morto): a pod stuck in actual_status=created /
+	// scheduling (the pre-loading handshake window, vast/types.go IsActive) with
+	// a mute onstart never advances to loading. firstCreatedAt anchors the
+	// created-budget at the FIRST created/scheduling observation; once elapsed
+	// exceeds createdBudget the pod is destroyed with created_state_timeout.
+	// CRITICAL (regime 1 vs 2, 20-CONTEXT.md:15-16): the anchor RESETS the moment
+	// actual_status advances to loading — a created→loading transition is a
+	// HEALTHY image pull (regime 2, "Pulling" 15min) that must RIDE to the
+	// coldstart_budget_s ceiling, never be killed by this budget. Anchoring on
+	// the first created poll then firing only on a SUBSEQUENT created poll makes
+	// the reset win: a single created observation followed by loading never fires.
+	var firstCreatedAt time.Time
+	createdBudget := time.Duration(hot.CreatedBudgetS) * time.Second
+
+	// FF-02 (regime 3 — download stall): the weights download runs INSIDE the
+	// onstart script, BEFORE docker compose / the health-bridge exist, so it is
+	// invisible to actual_status. The only signal is the onstart log (fetched via
+	// the Vast logs API on a slow sub-cadence — the API is async ~seconds). The
+	// stall is defined as dest-file BYTES provably frozen while telemetry is
+	// Available, scoped to the download phase (arm on `fetching`, disarm once all
+	// files log `ok`). Telemetry-unavailable (NotReady/FetchError/Empty) is
+	// UNKNOWN → ride to the coldstart ceiling, never a false kill (Codex #3).
+	var downloadArmed bool
+	var downloadDone bool
+	var maxBytes int64           // highest total dest bytes seen while armed
+	var lastProgressAt time.Time // anchor of the last byte ADVANCE
+	var lastLogFetchAt time.Time // sub-cadence gate
+	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
-			return ctx.Err()
+			return "cancelled_in_flight", ctx.Err()
 		case <-deadline.C:
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
-			return errors.New("primary: cold-start budget exhausted")
+			return "health_timeout", errors.New("primary: cold-start budget exhausted")
 		case <-poll.C:
 			inst, err := r.deps.Vast.GetInstance(ctx, instanceID)
 			if err != nil {
@@ -1539,7 +1594,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					if notFoundStrikes >= terminalConfirmStrikes {
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state_confirmed", 0)
-						return errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
+						return "instance_terminal_state_confirmed", errors.New("primary: instance terminal (3-strike confirm via ErrInstanceNotFound)")
 					}
 					continue
 				}
@@ -1566,7 +1621,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 						"instance_id", instanceID, "status_msg", msg)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
-					return errors.New(forensicsReason)
+					return forensicsReason, errors.New(forensicsReason)
 				}
 			}
 			if inst.IsTerminal() {
@@ -1577,24 +1632,97 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if terminalStrikes >= terminalConfirmStrikes {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
-					return errors.New("primary: instance terminal")
+					return "instance_terminal_state", errors.New("primary: instance terminal")
 				}
 				continue
 			}
 			// reset strikes on any non-terminal observation — Vast must report
 			// terminal `terminalConfirmStrikes` times IN A ROW for the close.
 			terminalStrikes = 0
+
+			// FF-02: download-phase byte-progress stall detector. Runs on the slow
+			// onstart-log sub-cadence (not every poll — the Vast logs API is async).
+			// ponytail: the 30s sub-cadence throttles the async fetch so it never
+			// stretches the 5s poll; telemetry-unavailable rides to the ceiling —
+			// the deferred SSH-tail leg (FF-03 b) is what would fast-fail regime 3
+			// during a Vast-logs outage.
+			if r.deps.Vast != nil && !downloadDone && time.Since(lastLogFetchAt) >= primaryOnstartLogIntervalForTest {
+				lastLogFetchAt = time.Now()
+				res, _ := r.deps.Vast.OnstartLog(ctx, instanceID)
+				if res.Status == vast.OnstartLogAvailable {
+					fetching, okCount, totalBytes := parseDownloadProgress(res.Text)
+					switch {
+					case fetching && !downloadArmed:
+						// Arm the download phase on the first `fetching` line.
+						downloadArmed = true
+						maxBytes = totalBytes
+						lastProgressAt = time.Now()
+					case downloadArmed && okCount >= expectedWeightFiles:
+						// All files logged `ok` — disarm; a healthy slow startup
+						// after the download must never trip the stall detector.
+						downloadDone = true
+					case downloadArmed && totalBytes > maxBytes:
+						// Bytes advanced — reset the stall anchor.
+						maxBytes = totalBytes
+						lastProgressAt = time.Now()
+					case downloadArmed && time.Since(lastProgressAt) >= progressStallBudget:
+						// Bytes provably frozen past budget while Available → stall.
+						log.Warn("primary provisioning: download bytes frozen (regime 3 stall)",
+							"lifecycle_id", lifecycleID,
+							"vast_instance_id", instanceID,
+							"max_bytes", maxBytes,
+							"stall_s", int(time.Since(lastProgressAt).Seconds()),
+							"budget_s", hot.ProgressStallBudgetS)
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
+						return "progress_stall_timeout", errors.New("primary: download progress stalled (regime 3)")
+					}
+				}
+				// NotReady / FetchError / Empty → UNKNOWN: skip non-fatally.
+			}
+
 			if inst.ActualStatus != "running" {
 				// Reset the port-bind budget anchor: it tracks ONLY contiguous
 				// running time (consistent with how terminalStrikes resets), so
 				// a flap back below running does not burn the 120s budget.
 				firstRunningAt = time.Time{}
+				// FF-01: created/scheduling is the regime-1 window. Anchor on the
+				// first such poll, fire on a subsequent one — a created→loading
+				// transition (regime 2) resets the anchor in the else branch below
+				// and rides to the coldstart ceiling.
+				if inst.ActualStatus == "created" || inst.ActualStatus == "scheduling" {
+					if firstCreatedAt.IsZero() {
+						firstCreatedAt = time.Now()
+						continue
+					}
+					elapsed := time.Since(firstCreatedAt)
+					log.Warn("primary provisioning: stuck in created/scheduling",
+						"lifecycle_id", lifecycleID,
+						"vast_instance_id", instanceID,
+						"actual_status", inst.ActualStatus,
+						"elapsed_since_created_s", int(elapsed.Seconds()),
+						"budget_s", hot.CreatedBudgetS)
+					// `>=` (not `>`) so a budget of 0 fires on the first post-anchor
+					// created poll — deterministic timeout test (mirrors port-bind).
+					if elapsed >= createdBudget {
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
+						return "created_state_timeout", errors.New("primary: created-state budget exhausted (host morto)")
+					}
+					continue
+				}
+				// Any other non-running status (loading) — regime 2 image pull.
+				// Reset the created anchor so the created-budget never fires for
+				// this lifecycle; it rides the coldstart_budget_s ceiling.
+				firstCreatedAt = time.Time{}
 				continue
 			}
-			// First running observation: anchor the port-bind budget here.
+			// First running observation: anchor the port-bind budget here, and
+			// clear the created anchor (the created window is behind us).
 			if firstRunningAt.IsZero() {
 				firstRunningAt = time.Now()
 			}
+			firstCreatedAt = time.Time{}
 			urls := r.buildPodURLs(inst)
 			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Option B (plan 6.6.Y-03): previously a SILENT continue. The
@@ -1616,7 +1744,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
-					return errors.New("primary: public port bind timeout")
+					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
 				}
 				continue
 			}
@@ -1647,7 +1775,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				if elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
-					return errors.New("primary: public port bind timeout")
+					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
 				}
 				continue
 			}
@@ -1672,9 +1800,9 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			}
 			if err := r.markReady(ctx, lifecycleID, urls, acceptedDPH, log); err != nil {
 				log.Error("primary markReady failed", "lifecycle_id", lifecycleID, "err", err)
-				return err
+				return "", err
 			}
-			return nil
+			return "ready", nil
 		}
 	}
 }
@@ -2001,3 +2129,176 @@ func (r *Reconciler) SetLastProvisionFailureAtForTest(t time.Time) {
 // reconciler reads HostPort as a string directly.
 var _ = strconv.Atoi
 var _ atomic.Int64
+
+// ===========================================================================
+// Phase 20-04 — FF-02 parser + BL-01/AL-01 classifier + outcome hook.
+// RED scaffolding: these are stubbed in Task 1 (tests fail on behavior) and
+// implemented in Tasks 3 (parseDownloadProgress) and 4 (classifier/hook/list
+// helpers).
+// ===========================================================================
+
+// parseDownloadProgress scans onstart-log text for `[download-weights]` lines:
+// whether any `fetching` line is present (arms the download phase), the count
+// of `ok` lines (disarms once all files complete), and the SUM of the newest
+// `bytes=<N>` per `key=` (3 parallel files → sum their latest partial sizes).
+func parseDownloadProgress(text string) (fetching bool, okCount int, totalBytes int64) {
+	const marker = "[download-weights]"
+	latest := map[string]int64{}
+	for _, line := range strings.Split(text, "\n") {
+		i := strings.Index(line, marker)
+		if i < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[i+len(marker):])
+		switch {
+		case strings.HasPrefix(rest, "fetching "):
+			fetching = true
+		case strings.HasPrefix(rest, "ok "):
+			okCount++
+		case strings.HasPrefix(rest, "progress "):
+			var key string
+			var b int64
+			for _, tok := range strings.Fields(rest) {
+				switch {
+				case strings.HasPrefix(tok, "key="):
+					key = tok[len("key="):]
+				case strings.HasPrefix(tok, "bytes="):
+					if v, err := strconv.ParseInt(tok[len("bytes="):], 10, 64); err == nil {
+						b = v
+					}
+				}
+			}
+			if key != "" {
+				latest[key] = b // newest bytes= per key wins
+			}
+		}
+	}
+	for _, v := range latest {
+		totalBytes += v
+	}
+	return fetching, okCount, totalBytes
+}
+
+// machineAttributableReason reports whether a close reason indicts the HOST
+// (safe to auto-blocklist) vs. a global / our-side / ambiguous cause. Only an
+// ALLOWLIST of reasons is machine-attributable; everything else — including
+// progress_stall_timeout (a download stall's root cause is the shared weights
+// store + network, potentially GLOBAL: a broken R2 stalls EVERY host, so
+// blocklisting on it would cascade-poison the market — Codex #9),
+// cancelled_in_flight, health_timeout, and all create/config/status_msg/R2-auth
+// errors — returns false.
+//
+// ponytail: promote progress_stall_timeout to machine-attributable only with
+// cross-lifecycle correlation (this machine stalled while OTHERS succeeded in
+// the same window ⇒ host-attributable); a single bytes-frozen signal cannot
+// distinguish a host fault from a global store/network outage.
+func machineAttributableReason(reason string) bool {
+	switch reason {
+	case "created_state_timeout",
+		"instance_terminal_state",
+		"instance_terminal_state_confirmed",
+		"public_port_bind_timeout":
+		return true
+	}
+	return false
+}
+
+// appendDedupCap appends id to list unless already present; when capacity > 0
+// and the result exceeds it, the oldest entries are dropped (FIFO). Returns the
+// input unchanged when id is already present (dedup — no double-add).
+func appendDedupCap(list []int64, id int64, capacity int) []int64 {
+	for _, x := range list {
+		if x == id {
+			return list
+		}
+	}
+	out := append(append([]int64{}, list...), id)
+	if capacity > 0 && len(out) > capacity {
+		out = out[len(out)-capacity:]
+	}
+	return out
+}
+
+// removeFromList returns a copy of list with every occurrence of id removed.
+func removeFromList(list []int64, id int64) []int64 {
+	out := make([]int64, 0, len(list))
+	for _, x := range list {
+		if x != id {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// int64SliceEqual reports element-wise equality (order-sensitive).
+func int64SliceEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// recordProvisionOutcome maintains the vast_machine_{block,allow}list from a
+// finished provision (BL-01/AL-01):
+//   - success (provErr == nil) → allowlist (dedup, FIFO cap allowlistCap) AND
+//     remove from the blocklist (a degraded-then-recovered host self-heals).
+//     UNGATED by reason — success is always allowlist-worthy.
+//   - failure AND failStreak>=1 AND a machine-attributable reason → blocklist
+//     (dedup) AND remove from the allowlist. A 1st failure (failStreak==0) or a
+//     non-machine-attributable reason mutates NEITHER list.
+//
+// A DB read/write error is logged and swallowed — never block/crash the
+// reconciler on a list write (matches the failStreak-count "never block the
+// pod" rule).
+//
+// ponytail: fresh read + up to 2 writes; the primary is leader-gated (single
+// reconciler, PRV-03) so there is no real contention — go per-field CAS only if
+// that ever changes. No TTL/expiry on the blocklist — manual prune; upgrade
+// path = a 24h expiry column if the list rots.
+func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, failStreak int64, reason string, provErr error, log *slog.Logger) {
+	if machineID <= 0 {
+		return
+	}
+	q := r.queries()
+	if q == nil {
+		return
+	}
+	cfg, err := q.GetPodConfig(ctx)
+	if err != nil {
+		log.Warn("primary recordProvisionOutcome: GetPodConfig failed", "err", err, "machine_id", machineID)
+		return
+	}
+	block := cfg.VastMachineBlocklist
+	allow := cfg.VastMachineAllowlist
+
+	var newBlock, newAllow []int64
+	switch {
+	case provErr == nil:
+		newAllow = appendDedupCap(allow, machineID, allowlistCap)
+		newBlock = removeFromList(block, machineID)
+	case failStreak >= 1 && machineAttributableReason(reason):
+		newBlock = appendDedupCap(block, machineID, 0) // no cap on the blocklist
+		newAllow = removeFromList(allow, machineID)
+	default:
+		// 1st-failure grace OR non-machine-attributable reason → no mutation.
+		return
+	}
+
+	if !int64SliceEqual(newAllow, allow) {
+		if err := q.UpdatePodConfigFieldAllowlist(ctx, newAllow); err != nil {
+			log.Warn("primary recordProvisionOutcome: allowlist write failed", "err", err, "machine_id", machineID)
+			return
+		}
+	}
+	if !int64SliceEqual(newBlock, block) {
+		if err := q.UpdatePodConfigFieldBlocklist(ctx, newBlock); err != nil {
+			log.Warn("primary recordProvisionOutcome: blocklist write failed", "err", err, "machine_id", machineID)
+			return
+		}
+	}
+}
