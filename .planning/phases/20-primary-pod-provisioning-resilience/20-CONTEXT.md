@@ -21,6 +21,7 @@ Ordem no `pod/onstart.sh`: preflight → **download pesos (linha 97, BLOQUEANTE)
 ## Decisões TRAVADAS
 
 1. **Fonte de progresso = cadeia de fallback (FF-03).** Regimes 1/2: `status_msg`+`actual_status` do `GetInstance` (GRÁTIS, já buscamos no loop). Regime 3: heartbeat do onstart log via **(a) Vast logs API primário** (`PUT /api/v0/instances/request_logs/{id}/` → `result_url` → GET; endpoint confirmado existir + auth ok 2026-07-10, async ~segundos) **→ (b) SSH tail `/var/log/onstart.log` fallback** (vast-ai.sh já tem `ssh-exec`; SSH do host publica cedo, independe do onstart). Uma falha → tenta a outra. Ambas leem o mesmo log.
+   - **SPLIT FORMAL pós-review codex (2026-07-10):** só o leg (a) Vast logs API entra NESTA phase; o leg (b) SSH-tail é **follow-up deferido** (`ponytail:` — sem SSH em Go hoje). Seguro porque a fix de telemetria (decisão 8 abaixo) faz `OnstartLog` vazio/fetch_error = **UNKNOWN, não mata** → logs-API caído só faz regime-3 correr até o `coldstart_budget_s` ceiling (default seguro), nunca false-kill. FF-03 = "logs API primário (phase 20) + SSH follow-up (deferido)".
 
 2. **REUSA `CountConsecutiveFailedPrimaryProvisions` (BL-01).** Já existe (`primary_lifecycles`, DB-backed) + política `fail_streak<2` mercado / `>=2` allowlist (quick 260702-nse / Phase 17). NÃO criar contador in-memory novo — era proposta original, DESCARTADA por redundância. Gap = auto-POPULAR as listas, não contar.
 
@@ -32,7 +33,17 @@ Ordem no `pod/onstart.sh`: preflight → **download pesos (linha 97, BLOQUEANTE)
 
 6. **Budgets são dashboard-editáveis (CFG-01/UI-01).** `created_budget_s` + `progress_stall_budget_s` viram campos em `pod_config` com min/max (molde EXATO dos `coldstart_budget_s`/`port_bind_budget_s` existentes) + 2 cases PATCH em `config_write.go` + 2 sliders no dashboard (molde Phase 17). `coldstart_budget_s` continua como teto absoluto, inalterado.
 
-7. **`download-weights.sh` dropa `mc cp --quiet` (OBS-01).** `--quiet` (linha 55) mata o progresso mid-file → um Qwen de 20GB baixa com 1 linha antes + 1 depois → regime 3 fica CEGO durante o arquivo. Sem heartbeat mid-file, FF-02 não detecta stall dentro de um arquivo grande. Dropar --quiet (ou emitir progresso periódico) é o habilitador de FF-02.
+7. **`download-weights.sh` dropa `mc cp --quiet` (OBS-11).** `--quiet` (linha 55) mata o progresso mid-file → um Qwen de 20GB baixa com 1 linha antes + 1 depois → regime 3 fica CEGO durante o arquivo. Sem heartbeat mid-file, FF-02 não detecta stall dentro de um arquivo grande. (ID renomeado OBS-01→OBS-11: OBS-01 já é requirement Complete da Phase 7.)
+
+## Decisões pós-review codex (2026-07-10 — HIGH risk, fold via --reviews)
+
+8. **Heartbeat carrega BYTES, não liveness (OBS-11 + FF-02).** Dropar `--quiet` + tick periódico ainda emite timestamp fresco com bytes congelados → transfer travado "prova progresso" pra sempre → stall NUNCA dispara. O loop emite `[download-weights] progress key=<k> bytes=<N>` (N = tamanho atual do arquivo parcial, `stat -c%s` ou `mc --json`); progresso = bytes SOBEM entre amostras. FF-02 avança `lastProgressAt` só quando `bytes` aumentou.
+
+9. **FF-02 escopado à FASE de download.** Arma no 1º `[download-weights] fetching`, atualiza no crescimento de bytes, **DESARMA** quando todos os arquivos logam `ok`/onstart passa do download. NÃO roda o timer de stall através de compose/model-startup/health-ready — startup lento saudável após download bem-sucedido NÃO pode tripar `progress_stall_timeout`.
+
+10. **Telemetria-indisponível = UNKNOWN, não mata (FF-02/FF-03).** `OnstartLog` retorna STATUS (`available|not_ready|fetch_error|empty`), não só texto. Stall dispara SÓ com `available` + bytes provadamente parados além do budget. `fetch_error`/`empty` (logs API caído/atrasado) → UNKNOWN → NÃO fast-fail; corre até o `coldstart_budget_s` ceiling (default seguro). É o que torna o SSH-tail deferível (decisão 1).
+
+11. **Classificação de falha antes do auto-blocklist (BL-01).** Blocklistar em QUALQUER erro do `waitForReadyOrDestroy` envenena o picker. Blocklista SÓ razões atribuíveis à máquina: `created_state_timeout`, terminal/offline (`exited`/`unknown`/`offline`), port-bind/reachability repetido. PULA (sem mutar lista): `cancelled_in_flight`, `health_timeout`, shutdown de operador/schedule, erros de imagem/config/R2/auth, telemetria-indisponível, **e `progress_stall_timeout` (EXCLUÍDO de propósito)**. Razão: stall de download tem raiz no store de pesos compartilhado (R2) + rede — numa queda global de R2 TODO host trava → blocklistar no stall cascataria envenenando o mercado inteiro. FF-02 ainda **mata** o pod no stall (economiza $), mas NÃO **parka** o host. `ponytail:` upgrade path = correlação cross-lifecycle (este host travou enquanto outros subiram ⇒ atribuível ao host). AL-01 (allowlist no sucesso) inalterado.
 
 ## Escopo (ganho honesto — NÃO vender demais)
 
