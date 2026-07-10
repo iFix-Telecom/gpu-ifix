@@ -59,6 +59,8 @@ type podConfigWriteQueries interface {
 	UpdatePodConfigFieldRejectPrivateIP(ctx context.Context, v bool) error
 	UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, v int32) error
+	UpdatePodConfigFieldCreatedBudgetS(ctx context.Context, v int32) error
+	UpdatePodConfigFieldProgressStallBudgetS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldFailureCooldownS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigFieldScheduleUpHour(ctx context.Context, v int32) error
@@ -76,6 +78,10 @@ type podConfigWriteQueries interface {
 	UpdatePodConfigBoundColdstartBudgetSMax(ctx context.Context, v int32) error
 	UpdatePodConfigBoundPortBindBudgetSMin(ctx context.Context, v int32) error
 	UpdatePodConfigBoundPortBindBudgetSMax(ctx context.Context, v int32) error
+	UpdatePodConfigBoundCreatedBudgetSMin(ctx context.Context, v int32) error
+	UpdatePodConfigBoundCreatedBudgetSMax(ctx context.Context, v int32) error
+	UpdatePodConfigBoundProgressStallBudgetSMin(ctx context.Context, v int32) error
+	UpdatePodConfigBoundProgressStallBudgetSMax(ctx context.Context, v int32) error
 	UpdatePodConfigBoundFailureCooldownSMin(ctx context.Context, v int32) error
 	UpdatePodConfigBoundFailureCooldownSMax(ctx context.Context, v int32) error
 	UpdatePodConfigBoundMonthlyBudgetBRLMin(ctx context.Context, v pgtype.Numeric) error
@@ -185,6 +191,10 @@ func (h *PrimaryConfigWriteHandler) writeConfig(ctx context.Context, w http.Resp
 		h.writeIntConfig(ctx, w, raw, b.ColdStartBudgetSMin, b.ColdStartBudgetSMax, h.q.UpdatePodConfigFieldColdstartBudgetS)
 	case "port_bind_budget_s":
 		h.writeIntConfig(ctx, w, raw, b.PortBindBudgetSMin, b.PortBindBudgetSMax, h.q.UpdatePodConfigFieldPortBindBudgetS)
+	case "created_budget_s":
+		h.writeIntConfig(ctx, w, raw, b.CreatedBudgetSMin, b.CreatedBudgetSMax, h.q.UpdatePodConfigFieldCreatedBudgetS)
+	case "progress_stall_budget_s":
+		h.writeIntConfig(ctx, w, raw, b.ProgressStallBudgetSMin, b.ProgressStallBudgetSMax, h.q.UpdatePodConfigFieldProgressStallBudgetS)
 	case "failure_cooldown_s":
 		h.writeIntConfig(ctx, w, raw, b.FailureCooldownSMin, b.FailureCooldownSMax, h.q.UpdatePodConfigFieldFailureCooldownS)
 	case "monthly_budget_brl":
@@ -259,6 +269,14 @@ func (h *PrimaryConfigWriteHandler) writeBound(ctx context.Context, w http.Respo
 		h.writeIntBoundMin(ctx, w, raw, b.PortBindBudgetSMax, h.q.UpdatePodConfigBoundPortBindBudgetSMin)
 	case "port_bind_budget_s_max":
 		h.writeIntBoundMax(ctx, w, raw, b.PortBindBudgetSMin, h.q.UpdatePodConfigBoundPortBindBudgetSMax)
+	case "created_budget_s_min":
+		h.writeIntBoundMin(ctx, w, raw, b.CreatedBudgetSMax, h.q.UpdatePodConfigBoundCreatedBudgetSMin)
+	case "created_budget_s_max":
+		h.writeIntBoundMax(ctx, w, raw, b.CreatedBudgetSMin, h.q.UpdatePodConfigBoundCreatedBudgetSMax)
+	case "progress_stall_budget_s_min":
+		h.writeIntBoundMin(ctx, w, raw, b.ProgressStallBudgetSMax, h.q.UpdatePodConfigBoundProgressStallBudgetSMin)
+	case "progress_stall_budget_s_max":
+		h.writeIntBoundMax(ctx, w, raw, b.ProgressStallBudgetSMin, h.q.UpdatePodConfigBoundProgressStallBudgetSMax)
 	case "failure_cooldown_s_min":
 		h.writeIntBoundMin(ctx, w, raw, b.FailureCooldownSMax, h.q.UpdatePodConfigBoundFailureCooldownSMin)
 	case "failure_cooldown_s_max":

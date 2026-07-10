@@ -18,7 +18,9 @@ INSERT INTO ai_gateway.pod_config (
     coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max,
     failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max,
     schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max,
-    grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max
+    grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max,
+    created_budget_s, created_budget_s_min, created_budget_s_max,
+    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
@@ -28,7 +30,9 @@ INSERT INTO ai_gateway.pod_config (
     $21, $22, $23, $24,
     $25, $26, $27, $28,
     $29, $30, $31, $32,
-    $33, $34, $35, $36
+    $33, $34, $35, $36,
+    $37, $38, $39,
+    $40, $41, $42
 )
 ON CONFLICT (id) DO NOTHING;
 
@@ -61,6 +65,12 @@ UPDATE ai_gateway.pod_config SET coldstart_budget_s = $1, updated_at = NOW() WHE
 
 -- name: UpdatePodConfigFieldPortBindBudgetS :exec
 UPDATE ai_gateway.pod_config SET port_bind_budget_s = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldCreatedBudgetS :exec
+UPDATE ai_gateway.pod_config SET created_budget_s = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldProgressStallBudgetS :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s = $1, updated_at = NOW() WHERE id = TRUE;
 
 -- name: UpdatePodConfigFieldFailureCooldownS :exec
 UPDATE ai_gateway.pod_config SET failure_cooldown_s = $1, updated_at = NOW() WHERE id = TRUE;
@@ -114,6 +124,18 @@ UPDATE ai_gateway.pod_config SET port_bind_budget_s_min = $1, updated_at = NOW()
 
 -- name: UpdatePodConfigBoundPortBindBudgetSMax :exec
 UPDATE ai_gateway.pod_config SET port_bind_budget_s_max = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigBoundCreatedBudgetSMin :exec
+UPDATE ai_gateway.pod_config SET created_budget_s_min = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigBoundCreatedBudgetSMax :exec
+UPDATE ai_gateway.pod_config SET created_budget_s_max = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigBoundProgressStallBudgetSMin :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s_min = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigBoundProgressStallBudgetSMax :exec
+UPDATE ai_gateway.pod_config SET progress_stall_budget_s_max = $1, updated_at = NOW() WHERE id = TRUE;
 
 -- name: UpdatePodConfigBoundFailureCooldownSMin :exec
 UPDATE ai_gateway.pod_config SET failure_cooldown_s_min = $1, updated_at = NOW() WHERE id = TRUE;

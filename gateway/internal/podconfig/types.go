@@ -34,6 +34,8 @@ type PodConfig struct {
 	RejectPrivateIP      bool
 	ColdStartBudgetS     int
 	PortBindBudgetS      int
+	CreatedBudgetS       int
+	ProgressStallBudgetS int
 	FailureCooldownS     int
 	MonthlyBudgetBRL     float64
 	ScheduleUpHour       int
@@ -48,26 +50,30 @@ type PodConfig struct {
 // numeric hot fields (D-03). The bounds gate operator-supplied values in
 // the admin write endpoint (Plan 17-04); they are themselves editable.
 type PodConfigBounds struct {
-	CapPrimaryMin       float64
-	CapPrimaryMax       float64
-	CapFallbackMin      float64
-	CapFallbackMax      float64
-	ColdStartBudgetSMin int
-	ColdStartBudgetSMax int
-	PortBindBudgetSMin  int
-	PortBindBudgetSMax  int
-	FailureCooldownSMin int
-	FailureCooldownSMax int
-	MonthlyBudgetBRLMin float64
-	MonthlyBudgetBRLMax float64
-	ScheduleUpHourMin   int
-	ScheduleUpHourMax   int
-	ScheduleDownHourMin int
-	ScheduleDownHourMax int
-	GraceRampDownSMin   int
-	GraceRampDownSMax   int
-	ProvisionLeadSMin   int
-	ProvisionLeadSMax   int
+	CapPrimaryMin           float64
+	CapPrimaryMax           float64
+	CapFallbackMin          float64
+	CapFallbackMax          float64
+	ColdStartBudgetSMin     int
+	ColdStartBudgetSMax     int
+	PortBindBudgetSMin      int
+	PortBindBudgetSMax      int
+	CreatedBudgetSMin       int
+	CreatedBudgetSMax       int
+	ProgressStallBudgetSMin int
+	ProgressStallBudgetSMax int
+	FailureCooldownSMin     int
+	FailureCooldownSMax     int
+	MonthlyBudgetBRLMin     float64
+	MonthlyBudgetBRLMax     float64
+	ScheduleUpHourMin       int
+	ScheduleUpHourMax       int
+	ScheduleDownHourMin     int
+	ScheduleDownHourMax     int
+	GraceRampDownSMin       int
+	GraceRampDownSMax       int
+	ProvisionLeadSMin       int
+	ProvisionLeadSMax       int
 }
 
 // ScheduleRule is a LOCAL data mirror of primary.ScheduleRule. It carries
@@ -169,6 +175,8 @@ func rowToPodConfig(r gen.AiGatewayPodConfig) PodConfig {
 		RejectPrivateIP:      r.RejectPrivateIp,
 		ColdStartBudgetS:     int(r.ColdstartBudgetS),
 		PortBindBudgetS:      int(r.PortBindBudgetS),
+		CreatedBudgetS:       int(r.CreatedBudgetS),
+		ProgressStallBudgetS: int(r.ProgressStallBudgetS),
 		FailureCooldownS:     int(r.FailureCooldownS),
 		MonthlyBudgetBRL:     numericToFloat(r.MonthlyBudgetBrl),
 		ScheduleUpHour:       int(r.ScheduleUpHour),
@@ -184,25 +192,29 @@ func rowToPodConfig(r gen.AiGatewayPodConfig) PodConfig {
 // PodConfigBounds view (D-03).
 func rowToBounds(r gen.AiGatewayPodConfig) PodConfigBounds {
 	return PodConfigBounds{
-		CapPrimaryMin:       numericToFloat(r.CapPrimaryMin),
-		CapPrimaryMax:       numericToFloat(r.CapPrimaryMax),
-		CapFallbackMin:      numericToFloat(r.CapFallbackMin),
-		CapFallbackMax:      numericToFloat(r.CapFallbackMax),
-		ColdStartBudgetSMin: int(r.ColdstartBudgetSMin),
-		ColdStartBudgetSMax: int(r.ColdstartBudgetSMax),
-		PortBindBudgetSMin:  int(r.PortBindBudgetSMin),
-		PortBindBudgetSMax:  int(r.PortBindBudgetSMax),
-		FailureCooldownSMin: int(r.FailureCooldownSMin),
-		FailureCooldownSMax: int(r.FailureCooldownSMax),
-		MonthlyBudgetBRLMin: numericToFloat(r.MonthlyBudgetBrlMin),
-		MonthlyBudgetBRLMax: numericToFloat(r.MonthlyBudgetBrlMax),
-		ScheduleUpHourMin:   int(r.ScheduleUpHourMin),
-		ScheduleUpHourMax:   int(r.ScheduleUpHourMax),
-		ScheduleDownHourMin: int(r.ScheduleDownHourMin),
-		ScheduleDownHourMax: int(r.ScheduleDownHourMax),
-		GraceRampDownSMin:   int(r.GraceRampDownSMin),
-		GraceRampDownSMax:   int(r.GraceRampDownSMax),
-		ProvisionLeadSMin:   int(r.ProvisionLeadSMin),
-		ProvisionLeadSMax:   int(r.ProvisionLeadSMax),
+		CapPrimaryMin:           numericToFloat(r.CapPrimaryMin),
+		CapPrimaryMax:           numericToFloat(r.CapPrimaryMax),
+		CapFallbackMin:          numericToFloat(r.CapFallbackMin),
+		CapFallbackMax:          numericToFloat(r.CapFallbackMax),
+		ColdStartBudgetSMin:     int(r.ColdstartBudgetSMin),
+		ColdStartBudgetSMax:     int(r.ColdstartBudgetSMax),
+		PortBindBudgetSMin:      int(r.PortBindBudgetSMin),
+		PortBindBudgetSMax:      int(r.PortBindBudgetSMax),
+		CreatedBudgetSMin:       int(r.CreatedBudgetSMin),
+		CreatedBudgetSMax:       int(r.CreatedBudgetSMax),
+		ProgressStallBudgetSMin: int(r.ProgressStallBudgetSMin),
+		ProgressStallBudgetSMax: int(r.ProgressStallBudgetSMax),
+		FailureCooldownSMin:     int(r.FailureCooldownSMin),
+		FailureCooldownSMax:     int(r.FailureCooldownSMax),
+		MonthlyBudgetBRLMin:     numericToFloat(r.MonthlyBudgetBrlMin),
+		MonthlyBudgetBRLMax:     numericToFloat(r.MonthlyBudgetBrlMax),
+		ScheduleUpHourMin:       int(r.ScheduleUpHourMin),
+		ScheduleUpHourMax:       int(r.ScheduleUpHourMax),
+		ScheduleDownHourMin:     int(r.ScheduleDownHourMin),
+		ScheduleDownHourMax:     int(r.ScheduleDownHourMax),
+		GraceRampDownSMin:       int(r.GraceRampDownSMin),
+		GraceRampDownSMax:       int(r.GraceRampDownSMax),
+		ProvisionLeadSMin:       int(r.ProvisionLeadSMin),
+		ProvisionLeadSMax:       int(r.ProvisionLeadSMax),
 	}
 }
