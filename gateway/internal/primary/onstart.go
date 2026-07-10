@@ -144,12 +144,33 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: minio alias set"
 
 download_with_verify() {
   local key="$1" target="$2" sha="$3"
-  local url
+  local url hb rc
   url=$(mc share download --expire=2h "ifix/$MINIO_BUCKET/$key" | awk -F': ' '/^Share/{print $2}')
-  aria2c --max-tries=50 --retry-wait=15 --timeout=60 --connect-timeout=30 \
+  # OBS-11: byte-bearing download heartbeat. The reconciler's FF-02 regime-3
+  # stall detector (parseDownloadProgress) keys on '[download-weights]' lines in
+  # THIS onstart log — 'fetching' arms, 'progress key= bytes=' advances, 'ok'
+  # disarms. A FROZEN transfer keeps a FLAT bytes= and trips the stall; a
+  # liveness-only tick would "prove progress" forever. Measured with
+  # 'du --block-size=1' (actual blocks written) + aria2c '--file-allocation=none'
+  # so a sparse multi-connection download reports REAL progress, not a
+  # preallocated / max-offset apparent size that would sit at full and
+  # false-stall a healthy download. Heartbeat killed on every return path.
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [download-weights] fetching $key -> $target"
+  ( while :; do
+      sz=$(du --block-size=1 "$target" 2>/dev/null | cut -f1) || sz=0
+      [ -n "$sz" ] || sz=0
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [download-weights] progress key=$key bytes=$sz"
+      sleep 15
+    done ) &
+  hb=$!
+  aria2c --file-allocation=none --max-tries=50 --retry-wait=15 --timeout=60 --connect-timeout=30 \
          --max-connection-per-server=16 --split=16 \
-         --min-split-size=1M --continue=true --dir="$(dirname "$target")" --out="$(basename "$target")" "$url"
+         --min-split-size=1M --continue=true --dir="$(dirname "$target")" --out="$(basename "$target")" "$url" && rc=0 || rc=$?
+  kill "$hb" 2>/dev/null || true
+  wait "$hb" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || return "$rc"
   echo "$sha  $target" | sha256sum -c -
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [download-weights] ok $target"
 }
 
 mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates /opt/chatterbox-data/models/hub

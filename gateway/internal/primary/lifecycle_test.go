@@ -212,6 +212,37 @@ func TestPrimaryOnstartLengthBelowLimit(t *testing.T) {
 	require.Less(t, len(req.Args[1]), 14000, "onstart must stay under 14 KB regression budget")
 }
 
+// TestPrimaryOnstart_EmitsDownloadHeartbeat — OBS-11/FF-02 wiring guard.
+// The primary pod downloads weights via THIS generated onstart (aria2c), not
+// pod/scripts/download-weights.sh. FF-02's regime-3 stall detector
+// (parseDownloadProgress) only fires if the onstart log carries the
+// `[download-weights]` markers it consumes: `fetching` (arms), `progress key=
+// bytes=` (advances), `ok` (disarms). This test pins the producer (onstart.go)
+// to the consumer (parseDownloadProgress) so the two never drift apart again.
+func TestPrimaryOnstart_EmitsDownloadHeartbeat(t *testing.T) {
+	r := newReconcilerWith(cfgWithDefaults())
+	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
+	require.NoError(t, err)
+	script := req.Args[1]
+
+	require.Contains(t, script, "[download-weights] fetching",
+		"onstart must emit the `fetching` line that arms FF-02")
+	require.Contains(t, script, "[download-weights] progress key=",
+		"onstart must emit byte-progress lines FF-02 advances on")
+	require.Contains(t, script, "[download-weights] ok ",
+		"onstart must emit the `ok` line that disarms FF-02")
+	require.Contains(t, script, "--file-allocation=none",
+		"aria2c must not preallocate, or `du` byte-progress would sit at full and false-stall")
+
+	// Consumer side: a synthetic log built from these markers must ARM and
+	// advance in parseDownloadProgress (the exact function the reconciler runs).
+	sample := "[t] [download-weights] fetching k -> /w\n" +
+		"[t] [download-weights] progress key=k bytes=42\n"
+	fetching, _, total := parseDownloadProgress(sample)
+	require.True(t, fetching, "parseDownloadProgress must arm on the onstart `fetching` line")
+	require.Equal(t, int64(42), total, "parseDownloadProgress must read the onstart `bytes=` value")
+}
+
 // TestPrimaryOnstart_StartsWithSetEuo — reviews #7 shell hardening: bash
 // strict mode is `set -euo pipefail` (NOT `set -euxo` — `x` xtrace would
 // leak MinIO credentials in pod logs via `mc alias set`).
