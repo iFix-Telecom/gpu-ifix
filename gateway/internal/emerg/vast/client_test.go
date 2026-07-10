@@ -34,6 +34,153 @@ func newTestServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	return s
 }
 
+// newTestTLSServer spawns an httptest TLS server (https://) — required by
+// the OnstartLog tests because FetchLogs rejects any non-https result_url
+// (SSRF guard, finding #8). Callers must set `c.httpClient = s.Client()` so
+// the client trusts the server's self-signed cert.
+func newTestTLSServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	s := httptest.NewTLSServer(h)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// TestOnstartLog_Available — PUT returns result_url, the presigned GET
+// returns non-empty text → Status=Available, Text set. Also asserts the
+// auth header IS on the PUT and ABSENT on the result_url GET (item 6).
+func TestOnstartLog_Available(t *testing.T) {
+	const apiKey = "k"
+	var putAuth, getAuth string
+	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/instances/request_logs/123/":
+			putAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"success":true,"result_url":"REPLACED/logs/blob"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/logs/blob":
+			getAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("[download-weights] progress key=qwen bytes=123\n"))
+		default:
+			w.WriteHeader(http.StatusTeapot)
+		}
+	})
+	// The result_url must point back at this same TLS server (same trusted
+	// cert). Rewrite the placeholder now that srv.URL is known.
+	rewriter := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/instances/request_logs/123/":
+			putAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"success":true,"result_url":"` + srv.URL + `/logs/blob"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/logs/blob":
+			getAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("[download-weights] progress key=qwen bytes=123\n"))
+		default:
+			w.WriteHeader(http.StatusTeapot)
+		}
+	}
+	srv.Config.Handler = http.HandlerFunc(rewriter)
+
+	c := NewClientWithBaseURL(apiKey, srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 123)
+	require.NoError(t, err, "all expected statuses return err==nil")
+	require.Equal(t, OnstartLogAvailable, res.Status)
+	require.Contains(t, res.Text, "bytes=123")
+	require.Equal(t, "Bearer "+apiKey, putAuth, "auth header must be on the PUT")
+	require.Empty(t, getAuth, "presigned result_url GET must carry NO auth header")
+}
+
+// TestOnstartLog_NotReady — PUT returns no result_url yet (async result
+// still cooking) → Status=NotReady, non-fatal, Text=="".
+func TestOnstartLog_NotReady(t *testing.T) {
+	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogNotReady, res.Status)
+	require.Empty(t, res.Text)
+}
+
+// TestOnstartLog_FetchError_GET5xx — PUT ok, but the result_url GET returns
+// 5xx → Status=FetchError (folded, non-fatal to the caller).
+func TestOnstartLog_FetchError_GET5xx(t *testing.T) {
+	var srv *httptest.Server
+	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write([]byte(`{"result_url":"` + srv.URL + `/logs/blob"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err, "FetchError must NOT surface as a fatal error")
+	require.Equal(t, OnstartLogFetchError, res.Status)
+}
+
+// TestOnstartLog_FetchError_PUTNon200 — PUT itself returns non-200 →
+// Status=FetchError (folded, non-fatal).
+func TestOnstartLog_FetchError_PUTNon200(t *testing.T) {
+	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"msg":"logs API down"}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogFetchError, res.Status)
+}
+
+// TestOnstartLog_Empty — GET returns 200 with whitespace-only body →
+// Status=Empty (UNKNOWN, non-fatal).
+func TestOnstartLog_Empty(t *testing.T) {
+	var srv *httptest.Server
+	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write([]byte(`{"result_url":"` + srv.URL + `/logs/blob"}`))
+			return
+		}
+		_, _ = w.Write([]byte("   \n\t  "))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogEmpty, res.Status)
+}
+
+// TestOnstartLog_NonHTTPSResultURL_FetchError — SSRF guard (finding #8): a
+// result_url with a non-https scheme is rejected BEFORE the GET → FetchError,
+// and the GET handler is never reached.
+func TestOnstartLog_NonHTTPSResultURL_FetchError(t *testing.T) {
+	getCalled := false
+	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			// Point at an http:// (non-https) internal-looking address.
+			_, _ = w.Write([]byte(`{"result_url":"http://169.254.169.254/latest/meta-data"}`))
+			return
+		}
+		getCalled = true
+		_, _ = w.Write([]byte("should never be fetched"))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogFetchError, res.Status, "non-https result_url must map to FetchError")
+	require.False(t, getCalled, "SSRF guard must reject before making the GET")
+}
+
 // TestNewClient_HTTPTimeoutIs30s asserts the package-level constant per
 // CONTEXT.md D-A1.
 func TestNewClient_HTTPTimeoutIs30s(t *testing.T) {

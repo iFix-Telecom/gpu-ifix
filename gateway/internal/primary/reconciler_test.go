@@ -87,6 +87,7 @@ type fakeVast struct {
 	createInstanceFn func(ctx context.Context, offerID int64, req vast.CreateRequest) (vast.Instance, error)
 	getInstanceFn    func(ctx context.Context, id int64) (vast.Instance, error)
 	destroyFn        func(ctx context.Context, id int64) error
+	onstartLogFn     func(ctx context.Context, id int64) (vast.OnstartLogResult, error)
 
 	destroyCalls atomic.Int32
 }
@@ -130,6 +131,18 @@ func (f *fakeVast) DestroyInstance(ctx context.Context, id int64) error {
 		return fn(ctx, id)
 	}
 	return nil
+}
+
+func (f *fakeVast) OnstartLog(ctx context.Context, id int64) (vast.OnstartLogResult, error) {
+	f.mu.Lock()
+	fn := f.onstartLogFn
+	f.mu.Unlock()
+	if fn == nil {
+		// Default: no heartbeat available yet, non-fatal — existing tests
+		// that never script this method stay unaffected.
+		return vast.OnstartLogResult{Status: vast.OnstartLogNotReady}, nil
+	}
+	return fn(ctx, id)
 }
 
 // fakeLoader records OverrideTier0 / RestoreTier0 calls so tests can

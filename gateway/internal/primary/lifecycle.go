@@ -28,6 +28,13 @@ type VastAPI interface {
 	CreateInstance(ctx context.Context, offerID int64, req vast.CreateRequest) (vast.Instance, error)
 	GetInstance(ctx context.Context, instanceID int64) (vast.Instance, error)
 	DestroyInstance(ctx context.Context, instanceID int64) error
+	// OnstartLog fetches the pod's onstart-log heartbeat (FF-03) so the
+	// reconciler can detect a regime-3 download stall while weights download
+	// (before the :9100 health-bridge exists). Returns a STATUS, not bare
+	// text — Vast-API/transport failures fold to FetchError (non-fatal).
+	// ponytail: the interface gains ONE method; RequestLogs/FetchLogs stay
+	// concrete on *vast.Client (only OnstartLog is called via r.deps.Vast).
+	OnstartLog(ctx context.Context, instanceID int64) (vast.OnstartLogResult, error)
 }
 
 // LoaderAdapter is the surface the primary reconciler consumes from the
