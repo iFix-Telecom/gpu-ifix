@@ -77,6 +77,11 @@ const (
 	// this budget — a single op blocking longer than 30s indicates a Vast
 	// outage that the lifecycle should surface to Sentry, not retry under.
 	httpTimeout = 30 * time.Second
+
+	// maxLogBytes bounds the onstart-log read (FF-03) so a giant/malicious
+	// log body cannot flood the heap. The reconciler only scans the tail for
+	// a heartbeat/byte-progress line, so 256 KiB is ample.
+	maxLogBytes = 256 * 1024
 )
 
 // Client is the thin Vast.ai REST client. Construct via NewClient (uses
@@ -322,6 +327,123 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID int64) error {
 		return nil
 	}
 	return parsedErr
+}
+
+// OnstartLog fetches the pod's /var/log/onstart.log via the Vast logs API
+// (FF-03 leg a) and returns a STATUS the primary reconciler branches on.
+// It chains RequestLogs → FetchLogs and folds every EXPECTED outcome into a
+// non-nil-error-free OnstartLogResult:
+//
+//   - RequestLogs error (PUT non-200 / transport / decode) → FetchError
+//   - empty result_url (async result not ready)            → NotReady
+//   - FetchLogs error (GET fail / non-https result_url)     → FetchError
+//   - GET 200 with empty/whitespace body                    → Empty
+//   - GET 200 with non-empty text                           → Available (Text set)
+//
+// The returned error is nil for all four statuses (they are the reconciler's
+// branch points); a non-nil error is reserved for a genuine programming bug.
+//
+// ponytail: SSH-tail fallback (FF-03 leg b) is deferred — there is no Go SSH
+// client today and leg-(a) FetchError is non-fatal, so the worst case of a
+// Vast-logs outage is regime-3 riding to the coldstart_budget_s ceiling
+// (fail slow), never a false destroy. SSH-tail closes that gap later.
+func (c *Client) OnstartLog(ctx context.Context, instanceID int64) (OnstartLogResult, error) {
+	resultURL, err := c.RequestLogs(ctx, instanceID)
+	if err != nil {
+		return OnstartLogResult{Status: OnstartLogFetchError}, nil
+	}
+	if resultURL == "" {
+		return OnstartLogResult{Status: OnstartLogNotReady}, nil
+	}
+	text, err := c.FetchLogs(ctx, resultURL)
+	if err != nil {
+		return OnstartLogResult{Status: OnstartLogFetchError}, nil
+	}
+	if strings.TrimSpace(text) == "" {
+		return OnstartLogResult{Status: OnstartLogEmpty}, nil
+	}
+	return OnstartLogResult{Status: OnstartLogAvailable, Text: text}, nil
+}
+
+// RequestLogs issues PUT /instances/request_logs/{id}/ to ask Vast to
+// materialise the onstart log, returning the presigned `result_url` (empty
+// string when the async result is not ready yet). Mirrors GetInstance for
+// the auth/Do/metrics/parseErrorBody shape.
+//
+// ponytail: the exact response JSON keys are UAT-unconfirmed (Q2, 20-06) —
+// we decode defensively for a top-level `result_url` string and tolerate the
+// usual `success`/`msg` envelope wrappers by ignoring unknown keys.
+func (c *Client) RequestLogs(ctx context.Context, instanceID int64) (string, error) {
+	u := fmt.Sprintf("%s/instances/request_logs/%d/", c.baseURL, instanceID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, nil)
+	if err != nil {
+		return "", err
+	}
+	c.setAuthHeader(req)
+
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("request_logs", "started").Inc()
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		obs.GatewayVastAPIRequestsTotal.WithLabelValues("request_logs", "transport_error").Inc()
+		return "", err
+	}
+	defer resp.Body.Close()
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("request_logs", strconv.Itoa(resp.StatusCode)).Inc()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", c.parseErrorBody(resp)
+	}
+	var body struct {
+		ResultURL string `json:"result_url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&body); err != nil {
+		return "", fmt.Errorf("vast: decode request_logs response: %w", err)
+	}
+	return strings.TrimSpace(body.ResultURL), nil
+}
+
+// FetchLogs GETs a presigned Vast `result_url` and returns the log text,
+// bounded to maxLogBytes. Two security invariants (finding #8):
+//
+//  1. SSRF guard — the URL scheme MUST be `https`; a non-https result_url is
+//     rejected BEFORE any network call (blocks file://, http:// internal
+//     metadata endpoints, etc.).
+//  2. The GET carries NO Authorization header — result_url is presigned, so
+//     attaching the bearer would leak it to whatever host Vast names.
+//
+// ponytail: a result_url HOST allowlist (vast.ai / *.cloudflarestorage) is a
+// REQUIRED 20-06 follow-up once the real host is observed in a live coldstart.
+func (c *Client) FetchLogs(ctx context.Context, resultURL string) (string, error) {
+	parsed, err := url.Parse(resultURL)
+	if err != nil {
+		return "", fmt.Errorf("vast: parse result_url: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("vast: result_url scheme %q is not https (SSRF guard)", parsed.Scheme)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
+	if err != nil {
+		return "", err
+	}
+	// Deliberately NO setAuthHeader — result_url is presigned; keep the key on-host.
+
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("fetch_logs", "started").Inc()
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		obs.GatewayVastAPIRequestsTotal.WithLabelValues("fetch_logs", "transport_error").Inc()
+		return "", err
+	}
+	defer resp.Body.Close()
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("fetch_logs", strconv.Itoa(resp.StatusCode)).Inc()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", c.parseErrorBody(resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLogBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 // setAuthHeader is the ONE place the API key touches an http.Request. By

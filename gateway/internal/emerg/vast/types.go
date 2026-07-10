@@ -116,6 +116,35 @@ func RejectPrivateIPOffers(offers []Offer) []Offer {
 	return out
 }
 
+// OnstartLogStatus classifies the outcome of an OnstartLog fetch so the
+// primary reconciler (FF-02, plan 20-04) can distinguish "we saw the log
+// and it says X" from "we could not read the log". FF-02 fast-fails ONLY
+// on Available + provably-frozen bytes; every other status = ride to the
+// coldstart_budget_s ceiling (the safe default), NEVER a false destroy.
+type OnstartLogStatus int
+
+const (
+	// OnstartLogAvailable — the presigned GET returned non-empty log text.
+	OnstartLogAvailable OnstartLogStatus = iota
+	// OnstartLogNotReady — the PUT returned no result_url yet (async result
+	// still cooking). NORMAL, non-fatal.
+	OnstartLogNotReady
+	// OnstartLogFetchError — PUT or GET failed (Vast logs API down/delayed,
+	// transport error, or a non-https result_url). UNKNOWN, non-fatal.
+	OnstartLogFetchError
+	// OnstartLogEmpty — the GET returned 200 but an empty/whitespace body.
+	// UNKNOWN, non-fatal.
+	OnstartLogEmpty
+)
+
+// OnstartLogResult is what OnstartLog returns. FF-02 branches on Status
+// (not on the method's error, which is nil for all four statuses — Vast-API
+// and transport failures are FOLDED into Status=OnstartLogFetchError).
+type OnstartLogResult struct {
+	Status OnstartLogStatus
+	Text   string
+}
+
 // PortBinding is one entry in the `ports["{container_port}/tcp"]` array
 // returned by GET /instances/{id}/. Mirrors Docker's NetworkSettings.Ports
 // shape: HostIp can be "0.0.0.0" or "::" (IPv6); HostPort is a string
