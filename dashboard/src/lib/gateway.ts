@@ -365,6 +365,8 @@ export interface PodConfigSection {
   reject_private_ip: boolean;
   coldstart_budget_s: number;
   port_bind_budget_s: number;
+  created_budget_s: number;
+  progress_stall_budget_s: number;
   failure_cooldown_s: number;
   monthly_budget_brl: number;
   schedule_up_hour: number;
@@ -385,6 +387,10 @@ export interface PodConfigBounds {
   coldstart_budget_s_max: number;
   port_bind_budget_s_min: number;
   port_bind_budget_s_max: number;
+  created_budget_s_min: number;
+  created_budget_s_max: number;
+  progress_stall_budget_s_min: number;
+  progress_stall_budget_s_max: number;
   failure_cooldown_s_min: number;
   failure_cooldown_s_max: number;
   monthly_budget_brl_min: number;
