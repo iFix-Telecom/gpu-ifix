@@ -386,3 +386,17 @@ Plans:
 - Fórmula economia = `soma(phantom) − custo_real_Vast` por período
 - Confia no preço phantom — NÃO validar antes (já corrigido via daily timer)
 - Gaps NÃO incluídos nesta fase (capturados em note/seed): metering `audio_seconds`/`embeds_count`=0 não gravam; latency chart vira série temporal (seed separado); Tier 3 GPU/RAM/CPU (HANDOFF-tier3-gpu-metrics.md)
+
+---
+
+### Phase 20: Primary-pod provisioning resilience — coldstart fast-fail + auto-blocklist/allowlist (INSERTED, promoted from SEED-009)
+
+**Goal:** Stop a stuck coldstart from silently burning money until the 3600s ceiling, and make the picker learn from outcomes — detect a doomed provision in ~2min (not 60), auto-park failing machines, auto-prefer proven ones. Objetivo de negócio: viabilizar validação rápida bom/ruim do pod (pod NÃO always-on, schedule-down; economia só se absorver Gemini ~R$800/mês — ver memory coldstart-pod-economics), sem babá humana no loop de provisioning.
+
+Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em Vast `actual_status=created`, onstart mudo → `created_budget_s` ~120s; (2) pull lento = `actual_status=loading`, progride → deixa correr até `coldstart_budget_s` (teto); (3) stall no download de pesos, dentro do onstart, invisível pro Vast → `progress_stall_budget_s` ~120s via heartbeat do onstart log.
+
+**Requirements**: FF-01 (created_budget_s fast-fail, regime 1), FF-02 (progress_stall_budget_s fast-fail, regime 3, via onstart-log heartbeat), FF-03 (fonte de progresso: Vast logs API primário `PUT /instances/request_logs/{id}/`→result_url→GET + SSH-tail `/var/log/onstart.log` fallback — cadeia; status_msg+actual_status do GetInstance cobre regimes 1/2 de graça), CFG-01 (migration pod_config +created_budget_s +progress_stall_budget_s +min/max, molde dos budgets existentes; config_write.go 2 cases PATCH), UI-01 (dashboard 2 sliders, molde Phase 17), BL-01 (auto-blocklist quando fail_streak≥2 — REUSA CountConsecutiveFailedPrimaryProvisions existente, NÃO novo contador; +remove da allowlist; persiste pod_config.vast_machine_blocklist; sem TTL agora, prune manual — ponytail:), AL-01 (auto-allowlist no first_health_pass +remove do blocklist; cap ~20 FIFO+dedup; query UpdatePodConfigFieldAllowlist espelha a de blocklist), OBS-11 (download-weights.sh dropar `mc cp --quiet` → heartbeat mid-file, habilita FF-02) — LOCKED em 20-CONTEXT.md
+
+**Depends on:** Phase 17 (pod_config dashboard fields + failStreak policy quick 260702-nse — herda CountConsecutiveFailedPrimaryProvisions + allowlist_preferred), Phase 6.6.Y (fail-fast endpoint-reachability já existe — escopar contra), Phase 12 (death-detection Ready-loop — escopar contra)
+
+**Plans:** TBD
