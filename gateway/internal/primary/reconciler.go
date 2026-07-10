@@ -1532,6 +1532,20 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var firstRunningAt time.Time
 	portBindBudget := time.Duration(hot.PortBindBudgetS) * time.Second
 
+	// FF-01 (regime 1 — host morto): a pod stuck in actual_status=created /
+	// scheduling (the pre-loading handshake window, vast/types.go IsActive) with
+	// a mute onstart never advances to loading. firstCreatedAt anchors the
+	// created-budget at the FIRST created/scheduling observation; once elapsed
+	// exceeds createdBudget the pod is destroyed with created_state_timeout.
+	// CRITICAL (regime 1 vs 2, 20-CONTEXT.md:15-16): the anchor RESETS the moment
+	// actual_status advances to loading — a created→loading transition is a
+	// HEALTHY image pull (regime 2, "Pulling" 15min) that must RIDE to the
+	// coldstart_budget_s ceiling, never be killed by this budget. Anchoring on
+	// the first created poll then firing only on a SUBSEQUENT created poll makes
+	// the reset win: a single created observation followed by loading never fires.
+	var firstCreatedAt time.Time
+	createdBudget := time.Duration(hot.CreatedBudgetS) * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1606,12 +1620,43 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// running time (consistent with how terminalStrikes resets), so
 				// a flap back below running does not burn the 120s budget.
 				firstRunningAt = time.Time{}
+				// FF-01: created/scheduling is the regime-1 window. Anchor on the
+				// first such poll, fire on a subsequent one — a created→loading
+				// transition (regime 2) resets the anchor in the else branch below
+				// and rides to the coldstart ceiling.
+				if inst.ActualStatus == "created" || inst.ActualStatus == "scheduling" {
+					if firstCreatedAt.IsZero() {
+						firstCreatedAt = time.Now()
+						continue
+					}
+					elapsed := time.Since(firstCreatedAt)
+					log.Warn("primary provisioning: stuck in created/scheduling",
+						"lifecycle_id", lifecycleID,
+						"vast_instance_id", instanceID,
+						"actual_status", inst.ActualStatus,
+						"elapsed_since_created_s", int(elapsed.Seconds()),
+						"budget_s", hot.CreatedBudgetS)
+					// `>=` (not `>`) so a budget of 0 fires on the first post-anchor
+					// created poll — deterministic timeout test (mirrors port-bind).
+					if elapsed >= createdBudget {
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
+						return errors.New("primary: created-state budget exhausted (host morto)")
+					}
+					continue
+				}
+				// Any other non-running status (loading) — regime 2 image pull.
+				// Reset the created anchor so the created-budget never fires for
+				// this lifecycle; it rides the coldstart_budget_s ceiling.
+				firstCreatedAt = time.Time{}
 				continue
 			}
-			// First running observation: anchor the port-bind budget here.
+			// First running observation: anchor the port-bind budget here, and
+			// clear the created anchor (the created window is behind us).
 			if firstRunningAt.IsZero() {
 				firstRunningAt = time.Now()
 			}
+			firstCreatedAt = time.Time{}
 			urls := r.buildPodURLs(inst)
 			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Option B (plan 6.6.Y-03): previously a SILENT continue. The
