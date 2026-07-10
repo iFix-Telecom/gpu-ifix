@@ -1546,6 +1546,21 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var firstCreatedAt time.Time
 	createdBudget := time.Duration(hot.CreatedBudgetS) * time.Second
 
+	// FF-02 (regime 3 — download stall): the weights download runs INSIDE the
+	// onstart script, BEFORE docker compose / the health-bridge exist, so it is
+	// invisible to actual_status. The only signal is the onstart log (fetched via
+	// the Vast logs API on a slow sub-cadence — the API is async ~seconds). The
+	// stall is defined as dest-file BYTES provably frozen while telemetry is
+	// Available, scoped to the download phase (arm on `fetching`, disarm once all
+	// files log `ok`). Telemetry-unavailable (NotReady/FetchError/Empty) is
+	// UNKNOWN → ride to the coldstart ceiling, never a false kill (Codex #3).
+	var downloadArmed bool
+	var downloadDone bool
+	var maxBytes int64        // highest total dest bytes seen while armed
+	var lastProgressAt time.Time // anchor of the last byte ADVANCE
+	var lastLogFetchAt time.Time // sub-cadence gate
+	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1615,6 +1630,48 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// reset strikes on any non-terminal observation — Vast must report
 			// terminal `terminalConfirmStrikes` times IN A ROW for the close.
 			terminalStrikes = 0
+
+			// FF-02: download-phase byte-progress stall detector. Runs on the slow
+			// onstart-log sub-cadence (not every poll — the Vast logs API is async).
+			// ponytail: the 30s sub-cadence throttles the async fetch so it never
+			// stretches the 5s poll; telemetry-unavailable rides to the ceiling —
+			// the deferred SSH-tail leg (FF-03 b) is what would fast-fail regime 3
+			// during a Vast-logs outage.
+			if r.deps.Vast != nil && !downloadDone && time.Since(lastLogFetchAt) >= primaryOnstartLogIntervalForTest {
+				lastLogFetchAt = time.Now()
+				res, _ := r.deps.Vast.OnstartLog(ctx, instanceID)
+				if res.Status == vast.OnstartLogAvailable {
+					fetching, okCount, totalBytes := parseDownloadProgress(res.Text)
+					switch {
+					case fetching && !downloadArmed:
+						// Arm the download phase on the first `fetching` line.
+						downloadArmed = true
+						maxBytes = totalBytes
+						lastProgressAt = time.Now()
+					case downloadArmed && okCount >= expectedWeightFiles:
+						// All files logged `ok` — disarm; a healthy slow startup
+						// after the download must never trip the stall detector.
+						downloadDone = true
+					case downloadArmed && totalBytes > maxBytes:
+						// Bytes advanced — reset the stall anchor.
+						maxBytes = totalBytes
+						lastProgressAt = time.Now()
+					case downloadArmed && time.Since(lastProgressAt) >= progressStallBudget:
+						// Bytes provably frozen past budget while Available → stall.
+						log.Warn("primary provisioning: download bytes frozen (regime 3 stall)",
+							"lifecycle_id", lifecycleID,
+							"vast_instance_id", instanceID,
+							"max_bytes", maxBytes,
+							"stall_s", int(time.Since(lastProgressAt).Seconds()),
+							"budget_s", hot.ProgressStallBudgetS)
+						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
+						return errors.New("primary: download progress stalled (regime 3)")
+					}
+				}
+				// NotReady / FetchError / Empty → UNKNOWN: skip non-fatally.
+			}
+
 			if inst.ActualStatus != "running" {
 				// Reset the port-bind budget anchor: it tracks ONLY contiguous
 				// running time (consistent with how terminalStrikes resets), so
@@ -2076,7 +2133,41 @@ var _ atomic.Int64
 // of `ok` lines (disarms once all files complete), and the SUM of the newest
 // `bytes=<N>` per `key=` (3 parallel files → sum their latest partial sizes).
 func parseDownloadProgress(text string) (fetching bool, okCount int, totalBytes int64) {
-	return false, 0, 0
+	const marker = "[download-weights]"
+	latest := map[string]int64{}
+	for _, line := range strings.Split(text, "\n") {
+		i := strings.Index(line, marker)
+		if i < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[i+len(marker):])
+		switch {
+		case strings.HasPrefix(rest, "fetching "):
+			fetching = true
+		case strings.HasPrefix(rest, "ok "):
+			okCount++
+		case strings.HasPrefix(rest, "progress "):
+			var key string
+			var b int64
+			for _, tok := range strings.Fields(rest) {
+				switch {
+				case strings.HasPrefix(tok, "key="):
+					key = tok[len("key="):]
+				case strings.HasPrefix(tok, "bytes="):
+					if v, err := strconv.ParseInt(tok[len("bytes="):], 10, 64); err == nil {
+						b = v
+					}
+				}
+			}
+			if key != "" {
+				latest[key] = b // newest bytes= per key wins
+			}
+		}
+	}
+	for _, v := range latest {
+		totalBytes += v
+	}
+	return fetching, okCount, totalBytes
 }
 
 // machineAttributableReason reports whether a close reason indicts the HOST
