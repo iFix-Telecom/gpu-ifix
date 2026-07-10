@@ -84,6 +84,10 @@ EXECUTE FUNCTION ai_gateway.notify_pod_config_changed();
 -- +goose StatementBegin
 SET search_path = ai_gateway, public;
 
+-- Drop the trigger FIRST: its WHEN-clause references the 6 columns below, so
+-- dropping the columns while the trigger is live fails with 2BP01 (dependency).
+DROP TRIGGER IF EXISTS pod_config_update_notify ON ai_gateway.pod_config;
+
 ALTER TABLE ai_gateway.pod_config
     DROP COLUMN IF EXISTS created_budget_s,
     DROP COLUMN IF EXISTS created_budget_s_min,
@@ -91,8 +95,6 @@ ALTER TABLE ai_gateway.pod_config
     DROP COLUMN IF EXISTS progress_stall_budget_s,
     DROP COLUMN IF EXISTS progress_stall_budget_s_min,
     DROP COLUMN IF EXISTS progress_stall_budget_s_max;
-
-DROP TRIGGER IF EXISTS pod_config_update_notify ON ai_gateway.pod_config;
 
 CREATE TRIGGER pod_config_update_notify
 AFTER UPDATE ON ai_gateway.pod_config
