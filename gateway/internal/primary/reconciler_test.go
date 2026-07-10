@@ -3249,3 +3249,680 @@ func TestCalculatePrimaryCostBRL_StartedAtFallback(t *testing.T) {
 		})
 	}
 }
+
+// ===========================================================================
+// Phase 20-04 — FF-01 (created-budget) + FF-02 (progress-stall) + BL-01/AL-01
+// (classified outcome hook) tests. Drive the PRODUCTION waitForReadyOrDestroy
+// (via runWait) with a provision-cfg snapshot carrying the FF budgets, and
+// the recordProvisionOutcome hook + helpers directly.
+// ===========================================================================
+
+// runWait wraps waitForReadyOrDestroy so the plan's signature change (adding a
+// returned close-reason string in Task 4) touches ONE call site, not every FF
+// test. Returns the provision error only.
+func runWait(r *Reconciler, ctx context.Context, lifecycleID, instanceID int64, dph float64, log *slog.Logger) error {
+	return r.waitForReadyOrDestroy(ctx, lifecycleID, instanceID, dph, log)
+}
+
+// setProvisionCfgForTest stashes a provision-cfg snapshot so
+// currentProvisionCfg (→ provisionCfg.Load) returns the FF budgets under test.
+func setProvisionCfgForTest(r *Reconciler, c podconfig.PodConfig) {
+	r.provisionCfg.Store(&c)
+}
+
+// reasonRecorder captures the shutdown_reason of every ClosePrimaryLifecycle
+// UPDATE the reconciler executes.
+type reasonRecorder struct {
+	mu      sync.Mutex
+	reasons []string
+}
+
+func (rr *reasonRecorder) has(reason string) bool {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	for _, r := range rr.reasons {
+		if r == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func newCloseReasonDBTX(rr *reasonRecorder) *fakeDBTX {
+	return &fakeDBTX{
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "UPDATE ai_gateway.primary_lifecycles") && len(args) >= 2 {
+				if reason, ok := args[1].(pgtype.Text); ok && reason.Valid {
+					rr.mu.Lock()
+					rr.reasons = append(rr.reasons, reason.String)
+					rr.mu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+}
+
+// --- FF-02 onstart-log fixtures --------------------------------------------
+
+const dlPrefix = "[2026-07-10T00:00:00+00:00] [download-weights] "
+
+func dlFetching(key string) string  { return dlPrefix + "fetching " + key + " -> /weights/" + key }
+func dlProgress(key string, b int64) string {
+	return dlPrefix + "progress key=" + key + " bytes=" + strconv.FormatInt(b, 10)
+}
+func dlOK(key string) string { return dlPrefix + "ok /weights/" + key + " (sha256=abcdef012345...)" }
+
+func dlText(lines ...string) string { return strings.Join(lines, "\n") + "\n" }
+
+// --- FF-01 created-budget ---------------------------------------------------
+
+func TestCreatedBudget_StuckCreated_Destroys(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "created"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 0, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "a pod stuck in actual_status=created past created_budget_s must fail fast")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once on created-budget timeout")
+	require.True(t, rr.has("created_state_timeout"), "close reason must be created_state_timeout")
+}
+
+func TestCreatedBudget_CreatedThenRunning_NoFire(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	var calls atomic.Int32
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			if calls.Add(1) == 1 {
+				return vast.Instance{ID: 42, ActualStatus: "created"}, nil
+			}
+			return runningInstanceWithAllPorts(42), nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Loader: newFakeLoader(), DCGMScraper: &fakeDCGMScraper{},
+		Rule:        alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	// large created budget → created→running before it could ever fire.
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.NoError(t, err, "created→running before budget must promote to Ready")
+	require.Equal(t, StateReady, r.deps.FSM.State())
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load())
+	require.False(t, rr.has("created_state_timeout"))
+}
+
+func TestCreatedBudget_CreatedThenLoading_Rides(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	var calls atomic.Int32
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			if calls.Add(1) == 1 {
+				return vast.Instance{ID: 42, ActualStatus: "created"}, nil
+			}
+			// regime 2: image pulling — must ride to the coldstart ceiling.
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	// created budget 0 (would fire if armed on loading) but coldstart 30s so it
+	// rides during the observation window.
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 0, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(80 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"a created→loading image-pull (regime 2) must NOT be destroyed by the created-budget")
+	require.False(t, rr.has("created_state_timeout"),
+		"regime 2 must NOT close with created_state_timeout — the anchor resets on the loading transition")
+	cancel()
+	<-errCh
+}
+
+// --- FF-02 progress-stall ---------------------------------------------------
+
+func TestProgressStall_FrozenBytes_Destroys(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			return vast.OnstartLogResult{
+				Status: vast.OnstartLogAvailable,
+				Text:   dlText(dlFetching("qwen"), dlProgress("qwen", 1000)),
+			}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "frozen download bytes past progress_stall_budget_s must fail fast")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
+	require.True(t, rr.has("progress_stall_timeout"), "close reason must be progress_stall_timeout")
+}
+
+func TestProgressStall_RisingBytes_Rides(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	var b atomic.Int64
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			return vast.OnstartLogResult{
+				Status: vast.OnstartLogAvailable,
+				Text:   dlText(dlFetching("qwen"), dlProgress("qwen", b.Add(1000))),
+			}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(80 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(), "a healthy rising-bytes download must ride, never fire")
+	require.False(t, rr.has("progress_stall_timeout"))
+	cancel()
+	<-errCh
+}
+
+func TestProgressStall_TelemetryUnavailable_Rides(t *testing.T) {
+	statuses := []struct {
+		name string
+		st   vast.OnstartLogStatus
+	}{
+		{"fetch_error", vast.OnstartLogFetchError},
+		{"empty", vast.OnstartLogEmpty},
+		{"not_ready", vast.OnstartLogNotReady},
+	}
+	for _, s := range statuses {
+		s := s
+		t.Run(s.name, func(t *testing.T) {
+			withTestPollInterval(t, 2*time.Millisecond)
+			setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+			cfg := testCfg(t)
+			fsm := NewFSM(nil, nil)
+			_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+			fakeV := &fakeVast{
+				getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+					return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+				},
+				onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+					return vast.OnstartLogResult{Status: s.st}, nil
+				},
+			}
+			rr := &reasonRecorder{}
+			r := buildReconciler(t, Deps{
+				Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+				HealthCheck: func(_ context.Context, _ string) bool { return true },
+				Vast:        fakeV,
+			})
+			r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+			r.activeLifecycleID.Store(99)
+			setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+			time.Sleep(60 * time.Millisecond)
+			require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+				"telemetry-unavailable (%s) is UNKNOWN — must ride to the coldstart ceiling, never a false kill", s.name)
+			require.False(t, rr.has("progress_stall_timeout"))
+			cancel()
+			<-errCh
+		})
+	}
+}
+
+func TestProgressStall_PostDownloadStartup_Rides(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	// Full download COMPLETE (all 3 ok) then healthy-but-slow startup lines
+	// with no further progress bytes → the download-stall detector must DISARM.
+	fullText := dlText(
+		dlFetching("qwen"), dlProgress("qwen", 1000), dlOK("qwen"),
+		dlFetching("whisper"), dlProgress("whisper", 2000), dlOK("whisper"),
+		dlFetching("bge-m3"), dlProgress("bge-m3", 3000), dlOK("bge-m3"),
+		"[2026-07-10T00:01:00+00:00] docker compose up -d",
+		"[2026-07-10T00:02:00+00:00] waiting for /health/ready",
+	)
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: fullText}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(60 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"a healthy startup AFTER a complete download must not trip the download-stall detector (disarmed)")
+	require.False(t, rr.has("progress_stall_timeout"))
+	cancel()
+	<-errCh
+}
+
+func TestProgressStall_NotArmedWithoutFetching_Rides(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			// available but no `fetching` line yet → phase never arms.
+			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: dlText("[t] preflight ok")}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(60 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(), "no fetching line → download phase never armed → no fire")
+	require.False(t, rr.has("progress_stall_timeout"))
+	cancel()
+	<-errCh
+}
+
+func TestProgressStall_OnstartLogThrottled(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 20*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	var getCalls, logCalls atomic.Int32
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			getCalls.Add(1)
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			logCalls.Add(1)
+			return vast.OnstartLogResult{Status: vast.OnstartLogNotReady}, nil
+		},
+	}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(&fakeDBTX{}))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 600, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-errCh
+	require.Greater(t, getCalls.Load(), logCalls.Load(),
+		"the onstart log fetch runs on a slower sub-cadence than the poll tick")
+	require.LessOrEqual(t, logCalls.Load(), int32(8),
+		"~100ms at a 20ms sub-cadence should fetch the log well under 8 times")
+}
+
+func TestParseDownloadProgress(t *testing.T) {
+	text := dlText(
+		dlFetching("qwen"), dlProgress("qwen", 1000),
+		dlFetching("whisper"), dlProgress("whisper", 500), dlProgress("whisper", 2000),
+		dlOK("qwen"),
+	)
+	fetching, ok, total := parseDownloadProgress(text)
+	require.True(t, fetching)
+	require.Equal(t, 1, ok)
+	// latest bytes per key: qwen=1000, whisper=2000 → 3000
+	require.Equal(t, int64(3000), total)
+
+	// junk → zero
+	f2, o2, t2 := parseDownloadProgress("random log line\nno markers here\n")
+	require.False(t, f2)
+	require.Equal(t, 0, o2)
+	require.Equal(t, int64(0), t2)
+}
+
+// --- BL-01 / AL-01 outcome hook ---------------------------------------------
+
+// podConfigRow feeds GetPodConfig's 43-column Scan; only the two machine-list
+// columns (dest[1] blocklist, dest[2] allowlist) are populated.
+type podConfigRow struct {
+	block []int64
+	allow []int64
+}
+
+func (r podConfigRow) Scan(dest ...interface{}) error {
+	if len(dest) < 3 {
+		return fmt.Errorf("podConfigRow: expected >=3 dest pointers, got %d", len(dest))
+	}
+	if p, ok := dest[1].(*[]int64); ok {
+		*p = r.block
+	}
+	if p, ok := dest[2].(*[]int64); ok {
+		*p = r.allow
+	}
+	return nil
+}
+
+type listCapture struct {
+	mu              sync.Mutex
+	blocklistWrites [][]int64
+	allowlistWrites [][]int64
+}
+
+func (c *listCapture) lastBlocklist() ([]int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.blocklistWrites) == 0 {
+		return nil, false
+	}
+	return c.blocklistWrites[len(c.blocklistWrites)-1], true
+}
+
+func (c *listCapture) lastAllowlist() ([]int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.allowlistWrites) == 0 {
+		return nil, false
+	}
+	return c.allowlistWrites[len(c.allowlistWrites)-1], true
+}
+
+func newPodConfigDBTX(block, allow []int64, cap *listCapture) *fakeDBTX {
+	return &fakeDBTX{
+		queryRowFn: func(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+			if contains(sql, "FROM ai_gateway.pod_config") {
+				return podConfigRow{block: block, allow: allow}
+			}
+			return errRow{err: errors.New("newPodConfigDBTX: unexpected queryRow")}
+		},
+		execFn: func(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+			if contains(sql, "vast_machine_blocklist") && len(args) >= 1 {
+				if v, ok := args[0].([]int64); ok {
+					cap.mu.Lock()
+					cap.blocklistWrites = append(cap.blocklistWrites, v)
+					cap.mu.Unlock()
+				}
+			}
+			if contains(sql, "vast_machine_allowlist") && len(args) >= 1 {
+				if v, ok := args[0].([]int64); ok {
+					cap.mu.Lock()
+					cap.allowlistWrites = append(cap.allowlistWrites, v)
+					cap.mu.Unlock()
+				}
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+}
+
+func int64sContain(list []int64, id int64) bool {
+	for _, x := range list {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRecordProvisionOutcome_MachineAttributable_Blocklists(t *testing.T) {
+	reasons := []string{
+		"created_state_timeout",
+		"instance_terminal_state",
+		"instance_terminal_state_confirmed",
+		"public_port_bind_timeout",
+	}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			cap := &listCapture{}
+			r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+			r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, []int64{42}, cap)))
+			r.recordProvisionOutcome(context.Background(), 42, 1, reason, errors.New("boom"), testLogger())
+
+			blk, ok := cap.lastBlocklist()
+			require.True(t, ok, "machine-attributable failure at failStreak>=1 must write the blocklist")
+			require.True(t, int64sContain(blk, 42), "machine 42 must be blocklisted")
+			alw, ok := cap.lastAllowlist()
+			require.True(t, ok, "machine must be removed from the allowlist")
+			require.False(t, int64sContain(alw, 42), "machine 42 must be removed from the allowlist")
+		})
+	}
+}
+
+func TestRecordProvisionOutcome_FirstFailureGrace_NoBlocklist(t *testing.T) {
+	cap := &listCapture{}
+	r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+	r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, nil, cap)))
+	r.recordProvisionOutcome(context.Background(), 42, 0, "created_state_timeout", errors.New("boom"), testLogger())
+	require.Empty(t, cap.blocklistWrites, "failStreak==0 (1st failure) must NOT blocklist even a machine-attributable reason")
+}
+
+func TestRecordProvisionOutcome_ExcludedReasons_NeverBlocklist(t *testing.T) {
+	reasons := []string{
+		"progress_stall_timeout",
+		"cancelled_in_flight",
+		"health_timeout",
+		"create_error",
+		"build_create_request_failed:boom",
+		"audit_write_failed",
+		"vast_status_msg_error:image pull failed",
+	}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			cap := &listCapture{}
+			r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+			r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, nil, cap)))
+			r.recordProvisionOutcome(context.Background(), 42, 1, reason, errors.New("boom"), testLogger())
+			require.Empty(t, cap.blocklistWrites, "excluded reason %q must NEVER blocklist", reason)
+		})
+	}
+}
+
+func TestRecordProvisionOutcome_Success_Allowlists(t *testing.T) {
+	cap := &listCapture{}
+	r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+	// machine was previously blocklisted → success must self-heal it.
+	r.SetQueriesForTest(gen.New(newPodConfigDBTX([]int64{42}, nil, cap)))
+	r.recordProvisionOutcome(context.Background(), 42, 0, "ready", nil, testLogger())
+
+	alw, ok := cap.lastAllowlist()
+	require.True(t, ok, "success must write the allowlist")
+	require.True(t, int64sContain(alw, 42), "machine 42 must be allowlisted on success")
+	blk, ok := cap.lastBlocklist()
+	require.True(t, ok, "success must remove the machine from the blocklist")
+	require.False(t, int64sContain(blk, 42), "machine 42 must be removed from the blocklist on success")
+}
+
+func TestRecordProvisionOutcome_AllowlistCapFIFO(t *testing.T) {
+	seed := make([]int64, 20)
+	for i := range seed {
+		seed[i] = int64(i + 1) // 1..20
+	}
+	cap := &listCapture{}
+	r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+	r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, seed, cap)))
+	r.recordProvisionOutcome(context.Background(), 21, 0, "ready", nil, testLogger())
+
+	alw, ok := cap.lastAllowlist()
+	require.True(t, ok)
+	require.Len(t, alw, 20, "allowlist stays capped at 20")
+	require.False(t, int64sContain(alw, 1), "oldest (1) dropped")
+	require.True(t, int64sContain(alw, 21), "newest (21) appended")
+}
+
+func TestRecordProvisionOutcome_AllowlistDedup(t *testing.T) {
+	cap := &listCapture{}
+	r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+	r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, []int64{5, 6, 7}, cap)))
+	r.recordProvisionOutcome(context.Background(), 6, 0, "ready", nil, testLogger())
+	require.Empty(t, cap.allowlistWrites, "a duplicate machine must not be re-written to the allowlist")
+}
+
+func TestRecordProvisionOutcome_ListWriteError_Swallowed(t *testing.T) {
+	dbtx := &fakeDBTX{
+		queryRowFn: func(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+			if contains(sql, "FROM ai_gateway.pod_config") {
+				return podConfigRow{allow: []int64{42}}
+			}
+			return errRow{err: errors.New("unexpected")}
+		},
+		execFn: func(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, errors.New("db write failed")
+		},
+	}
+	r := buildReconciler(t, Deps{Cfg: testCfg(t)})
+	r.SetQueriesForTest(gen.New(dbtx))
+	require.NotPanics(t, func() {
+		r.recordProvisionOutcome(context.Background(), 42, 1, "created_state_timeout", errors.New("boom"), testLogger())
+	}, "a list-write DB error must be swallowed, never crash the reconciler")
+}
+
+func TestProvisionLifecycle_PrePickFailure_NoListWrite(t *testing.T) {
+	cap := &listCapture{}
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, _ vast.SearchFilter) ([]vast.Offer, error) {
+			return nil, errors.New("search boom")
+		},
+	}
+	r := buildReconciler(t, Deps{Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(), Vast: fakeV})
+	r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, nil, cap)))
+	r.activeLifecycleID.Store(99)
+	err := r.provisionLifecycle(context.Background(), 99, testLogger())
+	require.Error(t, err)
+	require.Empty(t, cap.blocklistWrites, "a pre-pick search failure must not blocklist")
+	require.Empty(t, cap.allowlistWrites, "a pre-pick search failure must not allowlist")
+}
+
+func TestMachineAttributableReason(t *testing.T) {
+	machine := []string{"created_state_timeout", "instance_terminal_state", "instance_terminal_state_confirmed", "public_port_bind_timeout"}
+	for _, m := range machine {
+		require.True(t, machineAttributableReason(m), "%q must be machine-attributable", m)
+	}
+	excluded := []string{"progress_stall_timeout", "cancelled_in_flight", "health_timeout", "create_error", "build_create_request_failed:x", "audit_write_failed", "vast_status_msg_error:y", "ready", ""}
+	for _, e := range excluded {
+		require.False(t, machineAttributableReason(e), "%q must NOT be machine-attributable", e)
+	}
+}
+
+func TestAppendDedupCap(t *testing.T) {
+	require.Equal(t, []int64{1, 2, 3}, appendDedupCap([]int64{1, 2}, 3, 20))
+	require.Equal(t, []int64{1, 2}, appendDedupCap([]int64{1, 2}, 2, 20), "dedup: existing id unchanged")
+	require.Equal(t, []int64{2, 3}, appendDedupCap([]int64{1, 2}, 3, 2), "cap: drops oldest")
+}
+
+func TestRemoveFromList(t *testing.T) {
+	require.Equal(t, []int64{1, 3}, removeFromList([]int64{1, 2, 3}, 2))
+	require.Equal(t, []int64{1, 2}, removeFromList([]int64{1, 2}, 9), "remove absent: noop")
+}
+
+// setOnstartLogIntervalForTest overrides the FF-02 sub-cadence for a test.
+func setOnstartLogIntervalForTest(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := primaryOnstartLogIntervalForTest
+	primaryOnstartLogIntervalForTest = d
+	t.Cleanup(func() { primaryOnstartLogIntervalForTest = orig })
+}

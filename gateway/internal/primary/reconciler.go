@@ -116,6 +116,23 @@ const (
 // in production code paths.
 var primaryInstancePollIntervalForTest = primaryInstancePollInterval
 
+// primaryOnstartLogIntervalForTest is the sub-cadence at which
+// waitForReadyOrDestroy fetches the Vast onstart log for the FF-02 download-
+// stall detector. The Vast logs API is async (~seconds); fetching it on every
+// ~5s poll tick would stretch the tick, so the fetch is throttled to ~30s.
+// Overridden only in unit tests. Never mutated in production code paths.
+var primaryOnstartLogIntervalForTest = 30 * time.Second
+
+const (
+	// allowlistCap bounds the auto-populated machine allowlist (FIFO, dedup):
+	// the newest 20 known-good hosts. Decision #5 (20-CONTEXT.md).
+	allowlistCap = 20
+	// expectedWeightFiles is the number of weights download-weights.sh fetches
+	// (qwen + whisper + bge-m3). FF-02 disarms the download-stall detector once
+	// all N files have logged `ok`.
+	expectedWeightFiles = 3
+)
+
 // Start begins the reconciler. Spawns three goroutines:
 //
 //   - recovery: ONE-SHOT call to recoverOpenLifecycle BEFORE the loops
@@ -2001,3 +2018,35 @@ func (r *Reconciler) SetLastProvisionFailureAtForTest(t time.Time) {
 // reconciler reads HostPort as a string directly.
 var _ = strconv.Atoi
 var _ atomic.Int64
+
+// ===========================================================================
+// Phase 20-04 — FF-02 parser + BL-01/AL-01 classifier + outcome hook.
+// RED scaffolding: these are stubbed in Task 1 (tests fail on behavior) and
+// implemented in Tasks 3 (parseDownloadProgress) and 4 (classifier/hook/list
+// helpers).
+// ===========================================================================
+
+// parseDownloadProgress scans onstart-log text for `[download-weights]` lines:
+// whether any `fetching` line is present (arms the download phase), the count
+// of `ok` lines (disarms once all files complete), and the SUM of the newest
+// `bytes=<N>` per `key=` (3 parallel files → sum their latest partial sizes).
+func parseDownloadProgress(text string) (fetching bool, okCount int, totalBytes int64) {
+	return false, 0, 0
+}
+
+// machineAttributableReason reports whether a close reason indicts the HOST
+// (safe to auto-blocklist) vs. a global / our-side / ambiguous cause.
+func machineAttributableReason(reason string) bool { return false }
+
+// appendDedupCap appends id to list unless already present; when capacity > 0
+// and the result exceeds it, the oldest entries are dropped (FIFO).
+func appendDedupCap(list []int64, id int64, capacity int) []int64 { return list }
+
+// removeFromList returns list with every occurrence of id removed.
+func removeFromList(list []int64, id int64) []int64 { return list }
+
+// recordProvisionOutcome maintains the vast_machine_{block,allow}list from a
+// finished provision: success → allowlist (+ un-blocklist); a machine-
+// attributable failure at failStreak>=1 → blocklist (+ un-allowlist).
+func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, failStreak int64, reason string, provErr error, log *slog.Logger) {
+}
