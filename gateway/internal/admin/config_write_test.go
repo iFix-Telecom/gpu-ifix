@@ -47,6 +47,12 @@ func (f *fakeWriteQueries) UpdatePodConfigFieldColdstartBudgetS(_ context.Contex
 func (f *fakeWriteQueries) UpdatePodConfigFieldPortBindBudgetS(_ context.Context, _ int32) error {
 	return f.hit("UpdatePodConfigFieldPortBindBudgetS")
 }
+func (f *fakeWriteQueries) UpdatePodConfigFieldCreatedBudgetS(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigFieldCreatedBudgetS")
+}
+func (f *fakeWriteQueries) UpdatePodConfigFieldProgressStallBudgetS(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigFieldProgressStallBudgetS")
+}
 func (f *fakeWriteQueries) UpdatePodConfigFieldFailureCooldownS(_ context.Context, _ int32) error {
 	return f.hit("UpdatePodConfigFieldFailureCooldownS")
 }
@@ -94,6 +100,18 @@ func (f *fakeWriteQueries) UpdatePodConfigBoundPortBindBudgetSMin(_ context.Cont
 }
 func (f *fakeWriteQueries) UpdatePodConfigBoundPortBindBudgetSMax(_ context.Context, _ int32) error {
 	return f.hit("UpdatePodConfigBoundPortBindBudgetSMax")
+}
+func (f *fakeWriteQueries) UpdatePodConfigBoundCreatedBudgetSMin(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigBoundCreatedBudgetSMin")
+}
+func (f *fakeWriteQueries) UpdatePodConfigBoundCreatedBudgetSMax(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigBoundCreatedBudgetSMax")
+}
+func (f *fakeWriteQueries) UpdatePodConfigBoundProgressStallBudgetSMin(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigBoundProgressStallBudgetSMin")
+}
+func (f *fakeWriteQueries) UpdatePodConfigBoundProgressStallBudgetSMax(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigBoundProgressStallBudgetSMax")
 }
 func (f *fakeWriteQueries) UpdatePodConfigBoundFailureCooldownSMin(_ context.Context, _ int32) error {
 	return f.hit("UpdatePodConfigBoundFailureCooldownSMin")

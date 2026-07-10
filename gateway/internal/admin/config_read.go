@@ -49,6 +49,8 @@ type ConfigSection struct {
 	RejectPrivateIP      bool     `json:"reject_private_ip"`
 	ColdstartBudgetS     int      `json:"coldstart_budget_s"`
 	PortBindBudgetS      int      `json:"port_bind_budget_s"`
+	CreatedBudgetS       int      `json:"created_budget_s"`
+	ProgressStallBudgetS int      `json:"progress_stall_budget_s"`
 	FailureCooldownS     int      `json:"failure_cooldown_s"`
 	MonthlyBudgetBRL     float64  `json:"monthly_budget_brl"`
 	ScheduleUpHour       int      `json:"schedule_up_hour"`
@@ -62,26 +64,30 @@ type ConfigSection struct {
 // BoundsSection is the owner-editable min/max gate pairs for the numeric hot
 // fields (D-03). All bound columns are NOT NULL (Plan 17-01).
 type BoundsSection struct {
-	CapPrimaryMin       float64 `json:"cap_primary_min"`
-	CapPrimaryMax       float64 `json:"cap_primary_max"`
-	CapFallbackMin      float64 `json:"cap_fallback_min"`
-	CapFallbackMax      float64 `json:"cap_fallback_max"`
-	ColdstartBudgetSMin int     `json:"coldstart_budget_s_min"`
-	ColdstartBudgetSMax int     `json:"coldstart_budget_s_max"`
-	PortBindBudgetSMin  int     `json:"port_bind_budget_s_min"`
-	PortBindBudgetSMax  int     `json:"port_bind_budget_s_max"`
-	FailureCooldownSMin int     `json:"failure_cooldown_s_min"`
-	FailureCooldownSMax int     `json:"failure_cooldown_s_max"`
-	MonthlyBudgetBRLMin float64 `json:"monthly_budget_brl_min"`
-	MonthlyBudgetBRLMax float64 `json:"monthly_budget_brl_max"`
-	ScheduleUpHourMin   int     `json:"schedule_up_hour_min"`
-	ScheduleUpHourMax   int     `json:"schedule_up_hour_max"`
-	ScheduleDownHourMin int     `json:"schedule_down_hour_min"`
-	ScheduleDownHourMax int     `json:"schedule_down_hour_max"`
-	GraceRampDownSMin   int     `json:"grace_ramp_down_s_min"`
-	GraceRampDownSMax   int     `json:"grace_ramp_down_s_max"`
-	ProvisionLeadSMin   int     `json:"provision_lead_s_min"`
-	ProvisionLeadSMax   int     `json:"provision_lead_s_max"`
+	CapPrimaryMin           float64 `json:"cap_primary_min"`
+	CapPrimaryMax           float64 `json:"cap_primary_max"`
+	CapFallbackMin          float64 `json:"cap_fallback_min"`
+	CapFallbackMax          float64 `json:"cap_fallback_max"`
+	ColdstartBudgetSMin     int     `json:"coldstart_budget_s_min"`
+	ColdstartBudgetSMax     int     `json:"coldstart_budget_s_max"`
+	PortBindBudgetSMin      int     `json:"port_bind_budget_s_min"`
+	PortBindBudgetSMax      int     `json:"port_bind_budget_s_max"`
+	CreatedBudgetSMin       int     `json:"created_budget_s_min"`
+	CreatedBudgetSMax       int     `json:"created_budget_s_max"`
+	ProgressStallBudgetSMin int     `json:"progress_stall_budget_s_min"`
+	ProgressStallBudgetSMax int     `json:"progress_stall_budget_s_max"`
+	FailureCooldownSMin     int     `json:"failure_cooldown_s_min"`
+	FailureCooldownSMax     int     `json:"failure_cooldown_s_max"`
+	MonthlyBudgetBRLMin     float64 `json:"monthly_budget_brl_min"`
+	MonthlyBudgetBRLMax     float64 `json:"monthly_budget_brl_max"`
+	ScheduleUpHourMin       int     `json:"schedule_up_hour_min"`
+	ScheduleUpHourMax       int     `json:"schedule_up_hour_max"`
+	ScheduleDownHourMin     int     `json:"schedule_down_hour_min"`
+	ScheduleDownHourMax     int     `json:"schedule_down_hour_max"`
+	GraceRampDownSMin       int     `json:"grace_ramp_down_s_min"`
+	GraceRampDownSMax       int     `json:"grace_ramp_down_s_max"`
+	ProvisionLeadSMin       int     `json:"provision_lead_s_min"`
+	ProvisionLeadSMax       int     `json:"provision_lead_s_max"`
 }
 
 // podConfigReadQueries isolates the sqlc surface used by the handler.
@@ -143,6 +149,8 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			RejectPrivateIP:      row.RejectPrivateIp,
 			ColdstartBudgetS:     int(row.ColdstartBudgetS),
 			PortBindBudgetS:      int(row.PortBindBudgetS),
+			CreatedBudgetS:       int(row.CreatedBudgetS),
+			ProgressStallBudgetS: int(row.ProgressStallBudgetS),
 			FailureCooldownS:     int(row.FailureCooldownS),
 			MonthlyBudgetBRL:     numericFloat(row.MonthlyBudgetBrl),
 			ScheduleUpHour:       int(row.ScheduleUpHour),
@@ -153,26 +161,30 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			ScheduleDisabled:     row.ScheduleDisabled,
 		},
 		Bounds: BoundsSection{
-			CapPrimaryMin:       numericFloat(row.CapPrimaryMin),
-			CapPrimaryMax:       numericFloat(row.CapPrimaryMax),
-			CapFallbackMin:      numericFloat(row.CapFallbackMin),
-			CapFallbackMax:      numericFloat(row.CapFallbackMax),
-			ColdstartBudgetSMin: int(row.ColdstartBudgetSMin),
-			ColdstartBudgetSMax: int(row.ColdstartBudgetSMax),
-			PortBindBudgetSMin:  int(row.PortBindBudgetSMin),
-			PortBindBudgetSMax:  int(row.PortBindBudgetSMax),
-			FailureCooldownSMin: int(row.FailureCooldownSMin),
-			FailureCooldownSMax: int(row.FailureCooldownSMax),
-			MonthlyBudgetBRLMin: numericFloat(row.MonthlyBudgetBrlMin),
-			MonthlyBudgetBRLMax: numericFloat(row.MonthlyBudgetBrlMax),
-			ScheduleUpHourMin:   int(row.ScheduleUpHourMin),
-			ScheduleUpHourMax:   int(row.ScheduleUpHourMax),
-			ScheduleDownHourMin: int(row.ScheduleDownHourMin),
-			ScheduleDownHourMax: int(row.ScheduleDownHourMax),
-			GraceRampDownSMin:   int(row.GraceRampDownSMin),
-			GraceRampDownSMax:   int(row.GraceRampDownSMax),
-			ProvisionLeadSMin:   int(row.ProvisionLeadSMin),
-			ProvisionLeadSMax:   int(row.ProvisionLeadSMax),
+			CapPrimaryMin:           numericFloat(row.CapPrimaryMin),
+			CapPrimaryMax:           numericFloat(row.CapPrimaryMax),
+			CapFallbackMin:          numericFloat(row.CapFallbackMin),
+			CapFallbackMax:          numericFloat(row.CapFallbackMax),
+			ColdstartBudgetSMin:     int(row.ColdstartBudgetSMin),
+			ColdstartBudgetSMax:     int(row.ColdstartBudgetSMax),
+			PortBindBudgetSMin:      int(row.PortBindBudgetSMin),
+			PortBindBudgetSMax:      int(row.PortBindBudgetSMax),
+			CreatedBudgetSMin:       int(row.CreatedBudgetSMin),
+			CreatedBudgetSMax:       int(row.CreatedBudgetSMax),
+			ProgressStallBudgetSMin: int(row.ProgressStallBudgetSMin),
+			ProgressStallBudgetSMax: int(row.ProgressStallBudgetSMax),
+			FailureCooldownSMin:     int(row.FailureCooldownSMin),
+			FailureCooldownSMax:     int(row.FailureCooldownSMax),
+			MonthlyBudgetBRLMin:     numericFloat(row.MonthlyBudgetBrlMin),
+			MonthlyBudgetBRLMax:     numericFloat(row.MonthlyBudgetBrlMax),
+			ScheduleUpHourMin:       int(row.ScheduleUpHourMin),
+			ScheduleUpHourMax:       int(row.ScheduleUpHourMax),
+			ScheduleDownHourMin:     int(row.ScheduleDownHourMin),
+			ScheduleDownHourMax:     int(row.ScheduleDownHourMax),
+			GraceRampDownSMin:       int(row.GraceRampDownSMin),
+			GraceRampDownSMax:       int(row.GraceRampDownSMax),
+			ProvisionLeadSMin:       int(row.ProvisionLeadSMin),
+			ProvisionLeadSMax:       int(row.ProvisionLeadSMax),
 		},
 	}
 
