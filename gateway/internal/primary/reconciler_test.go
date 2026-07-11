@@ -3552,12 +3552,14 @@ func TestProgressStall_PostDownloadStartup_Rides(t *testing.T) {
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
-	// Full download COMPLETE (all 3 ok) then healthy-but-slow startup lines
-	// with no further progress bytes → the download-stall detector must DISARM.
+	// Full download COMPLETE (all 4 mandatory ok — qwen+whisper+bge-m3+chatterbox,
+	// expectedWeightFiles=4) then healthy-but-slow startup lines with no further
+	// progress bytes → the download-stall detector must DISARM.
 	fullText := dlText(
 		dlFetching("qwen"), dlProgress("qwen", 1000), dlOK("qwen"),
 		dlFetching("whisper"), dlProgress("whisper", 2000), dlOK("whisper"),
 		dlFetching("bge-m3"), dlProgress("bge-m3", 3000), dlOK("bge-m3"),
+		dlFetching("chatterbox"), dlProgress("chatterbox", 4000), dlOK("chatterbox"),
 		"[2026-07-10T00:01:00+00:00] docker compose up -d",
 		"[2026-07-10T00:02:00+00:00] waiting for /health/ready",
 	)
@@ -3680,6 +3682,202 @@ func TestParseDownloadProgress(t *testing.T) {
 	require.False(t, f2)
 	require.Equal(t, 0, o2)
 	require.Equal(t, int64(0), t2)
+}
+
+// --- 20-07 gap-closure: port-bind anchored on download completion -----------
+
+// TestPortBind_DownloadInFlight_RidesThenFiresAfterDone is the core 20-07
+// regression: a fresh coldstart reports actual_status=running while the ~20GB
+// weights download runs INSIDE onstart (before llama-server binds its public
+// port). With port_bind_budget_s=0 the OLD code false-killed on the first
+// running poll (lifecycle 137). The fix skips the port-bind timeout while the
+// download is armed-but-not-done, then measures the tight budget from
+// download-completion. Proof of riding: destroy fires only AFTER the onstart
+// log flips to all-4-ok (disarm), not on the first running poll.
+func TestPortBind_DownloadInFlight_RidesThenFiresAfterDone(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	const disarmAt = int32(5)
+	var logCalls atomic.Int32
+	var destroyedAtCall atomic.Int32
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			// running, published ports empty → the unbound port-bind branch.
+			return runningInstanceNoPorts(42), nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			n := logCalls.Add(1)
+			// armed-but-not-done: fetching + 3 non-qwen ok (okCount=3 < 4) while
+			// qwen is still downloading. bytes constant (ProgressStallBudgetS high
+			// so FF-02 never fires during the ride).
+			lines := []string{
+				dlFetching("qwen"), dlProgress("qwen", 1000),
+				dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+			}
+			if n >= disarmAt {
+				lines = append(lines, dlOK("qwen")) // 4th mandatory ok → disarm
+			}
+			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: dlText(lines...)}, nil
+		},
+		destroyFn: func(_ context.Context, _ int64) error {
+			destroyedAtCall.Store(logCalls.Load())
+			return nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	// port_bind_budget_s=0 → fires on the FIRST qualifying poll once enforced;
+	// progress_stall high so the frozen-bytes ride never trips FF-02.
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 600, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 0})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "after the download completes, running-but-unbound past the tight budget must fail fast")
+	require.Contains(t, err.Error(), "public port bind timeout")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
+	require.True(t, rr.has("public_port_bind_timeout"))
+	require.GreaterOrEqual(t, destroyedAtCall.Load(), disarmAt,
+		"the port-bind kill must fire ONLY after the download disarmed (rode through the armed phase, no false kill during download)")
+}
+
+// TestPortBind_TelemetryUnavailable_FiresFromFirstRunning asserts the legacy
+// fallback: when the onstart log never yields a download signal (FetchError →
+// downloadArmed stays false), the port-bind budget still anchors on
+// firstRunningAt and fast-fails as before — no behavior regression for the
+// no-telemetry case.
+func TestPortBind_TelemetryUnavailable_FiresFromFirstRunning(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return runningInstanceNoPorts(42), nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			// telemetry unavailable — download never arms.
+			return vast.OnstartLogResult{Status: vast.OnstartLogFetchError}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 600, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 0})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "telemetry-unavailable + running-unbound past budget must fast-fail from firstRunningAt (legacy)")
+	require.Contains(t, err.Error(), "public port bind timeout")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
+	require.True(t, rr.has("public_port_bind_timeout"))
+}
+
+// TestFF02_ThreeOfFourOk_StaysArmed proves expectedWeightFiles=4: with only the
+// 3 non-qwen mandatory files logged `ok` (qwen still downloading) and bytes
+// frozen past progress_stall_budget_s=0, the stall detector must STILL be armed
+// and fire progress_stall_timeout. At the old value 3 it would have disarmed
+// prematurely and skipped the stall check.
+func TestFF02_ThreeOfFourOk_StaysArmed(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	// 3 non-qwen ok + qwen fetching/progress frozen → okCount=3 < 4 (armed).
+	text := dlText(
+		dlFetching("qwen"), dlProgress("qwen", 1000),
+		dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+	)
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: text}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "3-of-4 ok with qwen frozen must stay ARMED and trip the stall detector")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
+	require.True(t, rr.has("progress_stall_timeout"),
+		"expectedWeightFiles=4: the 3 non-qwen files must NOT disarm while qwen downloads")
+}
+
+// TestFF02_FourthOk_Disarms asserts the disarm boundary: once ALL 4 mandatory
+// files log `ok`, the detector disarms — a subsequent healthy-but-slow startup
+// with frozen bytes must NOT trip the stall detector (rides).
+func TestFF02_FourthOk_Disarms(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	// all 4 mandatory ok (okCount=4 >= 4) with bytes frozen → disarmed.
+	text := dlText(
+		dlFetching("qwen"), dlProgress("qwen", 1000),
+		dlOK("qwen"), dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+	)
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
+			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: text}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{ProgressStallBudgetS: 0, CreatedBudgetS: 600, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(60 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"all 4 mandatory ok → disarmed; a slow startup with frozen bytes must ride, never trip the stall")
+	require.False(t, rr.has("progress_stall_timeout"))
+	cancel()
+	<-errCh
 }
 
 // --- BL-01 / AL-01 outcome hook ---------------------------------------------
