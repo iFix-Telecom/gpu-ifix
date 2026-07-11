@@ -127,10 +127,14 @@ const (
 	// allowlistCap bounds the auto-populated machine allowlist (FIFO, dedup):
 	// the newest 20 known-good hosts. Decision #5 (20-CONTEXT.md).
 	allowlistCap = 20
-	// expectedWeightFiles is the number of weights download-weights.sh fetches
-	// (qwen + whisper + bge-m3). FF-02 disarms the download-stall detector once
-	// all N files have logged `ok`.
-	expectedWeightFiles = 3
+	// expectedWeightFiles is the number of MANDATORY weights the PRIMARY onstart
+	// fetches (qwen + whisper + bge-m3 + chatterbox — onstart.go buildPrimaryOnstart
+	// runs 4 download_with_verify calls, each logging one `[download-weights] ok`).
+	// FF-02 disarms the download-stall detector only once all 4 have logged `ok`;
+	// at 3 the qwen download (the slow ~18GB one) could still be in flight while the
+	// 3 smaller files disarmed early. The optional 5th (jinja, only when
+	// PRIMARY_QWEN_JINJA_KEY is set) pushes okCount to 5 >= 4 — still disarms.
+	expectedWeightFiles = 4
 )
 
 // Start begins the reconciler. Spawns three goroutines:
@@ -1565,6 +1569,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// UNKNOWN → ride to the coldstart ceiling, never a false kill (Codex #3).
 	var downloadArmed bool
 	var downloadDone bool
+	var downloadDoneAt time.Time // when downloadDone flipped true — port-bind anchor
 	var maxBytes int64           // highest total dest bytes seen while armed
 	var lastProgressAt time.Time // anchor of the last byte ADVANCE
 	var lastLogFetchAt time.Time // sub-cadence gate
@@ -1660,7 +1665,11 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					case downloadArmed && okCount >= expectedWeightFiles:
 						// All files logged `ok` — disarm; a healthy slow startup
 						// after the download must never trip the stall detector.
+						// downloadDoneAt anchors the port-bind budget (Task 20-07):
+						// the tight budget counts the post-download service-bind
+						// window, not the ~20GB download that precedes the bind.
 						downloadDone = true
+						downloadDoneAt = time.Now()
 					case downloadArmed && totalBytes > maxBytes:
 						// Bytes advanced — reset the stall anchor.
 						maxBytes = totalBytes
@@ -1723,6 +1732,30 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				firstRunningAt = time.Now()
 			}
 			firstCreatedAt = time.Time{}
+			// ponytail: three-way port-bind anchor (Task 20-07, live evidence
+			// lifecycle 137). A fresh coldstart downloads ~20GB of weights INSIDE
+			// onstart — AFTER actual_status=running but BEFORE llama-server binds
+			// its public port — so anchoring the tight port_bind_budget_s (seed
+			// 120s) on firstRunningAt false-kills a healthy download (the download
+			// alone exceeds 120s). Trade-off by regime:
+			//   - download armed & not done: SKIP the timeout (enforce=false) — the
+			//     download provably owns this window; FF-02 (byte-stall) + the
+			//     absolute coldstart_budget_s backstop guard it. Warn still logs.
+			//   - downloadDone: measure from downloadDoneAt so the tight budget
+			//     counts only the post-download service-bind window (as intended).
+			//   - never armed (telemetry unavailable — OnstartLog FetchError/Empty/
+			//     NotReady): fall back to the legacy firstRunningAt anchor so a
+			//     genuinely no-signal pod still fast-fails on port bind.
+			portBindElapsed := func() (elapsed time.Duration, enforce bool) {
+				switch {
+				case downloadArmed && !downloadDone:
+					return time.Since(firstRunningAt), false
+				case downloadDone:
+					return time.Since(downloadDoneAt), true
+				default:
+					return time.Since(firstRunningAt), true
+				}
+			}
 			urls := r.buildPodURLs(inst)
 			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 				// Option B (plan 6.6.Y-03): previously a SILENT continue. The
@@ -1730,7 +1763,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// (40+ min observed) wait with zero operator-visible logs. Emit
 				// a per-poll Warn carrying the forensic fields, THEN fail fast
 				// once contiguous running time exceeds the bind budget.
-				elapsed := time.Since(firstRunningAt)
+				elapsed, enforce := portBindElapsed()
 				log.Warn("primary provisioning: running but public ports not bound",
 					"lifecycle_id", lifecycleID,
 					"vast_instance_id", instanceID,
@@ -1738,10 +1771,12 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"ssh_host", inst.SshHost,
 					"public_ipaddr", inst.PublicIPAddr,
 					"elapsed_since_running_s", int(elapsed.Seconds()),
+					"download_in_flight", downloadArmed && !downloadDone,
 					"budget_s", hot.PortBindBudgetS)
 				// `>=` (not `>`) so a budget of 0 fires on the first running
 				// poll — required for the deterministic timeout test (finding #7).
-				if elapsed >= portBindBudget {
+				// enforce=false while the download is in flight — no false kill.
+				if enforce && elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
 					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
@@ -1760,7 +1795,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// Skipped entirely when no Reachable probe is wired (nil) so unit
 			// tests / minimal Deps never false-positive destroy.
 			if r.deps.Reachable != nil && !r.deps.Reachable(ctx, urls.LLM) {
-				elapsed := time.Since(firstRunningAt)
+				elapsed, enforce := portBindElapsed()
 				log.Warn("primary provisioning: running, ports published, host TCP-unreachable",
 					"lifecycle_id", lifecycleID,
 					"vast_instance_id", instanceID,
@@ -1769,10 +1804,12 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"public_ipaddr", inst.PublicIPAddr,
 					"llm_url", urls.LLM,
 					"elapsed_since_running_s", int(elapsed.Seconds()),
+					"download_in_flight", downloadArmed && !downloadDone,
 					"budget_s", hot.PortBindBudgetS)
 				// `>=` (not `>`) so a budget of 0 fires on the first running
 				// poll — required for the deterministic timeout test.
-				if elapsed >= portBindBudget {
+				// enforce=false while the download is in flight — no false kill.
+				if enforce && elapsed >= portBindBudget {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
 					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
