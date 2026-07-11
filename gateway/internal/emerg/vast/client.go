@@ -82,7 +82,20 @@ const (
 	// log body cannot flood the heap. The reconciler only scans the tail for
 	// a heartbeat/byte-progress line, so 256 KiB is ample.
 	maxLogBytes = 256 * 1024
+
+	// onstartFetchAttempts bounds the result_url GET retry. The Vast logs API
+	// returns result_url immediately but materialises the S3 object
+	// asynchronously (~2s measured, "in a few seconds" per the API msg); a GET
+	// before materialisation returns 403/404. Without the retry a single
+	// immediate GET saw a perpetual FetchError and FF-02 never armed (20-06 UAT
+	// root cause). 4 attempts × onstartFetchBackoff stays well under the 30s
+	// onstart-log sub-cadence.
+	onstartFetchAttempts = 4
 )
+
+// onstartFetchBackoff is the delay between result_url GET retries. Package var
+// (not const) so tests can shrink it; never mutated in production code paths.
+var onstartFetchBackoff = 1 * time.Second
 
 // Client is the thin Vast.ai REST client. Construct via NewClient (uses
 // DefaultBaseURL) or NewClientWithBaseURL (for tests). All methods are
@@ -355,7 +368,26 @@ func (c *Client) OnstartLog(ctx context.Context, instanceID int64) (OnstartLogRe
 	if resultURL == "" {
 		return OnstartLogResult{Status: OnstartLogNotReady}, nil
 	}
-	text, err := c.FetchLogs(ctx, resultURL)
+	// The result_url is served by an S3 object Vast materialises ~2s AFTER the
+	// PUT (measured; "in a few seconds" per the API msg). A GET before then
+	// returns 403/404. Retry on a short backoff so FF-02 actually receives the
+	// download heartbeat instead of a perpetual FetchError (20-06 UAT root
+	// cause). A non-https result_url (SSRF guard) fails permanently inside
+	// FetchLogs and simply exhausts the attempts → FetchError, still no GET.
+	var text string
+	for attempt := 0; attempt < onstartFetchAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return OnstartLogResult{Status: OnstartLogFetchError}, nil
+			case <-time.After(onstartFetchBackoff):
+			}
+		}
+		text, err = c.FetchLogs(ctx, resultURL)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return OnstartLogResult{Status: OnstartLogFetchError}, nil
 	}

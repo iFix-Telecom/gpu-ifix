@@ -48,6 +48,46 @@ func newTestTLSServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 // TestOnstartLog_Available — PUT returns result_url, the presigned GET
 // returns non-empty text → Status=Available, Text set. Also asserts the
 // auth header IS on the PUT and ABSENT on the result_url GET (item 6).
+// shrinkOnstartBackoff drops the result_url GET retry backoff to ~0 so tests
+// that exhaust the retry loop (permanent GET errors) stay fast. Restored on
+// cleanup.
+func shrinkOnstartBackoff(t *testing.T) {
+	t.Helper()
+	orig := onstartFetchBackoff
+	onstartFetchBackoff = time.Millisecond
+	t.Cleanup(func() { onstartFetchBackoff = orig })
+}
+
+// TestOnstartLog_MaterializesAfterRetry reproduces the 20-06 UAT root cause:
+// the Vast logs API serves the result_url object asynchronously, so the first
+// GET returns 403 and only a later GET (post-materialisation) returns 200. The
+// retry loop must ride the early 403(s) and surface Available, not FetchError.
+func TestOnstartLog_MaterializesAfterRetry(t *testing.T) {
+	shrinkOnstartBackoff(t)
+	var srv *httptest.Server
+	var gets int
+	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write([]byte(`{"result_url":"` + srv.URL + `/logs/blob"}`))
+			return
+		}
+		gets++
+		if gets < 3 { // first two GETs: object not materialised yet
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte("[download-weights] progress key=qwen bytes=456\n"))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogAvailable, res.Status, "retry must ride the early 403s until the object materialises")
+	require.Contains(t, res.Text, "bytes=456")
+	require.GreaterOrEqual(t, gets, 3, "should have retried past the 403s")
+}
+
 func TestOnstartLog_Available(t *testing.T) {
 	const apiKey = "k"
 	var putAuth, getAuth string
@@ -108,6 +148,7 @@ func TestOnstartLog_NotReady(t *testing.T) {
 // TestOnstartLog_FetchError_GET5xx — PUT ok, but the result_url GET returns
 // 5xx → Status=FetchError (folded, non-fatal to the caller).
 func TestOnstartLog_FetchError_GET5xx(t *testing.T) {
+	shrinkOnstartBackoff(t)
 	var srv *httptest.Server
 	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
@@ -162,6 +203,7 @@ func TestOnstartLog_Empty(t *testing.T) {
 // result_url with a non-https scheme is rejected BEFORE the GET → FetchError,
 // and the GET handler is never reached.
 func TestOnstartLog_NonHTTPSResultURL_FetchError(t *testing.T) {
+	shrinkOnstartBackoff(t)
 	getCalled := false
 	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
