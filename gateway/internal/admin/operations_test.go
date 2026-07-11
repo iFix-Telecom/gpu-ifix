@@ -152,8 +152,8 @@ func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
 	}
 	y, mo, d := now.In(brt).Date()
 	todayBRT := time.Date(y, mo, d, 0, 0, 0, 0, brt) // 00:00 BRT today
-	closedStart := todayBRT                           // started today
-	openStart := todayBRT                             // started today, still running
+	closedStart := todayBRT                          // started today
+	openStart := todayBRT                            // started today, still running
 
 	fake := &fakeOperationsQueries{
 		rows: []gen.ListPrimaryLifecyclesRow{
