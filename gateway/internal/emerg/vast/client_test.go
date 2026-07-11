@@ -45,9 +45,6 @@ func newTestTLSServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	return s
 }
 
-// TestOnstartLog_Available — PUT returns result_url, the presigned GET
-// returns non-empty text → Status=Available, Text set. Also asserts the
-// auth header IS on the PUT and ABSENT on the result_url GET (item 6).
 // shrinkOnstartBackoff drops the result_url GET retry backoff to ~0 so tests
 // that exhaust the retry loop (permanent GET errors) stay fast. Restored on
 // cleanup.
@@ -58,12 +55,59 @@ func shrinkOnstartBackoff(t *testing.T) {
 	t.Cleanup(func() { onstartFetchBackoff = orig })
 }
 
+// allowLoopbackLogHost lets the httptest server's loopback host (127.0.0.1)
+// pass the result_url host-allowlist (finding #8) for tests that exercise the
+// real GET. Restored on cleanup.
+func allowLoopbackLogHost(t *testing.T) {
+	t.Helper()
+	orig := allowedLogHostSuffixes
+	allowedLogHostSuffixes = append(append([]string{}, orig...), "127.0.0.1")
+	t.Cleanup(func() { allowedLogHostSuffixes = orig })
+}
+
+// TestOnstartLog_HostNotAllowlisted_FetchError — finding #8: a result_url whose
+// host is not a known Vast log-storage host is rejected BEFORE the GET (no
+// network call), mapping to FetchError. Uses the default allowlist (no loopback
+// override) so the httptest 127.0.0.1 host is denied.
+func TestOnstartLog_HostNotAllowlisted_FetchError(t *testing.T) {
+	shrinkOnstartBackoff(t)
+	getCalled := false
+	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			// result_url points at an https host that is NOT allowlisted.
+			_, _ = w.Write([]byte(`{"result_url":"https://evil.example.com/logs/blob"}`))
+			return
+		}
+		getCalled = true
+		_, _ = w.Write([]byte("should never be fetched"))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	c.httpClient = srv.Client()
+
+	res, err := c.OnstartLog(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, OnstartLogFetchError, res.Status, "non-allowlisted result_url host must map to FetchError")
+	require.False(t, getCalled, "host allowlist must reject before making the GET")
+}
+
+// TestIsAllowedLogHost — suffix-boundary matching for the log-host allowlist.
+func TestIsAllowedLogHost(t *testing.T) {
+	require.True(t, isAllowedLogHost("s3.amazonaws.com"))
+	require.True(t, isAllowedLogHost("s3.amazonaws.com:443"))
+	require.True(t, isAllowedLogHost("public.vast.ai"))
+	require.True(t, isAllowedLogHost("abc.r2.cloudflarestorage.com"))
+	require.False(t, isAllowedLogHost("evilamazonaws.com"), "must not match without a dot boundary")
+	require.False(t, isAllowedLogHost("169.254.169.254"), "metadata endpoint must be denied")
+	require.False(t, isAllowedLogHost("evil.com"))
+}
+
 // TestOnstartLog_MaterializesAfterRetry reproduces the 20-06 UAT root cause:
 // the Vast logs API serves the result_url object asynchronously, so the first
 // GET returns 403 and only a later GET (post-materialisation) returns 200. The
 // retry loop must ride the early 403(s) and surface Available, not FetchError.
 func TestOnstartLog_MaterializesAfterRetry(t *testing.T) {
 	shrinkOnstartBackoff(t)
+	allowLoopbackLogHost(t)
 	var srv *httptest.Server
 	var gets int
 	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +132,11 @@ func TestOnstartLog_MaterializesAfterRetry(t *testing.T) {
 	require.GreaterOrEqual(t, gets, 3, "should have retried past the 403s")
 }
 
+// TestOnstartLog_Available — PUT returns result_url, the presigned GET
+// returns non-empty text → Status=Available, Text set. Also asserts the
+// auth header IS on the PUT and ABSENT on the result_url GET (item 6).
 func TestOnstartLog_Available(t *testing.T) {
+	allowLoopbackLogHost(t)
 	const apiKey = "k"
 	var putAuth, getAuth string
 	srv := newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +197,7 @@ func TestOnstartLog_NotReady(t *testing.T) {
 // 5xx → Status=FetchError (folded, non-fatal to the caller).
 func TestOnstartLog_FetchError_GET5xx(t *testing.T) {
 	shrinkOnstartBackoff(t)
+	allowLoopbackLogHost(t)
 	var srv *httptest.Server
 	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
@@ -183,6 +232,7 @@ func TestOnstartLog_FetchError_PUTNon200(t *testing.T) {
 // TestOnstartLog_Empty — GET returns 200 with whitespace-only body →
 // Status=Empty (UNKNOWN, non-fatal).
 func TestOnstartLog_Empty(t *testing.T) {
+	allowLoopbackLogHost(t)
 	var srv *httptest.Server
 	srv = newTestTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {

@@ -97,6 +97,35 @@ const (
 // (not const) so tests can shrink it; never mutated in production code paths.
 var onstartFetchBackoff = 1 * time.Second
 
+// allowedLogHostSuffixes bounds the result_url GET to Vast's known log-storage
+// hosts (finding #8, SSRF guard). The result_url is presigned by the Vast API;
+// pinning the host so a spoofed/compromised result_url cannot turn FetchLogs
+// into an SSRF primitive against internal/metadata endpoints. Observed live
+// (20-06 UAT): s3.amazonaws.com/public.vast.ai. The other two cover Vast's
+// documented storage backends. Package var so tests can append the httptest
+// loopback host; never mutated in production code paths.
+var allowedLogHostSuffixes = []string{
+	"amazonaws.com",         // observed: s3.amazonaws.com/public.vast.ai
+	"vast.ai",               // Vast-hosted storage
+	"cloudflarestorage.com", // Vast R2 backend
+}
+
+// isAllowedLogHost reports whether host (may include :port) matches an allowed
+// log-storage suffix. Case-insensitive; exact-suffix boundary (foo.amazonaws.com
+// matches, evilamazonaws.com does NOT).
+func isAllowedLogHost(host string) bool {
+	host = strings.ToLower(host)
+	if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.Contains(host[i:], "]") {
+		host = host[:i] // strip :port (guard against IPv6 [::1] form)
+	}
+	for _, suf := range allowedLogHostSuffixes {
+		if host == suf || strings.HasSuffix(host, "."+suf) {
+			return true
+		}
+	}
+	return false
+}
+
 // Client is the thin Vast.ai REST client. Construct via NewClient (uses
 // DefaultBaseURL) or NewClientWithBaseURL (for tests). All methods are
 // safe to call concurrently because *http.Client is goroutine-safe.
@@ -452,6 +481,12 @@ func (c *Client) FetchLogs(ctx context.Context, resultURL string) (string, error
 	}
 	if parsed.Scheme != "https" {
 		return "", fmt.Errorf("vast: result_url scheme %q is not https (SSRF guard)", parsed.Scheme)
+	}
+	if !isAllowedLogHost(parsed.Host) {
+		// SSRF guard #8: reject before any network call. Surfaced as a metric so
+		// a Vast host change (breaking FF-02) is visible without a false GET.
+		obs.GatewayVastAPIRequestsTotal.WithLabelValues("fetch_logs", "host_denied").Inc()
+		return "", fmt.Errorf("vast: result_url host %q not in log-host allowlist (SSRF guard #8)", parsed.Host)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
 	if err != nil {
