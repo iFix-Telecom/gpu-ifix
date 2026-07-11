@@ -399,4 +399,4 @@ Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em
 
 **Depends on:** Phase 17 (pod_config dashboard fields + failStreak policy quick 260702-nse — herda CountConsecutiveFailedPrimaryProvisions + allowlist_preferred), Phase 6.6.Y (fail-fast endpoint-reachability já existe — escopar contra), Phase 12 (death-detection Ready-loop — escopar contra)
 
-**Plans:** 5/6 plans executed
+**Plans:** 6/7 plans executed
