@@ -139,16 +139,28 @@ func doOperationsRequest(t *testing.T, h *OperationsHandler) (*httptest.Response
 // cost contributes to month/today; open row serializes cost_brl null and
 // its accrual is added on top.
 func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
+	// Anchor both lifecycle starts to 00:00 BRT of the current day. This keeps
+	// them (a) inside today's America/Sao_Paulo bucket and (b) always <= real
+	// time.Now(), so the open-row accrual (operations.go computes it from the
+	// REAL clock) stays positive. A raw now.Add(-2h)/now.Add(-1h) flaked between
+	// 00:00–02:00 BRT: the starts rolled into the previous BRT day and
+	// today_brl bucketed to 0 (operations.go buckets "today" in BRT).
 	now := time.Now()
-	closedStart := now.Add(-2 * time.Hour) // started today
-	openStart := now.Add(-1 * time.Hour)   // started today, still running
+	brt, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("load America/Sao_Paulo: %v", err)
+	}
+	y, mo, d := now.In(brt).Date()
+	todayBRT := time.Date(y, mo, d, 0, 0, 0, 0, brt) // 00:00 BRT today
+	closedStart := todayBRT                           // started today
+	openStart := todayBRT                             // started today, still running
 
 	fake := &fakeOperationsQueries{
 		rows: []gen.ListPrimaryLifecyclesRow{
 			{
 				ID:             1,
 				StartedAt:      closedStart,
-				EndedAt:        opTimestamptz(now.Add(-30 * time.Minute)),
+				EndedAt:        opTimestamptz(now), // closed just now (still today BRT)
 				TriggerReason:  "schedule_up",
 				VastInstanceID: opInt8(12345),
 				AcceptedDph:    opNumeric(0.40),
