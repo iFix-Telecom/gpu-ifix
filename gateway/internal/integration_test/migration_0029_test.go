@@ -183,9 +183,10 @@ func TestIntegration_Migration0029_Down_Symmetric(t *testing.T) {
 	// quick-260702-nse: bumped Down(2)→Down(3) when 0031 landed on HEAD.
 	// 260704-ubt HEAD bump: Down(3)→Down(4) when 0032 landed on HEAD.
 	// Phase 20 HEAD bump: Down(4)→Down(5) when 0033 landed on HEAD.
-	// Down(5) peels 0033+0032+0031+0030 then 0029 to exercise 0029's symmetric Down.
-	if err := db.Down(ctx, pool, 5); err != nil {
-		t.Fatalf("db.Down(5) revert 0033+0032+0031+0030+0029: %v", err)
+	// Phase 999.2 HEAD bump: Down(5)→Down(6) when 0034 landed on HEAD.
+	// Down(6) peels 0034+0033+0032+0031+0030 then 0029 to exercise 0029's symmetric Down.
+	if err := db.Down(ctx, pool, 6); err != nil {
+		t.Fatalf("db.Down(6) revert 0034+0033+0032+0031+0030+0029: %v", err)
 	}
 
 	for _, name := range []string{"local-stt", "gemini-stt", "groq-whisper"} {
