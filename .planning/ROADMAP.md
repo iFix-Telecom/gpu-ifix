@@ -400,3 +400,31 @@ Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em
 **Depends on:** Phase 17 (pod_config dashboard fields + failStreak policy quick 260702-nse — herda CountConsecutiveFailedPrimaryProvisions + allowlist_preferred), Phase 6.6.Y (fail-fast endpoint-reachability já existe — escopar contra), Phase 12 (death-detection Ready-loop — escopar contra)
 
 **Plans:** 7/7 plans complete
+
+## Backlog
+
+### Phase 999.1: Regime 3 download-stall live UAT (tarpit S3) (BACKLOG)
+
+**Goal:** Provar E2E ao vivo o `progress_stall_timeout` (FF-02 regime 3) num coldstart real — bytes de download congelados com o container VIVO.
+
+**Requirements:** TBD (valida FF-02 / OBS-11 ao vivo)
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd:review-backlog when ready)
+
+**Context (UAT 20-06, 2026-07-11):** adulterar key/sha de um peso faz o onstart EXITAR → crash-loop `exited↔running` (Vast reinicia), NÃO congela bytes → nunca dispara stall. Byte-frozen real exige TARPIT S3: MinIO próprio no worker-vm servindo 1 dos 4 pesos + `tc` rate-limit (bytes crescem e param, container segue running). Aponta `MINIO_ENDPOINT` (env stack 38) pro MinIO tarpit, redeploy, force-up. A lógica de stall já é unit-tested (`TestProgressStall_*`) e o FF-03 fetch foi provado ao vivo (`fetch_logs{200}`); falta só a prova E2E. Gateway prod: `develop-953e90c`.
+
+### Phase 999.2: Regime 1 created-stall live UAT (force host) (BACKLOG)
+
+**Goal:** Provar E2E ao vivo o `created_state_timeout` (FF-01 regime 1) — host que trava em `actual_status=created` e é morto ao `created_budget_s`.
+
+**Requirements:** TBD (valida FF-01 / BL-01 ao vivo)
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd:review-backlog when ready)
+
+**Context (UAT 20-06, 2026-07-11):** não induzível via config — picker usa `market_cheapest`, honra allowlist só com `failStreak>=2` (reconciler.go:1360), e o campo `host_id` do pod_config é EXCLUSÃO (`neq`), NÃO pin. Opções: (a) esperar um host flaky orgânico travar em created; (b) implementar feature "force host" (pin de machine_id no picker, gated p/ teste). BL-01 (auto-blocklist na 2ª falha) também só é observável limpo aqui.
