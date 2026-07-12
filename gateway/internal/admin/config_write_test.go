@@ -38,6 +38,9 @@ func (f *fakeWriteQueries) UpdatePodConfigFieldCapFallback(_ context.Context, _ 
 func (f *fakeWriteQueries) UpdatePodConfigFieldHostID(_ context.Context, _ int64) error {
 	return f.hit("UpdatePodConfigFieldHostID")
 }
+func (f *fakeWriteQueries) UpdatePodConfigFieldForceMachineID(_ context.Context, _ int64) error {
+	return f.hit("UpdatePodConfigFieldForceMachineID")
+}
 func (f *fakeWriteQueries) UpdatePodConfigFieldRejectPrivateIP(_ context.Context, _ bool) error {
 	return f.hit("UpdatePodConfigFieldRejectPrivateIP")
 }

@@ -56,6 +56,7 @@ type podConfigWriteQueries interface {
 	UpdatePodConfigFieldCapPrimary(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigFieldCapFallback(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigFieldHostID(ctx context.Context, v int64) error
+	UpdatePodConfigFieldForceMachineID(ctx context.Context, v int64) error
 	UpdatePodConfigFieldRejectPrivateIP(ctx context.Context, v bool) error
 	UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, v int32) error
@@ -180,6 +181,17 @@ func (h *PrimaryConfigWriteHandler) writeConfig(ctx context.Context, w http.Resp
 			return
 		}
 		h.finish(w, h.q.UpdatePodConfigFieldHostID(ctx, v))
+	case "force_machine_id":
+		v, err := decodeInt64(raw)
+		if err != nil {
+			h.badValue(w)
+			return
+		}
+		if v < 0 {
+			h.validationErr(w, "force_machine_id must be >= 0 (0 disables the pin)")
+			return
+		}
+		h.finish(w, h.q.UpdatePodConfigFieldForceMachineID(ctx, v))
 	case "reject_private_ip":
 		v, err := decodeBool(raw)
 		if err != nil {

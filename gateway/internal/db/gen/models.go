@@ -175,6 +175,7 @@ type AiGatewayPodConfig struct {
 	ProgressStallBudgetS    int32          `json:"progress_stall_budget_s"`
 	ProgressStallBudgetSMin int32          `json:"progress_stall_budget_s_min"`
 	ProgressStallBudgetSMax int32          `json:"progress_stall_budget_s_max"`
+	ForceMachineID          int64          `json:"force_machine_id"`
 }
 
 type AiGatewayPrice struct {

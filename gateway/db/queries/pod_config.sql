@@ -20,7 +20,8 @@ INSERT INTO ai_gateway.pod_config (
     schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max,
     grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max,
     created_budget_s, created_budget_s_min, created_budget_s_max,
-    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max
+    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max,
+    force_machine_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
@@ -32,7 +33,8 @@ INSERT INTO ai_gateway.pod_config (
     $29, $30, $31, $32,
     $33, $34, $35, $36,
     $37, $38, $39,
-    $40, $41, $42
+    $40, $41, $42,
+    $43
 )
 ON CONFLICT (id) DO NOTHING;
 
@@ -56,6 +58,9 @@ UPDATE ai_gateway.pod_config SET cap_fallback = $1, updated_at = NOW() WHERE id 
 
 -- name: UpdatePodConfigFieldHostID :exec
 UPDATE ai_gateway.pod_config SET host_id = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldForceMachineID :exec
+UPDATE ai_gateway.pod_config SET force_machine_id = $1, updated_at = NOW() WHERE id = TRUE;
 
 -- name: UpdatePodConfigFieldRejectPrivateIP :exec
 UPDATE ai_gateway.pod_config SET reject_private_ip = $1, updated_at = NOW() WHERE id = TRUE;

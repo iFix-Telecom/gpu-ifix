@@ -46,6 +46,7 @@ type ConfigSection struct {
 	CapPrimary           float64  `json:"cap_primary"`
 	CapFallback          float64  `json:"cap_fallback"`
 	HostID               int64    `json:"host_id"`
+	ForceMachineID       int64    `json:"force_machine_id"`
 	RejectPrivateIP      bool     `json:"reject_private_ip"`
 	ColdstartBudgetS     int      `json:"coldstart_budget_s"`
 	PortBindBudgetS      int      `json:"port_bind_budget_s"`
@@ -146,6 +147,7 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			CapPrimary:           numericFloat(row.CapPrimary),
 			CapFallback:          numericFloat(row.CapFallback),
 			HostID:               row.HostID,
+			ForceMachineID:       row.ForceMachineID,
 			RejectPrivateIP:      row.RejectPrivateIp,
 			ColdstartBudgetS:     int(row.ColdstartBudgetS),
 			PortBindBudgetS:      int(row.PortBindBudgetS),

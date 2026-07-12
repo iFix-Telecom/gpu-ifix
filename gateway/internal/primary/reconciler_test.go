@@ -4125,3 +4125,94 @@ func setOnstartLogIntervalForTest(t *testing.T, d time.Duration) {
 	primaryOnstartLogIntervalForTest = d
 	t.Cleanup(func() { primaryOnstartLogIntervalForTest = orig })
 }
+
+// --- Phase 999.2 force_machine_id (regime-1 UAT / ops pin) -------------------
+
+// TestReconcilerForceMachineID_Pins: with force_machine_id set, provisionLifecycle
+// must do exactly ONE search, scoped to that machine_id (machine_id.in filter),
+// and create the returned offer — bypassing the market/allowlist shape loop.
+func TestReconcilerForceMachineID_Pins(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var searchCalls atomic.Int32
+	var createdFor atomic.Int64
+	var sawMachineFilter atomic.Bool
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
+			searchCalls.Add(1)
+			if mid, ok := filter["machine_id"].(map[string]any); ok {
+				if ids, ok := mid["in"].([]any); ok && len(ids) == 1 && ids[0] == int64(141325) {
+					sawMachineFilter.Store(true)
+				}
+			}
+			// Vast would return only the pinned machine's offer(s).
+			return []vast.Offer{{ID: 100, MachineID: 141325, HostID: 5, DphTotal: 0.20}}, nil
+		},
+		createInstanceFn: func(_ context.Context, offerID int64, _ vast.CreateRequest) (vast.Instance, error) {
+			createdFor.Store(offerID)
+			return vast.Instance{ID: 1, ActualStatus: "loading"}, nil
+		},
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 1, ActualStatus: "loading"}, nil
+		},
+	}
+	snapCfg := podconfig.PodConfig{
+		ForceMachineID: 141325, CapPrimary: 1.0, CapFallback: 1.0,
+		ColdStartBudgetS: 30, CreatedBudgetS: 600, PortBindBudgetS: 600,
+	}
+	loader := podconfig.NewStaticLoaderForTest(snapCfg, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Vast: fakeV, PodCfg: loader, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return false },
+	})
+	r.SetQueriesForTest(gen.New(&fakeDBTX{}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.provisionLifecycle(ctx, 999, testLogger())
+
+	require.Equal(t, int32(1), searchCalls.Load(), "force path must do exactly ONE search (no shape loop)")
+	require.True(t, sawMachineFilter.Load(), "force search must carry machine_id.in=[141325]")
+	require.Equal(t, int64(100), createdFor.Load(), "must create the pinned machine's offer")
+}
+
+// TestReconcilerForceMachineID_NoOffer_FailsClosed: when the pinned machine has
+// no current offer, provisionLifecycle fails closed (forced_machine_no_offer),
+// never silently falling back to the market pick.
+func TestReconcilerForceMachineID_NoOffer_FailsClosed(t *testing.T) {
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+
+	var created atomic.Int32
+	fakeV := &fakeVast{
+		searchOffersFn: func(_ context.Context, _ vast.SearchFilter) ([]vast.Offer, error) {
+			return nil, nil // pinned machine has no offer
+		},
+		createInstanceFn: func(_ context.Context, _ int64, _ vast.CreateRequest) (vast.Instance, error) {
+			created.Add(1)
+			return vast.Instance{ID: 1, ActualStatus: "loading"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	snapCfg := podconfig.PodConfig{
+		ForceMachineID: 999999, CapPrimary: 1.0, CapFallback: 1.0,
+		ColdStartBudgetS: 30, CreatedBudgetS: 600, PortBindBudgetS: 600,
+	}
+	loader := podconfig.NewStaticLoaderForTest(snapCfg, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Vast: fakeV, PodCfg: loader, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return false },
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := r.provisionLifecycle(ctx, 999, testLogger())
+
+	require.Error(t, err, "a pinned machine with no offer must fail, not fall back to market")
+	require.True(t, rr.has("forced_machine_no_offer"), "close reason must be forced_machine_no_offer")
+	require.Equal(t, int32(0), created.Load(), "must NOT create any instance when the pin has no offer")
+}

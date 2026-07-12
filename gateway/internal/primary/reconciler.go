@@ -1352,7 +1352,33 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	var pickable []vast.Offer
 	var pickedShape int
 
+	// force_machine_id (Phase 999.2 — regime-1 UAT / ops pin): when set (>0),
+	// bypass market_cheapest + the allowlist-preferred pass and provision EXACTLY
+	// this Vast machine_id. Reuses the machine-allowlist filter with a list of one
+	// over filters[0] (primary shape). Fails CLOSED if the pinned machine has no
+	// current offer — never silently falls back to the market pick.
+	if hot.ForceMachineID > 0 {
+		forceFilter := vast.WithMachineAllowlist(filters[0], []int64{hot.ForceMachineID})
+		offers, err := r.deps.Vast.SearchOffers(ctx, forceFilter)
+		if err != nil {
+			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
+			return err
+		}
+		offers = r.rejectPrivateIPOffers(offers, log, 0, "force")
+		if len(offers) == 0 {
+			_ = r.closeLifecycle(ctx, lifecycleID, "forced_machine_no_offer", 0)
+			return fmt.Errorf("primary: force_machine_id %d has no offer", hot.ForceMachineID)
+		}
+		pickable = offers
+		pickedShape = 0
+		log.Warn("primary offer FORCED by force_machine_id (bypasses market/cap)",
+			"force_machine_id", hot.ForceMachineID, "offer_count", len(offers))
+	}
+
 	for i, f := range filters {
+		if len(pickable) > 0 {
+			break // force_machine_id already pinned the offer above
+		}
 		// Allowlist preference pass for this shape — quick-260702-nse: ONLY
 		// when failStreak >= 2 (allowlist_preferred mode). At failStreak < 2
 		// (market_cheapest) this block is skipped entirely and each shape goes

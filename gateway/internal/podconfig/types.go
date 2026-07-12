@@ -31,6 +31,7 @@ type PodConfig struct {
 	CapPrimary           float64
 	CapFallback          float64
 	HostID               int64
+	ForceMachineID       int64
 	RejectPrivateIP      bool
 	ColdStartBudgetS     int
 	PortBindBudgetS      int
@@ -172,6 +173,7 @@ func rowToPodConfig(r gen.AiGatewayPodConfig) PodConfig {
 		CapPrimary:           numericToFloat(r.CapPrimary),
 		CapFallback:          numericToFloat(r.CapFallback),
 		HostID:               r.HostID,
+		ForceMachineID:       r.ForceMachineID,
 		RejectPrivateIP:      r.RejectPrivateIp,
 		ColdStartBudgetS:     int(r.ColdstartBudgetS),
 		PortBindBudgetS:      int(r.PortBindBudgetS),

@@ -12,7 +12,7 @@ import (
 )
 
 const getPodConfig = `-- name: GetPodConfig :one
-SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max FROM ai_gateway.pod_config WHERE id = TRUE
+SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max, force_machine_id FROM ai_gateway.pod_config WHERE id = TRUE
 `
 
 // Hot-path single-row read at boot and on every pod_config_changed NOTIFY
@@ -66,6 +66,7 @@ func (q *Queries) GetPodConfig(ctx context.Context) (AiGatewayPodConfig, error) 
 		&i.ProgressStallBudgetS,
 		&i.ProgressStallBudgetSMin,
 		&i.ProgressStallBudgetSMax,
+		&i.ForceMachineID,
 	)
 	return i, err
 }
@@ -82,7 +83,8 @@ INSERT INTO ai_gateway.pod_config (
     schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max,
     grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max,
     created_budget_s, created_budget_s_min, created_budget_s_max,
-    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max
+    progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max,
+    force_machine_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
@@ -94,7 +96,8 @@ INSERT INTO ai_gateway.pod_config (
     $29, $30, $31, $32,
     $33, $34, $35, $36,
     $37, $38, $39,
-    $40, $41, $42
+    $40, $41, $42,
+    $43
 )
 ON CONFLICT (id) DO NOTHING
 `
@@ -142,6 +145,7 @@ type SeedPodConfigParams struct {
 	ProgressStallBudgetS    int32          `json:"progress_stall_budget_s"`
 	ProgressStallBudgetSMin int32          `json:"progress_stall_budget_s_min"`
 	ProgressStallBudgetSMax int32          `json:"progress_stall_budget_s_max"`
+	ForceMachineID          int64          `json:"force_machine_id"`
 }
 
 // Idempotent env->DB first-boot seed (Plan 17-03). Inserts the 16 hot fields +
@@ -192,6 +196,7 @@ func (q *Queries) SeedPodConfig(ctx context.Context, arg SeedPodConfigParams) er
 		arg.ProgressStallBudgetS,
 		arg.ProgressStallBudgetSMin,
 		arg.ProgressStallBudgetSMax,
+		arg.ForceMachineID,
 	)
 	return err
 }
@@ -483,6 +488,15 @@ UPDATE ai_gateway.pod_config SET failure_cooldown_s = $1, updated_at = NOW() WHE
 
 func (q *Queries) UpdatePodConfigFieldFailureCooldownS(ctx context.Context, failureCooldownS int32) error {
 	_, err := q.db.Exec(ctx, updatePodConfigFieldFailureCooldownS, failureCooldownS)
+	return err
+}
+
+const updatePodConfigFieldForceMachineID = `-- name: UpdatePodConfigFieldForceMachineID :exec
+UPDATE ai_gateway.pod_config SET force_machine_id = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigFieldForceMachineID(ctx context.Context, forceMachineID int64) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldForceMachineID, forceMachineID)
 	return err
 }
 

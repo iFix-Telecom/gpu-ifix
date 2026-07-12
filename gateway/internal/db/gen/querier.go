@@ -334,6 +334,7 @@ type Querier interface {
 	UpdatePodConfigFieldColdstartBudgetS(ctx context.Context, coldstartBudgetS int32) error
 	UpdatePodConfigFieldCreatedBudgetS(ctx context.Context, createdBudgetS int32) error
 	UpdatePodConfigFieldFailureCooldownS(ctx context.Context, failureCooldownS int32) error
+	UpdatePodConfigFieldForceMachineID(ctx context.Context, forceMachineID int64) error
 	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, graceRampDownS int32) error
 	UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) error
 	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error
