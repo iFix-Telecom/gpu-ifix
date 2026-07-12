@@ -403,28 +403,14 @@ Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em
 
 ## Backlog
 
-### Phase 999.1: Regime 3 download-stall live UAT (tarpit S3) (BACKLOG)
+### Phase 999.1: Regime 3 download-stall live UAT (tarpit S3) (CLOSED — coberto por unit-test)
 
 **Goal:** Provar E2E ao vivo o `progress_stall_timeout` (FF-02 regime 3) num coldstart real — bytes de download congelados com o container VIVO.
 
-**Requirements:** TBD (valida FF-02 / OBS-11 ao vivo)
+**Resolução (2026-07-11):** fechado como **coberto-por-unit-test + monitor**. A lógica de stall é unit-tested (`TestProgressStall_FrozenBytes_Destroys` / `_RisingBytes_Rides` / `_TelemetryUnavailable_Rides` / `_PostDownloadStartup_Rides`) e o FF-03 fetch foi **provado ao vivo** (métricas `fetch_logs{200}` 0→21). Agora que o FF-02 arma em prod (fix `69b6ae9`), um stall real futuro é detectado+logado. A prova E2E via tarpit S3 foi descartada: exige MinIO próprio + drop-de-bytes calibrado contra `aria2c --timeout=60` vs `progress_stall_budget_s`, + redeploy `MINIO_ENDPOINT` em prod — alto risco/custo, baixo retorno marginal sobre a cobertura existente.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (promote with /gsd:review-backlog when ready)
-
-**Context (UAT 20-06, 2026-07-11):** adulterar key/sha de um peso faz o onstart EXITAR → crash-loop `exited↔running` (Vast reinicia), NÃO congela bytes → nunca dispara stall. Byte-frozen real exige TARPIT S3: MinIO próprio no worker-vm servindo 1 dos 4 pesos + `tc` rate-limit (bytes crescem e param, container segue running). Aponta `MINIO_ENDPOINT` (env stack 38) pro MinIO tarpit, redeploy, force-up. A lógica de stall já é unit-tested (`TestProgressStall_*`) e o FF-03 fetch foi provado ao vivo (`fetch_logs{200}`); falta só a prova E2E. Gateway prod: `develop-953e90c`.
-
-### Phase 999.2: Regime 1 created-stall live UAT (force host) (BACKLOG)
+### Phase 999.2: Regime 1 created-stall live UAT (force host) (CLOSED — PROVADO ao vivo)
 
 **Goal:** Provar E2E ao vivo o `created_state_timeout` (FF-01 regime 1) — host que trava em `actual_status=created` e é morto ao `created_budget_s`.
 
-**Requirements:** TBD (valida FF-01 / BL-01 ao vivo)
-
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (promote with /gsd:review-backlog when ready)
-
-**Context (UAT 20-06, 2026-07-11):** não induzível via config — picker usa `market_cheapest`, honra allowlist só com `failStreak>=2` (reconciler.go:1360), e o campo `host_id` do pod_config é EXCLUSÃO (`neq`), NÃO pin. Opções: (a) esperar um host flaky orgânico travar em created; (b) implementar feature "force host" (pin de machine_id no picker, gated p/ teste). BL-01 (auto-blocklist na 2ª falha) também só é observável limpo aqui.
+**Resolução (2026-07-12):** ✅ PROVADO. Implementada a feature **force_machine_id** (opção b) — migration 0034 + config PATCH/GET + picker pin, deployada em prod (`develop-b57788a`, migration aplicada via MIGRATE_ON_BOOT). UAT ao vivo: `force_machine_id=24953` (Norway, seed) → picker logou "offer FORCED by force_machine_id (bypasses market/cap)" e pinou machine 24953 exatamente. O host ficou preso em `actual_status=created`; o FF-01 contou `elapsed_since_created_s` até 120 e fechou o lifecycle 143 com **`shutdown_reason=created_state_timeout`** ("created-state budget exhausted (host morto)") no budget exato, com **0 órfãos Vast** (BestEffortDestroy ok). BL-01 NÃO blocklistou 24953 — foi a 1ª falha (parka só na 2ª consecutiva, correto). force_machine_id revertido p/ 0 pós-UAT. Custo ~R$0.02.
