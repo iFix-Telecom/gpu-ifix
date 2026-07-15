@@ -498,13 +498,17 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	// and /usr/bin/dcgm-exporter, baked into the custom image.
 
 	return vast.CreateRequest{
-		ClientID:    "me",
-		Image:       cfg.PrimaryTemplateImage,
-		Env:         env,
-		Onstart:     "/bin/bash",
-		Runtype:     "args",
-		Args:        []string{"-c", onstart},
-		Disk:        50,
+		ClientID: "me",
+		Image:    cfg.PrimaryTemplateImage,
+		Env:      env,
+		Onstart:  "/bin/bash",
+		Runtype:  "args",
+		Args:     []string{"-c", onstart},
+		// 45GB (was 50): trims storage cost. NOT lower — coldstart disk peaks at
+		// ~40GB (image ~8-10GB + parallel weight downloads ~24GB [qwen 17 + whisper
+		// 2.7 + bge-m3 1.2 + chatterbox 2.8] + tarball extraction ~7GB before the
+		// .tar.gz files are removed). 40GB would risk ENOSPC mid-coldstart.
+		Disk:        45,
 		Label:       fmt.Sprintf("ifix-primary-lifecycle-%d", lifecycleID),
 		TargetState: "running",
 	}, nil
