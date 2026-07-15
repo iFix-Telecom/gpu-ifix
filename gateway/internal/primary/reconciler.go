@@ -1525,6 +1525,14 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	// terminal close 12s before 4 endpoints were actually reachable.
 	terminalStrikes := 0
 
+	// Counter for consecutive docker-pull "Retrying" observations (bad-host
+	// detection, backlog primary-provisioning-bad-host-detection-todo). A host
+	// whose layer pull keeps retrying (bad registry route) reports
+	// status_msg="<layer>: Retrying in N second(s)" and otherwise rides the
+	// full coldstart budget. Same 3-strike confirm as terminalStrikes: a
+	// one-off retry can recover, so require terminalConfirmStrikes in a row.
+	pullRetryStrikes := 0
+
 	// Counter for consecutive ErrInstanceNotFound observations. Same
 	// transient-flap rationale as terminalStrikes but for a different
 	// upstream signal: Vast can return `{"instances": null}` for an
@@ -1640,25 +1648,53 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// 3-strike close. Mirrors the terminalStrikes reset below.
 			notFoundStrikes = 0
 			// Reviews #11 — Vast `status_msg` early-abort.
-			if msg := strings.TrimSpace(inst.StatusMsg); msg != "" {
-				if strings.Contains(strings.ToLower(msg), "error") {
-					// Truncate to 200 chars to keep the forensic event bounded.
-					trunc := msg
-					if len(trunc) > 200 {
-						trunc = trunc[:200]
-					}
-					forensicsReason := "vast_status_msg_error:" + trunc
-					log.Error("primary provisioning: Vast reported instance error",
-						"instance_id", instanceID, "status_msg", msg)
-					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
-					_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
-					return forensicsReason, errors.New(forensicsReason)
+			msg := strings.TrimSpace(inst.StatusMsg)
+			lower := strings.ToLower(msg)
+			if msg != "" && strings.Contains(lower, "error") {
+				// Truncate to 200 chars to keep the forensic event bounded.
+				trunc := msg
+				if len(trunc) > 200 {
+					trunc = trunc[:200]
 				}
+				forensicsReason := "vast_status_msg_error:" + trunc
+				log.Error("primary provisioning: Vast reported instance error",
+					"instance_id", instanceID, "status_msg", msg)
+				vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+				_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
+				return forensicsReason, errors.New(forensicsReason)
 			}
-			if inst.IsTerminal() {
+			// Pull-stall fast-fail: a host retrying a docker layer pull has a
+			// bad registry route. A healthy pull logs Pulling/Downloading/
+			// Extracting, never Retrying — so 3 consecutive Retrying polls (~15s)
+			// confirm a stuck host without false-killing a one-off retry that
+			// recovers. Reset on any poll that is not retrying (including empty
+			// status_msg once the pull advances phase).
+			if strings.Contains(lower, "retrying") {
+				pullRetryStrikes++
+				log.Warn("primary provisioning: Vast pull retrying (bad registry route)",
+					"instance_id", instanceID, "status_msg", msg,
+					"strike", pullRetryStrikes, "confirm_at", terminalConfirmStrikes)
+				if pullRetryStrikes >= terminalConfirmStrikes {
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "vast_pull_retry_stall", 0)
+					return "vast_pull_retry_stall", errors.New("primary: docker pull retry stall")
+				}
+				continue
+			}
+			pullRetryStrikes = 0
+			// intended_status=stopped is the reliable billing/host-stop signal
+			// (classifyDeath A1). It can appear while actual_status is still
+			// non-terminal or blank (Vast stopped the container but the agent
+			// never reports exited) — the case IsTerminal() misses, which then
+			// rides the full coldstart budget. Fold it into the same 3-strike
+			// terminal path so provisioning fast-fails and the schedule loop
+			// re-bids a different host.
+			billingStopped := strings.EqualFold(strings.TrimSpace(inst.IntendedStatus), "stopped")
+			if inst.IsTerminal() || billingStopped {
 				terminalStrikes++
-				log.Warn("primary provisioning: Vast reports terminal status",
+				log.Warn("primary provisioning: Vast reports terminal/stopped status",
 					"instance_id", instanceID, "actual_status", inst.ActualStatus,
+					"intended_status", inst.IntendedStatus,
 					"strike", terminalStrikes, "confirm_at", terminalConfirmStrikes)
 				if terminalStrikes >= terminalConfirmStrikes {
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)

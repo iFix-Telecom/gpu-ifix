@@ -3347,6 +3347,110 @@ func TestCreatedBudget_StuckCreated_Destroys(t *testing.T) {
 	require.True(t, rr.has("created_state_timeout"), "close reason must be created_state_timeout")
 }
 
+// TestWaitForReady_IntendedStopped_Destroys — Vast reports intended_status=stopped
+// (billing/host stop) while actual_status is still non-terminal ("loading"), the
+// case IsTerminal() misses. Must fast-fail via the 3-strike terminal path instead
+// of riding the coldstart budget.
+func TestWaitForReady_IntendedStopped_Destroys(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading", IntendedStatus: "stopped"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	// Large coldstart budget so ONLY the intended-stopped fast-fail can close it.
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "intended_status=stopped must fast-fail provisioning")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once")
+	require.True(t, rr.has("instance_terminal_state"), "close reason must be instance_terminal_state")
+}
+
+// TestWaitForReady_PullRetrying_Destroys — a host stuck retrying a docker layer
+// pull (bad registry route) must fast-fail after 3 strikes, not ride the budget.
+func TestWaitForReady_PullRetrying_Destroys(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, ActualStatus: "loading", StatusMsg: "a1b2c3: Retrying in 1 second"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "a stuck pull (Retrying) must fast-fail provisioning")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once")
+	require.True(t, rr.has("vast_pull_retry_stall"), "close reason must be vast_pull_retry_stall")
+}
+
+// TestWaitForReady_TransientRetryThenLoading_NoFire — one Retrying poll followed
+// by clean loading must NOT fire (strikes reset) — a one-off layer retry recovers
+// and the pull rides to the coldstart ceiling.
+func TestWaitForReady_TransientRetryThenLoading_NoFire(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	var calls atomic.Int32
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			if calls.Add(1) == 1 {
+				return vast.Instance{ID: 42, ActualStatus: "loading", StatusMsg: "a1b2c3: Retrying in 1 second"}, nil
+			}
+			return vast.Instance{ID: 42, ActualStatus: "loading"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
+	time.Sleep(80 * time.Millisecond)
+	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
+		"a one-off retry that recovers to clean loading must NOT be destroyed")
+	require.False(t, rr.has("vast_pull_retry_stall"),
+		"strikes must reset — no vast_pull_retry_stall close")
+	cancel()
+	<-errCh
+}
+
 func TestCreatedBudget_CreatedThenRunning_NoFire(t *testing.T) {
 	withTestPollInterval(t, 2*time.Millisecond)
 	cfg := testCfg(t)
