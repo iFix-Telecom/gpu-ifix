@@ -112,7 +112,7 @@ func TestBuildPrimaryCreateRequest_Supervisord(t *testing.T) {
 	require.Contains(t, req.Args[1], "/weights/qwen/model.gguf", "Qwen weights path")
 	require.Contains(t, req.Args[1], "set -euo pipefail", "reviews #7 shell hardening")
 
-	require.Equal(t, 50, req.Disk)
+	require.Equal(t, 45, req.Disk)
 	require.Equal(t, "ifix-primary-lifecycle-7", req.Label)
 	require.Equal(t, "running", req.TargetState)
 
