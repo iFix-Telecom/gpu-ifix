@@ -4259,6 +4259,7 @@ func TestRecordProvisionOutcome_MachineAttributable_Blocklists(t *testing.T) {
 		"instance_terminal_state",
 		"instance_terminal_state_confirmed",
 		"public_port_bind_timeout",
+		"blocklisted_ip",
 	}
 	for _, reason := range reasons {
 		reason := reason
@@ -4266,7 +4267,14 @@ func TestRecordProvisionOutcome_MachineAttributable_Blocklists(t *testing.T) {
 			cap := &listCapture{}
 			r := buildReconciler(t, Deps{Cfg: testCfg(t)})
 			r.SetQueriesForTest(gen.New(newPodConfigDBTX(nil, []int64{42}, cap)))
-			r.recordProvisionOutcome(context.Background(), 42, 1, reason, errors.New("boom"), testLogger())
+			// CANCELED ctx on purpose: closeLifecycle cancels the provision ctx
+			// before waitForReadyOrDestroy returns, so this is the ctx state the
+			// production failure path ALWAYS calls with. The write must land
+			// anyway (detached internal ctx) — prod 2026-07-16 re-picked machine
+			// 136634 twice because this write silently died on the dead ctx.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			r.recordProvisionOutcome(ctx, 42, 1, reason, errors.New("boom"), testLogger())
 
 			blk, ok := cap.lastBlocklist()
 			require.True(t, ok, "machine-attributable failure at failStreak>=1 must write the blocklist")

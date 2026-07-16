@@ -2525,6 +2525,15 @@ func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, fail
 	if q == nil {
 		return
 	}
+	// Detached ctx (same pattern as closeLifecycle's DB write): on every
+	// fast-fail path closeLifecycle CANCELS the provision ctx (lifecycleCancel)
+	// before waitForReadyOrDestroy returns its reason, so this function always
+	// received a dead ctx on failure and every blocklist write silently died
+	// with "GetPodConfig failed: context canceled" (observed prod 2026-07-16 —
+	// machine 136634 was re-picked twice after a blocklisted_ip close because
+	// the BL-01 write never landed).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	cfg, err := q.GetPodConfig(ctx)
 	if err != nil {
 		log.Warn("primary recordProvisionOutcome: GetPodConfig failed", "err", err, "machine_id", machineID)
