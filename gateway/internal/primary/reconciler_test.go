@@ -2052,6 +2052,10 @@ func TestRecoverOpenLifecycle_UnhealthyInstanceClosesLifecycle(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, "gateway_restart_orphan_unhealthy", *got,
 		"4-endpoint health check failure must close with gateway_restart_orphan_unhealthy")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(),
+		"orphan-unhealthy close must destroy the still-billing instance (leak observed live: lifecycle 189/instance 45098378 kept billing after the 14a63f3 rollout)")
+	require.Empty(t, fakeV.reportedProblems(),
+		"recovery closes must NOT file a machine report — unhealthy here is usually OUR restart interrupting a legit cold start")
 }
 
 func TestRecoverOpenLifecycle_NoOpenRow_NoOp(t *testing.T) {
@@ -3366,6 +3370,42 @@ func TestCreatedBudget_StuckCreated_Destroys(t *testing.T) {
 	require.Error(t, err, "a pod stuck in actual_status=created past created_budget_s must fail fast")
 	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once on created-budget timeout")
 	require.True(t, rr.has("created_state_timeout"), "close reason must be created_state_timeout")
+}
+
+// TestCreatedBudget_BlankStatus_Destroys — a BLANK actual_status is the same
+// regime-1 window as created/scheduling (observed live 2026-07-16: lifecycle
+// 190/machine 54626 kept actual_status null for 10+ min — host never picked up
+// the container — and rode toward the coldstart ceiling because "" matched
+// neither created nor loading).
+func TestCreatedBudget_BlankStatus_Destroys(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, MachineID: 54626, ActualStatus: ""}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(),
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 0, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
+
+	require.Error(t, err, "a pod whose actual_status never leaves blank must fail fast via the created budget")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
+	require.True(t, rr.has("created_state_timeout"), "close reason must be created_state_timeout")
+	require.Equal(t, []string{vast.ReportProblemUnableToStart}, fakeV.reportedProblems(),
+		"blank-status created timeout must report the machine before the destroy")
 }
 
 // TestWaitForReady_IntendedStopped_Destroys — Vast reports intended_status=stopped

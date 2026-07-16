@@ -1810,7 +1810,14 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// first such poll, fire on a subsequent one — a created→loading
 				// transition (regime 2) resets the anchor in the else branch below
 				// and rides to the coldstart ceiling.
-				if inst.ActualStatus == "created" || inst.ActualStatus == "scheduling" {
+				//
+				// A BLANK actual_status is the same regime: observed live 2026-07-16
+				// (lifecycle 190, machine 54626) — the host never picked up the
+				// container, Vast kept actual_status null for 10+ min and the pod
+				// rode toward the coldstart ceiling because "" matched neither
+				// created nor loading. Blank in the first seconds after create is
+				// normal; the created-budget anchor absorbs that.
+				if inst.ActualStatus == "created" || inst.ActualStatus == "scheduling" || inst.ActualStatus == "" {
 					if firstCreatedAt.IsZero() {
 						firstCreatedAt = time.Now()
 						continue
@@ -1826,7 +1833,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					// created poll — deterministic timeout test (mirrors port-bind).
 					if elapsed >= createdBudget {
 						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
-							fmt.Sprintf("Automated report: instance stuck in %s for %ds without ever advancing to loading — host never picked up the container.", inst.ActualStatus, int(elapsed.Seconds())), log)
+							fmt.Sprintf("Automated report: instance stuck in created/blank state (%q) for %ds without ever advancing to loading — host never picked up the container.", inst.ActualStatus, int(elapsed.Seconds())), log)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
 						return "created_state_timeout", errors.New("primary: created-state budget exhausted (host morto)")
@@ -2063,6 +2070,12 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 			"lifecycle_id", open.ID,
 			"instance_id", open.VastInstanceID.Int64,
 			"err", err)
+		// Leak fix (observed live 2026-07-16, lifecycle 189): closing the DB
+		// row WITHOUT destroying leaves a still-billing Vast instance nobody
+		// manages. A not-running instance (loading/created/blank) is still
+		// billed; BestEffortDestroy is idempotent (404 → nil) so calling it
+		// when Vast already destroyed the instance is harmless.
+		vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
 			ShutdownReason: pgtype.Text{String: "gateway_restart_orphan", Valid: true},
@@ -2075,6 +2088,10 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
 		r.deps.Log.Warn("primary recover: pod ports not fully mapped; closing as unhealthy orphan",
 			"lifecycle_id", open.ID)
+		// Leak fix: the instance is RUNNING and billing — destroy before the
+		// DB close or nobody ever will. No machine report: the pod may just
+		// have been mid-cold-start when OUR restart interrupted it.
+		vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
 			ShutdownReason: pgtype.Text{String: "gateway_restart_orphan_unhealthy", Valid: true},
@@ -2090,6 +2107,12 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
 		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
+		// Leak fix (THE observed case — lifecycle 189/instance 45098378 kept
+		// billing after this close during the 14a63f3 rollout): destroy the
+		// running-but-unhealthy instance before closing the row. No machine
+		// report: unhealthy here usually means OUR restart interrupted a
+		// legitimate cold start, not a host defect.
+		vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, open.VastInstanceID.Int64)
 		_ = q.ClosePrimaryLifecycle(ctx, gen.ClosePrimaryLifecycleParams{
 			ID:             open.ID,
 			ShutdownReason: pgtype.Text{String: "gateway_restart_orphan_unhealthy", Valid: true},
