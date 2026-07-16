@@ -3442,6 +3442,47 @@ func TestWaitForReady_ReportBlocksIP(t *testing.T) {
 		"a pull-stall fast-fail must blocklist the host's public IP")
 }
 
+// TestWaitForReady_HealthTimeout_DoesNotBlockIP — a blown coldstart budget is
+// AMBIGUOUS (slow-but-legit host), so health_timeout reports to Vast but must
+// NOT IP-block: banning the IP for 24h would break the retry-on-same-host
+// path (the supervisord autorestart flow re-provisions the same host after a
+// first health_timeout and MUST be allowed to succeed).
+func TestWaitForReady_HealthTimeout_DoesNotBlockIP(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	s := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			// Healthy-looking loading pod that simply never becomes ready.
+			return vast.Instance{ID: 44, MachineID: 77, PublicIPAddr: "203.0.113.7",
+				ActualStatus: "loading"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(), Redis: rdb,
+		HealthCheck: func(_ context.Context, _ string) bool { return false },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	// Tiny coldstart budget so the deadline fires quickly.
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 1, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 44, 0.30, testLogger())
+
+	require.Error(t, err)
+	require.True(t, rr.has("health_timeout"), "close reason must be health_timeout")
+	require.False(t, s.Exists("gw:primary:blockip:203.0.113.7"),
+		"health_timeout must NOT blocklist the IP (ambiguous, breaks same-host retry)")
+}
+
 // TestWaitForReady_BlockedIP_FastFails — a fresh instance whose public IP is
 // already on the blocklist (a sibling machine behind the same NAT failed
 // within blockIPTTL) must die in one poll with blocklisted_ip and NO Vast

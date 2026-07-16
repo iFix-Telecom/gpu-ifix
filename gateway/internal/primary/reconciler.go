@@ -1673,11 +1673,11 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var lastLogFetchAt time.Time // sub-cadence gate
 	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
 
-	// Machine id + public IP from the last healthy GetInstance poll — the
-	// deadline (health_timeout) case fires with no inst in scope, but should
-	// still report the machine to Vast + IP-blocklist it before destroying.
+	// Machine id from the last healthy GetInstance poll — the deadline
+	// (health_timeout) case fires with no inst in scope, but should still
+	// report the machine to Vast before destroying. (No IP tracking: the
+	// deadline deliberately does NOT IP-block — see the deadline case.)
 	var lastMachineID int64
-	var lastPublicIP string
 
 	// ipChecked gates the one-shot IP-blocklist check: runs on the FIRST poll
 	// whose public_ipaddr is non-empty (Vast populates it before actual_status
@@ -1695,7 +1695,14 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
 			return "cancelled_in_flight", ctx.Err()
 		case <-deadline.C:
-			r.bestEffortReportMachine(ctx, lastMachineID, instanceID, lastPublicIP, vast.ReportProblemTooLongToLoad,
+			// ip="" — health_timeout REPORTS but does NOT IP-block: a blown
+			// coldstart budget is ambiguous (slow-but-legit host, transient
+			// congestion), and banning the IP for 24h would break the designed
+			// retry-on-same-host path (observed: the supervisord autorestart
+			// integration test loops health_timeout → blocklisted_ip forever).
+			// Only unambiguous host defects (pull stall, created stuck, byte
+			// freeze, port bind, status_msg error) block the IP.
+			r.bestEffortReportMachine(ctx, lastMachineID, instanceID, "", vast.ReportProblemTooLongToLoad,
 				fmt.Sprintf("Automated report: instance never became healthy within the %ds cold-start budget (all endpoints unreachable or unhealthy for the whole window).", hot.ColdStartBudgetS), log)
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
@@ -1728,14 +1735,11 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// single transient null between healthy polls does not trip the
 			// 3-strike close. Mirrors the terminalStrikes reset below.
 			notFoundStrikes = 0
-			// Track machine id + public IP for the deadline (health_timeout)
-			// report — the deadline case fires outside the poll body, with no
-			// inst in scope.
+			// Track the machine id for the deadline (health_timeout) report —
+			// the deadline case fires outside the poll body, with no inst in
+			// scope.
 			if inst.MachineID != 0 {
 				lastMachineID = inst.MachineID
-			}
-			if inst.PublicIPAddr != "" {
-				lastPublicIP = inst.PublicIPAddr
 			}
 			// IP-blocklist gate (one-shot, first poll with a populated IP): a
 			// sibling machine behind this NAT already burned a lifecycle on a
