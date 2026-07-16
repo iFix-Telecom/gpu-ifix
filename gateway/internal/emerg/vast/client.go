@@ -339,6 +339,39 @@ func (c *Client) GetInstance(ctx context.Context, instanceID int64) (Instance, e
 	return Instance{}, fmt.Errorf("vast: instances field is neither object nor non-empty array")
 }
 
+// ReportMachine issues PUT /machines/{machine_id}/report/ — files a
+// bad-machine report with Vast.ai (the console UI "Report Machine" action).
+// See ReportMachineRequest for the active-instance constraint: this must be
+// called BEFORE DestroyInstance or Vast rejects it with 403.
+func (c *Client) ReportMachine(ctx context.Context, machineID int64, body ReportMachineRequest) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("vast: marshal report request: %w", err)
+	}
+	u := fmt.Sprintf("%s/machines/%d/report/", c.baseURL, machineID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	c.setAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("report", "started").Inc()
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		obs.GatewayVastAPIRequestsTotal.WithLabelValues("report", "transport_error").Inc()
+		return err
+	}
+	defer resp.Body.Close()
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("report", strconv.Itoa(resp.StatusCode)).Inc()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseErrorBody(resp)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
+	return nil
+}
+
 // DestroyInstance issues DELETE /instances/{id}/ and returns nil on HTTP
 // 200 OR on 404 + no_such_instance (idempotent — the instance is gone
 // either way, which is what the caller wanted).

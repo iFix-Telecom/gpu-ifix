@@ -1506,6 +1506,30 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // Returns the close REASON string alongside the error so the caller's
 // recordProvisionOutcome hook (BL-01) can classify machine-attributable
 // failures. Success returns ("ready", nil).
+// bestEffortReportMachine files a Vast bad-machine report for a provisioning
+// fast-fail. MUST run BEFORE BestEffortDestroy — Vast rejects reports (403)
+// once the account has no active instance on the machine. Best-effort:
+// failures are logged, never block or reorder the close path. machineID==0
+// (instance never reported one) skips silently.
+func (r *Reconciler) bestEffortReportMachine(ctx context.Context, machineID, instanceID int64, problem, message string, log *slog.Logger) {
+	if r.deps.Vast == nil || machineID == 0 {
+		return
+	}
+	err := r.deps.Vast.ReportMachine(ctx, machineID, vast.ReportMachineRequest{
+		InstanceID: instanceID,
+		Problem:    problem,
+		Message:    message,
+	})
+	if err != nil {
+		log.Warn("primary provisioning: Vast machine report failed",
+			"machine_id", machineID, "vast_instance_id", instanceID,
+			"problem", problem, "err", err)
+		return
+	}
+	log.Info("primary provisioning: bad machine reported to Vast",
+		"machine_id", machineID, "vast_instance_id", instanceID, "problem", problem)
+}
+
 func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, instanceID int64, acceptedDPH float64, log *slog.Logger) (string, error) {
 	poll := time.NewTicker(primaryInstancePollIntervalForTest)
 	defer poll.Stop()
@@ -1609,13 +1633,22 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var lastLogFetchAt time.Time // sub-cadence gate
 	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
 
+	// Machine id from the last healthy GetInstance poll — the deadline
+	// (health_timeout) case fires with no inst in scope, but should still
+	// report the machine to Vast before destroying.
+	var lastMachineID int64
+
 	for {
 		select {
 		case <-ctx.Done():
+			// No machine report: a cancelled provision (shutdown/leader change)
+			// says nothing about the host's health.
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
 			return "cancelled_in_flight", ctx.Err()
 		case <-deadline.C:
+			r.bestEffortReportMachine(ctx, lastMachineID, instanceID, vast.ReportProblemTooLongToLoad,
+				fmt.Sprintf("Automated report: instance never became healthy within the %ds cold-start budget (all endpoints unreachable or unhealthy for the whole window).", hot.ColdStartBudgetS), log)
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
 			return "health_timeout", errors.New("primary: cold-start budget exhausted")
@@ -1647,6 +1680,12 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// single transient null between healthy polls does not trip the
 			// 3-strike close. Mirrors the terminalStrikes reset below.
 			notFoundStrikes = 0
+			// Track the machine id for the deadline (health_timeout) report —
+			// the deadline case fires outside the poll body, with no inst in
+			// scope.
+			if inst.MachineID != 0 {
+				lastMachineID = inst.MachineID
+			}
 			// Reviews #11 — Vast `status_msg` early-abort.
 			msg := strings.TrimSpace(inst.StatusMsg)
 			lower := strings.ToLower(msg)
@@ -1659,6 +1698,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				forensicsReason := "vast_status_msg_error:" + trunc
 				log.Error("primary provisioning: Vast reported instance error",
 					"instance_id", instanceID, "status_msg", msg)
+				r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+					"Automated report: Vast status_msg reported an error during provisioning: "+trunc, log)
 				vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 				_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
 				return forensicsReason, errors.New(forensicsReason)
@@ -1675,6 +1716,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"instance_id", instanceID, "status_msg", msg,
 					"strike", pullRetryStrikes, "confirm_at", terminalConfirmStrikes)
 				if pullRetryStrikes >= terminalConfirmStrikes {
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+						"Automated report: docker image pull stuck in a retry loop (status_msg: "+msg+"); host appears to have a broken route to the registry.", log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "vast_pull_retry_stall", 0)
 					return "vast_pull_retry_stall", errors.New("primary: docker pull retry stall")
@@ -1697,6 +1740,10 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"intended_status", inst.IntendedStatus,
 					"strike", terminalStrikes, "confirm_at", terminalConfirmStrikes)
 				if terminalStrikes >= terminalConfirmStrikes {
+					// No machine report here: terminal/stopped is ambiguous —
+					// intended=stopped may be OUR billing stop (zero credit),
+					// not the host's fault. Only unambiguous host defects
+					// (pull stall, created stuck, port bind, timeouts) report.
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "instance_terminal_state", 0)
 					return "instance_terminal_state", errors.New("primary: instance terminal")
@@ -1744,6 +1791,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 							"max_bytes", maxBytes,
 							"stall_s", int(time.Since(lastProgressAt).Seconds()),
 							"budget_s", hot.ProgressStallBudgetS)
+						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemTooLongToLoad,
+							fmt.Sprintf("Automated report: weights download bytes frozen for %ds (no progress past %d bytes) — host network stalled mid-download.", int(time.Since(lastProgressAt).Seconds()), maxBytes), log)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
 						return "progress_stall_timeout", errors.New("primary: download progress stalled (regime 3)")
@@ -1776,6 +1825,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					// `>=` (not `>`) so a budget of 0 fires on the first post-anchor
 					// created poll — deterministic timeout test (mirrors port-bind).
 					if elapsed >= createdBudget {
+						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+							fmt.Sprintf("Automated report: instance stuck in %s for %ds without ever advancing to loading — host never picked up the container.", inst.ActualStatus, int(elapsed.Seconds())), log)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
 						return "created_state_timeout", errors.New("primary: created-state budget exhausted (host morto)")
@@ -1839,6 +1890,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// poll — required for the deterministic timeout test (finding #7).
 				// enforce=false while the download is in flight — no false kill.
 				if enforce && elapsed >= portBindBudget {
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemPortIssues,
+						fmt.Sprintf("Automated report: instance running for %ds but Vast never published public port mappings.", int(elapsed.Seconds())), log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
 					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")
@@ -1872,6 +1925,8 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// poll — required for the deterministic timeout test.
 				// enforce=false while the download is in flight — no false kill.
 				if enforce && elapsed >= portBindBudget {
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemPortIssues,
+						fmt.Sprintf("Automated report: instance running with published ports but host is TCP-unreachable from outside for %ds (dial timeout / no route).", int(elapsed.Seconds())), log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
 					return "public_port_bind_timeout", errors.New("primary: public port bind timeout")

@@ -606,6 +606,42 @@ func TestDestroyInstance_500_Surfaces(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, ve.Status)
 }
 
+// TestReportMachine_HappyPath — PUT /machines/{id}/report/ with the
+// {instance_id, problem, message} body (console-UI shape) returns nil on 200.
+func TestReportMachine_HappyPath(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method)
+		require.Equal(t, "/machines/141296/report/", r.URL.Path)
+		var body ReportMachineRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, int64(44988484), body.InstanceID)
+		require.Equal(t, ReportProblemUnableToStart, body.Problem)
+		require.NotEmpty(t, body.Message)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	require.NoError(t, c.ReportMachine(context.Background(), 141296, ReportMachineRequest{
+		InstanceID: 44988484,
+		Problem:    ReportProblemUnableToStart,
+		Message:    "pull stuck retrying",
+	}))
+}
+
+// TestReportMachine_403_Surfaces — Vast rejects reports without an active
+// instance on the machine (observed live 2026-07-16: 403 "You can only
+// report machines on which you have an active instance"). parseErrorBody
+// folds 401/403 into ErrUnauthorized; it must surface so the best-effort
+// caller can log it, never panic or retry-loop.
+func TestReportMachine_403_Surfaces(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"success":false,"error":"unauthorized","msg":"You can only report machines on which you have an active instance"}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	err := c.ReportMachine(context.Background(), 141296, ReportMachineRequest{InstanceID: 1, Problem: ReportProblemPortIssues, Message: "x"})
+	require.ErrorIs(t, err, ErrUnauthorized)
+}
+
 // TestVastError_NeverIncludesAPIKey — VastError.Error() formatting must
 // not include any apiKey-derived data, even if the caller wraps with %w.
 func TestVastError_NeverIncludesAPIKey(t *testing.T) {

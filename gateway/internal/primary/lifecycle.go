@@ -35,6 +35,11 @@ type VastAPI interface {
 	// ponytail: the interface gains ONE method; RequestLogs/FetchLogs stay
 	// concrete on *vast.Client (only OnstartLog is called via r.deps.Vast).
 	OnstartLog(ctx context.Context, instanceID int64) (vast.OnstartLogResult, error)
+	// ReportMachine files a bad-machine report with Vast (console "Report
+	// Machine" action). Called best-effort by the provisioning fast-fail
+	// paths BEFORE BestEffortDestroy — Vast 403s reports once the account
+	// has no active instance on the machine.
+	ReportMachine(ctx context.Context, machineID int64, body vast.ReportMachineRequest) error
 }
 
 // LoaderAdapter is the surface the primary reconciler consumes from the

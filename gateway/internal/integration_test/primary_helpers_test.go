@@ -144,6 +144,11 @@ func (f *fakeVastPrimary) OnstartLog(_ context.Context, _ int64) (vast.OnstartLo
 	return vast.OnstartLogResult{Status: vast.OnstartLogNotReady}, nil
 }
 
+func (f *fakeVastPrimary) ReportMachine(_ context.Context, _ int64, _ vast.ReportMachineRequest) error {
+	// Best-effort report — integration harness accepts and discards it.
+	return nil
+}
+
 // HasDestroyed returns true if DestroyInstance was called with id.
 func (f *fakeVastPrimary) HasDestroyed(id int64) bool {
 	_, ok := f.Destroyed.Load(id)

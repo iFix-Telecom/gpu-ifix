@@ -216,6 +216,28 @@ func (i Instance) IsTerminal() bool {
 	return false
 }
 
+// ReportMachineRequest is the JSON body of PUT /machines/{machine_id}/report/
+// — the API behind the console UI's "Report Machine" button. NOT in the
+// documented OpenAPI/CLI/SDK surface (extracted from the console JS bundle
+// 2026-07-16). Vast only accepts a report while the reporting account has an
+// ACTIVE instance on the machine (403 "You can only report machines on which
+// you have an active instance" otherwise) — callers MUST report BEFORE
+// destroying the instance.
+type ReportMachineRequest struct {
+	InstanceID int64  `json:"instance_id"`
+	Problem    string `json:"problem"`
+	Message    string `json:"message"`
+}
+
+// Report problem categories accepted by PUT /machines/{id}/report/ — the
+// EXACT console-UI dropdown strings (same bundle extraction). Vast matches
+// these verbatim; do not localize or reword.
+const (
+	ReportProblemUnableToStart = "Unable To Start Instance"
+	ReportProblemTooLongToLoad = "Instance Takes Too Long To Load"
+	ReportProblemPortIssues    = "Machine Has Port Issues"
+)
+
 // CreateRequest is the JSON body of PUT /asks/{offer_id}/.
 //
 // `Env` map keys are the literal strings Vast.ai uses to forward `docker

@@ -90,6 +90,27 @@ type fakeVast struct {
 	onstartLogFn     func(ctx context.Context, id int64) (vast.OnstartLogResult, error)
 
 	destroyCalls atomic.Int32
+
+	// reportCalls records ReportMachine invocations (machineID + problem) so
+	// tests can assert the bad-host report fired before the destroy.
+	reportCalls []vast.ReportMachineRequest
+}
+
+func (f *fakeVast) ReportMachine(_ context.Context, machineID int64, body vast.ReportMachineRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reportCalls = append(f.reportCalls, body)
+	return nil
+}
+
+func (f *fakeVast) reportedProblems() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.reportCalls))
+	for i, c := range f.reportCalls {
+		out[i] = c.Problem
+	}
+	return out
 }
 
 func (f *fakeVast) SearchOffers(ctx context.Context, filter vast.SearchFilter) ([]vast.Offer, error) {
@@ -3379,6 +3400,8 @@ func TestWaitForReady_IntendedStopped_Destroys(t *testing.T) {
 	require.Error(t, err, "intended_status=stopped must fast-fail provisioning")
 	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once")
 	require.True(t, rr.has("instance_terminal_state"), "close reason must be instance_terminal_state")
+	require.Empty(t, fakeV.reportedProblems(),
+		"terminal/stopped must NOT file a machine report — may be our own billing stop, not the host's fault")
 }
 
 // TestWaitForReady_PullRetrying_Destroys — a host stuck retrying a docker layer
@@ -3390,7 +3413,7 @@ func TestWaitForReady_PullRetrying_Destroys(t *testing.T) {
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
 	fakeV := &fakeVast{
 		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
-			return vast.Instance{ID: 42, ActualStatus: "loading", StatusMsg: "a1b2c3: Retrying in 1 second"}, nil
+			return vast.Instance{ID: 42, MachineID: 141296, ActualStatus: "loading", StatusMsg: "a1b2c3: Retrying in 1 second"}, nil
 		},
 	}
 	rr := &reasonRecorder{}
@@ -3410,6 +3433,8 @@ func TestWaitForReady_PullRetrying_Destroys(t *testing.T) {
 	require.Error(t, err, "a stuck pull (Retrying) must fast-fail provisioning")
 	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "BestEffortDestroy must fire once")
 	require.True(t, rr.has("vast_pull_retry_stall"), "close reason must be vast_pull_retry_stall")
+	require.Equal(t, []string{vast.ReportProblemUnableToStart}, fakeV.reportedProblems(),
+		"a pull-stall close must file exactly one Vast machine report (Unable To Start Instance) before the destroy")
 }
 
 // TestWaitForReady_TransientRetryThenLoading_NoFire — one Retrying poll followed
