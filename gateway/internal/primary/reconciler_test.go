@@ -3408,6 +3408,86 @@ func TestCreatedBudget_BlankStatus_Destroys(t *testing.T) {
 		"blank-status created timeout must report the machine before the destroy")
 }
 
+// TestWaitForReady_ReportBlocksIP — every report-worthy fast-fail must also
+// record the host's public IP on the Redis blocklist (report ⇒ IP-block).
+func TestWaitForReady_ReportBlocksIP(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	s := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			return vast.Instance{ID: 42, MachineID: 56883, PublicIPAddr: "120.238.149.205",
+				ActualStatus: "loading", StatusMsg: "a1b2c3: Retrying in 1 second"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(), Redis: rdb,
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = mustErr(runWait(r, ctx, 99, 42, 0.30, testLogger()))
+
+	require.True(t, s.Exists("gw:primary:blockip:120.238.149.205"),
+		"a pull-stall fast-fail must blocklist the host's public IP")
+}
+
+// TestWaitForReady_BlockedIP_FastFails — a fresh instance whose public IP is
+// already on the blocklist (a sibling machine behind the same NAT failed
+// within blockIPTTL) must die in one poll with blocklisted_ip and NO Vast
+// report (guilt by shared link is not new defect evidence). The observed case:
+// machines 56883 + 59295 behind 120.238.149.205, each wasting a full ~17GiB
+// download on the same broken link (2026-07-16).
+func TestWaitForReady_BlockedIP_FastFails(t *testing.T) {
+	withTestPollInterval(t, 2*time.Millisecond)
+	s := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	require.NoError(t, s.Set("gw:primary:blockip:120.238.149.205", "machine=56883 problem=x"))
+	cfg := testCfg(t)
+	fsm := NewFSM(nil, nil)
+	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
+	fakeV := &fakeVast{
+		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
+			// A different machine_id behind the SAME public IP, healthy-looking.
+			return vast.Instance{ID: 43, MachineID: 59295, PublicIPAddr: "120.238.149.205",
+				ActualStatus: "loading"}, nil
+		},
+	}
+	rr := &reasonRecorder{}
+	r := buildReconciler(t, Deps{
+		Cfg: cfg, FSM: fsm, Rule: alwaysInPeakRule(), Redis: rdb,
+		HealthCheck: func(_ context.Context, _ string) bool { return true },
+		Vast:        fakeV,
+	})
+	r.SetQueriesForTest(gen.New(newCloseReasonDBTX(rr)))
+	r.activeLifecycleID.Store(99)
+	setProvisionCfgForTest(r, podconfig.PodConfig{CreatedBudgetS: 60, ColdStartBudgetS: 30, PortBindBudgetS: 600})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runWait(r, ctx, 99, 43, 0.30, testLogger())
+
+	require.Error(t, err, "blocked IP must fast-fail")
+	require.True(t, rr.has("blocklisted_ip"), "close reason must be blocklisted_ip")
+	require.Equal(t, int32(1), fakeV.destroyCalls.Load(), "must destroy the instance")
+	require.Empty(t, fakeV.reportedProblems(), "blocked-IP kill must NOT file a Vast report")
+}
+
+// mustErr passes err through, asserting non-nil at the call site keeps the
+// linter happy for tests that only care about side effects.
+func mustErr(err error) error { return err }
+
 // TestWaitForReady_IntendedStopped_Destroys — Vast reports intended_status=stopped
 // (billing/host stop) while actual_status is still non-terminal ("loading"), the
 // case IsTerminal() misses. Must fast-fail via the 3-strike terminal path instead
@@ -4266,7 +4346,7 @@ func TestProvisionLifecycle_PrePickFailure_NoListWrite(t *testing.T) {
 }
 
 func TestMachineAttributableReason(t *testing.T) {
-	machine := []string{"created_state_timeout", "instance_terminal_state", "instance_terminal_state_confirmed", "public_port_bind_timeout"}
+	machine := []string{"created_state_timeout", "instance_terminal_state", "instance_terminal_state_confirmed", "public_port_bind_timeout", "blocklisted_ip"}
 	for _, m := range machine {
 		require.True(t, machineAttributableReason(m), "%q must be machine-attributable", m)
 	}

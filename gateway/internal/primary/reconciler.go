@@ -1506,12 +1506,52 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 // Returns the close REASON string alongside the error so the caller's
 // recordProvisionOutcome hook (BL-01) can classify machine-attributable
 // failures. Success returns ("ready", nil).
+// blockIPTTL bounds the Redis IP-blocklist entries. Rationale for a TTL (vs
+// the permanent pod_config machine blocklist): the IP block is written on
+// EVERY report-worthy fast-fail — including progress_stall_timeout, which
+// Codex #9 flagged as potentially GLOBAL (a broken R2 stalls every host). A
+// 24h expiry caps the blast radius of a global outage to one day of blocked
+// IPs, while still covering the observed failure mode: one datacenter NAT
+// (one public IP) fronting several Vast machine_ids, each a "new" machine to
+// the selector (2026-07-16: machines 56883 + 59295 behind 120.238.149.205,
+// both wasted a full download before dying).
+const blockIPTTL = 24 * time.Hour
+
+func blockIPKey(ip string) string { return "gw:primary:blockip:" + ip }
+
+// blockIP records a bad host's public IP in Redis (TTL blockIPTTL).
+// Best-effort: nil Redis / write error logs and moves on.
+func (r *Reconciler) blockIP(ctx context.Context, ip, note string, log *slog.Logger) {
+	if r.deps.Redis == nil || ip == "" {
+		return
+	}
+	if err := r.deps.Redis.Set(ctx, blockIPKey(ip), note, blockIPTTL).Err(); err != nil {
+		log.Warn("primary provisioning: IP blocklist write failed", "ip", ip, "err", err)
+		return
+	}
+	log.Info("primary provisioning: IP blocklisted", "ip", ip, "ttl_h", 24, "note", note)
+}
+
+// ipBlocked reports whether ip is on the Redis IP blocklist. Fail-open: nil
+// Redis / read error returns false (never blocks provisioning on Redis).
+func (r *Reconciler) ipBlocked(ctx context.Context, ip string) bool {
+	if r.deps.Redis == nil || ip == "" {
+		return false
+	}
+	n, err := r.deps.Redis.Exists(ctx, blockIPKey(ip)).Result()
+	return err == nil && n > 0
+}
+
 // bestEffortReportMachine files a Vast bad-machine report for a provisioning
-// fast-fail. MUST run BEFORE BestEffortDestroy — Vast rejects reports (403)
-// once the account has no active instance on the machine. Best-effort:
-// failures are logged, never block or reorder the close path. machineID==0
-// (instance never reported one) skips silently.
-func (r *Reconciler) bestEffortReportMachine(ctx context.Context, machineID, instanceID int64, problem, message string, log *slog.Logger) {
+// fast-fail AND blocklists the host's public IP (report ⇒ IP-block: every
+// reason bad enough to tell Vast about is bad enough to avoid for 24h — the
+// offer feed carries no IP, so the IP can only be learned here, post-create).
+// MUST run BEFORE BestEffortDestroy — Vast rejects reports (403) once the
+// account has no active instance on the machine. Best-effort: failures are
+// logged, never block or reorder the close path. machineID==0 (instance never
+// reported one) skips the report; ip=="" skips the IP block.
+func (r *Reconciler) bestEffortReportMachine(ctx context.Context, machineID, instanceID int64, ip, problem, message string, log *slog.Logger) {
+	r.blockIP(ctx, ip, fmt.Sprintf("machine=%d problem=%s", machineID, problem), log)
 	if r.deps.Vast == nil || machineID == 0 {
 		return
 	}
@@ -1633,10 +1673,18 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 	var lastLogFetchAt time.Time // sub-cadence gate
 	progressStallBudget := time.Duration(hot.ProgressStallBudgetS) * time.Second
 
-	// Machine id from the last healthy GetInstance poll — the deadline
-	// (health_timeout) case fires with no inst in scope, but should still
-	// report the machine to Vast before destroying.
+	// Machine id + public IP from the last healthy GetInstance poll — the
+	// deadline (health_timeout) case fires with no inst in scope, but should
+	// still report the machine to Vast + IP-blocklist it before destroying.
 	var lastMachineID int64
+	var lastPublicIP string
+
+	// ipChecked gates the one-shot IP-blocklist check: runs on the FIRST poll
+	// whose public_ipaddr is non-empty (Vast populates it before actual_status
+	// on some hosts). A blocked IP means another machine behind the same NAT
+	// already failed a report-worthy fast-fail within blockIPTTL — kill in
+	// seconds instead of wasting a full download on the same broken link.
+	var ipChecked bool
 
 	for {
 		select {
@@ -1647,7 +1695,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "cancelled_in_flight", 0)
 			return "cancelled_in_flight", ctx.Err()
 		case <-deadline.C:
-			r.bestEffortReportMachine(ctx, lastMachineID, instanceID, vast.ReportProblemTooLongToLoad,
+			r.bestEffortReportMachine(ctx, lastMachineID, instanceID, lastPublicIP, vast.ReportProblemTooLongToLoad,
 				fmt.Sprintf("Automated report: instance never became healthy within the %ds cold-start budget (all endpoints unreachable or unhealthy for the whole window).", hot.ColdStartBudgetS), log)
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 			_ = r.closeLifecycle(context.Background(), lifecycleID, "health_timeout", 0)
@@ -1680,11 +1728,34 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// single transient null between healthy polls does not trip the
 			// 3-strike close. Mirrors the terminalStrikes reset below.
 			notFoundStrikes = 0
-			// Track the machine id for the deadline (health_timeout) report —
-			// the deadline case fires outside the poll body, with no inst in
-			// scope.
+			// Track machine id + public IP for the deadline (health_timeout)
+			// report — the deadline case fires outside the poll body, with no
+			// inst in scope.
 			if inst.MachineID != 0 {
 				lastMachineID = inst.MachineID
+			}
+			if inst.PublicIPAddr != "" {
+				lastPublicIP = inst.PublicIPAddr
+			}
+			// IP-blocklist gate (one-shot, first poll with a populated IP): a
+			// sibling machine behind this NAT already burned a lifecycle on a
+			// report-worthy defect within blockIPTTL. Fail in seconds. No Vast
+			// report (no NEW defect evidence — guilt by shared link); the
+			// blocklisted_ip reason IS machine-attributable, so
+			// recordProvisionOutcome learns this machine_id into the DB
+			// blocklist (the IP→machine_id association the selector cannot see).
+			if !ipChecked && inst.PublicIPAddr != "" {
+				ipChecked = true
+				if r.ipBlocked(ctx, inst.PublicIPAddr) {
+					log.Warn("primary provisioning: public IP is blocklisted; failing fast",
+						"lifecycle_id", lifecycleID,
+						"vast_instance_id", instanceID,
+						"machine_id", inst.MachineID,
+						"public_ipaddr", inst.PublicIPAddr)
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "blocklisted_ip", 0)
+					return "blocklisted_ip", errors.New("primary: host public IP is blocklisted")
+				}
 			}
 			// Reviews #11 — Vast `status_msg` early-abort.
 			msg := strings.TrimSpace(inst.StatusMsg)
@@ -1698,7 +1769,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				forensicsReason := "vast_status_msg_error:" + trunc
 				log.Error("primary provisioning: Vast reported instance error",
 					"instance_id", instanceID, "status_msg", msg)
-				r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+				r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemUnableToStart,
 					"Automated report: Vast status_msg reported an error during provisioning: "+trunc, log)
 				vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 				_ = r.closeLifecycle(context.Background(), lifecycleID, forensicsReason, 0)
@@ -1716,7 +1787,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					"instance_id", instanceID, "status_msg", msg,
 					"strike", pullRetryStrikes, "confirm_at", terminalConfirmStrikes)
 				if pullRetryStrikes >= terminalConfirmStrikes {
-					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemUnableToStart,
 						"Automated report: docker image pull stuck in a retry loop (status_msg: "+msg+"); host appears to have a broken route to the registry.", log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "vast_pull_retry_stall", 0)
@@ -1791,7 +1862,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 							"max_bytes", maxBytes,
 							"stall_s", int(time.Since(lastProgressAt).Seconds()),
 							"budget_s", hot.ProgressStallBudgetS)
-						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemTooLongToLoad,
+						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemTooLongToLoad,
 							fmt.Sprintf("Automated report: weights download bytes frozen for %ds (no progress past %d bytes) — host network stalled mid-download.", int(time.Since(lastProgressAt).Seconds()), maxBytes), log)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
@@ -1832,7 +1903,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 					// `>=` (not `>`) so a budget of 0 fires on the first post-anchor
 					// created poll — deterministic timeout test (mirrors port-bind).
 					if elapsed >= createdBudget {
-						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemUnableToStart,
+						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemUnableToStart,
 							fmt.Sprintf("Automated report: instance stuck in created/blank state (%q) for %ds without ever advancing to loading — host never picked up the container.", inst.ActualStatus, int(elapsed.Seconds())), log)
 						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "created_state_timeout", 0)
@@ -1897,7 +1968,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// poll — required for the deterministic timeout test (finding #7).
 				// enforce=false while the download is in flight — no false kill.
 				if enforce && elapsed >= portBindBudget {
-					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemPortIssues,
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemPortIssues,
 						fmt.Sprintf("Automated report: instance running for %ds but Vast never published public port mappings.", int(elapsed.Seconds())), log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
@@ -1932,7 +2003,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				// poll — required for the deterministic timeout test.
 				// enforce=false while the download is in flight — no false kill.
 				if enforce && elapsed >= portBindBudget {
-					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, vast.ReportProblemPortIssues,
+					r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemPortIssues,
 						fmt.Sprintf("Automated report: instance running with published ports but host is TCP-unreachable from outside for %ds (dial timeout / no route).", int(elapsed.Seconds())), log)
 					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 					_ = r.closeLifecycle(context.Background(), lifecycleID, "public_port_bind_timeout", 0)
@@ -2374,7 +2445,12 @@ func machineAttributableReason(reason string) bool {
 	case "created_state_timeout",
 		"instance_terminal_state",
 		"instance_terminal_state_confirmed",
-		"public_port_bind_timeout":
+		"public_port_bind_timeout",
+		// blocklisted_ip: a sibling machine behind the same public IP already
+		// failed a report-worthy fast-fail. Adding THIS machine_id to the DB
+		// blocklist is the IP→machine learning loop — the offer feed has no
+		// IP, so the selector can only avoid the datacenter via machine_ids.
+		"blocklisted_ip":
 		return true
 	}
 	return false
