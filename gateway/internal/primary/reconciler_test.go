@@ -694,11 +694,11 @@ func TestEvaluateProvisioning_AllFourEndpointsHealthy_PromotesToReady(t *testing
 	err := r.waitForReadyOrDestroyForTest(ctx, 99, 42, 0.30, testLogger(), 50*time.Millisecond)
 	require.NoError(t, err)
 	require.Equal(t, StateReady, r.deps.FSM.State(),
-		"all 4 endpoints healthy + running + ports populated → markReady fires + FSM → Ready")
+		"all 3 endpoints healthy + running + ports populated → markReady fires + FSM → Ready")
 	snap := loader.snapshot()
 	require.Contains(t, snap, "llm", "OverrideTier0('llm', URL) must fire")
 	require.Contains(t, snap, "stt", "OverrideTier0('stt', URL) must fire (Phase 11.2 D-B5′ — restored)")
-	require.Contains(t, snap, "tts", "OverrideTier0('tts', URL) must fire")
+	require.NotContains(t, snap, "tts", "Phase 21: tts removed — no tts override")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the 9400 host mapping")
 }
@@ -794,7 +794,7 @@ func TestEvaluateProvisioning_WhisperDevice(t *testing.T) {
 
 			snap := loader.snapshot()
 			require.Contains(t, snap, "llm", "llm override must always fire")
-			require.Contains(t, snap, "tts", "tts override must always fire")
+			require.NotContains(t, snap, "tts", "Phase 21: tts removed — no tts override")
 			if tc.wantSTT {
 				require.Contains(t, snap, "stt", tc.assertNote)
 				require.Equal(t, "cuda", active.WhisperDevice,
@@ -825,9 +825,9 @@ func TestEvaluateProvisioning_OneEndpointUnhealthy_DoesNotPromote(t *testing.T) 
 		Rule:        alwaysInPeakRule(),
 		HealthCheck: func(_ context.Context, url string) bool {
 			probeCalls.Add(1)
-			// LLM/STT/TTS healthy except the tts (8003) endpoint, which
+			// LLM/STT/DCGM healthy except the STT (8001) endpoint, which
 			// is broken — provisioning must NOT promote to Ready.
-			return !contains(url, ":33003") // tts broken
+			return !contains(url, ":33001") // stt broken (Phase 21: 3-endpoint gate, was tts:33003)
 		},
 		Vast: &fakeVast{
 			getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
@@ -1311,7 +1311,6 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1327,7 +1326,7 @@ func TestEvaluateReady_TransitionsToDrainingOutOfPeak(t *testing.T) {
 		"evaluateReady with !IsInPeak must transition Ready→Draining")
 	require.NotNil(t, r.drainStartedAt.Load(), "drainStartedAt populated")
 	roles := loader.restoredRoles()
-	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+	require.Equal(t, []string{"llm", "stt"}, roles,
 		"startDrain must RestoreTier0 for the 3 primary roles (llm+stt+tts) in order — Phase 11.2 D-B5′ restored stt")
 }
 
@@ -1368,7 +1367,6 @@ func TestEvaluateReady_DoesNotDrainDuringPreWarmLead(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1402,7 +1400,6 @@ func TestEvaluateReady_DrainsAfterDownHour(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1432,7 +1429,6 @@ func TestEvaluateReady_DoesNotDrainDuringPeak(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1541,17 +1537,16 @@ func TestMarkReady_OverridesTier0_2Roles(t *testing.T) {
 	urls := primaryPodURLs{
 		LLM:           "http://1.2.3.4:33000/v1/models",
 		STT:           "http://1.2.3.4:33001/health",
-		TTS:           "http://1.2.3.4:33003/health",
 		DCGM:          "http://1.2.3.4:33400/metrics",
 		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 	err := r.markReady(context.Background(), 5, urls, 0.30, testLogger())
 	require.NoError(t, err)
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
+	require.Len(t, snap, 2, "exactly 2 OverrideTier0 calls (llm+stt; Phase 21 removed tts)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
-	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
+	require.NotContains(t, snap, "tts", "Phase 21: no tts override")
 	require.Equal(t, urls.DCGM, dcgm.Last(), "DCGM URL passed verbatim to scraper")
 	require.Equal(t, StateReady, r.deps.FSM.State())
 }
@@ -1571,7 +1566,6 @@ func TestMarkReady_SetsDCGMScraperURL(t *testing.T) {
 	r.SetQueriesForTest(gen.New(dbtx))
 	urls := primaryPodURLs{
 		LLM:  "http://1.2.3.4:33000/v1/models",
-		TTS:  "http://1.2.3.4:33003/health",
 		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
@@ -1585,7 +1579,6 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
 	loader.OverrideTier0("stt", "http://x")
-	loader.OverrideTier0("tts", "http://x")
 	infl := newFakeInflight() // all zero → immediate destroy
 	fakeV := &fakeVast{}
 	r := buildReconciler(t, Deps{
@@ -1615,8 +1608,8 @@ func TestDrain_RestoreTier0CalledBeforeDestroy(t *testing.T) {
 	// startDrain wasn't called in this flow (we pre-set FSM=Draining), but
 	// closeLifecycle in evaluateDestroying also defensively RestoresTier0.
 	restored := loader.restoredRoles()
-	require.GreaterOrEqual(t, len(restored), 3,
-		"closeLifecycle must defensively RestoreTier0 for the 3 roles (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
+	require.GreaterOrEqual(t, len(restored), 2,
+		"closeLifecycle must defensively RestoreTier0 for the 2 roles (llm+stt; Phase 21 removed tts)")
 }
 
 // ===========================================================================
@@ -1717,7 +1710,6 @@ func TestHandleForceDownRequest_TransitionsReadyToDraining(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://x")
 	loader.OverrideTier0("stt", "http://x")
-	loader.OverrideTier0("tts", "http://x")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -1957,7 +1949,7 @@ func TestRecoverOpenLifecycle_HealthyInstanceRestoresReady(t *testing.T) {
 	require.Equal(t, int64(100), r.activeLifecycleID.Load())
 	require.Equal(t, int64(42), r.activeInstanceID.Load())
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "3-role OverrideTier0 must fire on recovery (llm+stt+tts; Phase 11.2 D-B5′ restored stt)")
+	require.Len(t, snap, 2, "2-role OverrideTier0 must fire on recovery (llm+stt; Phase 21 removed tts)")
 	require.Contains(t, dcgm.Last(), ":33400/metrics",
 		"DCGMScraper.SetURL must point at the recovered pod's DCGM endpoint")
 }
@@ -2469,14 +2461,14 @@ func (r *Reconciler) waitForReadyOrDestroyForTest(ctx context.Context, lifecycle
 				continue
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.TTS == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.STT == "" || urls.DCGM == "" {
 				continue
 			}
 			if r.deps.HealthCheck == nil {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.LLM) ||
-				!r.deps.HealthCheck(ctx, urls.TTS) ||
+				!r.deps.HealthCheck(ctx, urls.STT) ||
 				!r.deps.HealthCheck(ctx, urls.DCGM) {
 				continue
 			}
@@ -2541,7 +2533,6 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	urls := primaryPodURLs{
 		LLM:           "http://203.0.113.7:33000/v1/models",
 		STT:           "http://203.0.113.7:33001/health",
-		TTS:           "http://203.0.113.7:33003/health",
 		DCGM:          "http://203.0.113.7:33400/metrics",
 		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt re-assert fires
 	}
@@ -2550,8 +2541,8 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	r.evaluateReady(context.Background(), time.Now(), testLogger())
 
 	snap := loader.snapshot()
-	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
-		"evaluateReady must re-assert the cleared tts slot (stripped /health)")
+	_, ttsSet := snap["tts"]
+	require.False(t, ttsSet, "Phase 21: tts removed — must NOT be re-asserted")
 	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
 		"evaluateReady must re-assert the cleared stt slot (Phase 11.2 D-B5′ restored)")
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
@@ -2560,15 +2551,11 @@ func TestEvaluateReady_ReassertsTier0WhenCleared(t *testing.T) {
 	require.False(t, embedSet, "embed must NEVER be re-asserted by the primary reconciler (D-03)")
 }
 
-// TestMarkReady_OverridesTTSNotEmbed asserts that when the primary pod
-// reaches StatePrimaryReady, markReady calls loader.OverrideTier0 for "llm",
-// "stt", and "tts" (the swapped role) and does NOT call it for "embed"
-// (relocated off the primary pod per D-11). This replaces the Phase 6.6
-// {llm,stt,embed} override set with the Phase 06.7 {llm,stt,tts} set.
-//
-// OWNER: Plan 06.7-08 — update markReady role set to {llm,stt,tts}, unskip,
-// and assert OverrideTier0 fired for tts + NOT for embed before COMPLETE.
-func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
+// TestMarkReady_OverridesLLMSTTNotTTSNotEmbed asserts that when the primary
+// pod reaches StatePrimaryReady, markReady calls loader.OverrideTier0 for
+// "llm" and "stt" ONLY — NOT "tts" (Phase 21: Chatterbox removed from the
+// pod) and NOT "embed" (relocated off the primary pod per D-03).
+func TestMarkReady_OverridesLLMSTTNotTTSNotEmbed(t *testing.T) {
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "x")
@@ -2587,17 +2574,17 @@ func TestMarkReady_OverridesTTSNotEmbed(t *testing.T) {
 	urls := primaryPodURLs{
 		LLM:           "http://1.2.3.4:33000/v1/models",
 		STT:           "http://1.2.3.4:33001/health",
-		TTS:           "http://1.2.3.4:33003/health",
 		DCGM:          "http://1.2.3.4:33400/metrics",
 		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
 	require.NoError(t, r.markReady(context.Background(), 5, urls, 0.30, testLogger()))
 
 	snap := loader.snapshot()
-	require.Len(t, snap, 3, "exactly 3 OverrideTier0 calls (llm/stt/tts; Phase 11.2 D-B5′ restored stt)")
+	require.Len(t, snap, 2, "exactly 2 OverrideTier0 calls (llm/stt; Phase 21 removed tts)")
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"], "/v1/models suffix stripped for LLM")
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"], "/health suffix stripped for STT")
-	require.Equal(t, "http://1.2.3.4:33003", snap["tts"], "/health suffix stripped for TTS")
+	_, ttsSet := snap["tts"]
+	require.False(t, ttsSet, "Phase 21: markReady must NOT override tts (Chatterbox removed)")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "markReady must NOT override embed (D-03 — embed is static off-pod)")
 	require.Equal(t, StateReady, r.deps.FSM.State())
@@ -2622,7 +2609,6 @@ func TestStartDrain_RestoreTier0_CalledFor_STT(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -2639,7 +2625,7 @@ func TestStartDrain_RestoreTier0_CalledFor_STT(t *testing.T) {
 	roles := loader.restoredRoles()
 	require.Contains(t, roles, "stt",
 		"startDrain MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
-	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+	require.Equal(t, []string{"llm", "stt"}, roles,
 		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
 }
 
@@ -2667,7 +2653,6 @@ func TestMarkReady_OverrideTier0_CalledFor_STT(t *testing.T) {
 	urls := primaryPodURLs{
 		LLM:           "http://primary:33000/v1/models",
 		STT:           "http://primary:33001/health",
-		TTS:           "http://primary:33003/health",
 		DCGM:          "http://primary:33400/metrics",
 		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
@@ -2689,7 +2674,6 @@ func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://pod:8000")
 	loader.OverrideTier0("stt", "http://pod:8001")
-	loader.OverrideTier0("tts", "http://pod:8003")
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
 		Cfg:    cfg,
@@ -2704,7 +2688,7 @@ func TestCloseLifecycle_RestoreTier0_CalledFor_STT(t *testing.T) {
 	roles := loader.restoredRoles()
 	require.Contains(t, roles, "stt",
 		"closeLifecycle MUST call RestoreTier0(stt) (Phase 11.2 D-B5′)")
-	require.Equal(t, []string{"llm", "stt", "tts"}, roles,
+	require.Equal(t, []string{"llm", "stt"}, roles,
 		"3-role RestoreTier0 order must be llm/stt/tts (Phase 11.2 D-B5′)")
 }
 
@@ -2734,7 +2718,6 @@ func deathPollReady(t *testing.T, vastFn func(ctx context.Context, id int64) (va
 	// Slots set so the Pitfall #11 re-assert loop does not fire.
 	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
 	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
-	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
 	fv := &fakeVast{getInstanceFn: vastFn}
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
@@ -2750,7 +2733,6 @@ func deathPollReady(t *testing.T, vastFn func(ctx context.Context, id int64) (va
 	urls := primaryPodURLs{
 		LLM:  "http://203.0.113.7:33000/v1/models",
 		STT:  "http://203.0.113.7:33001/health",
-		TTS:  "http://203.0.113.7:33003/health",
 		DCGM: "http://203.0.113.7:33400/metrics",
 	}
 	r.activePodURLs.Store(&urls)
@@ -2773,7 +2755,6 @@ func TestEvaluateReady_EmptyTrackedIDReconciles(t *testing.T) {
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
 	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
-	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
 	polled := atomic.Int64{}
 	fv := &fakeVast{getInstanceFn: func(_ context.Context, id int64) (vast.Instance, error) {
 		polled.Store(id)
@@ -2798,7 +2779,7 @@ func TestEvaluateReady_EmptyTrackedIDReconciles(t *testing.T) {
 	r.activeInstanceID.Store(0)
 	urls := primaryPodURLs{
 		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
-		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+		DCGM: "http://203.0.113.7:33400/metrics",
 	}
 	r.activePodURLs.Store(&urls)
 
@@ -2902,7 +2883,7 @@ func TestEvaluateReady_StrikesResetOnEnterReady(t *testing.T) {
 	r.deps.DCGMScraper = dcgm
 	urls := primaryPodURLs{
 		LLM: "http://1.2.3.4:33000/v1/models", STT: "http://1.2.3.4:33001/health",
-		TTS: "http://1.2.3.4:33003/health", DCGM: "http://1.2.3.4:33400/metrics",
+		DCGM: "http://1.2.3.4:33400/metrics",
 	}
 	require.NoError(t, r.markReady(ctx, 8, urls, 0.30, testLogger()))
 	require.Equal(t, 0, r.terminalStrikesForTest(),
@@ -2936,7 +2917,6 @@ func readyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Cl
 	loader := newFakeLoader()
 	loader.OverrideTier0("llm", "http://203.0.113.7:33000")
 	loader.OverrideTier0("stt", "http://203.0.113.7:33001")
-	loader.OverrideTier0("tts", "http://203.0.113.7:33003")
 	rdb, _ := miniredisClient(t)
 	dbtx := &fakeDBTX{}
 	r := buildReconciler(t, Deps{
@@ -2951,7 +2931,7 @@ func readyReconcilerWithRedis(t *testing.T) (*Reconciler, *fakeLoader, *redis.Cl
 	r.activeInstanceID.Store(42)
 	urls := primaryPodURLs{
 		LLM: "http://203.0.113.7:33000/v1/models", STT: "http://203.0.113.7:33001/health",
-		TTS: "http://203.0.113.7:33003/health", DCGM: "http://203.0.113.7:33400/metrics",
+		DCGM: "http://203.0.113.7:33400/metrics",
 	}
 	r.activePodURLs.Store(&urls)
 	return r, loader, rdb
@@ -2975,9 +2955,9 @@ func TestDeath_HostYankDrainsAndForceOpens(t *testing.T) {
 
 	require.Equal(t, StateDraining, r.deps.FSM.State(),
 		"confirmed death must startDrain (Ready→Draining)")
-	require.Equal(t, []string{"llm", "stt", "tts"}, loader.restoredRoles(),
+	require.Equal(t, []string{"llm", "stt"}, loader.restoredRoles(),
 		"startDrain RestoreTier0s the 3 dynamic roles")
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		state, set := forceOverrideState(t, rdb, name)
 		require.True(t, set, "breaker %s must be force-overridden", name)
 		require.Equal(t, "open", state, "breaker %s must be force-OPEN", name)
@@ -2997,7 +2977,7 @@ func TestDeath_BillingStopRecordsSuppression(t *testing.T) {
 	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "billing_stopped"}, testLogger())
 
 	require.Equal(t, StateDraining, r.deps.FSM.State())
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		state, set := forceOverrideState(t, rdb, name)
 		require.True(t, set)
 		require.Equal(t, "open", state)
@@ -3057,7 +3037,7 @@ func TestDeath_BreakersForceOpenedBeforeDestroy(t *testing.T) {
 	r.handleConfirmedDeath(context.Background(), deathClassification{dead: true, cause: "host_death"}, testLogger())
 	require.Equal(t, StateDraining, r.deps.FSM.State(),
 		"after handleConfirmedDeath the FSM is Draining — destroy has NOT yet run")
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		_, set := forceOverrideState(t, rdb, name)
 		require.True(t, set, "breaker %s force-open must be written before destroy", name)
 	}
@@ -3112,7 +3092,6 @@ func markReadyURLs() primaryPodURLs {
 	return primaryPodURLs{
 		LLM:           "http://1.2.3.4:33000/v1/models",
 		STT:           "http://1.2.3.4:33001/health",
-		TTS:           "http://1.2.3.4:33003/health",
 		DCGM:          "http://1.2.3.4:33400/metrics",
 		WhisperDevice: "cuda", // SEED-019 part 3: GPU pod → stt override fires
 	}
@@ -3124,13 +3103,13 @@ func markReadyURLs() primaryPodURLs {
 func TestMarkReady_ResetsStaleBreakers(t *testing.T) {
 	r, _, rdb := markReadyReconcilerWithRedis(t)
 	// Simulate a stale OPEN inherited from the previous dead pod's death path.
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		require.NoError(t, breaker.WriteForceOverride(context.Background(), rdb, name, "open", 10*time.Minute, "prev_death"))
 	}
 
 	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
 
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		state, _, set, err := breakerReadForce(t, rdb, name)
 		require.NoError(t, err)
 		require.True(t, set, "breaker %s must still be force-overridden (now closed)", name)
@@ -3146,13 +3125,13 @@ func TestMarkReady_ForceCloseAfterOverrideTier0(t *testing.T) {
 	r, loader, rdb := markReadyReconcilerWithRedis(t)
 	require.NoError(t, r.markReady(context.Background(), 5, markReadyURLs(), 0.30, testLogger()))
 
-	// OverrideTier0 fired for the 3 roles (slots set) ...
+	// OverrideTier0 fired for the 2 roles (slots set; Phase 21 removed tts) ...
 	snap := loader.snapshot()
 	require.Equal(t, "http://1.2.3.4:33000", snap["llm"])
 	require.Equal(t, "http://1.2.3.4:33001", snap["stt"])
-	require.Equal(t, "http://1.2.3.4:33003", snap["tts"])
+	require.NotContains(t, snap, "tts", "Phase 21: no tts override")
 	// ... and the force-close keys are present (written after the slots).
-	for _, name := range []string{"local-llm", "local-stt", "local-tts"} {
+	for _, name := range []string{"local-llm", "local-stt"} {
 		state, _, set, err := breakerReadForce(t, rdb, name)
 		require.NoError(t, err)
 		require.True(t, set)

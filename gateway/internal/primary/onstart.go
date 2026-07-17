@@ -120,10 +120,7 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: checking env vars"
 : "${PRIMARY_WHISPER_WEIGHTS_SHA256:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_KEY:?required}"
 : "${PRIMARY_BGEM3_WEIGHTS_SHA256:?required}"
-# Chatterbox TTS model — pre-provisioned HF-cache snapshot (replaces the
-# runtime huggingface.co fetch that crash-looped on hosts without an HF route).
-: "${PRIMARY_CHATTERBOX_WEIGHTS_KEY:?required}"
-: "${PRIMARY_CHATTERBOX_WEIGHTS_SHA256:?required}"
+# Phase 21: Chatterbox TTS removed from the pod — no CHATTERBOX weights guard.
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: env vars OK"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: installing mc if missing"
@@ -173,54 +170,40 @@ download_with_verify() {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [download-weights] ok $target"
 }
 
-mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates /opt/chatterbox-data/models/hub
+mkdir -p /weights/qwen /weights/bge-m3 /weights/whisper /app/templates
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 4 parallel downloads"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: spawning 3 parallel downloads"
 download_with_verify "$PRIMARY_QWEN_WEIGHTS_KEY" "/weights/qwen/model.gguf" "$PRIMARY_QWEN_WEIGHTS_SHA256" &
 QWEN_PID=$!
 download_with_verify "$PRIMARY_BGEM3_WEIGHTS_KEY" "/weights/bge-m3/model.tar.gz" "$PRIMARY_BGEM3_WEIGHTS_SHA256" &
 BGE_PID=$!
 download_with_verify "$PRIMARY_WHISPER_WEIGHTS_KEY" "/weights/whisper/model.tar.gz" "$PRIMARY_WHISPER_WEIGHTS_SHA256" &
 WHISPER_PID=$!
-# Chatterbox TTS HF-cache snapshot (models--ResembleAI--chatterbox/...).
-download_with_verify "$PRIMARY_CHATTERBOX_WEIGHTS_KEY" "/opt/chatterbox-data/models/cache.tar.gz" "$PRIMARY_CHATTERBOX_WEIGHTS_SHA256" &
-CHATTERBOX_PID=$!
 
 if [ -n "${PRIMARY_QWEN_JINJA_KEY:-}" ]; then
   : "${PRIMARY_QWEN_JINJA_SHA256:?required when PRIMARY_QWEN_JINJA_KEY is set}"
   download_with_verify "$PRIMARY_QWEN_JINJA_KEY" "/app/templates/qwen3.6.jinja" "$PRIMARY_QWEN_JINJA_SHA256"
 fi
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 4 downloads"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: waiting for 3 downloads"
 # CR-02 (6.6.Y review): bash 'wait' with multiple IDs returns ONLY the last
 # id's exit status, so a failed Qwen/bge-m3 download or SHA-256 mismatch was
 # silently swallowed and supervisord exec'd with a missing/corrupt weight.
 # Wait each PID individually and fail the whole onstart (no supervisord exec)
 # if ANY download/verify failed — restores the T-06.6-02 integrity fail-fast
-# for all 4 weights (chatterbox TTS added 2026-06-13).
+# for all 3 weights (Phase 21: chatterbox TTS removed).
 FAIL=
 wait "$QWEN_PID" || FAIL=1
 wait "$BGE_PID" || FAIL=1
 wait "$WHISPER_PID" || FAIL=1
-wait "$CHATTERBOX_PID" || FAIL=1
 if [ -n "$FAIL" ]; then
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: FATAL — weight download/verify failed; aborting before supervisord"
   exit 1
 fi
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 4 downloads complete; extracting tarballs"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: 3 downloads complete; extracting tarballs"
 
 tar -xzf /weights/bge-m3/model.tar.gz -C /weights/bge-m3
 tar -xzf /weights/whisper/model.tar.gz -C /weights/whisper
-# Chatterbox HF-cache: from_pretrained() calls snapshot_download() WITHOUT an
-# explicit cache_dir, so huggingface_hub resolves the cache at $HF_HOME/hub
-# (HF_HOME is /opt/chatterbox-data/models per supervisord.conf). Extract the
-# models--ResembleAI--chatterbox/ tree into that hub/ subdir — extracting it
-# one level up (…/models/) makes offline snapshot_download miss it and the
-# chatterbox child crash-loops with LocalEntryNotFoundError. With
-# HF_HUB_OFFLINE=1 from_pretrained() then reads this cache and never contacts
-# huggingface.co.
-tar -xzf /opt/chatterbox-data/models/cache.tar.gz -C /opt/chatterbox-data/models/hub
-rm -f /opt/chatterbox-data/models/cache.tar.gz
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisord"
 
 # --- SEED-019 part 2: VRAM-adaptive whisper device (Block A) -----------------
@@ -234,9 +217,12 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # shared-card CUDA OOM. The old "max-free at onstart" pick was unreliable: at
 # onstart (before llama loads) every card reads ~empty, tying to GPU0, the very
 # card qwen then loads onto → OOM (UAT B "instance terminal", 2026-06-19). On a
-# single-GPU >=30GB shape (5090=32) there is no second card, so whisper shares
-# GPU0 with qwen (32GB has the headroom). Below threshold (1x3090=24) export cpu
-# so the gateway fail-safes STT to tier-1 gemini instead of slow CPU whisper.
+# single-GPU shape above threshold there is no second card, so whisper shares
+# GPU0 with qwen. Phase 21: TTS/Chatterbox removed from the pod freed ~5GB, so a
+# 1x3090 (24GB) now fits Qwen (~18GB) + whisper (~4GB) = ~22GB with ~2GB margin —
+# threshold lowered 30000 -> 22000 so a 24576 MiB card qualifies for cuda. 22000
+# (not 24000) keeps margin against nvidia-smi total-VRAM read variance. Below
+# threshold export cpu so the gateway fail-safes STT to tier-1 gemini.
 # These exports happen BEFORE exec supervisord so [program:speaches] inherits
 # them (supervisord.conf no longer pins WHISPER__INFERENCE_DEVICE — env
 # inheritance Option A, fail-open to speaches default auto/0 if ever unset).
@@ -253,7 +239,7 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # UAT-B OOM fix. (Documented at the supervisord [program:llama]/[program:speaches]
 # boundary too.)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-WHISPER_GPU_THRESHOLD_MIB=30000
+WHISPER_GPU_THRESHOLD_MIB=22000
 TOTAL_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END{print s}')
 NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'END{print NR}')
 if [ -z "${TOTAL_VRAM_MIB:-}" ]; then

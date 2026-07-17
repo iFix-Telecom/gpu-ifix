@@ -20,11 +20,10 @@
 #     (faster-whisper==1.1.1 pinned + silero v5 ONNX vendored from upstream
 #     speaches image via multi-stage COPY). D-B1 LOCKED image tag for the
 #     silero-asset source: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3.
-#   - Chatterbox TTS installed via pip into a dedicated venv at
-#     /opt/chatterbox-venv (torch 2.7.1 cu128 trio + chatterbox-tts 0.1.7).
-#     SHA-pin invariant is preserved for the non-substitutable component
-#     (llama.cpp b9191 — required for Qwen3.6 SSM tensor support per Wave 0
-#     spike Round 3).
+#   - Phase 21: Chatterbox TTS venv REMOVED (zero prod use; freed ~5GB VRAM so
+#     whisper runs on-GPU in a 24GB shape). SHA-pin invariant is preserved for
+#     the non-substitutable component (llama.cpp b9191 — required for Qwen3.6
+#     SSM tensor support per Wave 0 spike Round 3).
 #
 # All SHA-pinned FROM digests are LITERAL per WAVE0-GATES.md Decision 1
 # captured 2026-05-17. Dockerfile FROM does not support env substitution,
@@ -53,7 +52,7 @@ FROM ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda-12.6.3 AS speaches-assets
 
 # Stage 2: Final image — llama.cpp:server-cuda-b9191 carries Qwen3.6 SSM
 # support (Wave 0 UPGRADED from b9128 per 06.6-SPIKE-qwen3.6-jinja.md Round 3
-# tensor-blk-64 SSM pass). All 4 services co-locate here under supervisord.
+# tensor-blk-64 SSM pass). The 3 services (llm/stt/dcgm) co-locate here under supervisord (Phase 21: tts removed).
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b9191@sha256:cb375311f4170bb1aa18840e946f64f99e6094b90bde69dcb6e0a62a183d7ba3 AS final
 
 # Install supervisord (PID 1) + aria2 (multi-stream weight download from
@@ -139,46 +138,10 @@ COPY --from=speaches-assets \
     /home/ubuntu/speaches/.venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx \
     /opt/speaches-venv/lib/python3.12/site-packages/faster_whisper/assets/silero_decoder_v5.onnx
 
-# Chatterbox Multilingual TTS — Phase 06.7 Plan 05 (Wave 1).
-#
-# Isolated /opt/chatterbox-venv per GATE 2: chatterbox-tts==0.1.7 pins
-# torch==2.6.0 + transformers==5.2.0, which CANNOT share the speaches torch
-# stack (speaches gates transformers<4.49 for optimum.bettertransformer
-# compatibility carried in via faster-whisper deps). A dedicated venv keeps
-# the torch stack fully isolated.
-#
-# RTX 5090 (Blackwell, sm_120) fix: chatterbox-tts pins torch==2.6.0+cu124, but
-# cu124 ships NO sm_120 kernels — the model load crashes with "no kernel image
-# is available for execution on the device" (the cu124 trio was validated on a
-# 4090/sm_89; Phase 6.6 moved the pod to a 5090). Blackwell support starts at
-# torch 2.7+/cu128. So install chatterbox-tts FIRST (pulls its transformers==5.2.0
-# + the rest), THEN UPGRADE the version-aligned cu128 trio. Do NOT use --no-deps:
-# the cu128 torch wheels need the matching nvidia-cuda-*-cu12 12.8 runtime
-# (esp. nvidia-cuda-cupti-cu12) — skipping deps makes torch fall back to the base
-# image's CUDA 12.6 libcupti, which lacks `cuptiActivityEnableDriverApi` and
-# crashes the import. --index-url cu128 serves torch + the nvidia 12.8 libs;
-# --extra-index-url PyPI serves the pure-python deps (numpy stays <2 per chatterbox).
-# The torch/torchvision/torchaudio trio MUST stay version-aligned or the chatterbox
-# import breaks via `torchvision::nms`. pip warns about chatterbox's torch==2.6.0
-# pin — expected and benign; the 2.6->2.7 inference API chatterbox uses is stable.
-#
-# boto3 is the pinned S3 client the shim uses for the lazy reference-WAV fetch
-# from MinIO (zero-shot voice survival). fastapi+uvicorn serve the shim.
-RUN python3 -m venv /opt/chatterbox-venv \
-    && /opt/chatterbox-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/chatterbox-venv/bin/pip install --no-cache-dir \
-         "chatterbox-tts==0.1.7" \
-         "boto3==1.35.99" \
-         "fastapi==0.115.6" "uvicorn==0.34.0" \
-    && /opt/chatterbox-venv/bin/pip install --no-cache-dir --upgrade \
-         --index-url https://download.pytorch.org/whl/cu128 \
-         --extra-index-url https://pypi.org/simple \
-         "torch==2.7.1" "torchvision==0.22.1" "torchaudio==2.7.1" \
-    # resemble-perth (chatterbox watermarker dep) imports `pkg_resources`, which
-    # setuptools 81+ removed. Pin <81 LAST (the torch --upgrade above can pull
-    # setuptools 82) so pkg_resources stays present, else PerthImplicitWatermarker
-    # is None and chatterbox load crashes with "NoneType object is not callable".
-    && /opt/chatterbox-venv/bin/pip install --no-cache-dir "setuptools<81"
+# Phase 21: Chatterbox Multilingual TTS venv REMOVED. Zero prod use + ~5GB VRAM
+# forced whisper to CPU on a 24GB shape. Dropping it (~2.8GB image + the whole
+# torch 2.7.1 cu128 trio) frees the GPU so speaches/whisper runs on-GPU in
+# 1x3090. STT tier-0 local instead of the tier-1 gemini/openai cascade.
 
 # Copy dcgm-exporter binary AND the libdcgm.so.4 family + metric configs
 # from stage 1. The distroless dcgm-exporter image bundles libdcgm under
@@ -199,10 +162,7 @@ RUN ldconfig
 # CONTEXT.md Deferred Ideas as B2 fallback).
 COPY pod/primary/supervisord.conf /etc/supervisor/conf.d/services.conf
 
-# Chatterbox TTS shim served by [program:chatterbox] (uvicorn on :8003,
-# directory=/opt/chatterbox-data). The shim imports torch/chatterbox/torchaudio
-# lazily at model-load time, so it lives standalone here.
-COPY pod/primary/chatterbox_server.py /opt/chatterbox-data/chatterbox_server.py
+# Phase 21: chatterbox_server.py shim COPY removed (TTS program dropped).
 
 # Pre-create runtime directories referenced by supervisord.conf + onstart.
 # /weights/qwen is the mount-target for the aria2c-downloaded GGUF artifact;
@@ -214,11 +174,10 @@ COPY pod/primary/chatterbox_server.py /opt/chatterbox-data/chatterbox_server.py
 # pre-create removed — BGE-M3 embed is off-pod (Phase 06.7 D-03) and the
 # pod's onstart `mkdir -p` recreates the directory at runtime if a future
 # config re-enables on-pod BGE-M3 downloads.
-RUN mkdir -p /var/log /weights/qwen /weights/whisper /app/templates \
-        /opt/chatterbox-data/models /opt/chatterbox-data/voices
+RUN mkdir -p /var/log /weights/qwen /weights/whisper /app/templates
 
 # Disable inherited HEALTHCHECK from llama.cpp base (which curls :8080/health,
-# but our supervisord-managed services bind to :8000/:8001/:8003/:9100/:9400 —
+# but our supervisord-managed services bind to :8000/:8001/:9100/:9400 —
 # never :8080). Continuous healthcheck failure caused Vast.ai's worker agent to reap
 # the container as exited within 30-60s of start across all 8 UAT attempts on
 # 2026-05-18 (gsd-debug session primary-uat-custom-image-vast-runtype-args).
@@ -227,7 +186,7 @@ RUN mkdir -p /var/log /weights/qwen /weights/whisper /app/templates \
 HEALTHCHECK NONE
 
 LABEL org.opencontainers.image.source="https://github.com/IfixTelecom/gpu-ifix"
-LABEL org.opencontainers.image.description="Phase 11.2 primary pod — supervisord + llama.cpp b9191 + speaches + chatterbox-tts + dcgm (STT tier-0 restored; tier-1 cascade gemini->groq->openai-whisper; embed off-pod per Phase 06.7 D-03)"
+LABEL org.opencontainers.image.description="Phase 21 primary pod — supervisord + llama.cpp b9191 + speaches (whisper on GPU) + dcgm. STT tier-0 local; tier-1 cascade gemini->groq->openai-whisper. embed off-pod (06.7 D-03); TTS/chatterbox removed (Phase 21)."
 
 # Override inherited ENTRYPOINT from llama.cpp base (which is `/app/llama-server`)
 # with `/bin/bash` so the supervisord-driven primary pod boots via the bash

@@ -108,9 +108,6 @@ var (
 	ErrMissingBGEM3SHA = errors.New(
 		"primary: PRIMARY_BGEM3_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
 	)
-	ErrMissingChatterboxSHA = errors.New(
-		"primary: PRIMARY_CHATTERBOX_WEIGHTS_SHA256 is empty — operator must set this env var explicitly (no default shipped)",
-	)
 )
 
 // primaryPodURLs collects the 4 per-service URLs (one per supervisord
@@ -122,13 +119,12 @@ var (
 // 8000/8001/8003; DCGM uses the host-port mapping for 9400.
 //
 // Phase 06.7 (D-03/D-11): embed left the pod (relocated to a 24/7 CPU
-// host, static tier-0 row), and Chatterbox TTS took its container slot on
-// port 8003. The dynamic tier-0 roster the reconciler drives is now
-// {llm,stt,tts}.
+// host, static tier-0 row). Phase 21: Chatterbox TTS removed from the pod
+// (zero prod use; freed VRAM lets whisper run on GPU in 24GB). The dynamic
+// tier-0 roster the reconciler drives is now {llm,stt}.
 type primaryPodURLs struct {
 	LLM  string
 	STT  string // Phase 11.2 D-B5′: restored (revert 11.1 D-A4 — speaches back on pod)
-	TTS  string
 	DCGM string
 
 	// WhisperDevice carries the pod-reported whisper inference device read
@@ -423,9 +419,6 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 	if cfg.PrimaryBGEM3WeightsSHA256 == "" {
 		return vast.CreateRequest{}, ErrMissingBGEM3SHA
 	}
-	if cfg.PrimaryChatterboxWeightsSHA256 == "" {
-		return vast.CreateRequest{}, ErrMissingChatterboxSHA
-	}
 
 	llamaArgs := primaryLlamaArgsDefault
 	if len(cfg.PrimaryLlamaArgs) > 0 {
@@ -445,7 +438,6 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// to `docker run -p ...` at instance create time.
 		"-p 8000:8000": "1", // LLM (llama-server)
 		"-p 8001:8001": "1", // STT (speaches)
-		"-p 8003:8003": "1", // TTS (chatterbox) — Phase 06.7 D-11 (was embed:8002)
 		"-p 9400:9400": "1", // GPU metrics (dcgm-exporter)
 		"-p 9100:9100": "1", // device-report responder (SEED-019 part 2) — gateway reads /whisper_device at Ready
 
@@ -472,11 +464,9 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		"PRIMARY_WHISPER_WEIGHTS_SHA256": cfg.PrimaryWhisperWeightsSHA256,
 		"PRIMARY_BGEM3_WEIGHTS_KEY":      cfg.PrimaryBGEM3WeightsKey,
 		"PRIMARY_BGEM3_WEIGHTS_SHA256":   cfg.PrimaryBGEM3WeightsSHA256,
-		// Chatterbox TTS HF-cache snapshot — pre-provisioned to MinIO so the
-		// pod loads the model offline (HF_HUB_OFFLINE=1) instead of hitting
-		// huggingface.co at boot (crash-loops on hosts without an HF route).
-		"PRIMARY_CHATTERBOX_WEIGHTS_KEY":    cfg.PrimaryChatterboxWeightsKey,
-		"PRIMARY_CHATTERBOX_WEIGHTS_SHA256": cfg.PrimaryChatterboxWeightsSHA256,
+		// Phase 21: Chatterbox TTS removed from the pod (zero prod use; freed
+		// ~5GB VRAM lets whisper run on GPU in a 24GB shape). No
+		// PRIMARY_CHATTERBOX_WEIGHTS_* forward — onstart no longer downloads it.
 	}
 
 	if cfg.PrimaryQwenJinjaKey != "" {
@@ -509,10 +499,10 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		Onstart:  "/bin/bash",
 		Runtype:  "args",
 		Args:     []string{"-c", onstart},
-		// 45GB (was 50): trims storage cost. NOT lower — coldstart disk peaks at
-		// ~40GB (image ~8-10GB + parallel weight downloads ~24GB [qwen 17 + whisper
-		// 2.7 + bge-m3 1.2 + chatterbox 2.8] + tarball extraction ~7GB before the
-		// .tar.gz files are removed). 40GB would risk ENOSPC mid-coldstart.
+		// 45GB: trims storage cost. Phase 21 dropped chatterbox (~2.8GB weight +
+		// venv), lowering the coldstart disk peak (image + parallel weight
+		// downloads [qwen 17 + whisper 2.7 + bge-m3 1.2] + tarball extraction
+		// before the .tar.gz files are removed). 45GB keeps comfortable margin.
 		Disk:        45,
 		Label:       fmt.Sprintf("ifix-primary-lifecycle-%d", lifecycleID),
 		TargetState: "running",
@@ -557,13 +547,6 @@ func (r *Reconciler) podLLMURL(inst vast.Instance) string {
 // running Vast.ai instance.
 func (r *Reconciler) podSTTURL(inst vast.Instance) string {
 	return r.podPortURL(inst, "8001", "/health")
-}
-
-// podTTSURL extracts the public TTS endpoint (8003/tcp -> /health) from a
-// running Vast.ai instance. Phase 06.7 (D-11) — Chatterbox replaced the
-// Infinity embed child on the pod; the container port moved 8002 -> 8003.
-func (r *Reconciler) podTTSURL(inst vast.Instance) string {
-	return r.podPortURL(inst, "8003", "/health")
 }
 
 // podDCGMURL extracts the public DCGM endpoint (9400/tcp -> /metrics) from
@@ -612,8 +595,6 @@ func roleURL(urls primaryPodURLs, role string) string {
 		return urls.LLM
 	case "stt":
 		return urls.STT
-	case "tts":
-		return urls.TTS
 	default:
 		return ""
 	}

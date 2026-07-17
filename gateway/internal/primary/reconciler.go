@@ -475,12 +475,12 @@ func (r *Reconciler) evaluateReady(ctx context.Context, now time.Time, log *slog
 	// because an operator force-up pod is Ready under DISABLED and is just
 	// as vulnerable to an emerg cutback clearing its slot.
 	if urls := r.activePodURLs.Load(); urls != nil && r.deps.Loader != nil {
-		for _, role := range []string{"llm", "stt", "tts"} {
+		for _, role := range []string{"llm", "stt"} {
 			// SEED-019 part 3: gate the "stt" re-assert on the pod-reported
 			// whisper_device. Only a GPU pod (device=="cuda") re-asserts stt;
 			// for cpu/missing/unknown the pod's whisper is too slow (or absent)
-			// so STT falls to the tier-1 cloud cascade (gemini-stt). llm/tts
-			// unaffected. (Replaces the deleted manual STT-serve config flag.)
+			// so STT falls to the tier-1 cloud cascade (gemini-stt). llm
+			// unaffected. (Phase 21: tts removed from the roster.)
 			if role == "stt" && urls.WhisperDevice != "cuda" {
 				continue
 			}
@@ -652,7 +652,7 @@ const (
 // confirmed primary death (D-04) and force-CLOSEd on a new pod's markReady
 // (D-13). These are the dispatcher upstream NAMES (not the dynamic role keys) —
 // the request path keys breaker state on the upstream name.
-var localDeathBreakers = []string{"local-llm", "local-stt", "local-tts"}
+var localDeathBreakers = []string{"local-llm", "local-stt"}
 
 // handleConfirmedDeath is the death-confirmed action path (D-01/D-03/D-04). On a
 // confirmed death from pollDeathOnReadyTick it:
@@ -788,13 +788,11 @@ func (r *Reconciler) evaluateDraining(ctx context.Context, now time.Time, log *s
 	inflight := int64(0)
 	if r.deps.Inflight != nil {
 		// Sum the upstreams that actually live on the primary pod
-		// (llama/speaches/chatterbox). embed is off-pod (D-03) — do not count it.
-		// Phase 11.2 D-B5′ / Phase 14: local-stt and local-tts are back on the
-		// pod, so the drain-complete gate must hold open until in-flight STT/TTS
-		// requests finish, not just LLM.
+		// (llama/speaches). embed is off-pod (D-03) and tts was removed
+		// (Phase 21) — do not count them. The drain-complete gate holds open
+		// until in-flight LLM+STT requests finish.
 		inflight = r.deps.Inflight.Count("local-llm") +
-			r.deps.Inflight.Count("local-stt") +
-			r.deps.Inflight.Count("local-tts")
+			r.deps.Inflight.Count("local-stt")
 	}
 
 	if inflight == 0 || elapsed >= grace {
@@ -867,14 +865,13 @@ func (r *Reconciler) startDrain(ctx context.Context, reason string, log *slog.Lo
 		}
 	}
 
-	// RestoreTier0 for the 3 dynamic roles (llm/stt/tts — NOT embed, D-03)
-	// BEFORE the FSM transition. New requests land on the fallback chain
-	// immediately; in-flight ones drain over the grace window. Phase 11.2
-	// (D-B5′) restored "stt" after Phase 11.1 D-A4 had dropped it.
+	// RestoreTier0 for the dynamic roles (llm/stt — NOT embed D-03, NOT tts
+	// Phase 21) BEFORE the FSM transition. New requests land on the fallback
+	// chain immediately; in-flight ones drain over the grace window. Phase
+	// 11.2 (D-B5′) restored "stt" after Phase 11.1 D-A4 had dropped it.
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
-		r.deps.Loader.RestoreTier0("tts")
 	}
 
 	_ = r.deps.FSM.Transition(StateReady, StateDraining, now, reason)
@@ -898,7 +895,6 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 			"lifecycle_id": lifecycleID,
 			"llm_url":      urls.LLM,
 			"stt_url":      urls.STT,
-			"tts_url":      urls.TTS,
 			"dcgm_url":     urls.DCGM,
 			"dph":          acceptedDPH,
 		})
@@ -940,7 +936,7 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 				"whisper_device", urls.WhisperDevice,
 				"stt_url", urls.STT)
 		}
-		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
+		// Phase 21: no tts override — Chatterbox removed from the pod.
 		// Refresh is intentionally NOT called here — the OverrideTier0 path
 		// is atomic and Live; Refresh would re-scan the DB which is
 		// orthogonal to this transition. Refresh remains available for
@@ -1043,10 +1039,9 @@ func (r *Reconciler) closeLifecycle(ctx context.Context, id int64, reason string
 		(*cancelPtr)()
 	}
 	if r.deps.Loader != nil {
-		// Phase 11.2 (D-B5′): defensive 3-role RestoreTier0 (idempotent).
+		// Phase 21: defensive 2-role RestoreTier0 (idempotent; tts removed).
 		r.deps.Loader.RestoreTier0("llm")
 		r.deps.Loader.RestoreTier0("stt")
-		r.deps.Loader.RestoreTier0("tts")
 	}
 	if r.deps.DCGMScraper != nil {
 		r.deps.DCGMScraper.SetURL("")
@@ -1952,7 +1947,7 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				}
 			}
 			urls := r.buildPodURLs(inst)
-			if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
+			if urls.LLM == "" || urls.STT == "" || urls.DCGM == "" {
 				// Option B (plan 6.6.Y-03): previously a SILENT continue. The
 				// 6.6.Y-01 spike confirmed this exact branch swallowed a 17-min
 				// (40+ min observed) wait with zero operator-visible logs. Emit
@@ -2015,10 +2010,9 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				}
 				continue
 			}
-			// 4-endpoint health check inside ONE container's namespace
-			// (Phase 11.2 supervisord 4-services: llm/stt/tts/dcgm — embed
-			// left the pod per D-03). All 4 must pass. Phase 11.2 (D-B5′)
-			// restored "stt" after Phase 11.1 D-A4 had dropped it.
+			// 3-endpoint health check inside ONE container's namespace
+			// (Phase 21 supervisord 3-services: llm/stt/dcgm — embed left the
+			// pod per D-03, tts/chatterbox removed Phase 21). All 3 must pass.
 			if r.deps.HealthCheck == nil {
 				continue
 			}
@@ -2026,9 +2020,6 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.STT) {
-				continue
-			}
-			if !r.deps.HealthCheck(ctx, urls.TTS) {
 				continue
 			}
 			if !r.deps.HealthCheck(ctx, urls.DCGM) {
@@ -2090,7 +2081,6 @@ func (r *Reconciler) buildPodURLs(inst vast.Instance) primaryPodURLs {
 	return primaryPodURLs{
 		LLM:  r.podLLMURL(inst),
 		STT:  r.podSTTURL(inst), // Phase 11.2 D-B5′: restored
-		TTS:  r.podTTSURL(inst),
 		DCGM: r.podDCGMURL(inst),
 		// SEED-019 part 3: capture the pod-reported whisper device (already
 		// whitelisted to cuda/cpu; "" when unavailable). Gates the "stt"
@@ -2160,7 +2150,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		return nil
 	}
 	urls := r.buildPodURLs(inst)
-	if urls.LLM == "" || urls.STT == "" || urls.TTS == "" || urls.DCGM == "" {
+	if urls.LLM == "" || urls.STT == "" || urls.DCGM == "" {
 		r.deps.Log.Warn("primary recover: pod ports not fully mapped; closing as unhealthy orphan",
 			"lifecycle_id", open.ID)
 		// Leak fix: the instance is RUNNING and billing — destroy before the
@@ -2178,9 +2168,8 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	if r.deps.HealthCheck == nil ||
 		!r.deps.HealthCheck(ctx, urls.LLM) ||
 		!r.deps.HealthCheck(ctx, urls.STT) ||
-		!r.deps.HealthCheck(ctx, urls.TTS) ||
 		!r.deps.HealthCheck(ctx, urls.DCGM) {
-		r.deps.Log.Warn("primary recover: 4-endpoint health check failed; closing as unhealthy orphan",
+		r.deps.Log.Warn("primary recover: 3-endpoint health check failed; closing as unhealthy orphan",
 			"lifecycle_id", open.ID, "instance_id", open.VastInstanceID.Int64)
 		// Leak fix (THE observed case — lifecycle 189/instance 45098378 kept
 		// billing after this close during the 14a63f3 rollout): destroy the
@@ -2202,7 +2191,7 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	r.activeInstanceID.Store(open.VastInstanceID.Int64)
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
-		// Phase 11.2 (D-B5′): 3-role restart-recovery override.
+		// Phase 21: 2-role restart-recovery override (tts removed).
 		r.deps.Loader.OverrideTier0("llm", stripPrimaryReadinessSuffix(urls.LLM))
 		// SEED-019 part 3: gate "stt" override on the pod-reported
 		// whisper_device (cuda → override; else fail-safe to gemini-stt).
@@ -2210,7 +2199,6 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 		if urls.WhisperDevice == "cuda" {
 			r.deps.Loader.OverrideTier0("stt", stripPrimaryReadinessSuffix(urls.STT))
 		}
-		r.deps.Loader.OverrideTier0("tts", stripPrimaryReadinessSuffix(urls.TTS))
 	}
 	if r.deps.DCGMScraper != nil {
 		r.deps.DCGMScraper.SetURL(urls.DCGM)

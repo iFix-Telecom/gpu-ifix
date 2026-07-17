@@ -122,20 +122,22 @@ func TestBuildPrimaryCreateRequest_Supervisord(t *testing.T) {
 	require.Equal(t, "SK-test", req.Env["MINIO_SECRET_KEY"])
 }
 
-// TestBuildPrimaryCreateRequest_Has4PortMappings — Pitfall #8 (4
-// port forwards on the pod: 8000 LLM + 8001 STT + 8003 TTS + 9400 DCGM).
-// Phase 06.7 (D-11): the embed:8002 forward was replaced by the
-// Chatterbox tts:8003 forward; 8002 must NOT be present.
-func TestBuildPrimaryCreateRequest_Has4PortMappings(t *testing.T) {
+// TestBuildPrimaryCreateRequest_HasPortMappings — Pitfall #8 (port forwards on
+// the pod: 8000 LLM + 8001 STT + 9400 DCGM + 9100 device-report). Phase 21:
+// the tts:8003 forward was removed (Chatterbox left the pod); 8002 (embed) and
+// 8003 (tts) must NOT be present.
+func TestBuildPrimaryCreateRequest_HasPortMappings(t *testing.T) {
 	r := newReconcilerWith(cfgWithDefaults())
 	req, err := r.buildCreateRequest(vast.Offer{ID: 1}, 1)
 	require.NoError(t, err)
 
-	for _, key := range []string{"-p 8000:8000", "-p 8001:8001", "-p 8003:8003", "-p 9400:9400"} {
+	for _, key := range []string{"-p 8000:8000", "-p 8001:8001", "-p 9400:9400"} {
 		require.Equal(t, "1", req.Env[key], "port mapping %s must be present with value \"1\"", key)
 	}
 	_, has8002 := req.Env["-p 8002:8002"]
 	require.False(t, has8002, "embed port 8002 must NOT be forwarded (embed left the pod, D-03)")
+	_, has8003 := req.Env["-p 8003:8003"]
+	require.False(t, has8003, "tts port 8003 must NOT be forwarded (Phase 21: Chatterbox removed)")
 }
 
 // TestBuildPrimaryCreateRequest_MinIOCredentialsNotEmpty — all 4 MinIO
@@ -618,7 +620,7 @@ func TestSupervisordConf_3ProgramBlocks(t *testing.T) {
 	}
 	require.True(t, activePrograms["llama"], "must have [program:llama]")
 	require.True(t, activePrograms["speaches"], "Phase 11.2 D-B5′: must have [program:speaches] STT child (restored)")
-	require.True(t, activePrograms["chatterbox"], "Phase 06.7 D-05: must have [program:chatterbox] TTS child")
+	require.False(t, activePrograms["chatterbox"], "Phase 21: [program:chatterbox] TTS must be removed (freed VRAM for whisper on GPU)")
 	require.False(t, activePrograms["infinity"], "Phase 06.7 D-03: [program:infinity] embed must be removed (relocated off the pod)")
 	require.True(t, activePrograms["dcgm"], "must have [program:dcgm]")
 	require.Contains(t, src, "--jinja", "llama command must include --jinja (B1 embedded LOCKED)")
