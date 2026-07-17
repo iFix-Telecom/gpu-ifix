@@ -401,6 +401,18 @@ Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em
 
 **Plans:** 7/7 plans complete
 
+### Phase 21: Strip TTS from primary pod + enable whisper on GPU for 1x3090 (24GB) — reverte 06.7 embed→tts swap
+
+**Goal:** Fazer o STT rodar LOCAL no pod de 1×3090 (24GB) em vez de ir pro tier-1 (gemini-stt/openai-whisper). Hoje o Chatterbox TTS ocupa ~5GB de VRAM forçando o whisper pra CPU → o gate `whisper_device != cuda` mantém `local-stt` breaker open → todo STT roteia externo. Motivação: TTS = ZERO uso em 90d (billing_events, nenhum upstream tts/chatterbox jamais); valor real NÃO é custo (tier-1 ~R$6,6/mês, ninharia) mas **LGPD** (áudio de call de cliente sai da casa pro Gemini/OpenAI hoje) + latência. Orçamento VRAM medido (06.8-RESEARCH spike machine 43803): Qwen ~18GB + whisper +4GB = 22GB **cabe** em 24GB; o 3º serviço (TTS ~5GB) é o que estourava pra 27GB.
+
+**Requirements:** POD-01 (remover `[program:chatterbox]` do `pod/primary/supervisord.conf`), POD-02 (remover venv chatterbox do `pod/primary/Dockerfile`, ~2.8GB imagem), POD-03 (`onstart.go`: remover download+extração do peso chatterbox + baixar `WHISPER_GPU_THRESHOLD_MIB` 30000→~22000 pra 24GB qualificar cuda), GW-01 (reverter roster tier-0 do gateway {llm,stt,tts}→{llm,stt}: `lifecycle.go` campo TTS/podTTSURL/roleURL/port-forward 8003/health-check 4→3 endpoints/drain counting; `reconciler.go` markReady+recoverOpenLifecycle override tts/evaluateReady re-assert/buildPodURLs), GW-02 (testes: reverter contrato tts/8003 nos ~6 arquivos de teste que a 06.7 atualizou), DB-01 (`ai_gateway.upstreams` disable/delete row `local-tts`), VRAM-GATE (GATE OBRIGATÓRIO: teste live num pod 1×3090 provando Qwen+whisper na GPU sem CUDA OOM, margem ~2GB, ANTES de promover imagem/gateway — foi OOM que a UAT-B pegou em 2026-06-19).
+
+**Depends on:** Phase 06.7 (embed→tts swap que esta reverte — escopar contra), Phase 11.2 (re-add whisper local — a base que se mantém), Phase 14 (VRAM-adaptive threshold — é o número que muda), Phase 20 (provisioning resilience — não regredir os fast-fails/blocklist).
+
+**Contexto de arquitetura (LOCKED):** pod atual = `converseai-primary-pod:main` (imagem única supervisord + onstart gerado em Go). NÃO usar `ifix-ai-pod` (compose multi-container, não bootável pelo gateway atual — path onstart.go rejeita DinD). Ver memory [[stt-cpu-and-billing-columns]].
+
+**Plans:** 0 plans
+
 ## Backlog
 
 ### Phase 999.1: Regime 3 download-stall live UAT (tarpit S3) (CLOSED — coberto por unit-test)
