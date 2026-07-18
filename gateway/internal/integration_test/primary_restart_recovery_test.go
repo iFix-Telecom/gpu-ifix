@@ -8,11 +8,11 @@
 // from primary_lifecycles WHERE ended_at IS NULL. Four branches:
 //
 //  1. Healthy → restore in-memory state (lifecycle id, instance id,
-//     pod URLs) + OverrideTier0 3x + DCGMScraper.SetURL +
+//     pod URLs) + OverrideTier0 2x (llm/stt) + DCGMScraper.SetURL +
 //     FSM.SetState(Ready, "restart_recovery").
 //  2. Vast says destroyed (or not running) → close lifecycle with
 //     shutdown_reason='gateway_restart_orphan'. FSM stays Asleep.
-//  3. Healthy instance but 4-endpoint health probe fails → close with
+//  3. Healthy instance but 3-endpoint health probe fails → close with
 //     shutdown_reason='gateway_restart_orphan_unhealthy'.
 //  4. No open row → no-op (return nil, FSM stays Asleep).
 //
@@ -35,9 +35,9 @@ import (
 )
 
 // TestRestartRecovery_HealthyInstanceRestoresReady — reviews #4 branch
-// 1: open lifecycle row + Vast says running + all 4 endpoints healthy
-// → FSM = Ready, OverrideTier0 fires for 3 roles, DCGM SetURL fires,
-// lifecycle row STAYS open (ended_at IS NULL).
+// 1: open lifecycle row + Vast says running + all 3 endpoints healthy
+// → FSM = Ready, OverrideTier0 fires for 2 roles (llm/stt), DCGM SetURL
+// fires, lifecycle row STAYS open (ended_at IS NULL).
 func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	rootCtx, rootCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer rootCancel()
@@ -60,7 +60,7 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	require.NoError(t, err)
 	lifecycleID := row.ID
 
-	// Wire fakes: GetInstance returns running with 4 ports, HealthCheck
+	// Wire fakes: GetInstance returns running with pod ports, HealthCheck
 	// always healthy.
 	loader := newFakePrimaryLoader()
 	dcgm := &fakePrimaryDCGM{}
@@ -84,7 +84,7 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 		Redis:        rdb,
 		ReplicaID:    "test-restart-healthy",
 		HealthCheck:  alwaysHealthy,
-		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt re-override on recovery (full trio)
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt re-override on recovery (llm/stt pair)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)
@@ -97,12 +97,11 @@ func TestRestartRecovery_HealthyInstanceRestoresReady(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond,
 		"recoverOpenLifecycle must SetState(Ready, 'restart_recovery') for a healthy instance")
 
-	// Phase 11.2: 3-role OverrideTier0 (llm/stt/tts) — stt restored (revert
-	// 11.1 D-A1), embed remains off-pod (D-03).
+	// Phase 21: 2-role OverrideTier0 (llm/stt) — TTS removed, embed off-pod (D-03).
 	require.Eventually(t, func() bool {
-		return len(loader.Snapshot()) == 3
+		return len(loader.Snapshot()) == 2
 	}, 2*time.Second, 50*time.Millisecond,
-		"OverrideTier0 must fire 3x (llm/stt/tts) on recovery")
+		"OverrideTier0 must fire 2x (llm/stt) on recovery")
 	require.Equal(t, "http://203.0.113.7:33400/metrics", dcgm.Last(),
 		"DCGM URL must point at the recovered pod's :9400 mapping")
 
@@ -185,7 +184,7 @@ func TestRestartRecovery_OrphanInstance_ClosesLifecycle(t *testing.T) {
 }
 
 // TestRestartRecovery_UnhealthyInstance_ClosesLifecycle — reviews #4
-// branch 3: Vast says running + ports populated, but the 4-endpoint
+// branch 3: Vast says running + ports populated, but the 3-endpoint
 // health probe fails. The row is closed with shutdown_reason=
 // 'gateway_restart_orphan_unhealthy'.
 func TestRestartRecovery_UnhealthyInstance_ClosesLifecycle(t *testing.T) {
@@ -215,7 +214,7 @@ func TestRestartRecovery_UnhealthyInstance_ClosesLifecycle(t *testing.T) {
 		},
 	}
 
-	// HealthCheck always false → 4-endpoint probe never passes.
+	// HealthCheck always false → 3-endpoint probe never passes.
 	healthCheck := func(_ context.Context, _ string) bool { return false }
 
 	fsm := primary.NewFSM(nil, nil)

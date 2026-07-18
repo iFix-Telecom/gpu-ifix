@@ -1,7 +1,8 @@
 //go:build integration
 
-// Phase 6.6 Plan 06.6-10 Task 1 — markReady + 3-role tier-0 override +
-// DCGMScraper.SetURL + 4-endpoint reachability E2E coverage.
+// Phase 6.6 Plan 06.6-10 Task 1 — markReady + tier-0 override +
+// DCGMScraper.SetURL + 3-endpoint reachability E2E coverage (Phase 21:
+// TTS removed → llm/stt/dcgm).
 //
 // Setup drives the full primary.Reconciler Start() path:
 //   - testcontainers Postgres + miniredis (via freshSchema)
@@ -11,13 +12,13 @@
 //   - fakePrimaryLoader: records OverrideTier0 / RestoreTier0 calls per
 //     role.
 //   - fakePrimaryDCGM: records SetURL.
-//   - alwaysHealthy HealthCheck closure (4-endpoint reachability passes).
+//   - alwaysHealthy HealthCheck closure (3-endpoint reachability passes).
 //   - alwaysInPeakRule: ShouldBeProvisioned returns true so the schedule
 //     loop fires evaluateAsleep → spawnProvisioning at the first tick.
 //
-// The Wave 0 supervisord-4-services invariant is mechanically proven by
-// asserting (a) the reconciler probes all 4 derived URLs (LLM/STT/TTS/
-// DCGM via Ports map), (b) Loader.OverrideTier0 fires 3x with the
+// The Phase 21 supervisord-3-services invariant is mechanically proven by
+// asserting (a) the reconciler probes the 3 derived URLs (LLM/STT/
+// DCGM via Ports map), (b) Loader.OverrideTier0 fires 2x with the
 // correctly-stripped base URLs, (c) DCGMScraper.SetURL receives the
 // /metrics URL verbatim, (d) DB row carries first_health_pass_at != NULL,
 // (e) FSM advances Provisioning → Ready.
@@ -37,11 +38,11 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 )
 
-// TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable —
+// TestPrimaryProbe_MarkReady_OverridesTier02Roles_3EndpointsReachable —
 // the canonical happy-path proof for Plan 06.6-06a markReady + Plan
-// 06.6-06b 3-role tier-0 override + Wave 0 4-endpoint single-container
-// reachability.
-func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *testing.T) {
+// 06.6-06b tier-0 override + Phase 21 3-endpoint (llm/stt/dcgm) single-
+// container reachability (TTS removed).
+func TestPrimaryProbe_MarkReady_OverridesTier02Roles_3EndpointsReachable(t *testing.T) {
 	rootCtx, rootCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer rootCancel()
 
@@ -49,8 +50,8 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 	cfg := primaryTestCfg(t)
 	cfg.PrimaryPodScheduleDisabled = false // schedule loop must drive provisioning
 
-	// Track which URLs were probed — the Wave 0 4-endpoint
-	// reachability invariant requires all 4 to be called before markReady.
+	// Track which URLs were probed — the 3-endpoint reachability
+	// invariant requires all 3 to be called before markReady.
 	var probedMu sync.Mutex
 	probedURLs := map[string]bool{}
 	healthCheck := func(_ context.Context, url string) bool {
@@ -88,7 +89,7 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 		Redis:        rdb,
 		ReplicaID:    "test-primary-probe",
 		HealthCheck:  healthCheck,
-		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (full llm/stt/tts trio)
+		DeviceReport: cudaDeviceReport, // Phase 14: GPU pod reports cuda → stt override fires (llm/stt pair)
 	})
 
 	ctx, cancel := context.WithCancel(rootCtx)
@@ -97,13 +98,13 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 
 	// Wait for the FSM to reach Ready — proves the full pipeline:
 	// schedule loop → spawnProvisioning → waitForReadyOrDestroy →
-	// 4-endpoint health pass → markReady → FSM Provisioning → Ready.
+	// 3-endpoint health pass → markReady → FSM Provisioning → Ready.
 	require.Eventually(t, func() bool {
 		return fsm.State() == primary.StateReady
 	}, 20*time.Second, 100*time.Millisecond,
-		"FSM must reach Ready after 4-endpoint healthy probe + markReady; got %s", fsm.State())
+		"FSM must reach Ready after 3-endpoint healthy probe + markReady; got %s", fsm.State())
 
-	// (a) Wave 0 4-endpoint reachability assertion — all 4 derived URLs
+	// (a) 3-endpoint reachability assertion — all 3 derived URLs
 	// must have been probed.
 	probedMu.Lock()
 	probed := make(map[string]bool, len(probedURLs))
@@ -113,27 +114,26 @@ func TestPrimaryProbe_MarkReady_OverridesTier03Roles_4EndpointsReachable(t *test
 	probedMu.Unlock()
 	require.True(t, probed["http://203.0.113.7:33000/v1/models"],
 		"LLM /v1/models endpoint must be probed")
-	require.True(t, probed["http://203.0.113.7:33003/health"],
-		"TTS /health endpoint must be probed (Phase 06.7 — was embed:8002)")
+	// Phase 21: TTS (:33003) removed from the pod — no longer probed.
 	// Phase 11.2: STT :33001 endpoint restored — tier-0 STT re-added (revert 11.1 D-A1).
 	require.True(t, probed["http://203.0.113.7:33001/health"],
 		"STT /health endpoint must be probed post-Phase 11.2")
 	require.True(t, probed["http://203.0.113.7:33400/metrics"],
 		"DCGM /metrics endpoint must be probed")
 
-	// (b) Phase 11.2: 3-role tier-0 override {llm,stt,tts} — embed off-pod (D-03).
+	// (b) Phase 21: 2-role tier-0 override {llm,stt} — TTS removed, embed off-pod (D-03).
 	require.Eventually(t, func() bool {
 		snap := loader.Snapshot()
-		return len(snap) == 3
+		return len(snap) == 2
 	}, 2*time.Second, 50*time.Millisecond,
-		"Loader.OverrideTier0 must be called 3x (llm/stt/tts); got %v", loader.Snapshot())
+		"Loader.OverrideTier0 must be called 2x (llm/stt); got %v", loader.Snapshot())
 	snap := loader.Snapshot()
 	require.Equal(t, "http://203.0.113.7:33000", snap["llm"],
 		"/v1/models suffix stripped for LLM (parity emerg stripHealthSuffix)")
-	require.Equal(t, "http://203.0.113.7:33003", snap["tts"],
-		"/health suffix stripped for TTS")
 	require.Equal(t, "http://203.0.113.7:33001", snap["stt"],
 		"/health suffix stripped for STT (Phase 11.2 restore)")
+	_, ttsSet := snap["tts"]
+	require.False(t, ttsSet, "tts must NOT be a dynamic primary role (Phase 21 — TTS removed)")
 	_, embedSet := snap["embed"]
 	require.False(t, embedSet, "embed must NOT be a dynamic primary role (D-03)")
 
