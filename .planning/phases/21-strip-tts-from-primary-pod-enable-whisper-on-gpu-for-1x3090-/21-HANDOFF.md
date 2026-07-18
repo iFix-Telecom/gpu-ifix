@@ -1,6 +1,26 @@
 # Phase 21 — HANDOFF (retomar em outra sessão)
 
-**Estado 2026-07-17:** código DONE + commitado + pushado. Parado no **VRAM-GATE** (teste live de hardware). Falta: validação OOM em 1×3090 → DB-01 → promover imagem → deploy gateway → smoke.
+## ✅ COMPLETA — 2026-07-18
+
+Todos os gates passaram + deployado em prod. Resumo:
+
+- **VRAM-GATE ✅ (live 1×3090, Vast 45232952/manual 35215243):** Qwen 19662MiB + whisper cuda 4050MiB = **23727/24576 MiB, ~849MiB margem**, sem CUDA OOM, llama não crasha, transcrição na GPU. onstart log `total VRAM 24576 >= 22000 ... whisper device=cuda`. Margem real ~849MiB (< ~2GB do comentário; fina mas estável — sem folga p/ aumentar ctx qwen ou re-adicionar TTS).
+- **Integration tests ✅ (commit `5824b0a`):** c2e6408 mudou o contrato p/ 3-endpoint mas deixou 5 integration tests (testcontainers) assertando 4-endpoint/4-service → `build-gateway` falhava e gateava o push da imagem. Alinhados (probe/supervisord/restart_recovery → llm/stt/dcgm, 2 overrides). Unit flake `TestChatProxy_SSEStreamingFlushesPerChunk` (rerun resolveu).
+- **DB-01 ✅:** `gatewayctl upstreams disable --name local-tts` (enabled=false, persistiu redeploy). kokoro-tts tier1 segue enabled (fora de escopo).
+- **Gateway deploy ✅:** stack Portainer 38 → `ifix-ai-gateway:develop-5824b0a@sha256:fdfd8fcee600…` (threshold 22000 + roster {llm,stt} + 3-endpoint). `/health`=200.
+- **Pod template ✅:** `PRIMARY_TEMPLATE_IMAGE` `:main` → `converseai-primary-pod@sha256:f14c603675b7…` (digest validado, mesma convenção digest-pin do gateway).
+- **Smoke STT-local ✅:** edge `/v1/audio/transcriptions` (tenant transcricao-voip, model=whisper) → HTTP 200 `{"text":"Thank you."}` 1.0s → `billing_events`: `route=stt upstream=emergency_pod_stt audio_seconds=3 cost_external_brl=0` (servido pelo pod local, in-house LGPD OK). Override log: `role=stt` + `role=llm` (2, SEM tts) = roster Phase 21 confirmado em prod com pod real.
+- **Teardown ✅:** pod force-down, 0 instâncias Vast, config knobs temporários restaurados (cap_primary 0.2, schedule_disabled false, force_machine_id 0).
+
+**GOTCHAs desta sessão (p/ próximas provisões manuais):**
+- `PRIMARY_POD_SCHEDULE_DISABLED` no **env do stack = true** mas **DB pod_config (autoritativo) = false**. Sábado = schedule_days mon-fri → schedule drena force-up'd pod se `schedule_disabled=false`. Pra segurar pod fora de janela: PATCH `schedule_disabled=true` via `/admin/primary/config`.
+- Provisão market_cheapest pega hosts CN baratos ruins (IP blocklist / download lento / TCP-unreachable nas portas mapeadas). **Solução:** `force_machine_id` (PATCH config) pinando machine US/EU verificado com net alto (achado via Vast bundles API `inet_down desc`, filtrar geo≠CN). NL machine 123798 subiu Ready em ~4.5min.
+- `gatewayctl upstreams list` mostra `local-stt` probe=**failed** mesmo com pod servindo (probe bate no env estático, não na URL de override). Confirmar serving por `billing_events.upstream=emergency_pod_stt`, não pela probe.
+- PATCH admin config: body `{"kind":"config","field":"<f>","value":<v>}` (um campo por call).
+
+---
+
+**Estado 2026-07-17 (histórico):** código DONE + commitado + pushado. Parado no **VRAM-GATE** (teste live de hardware). Falta: validação OOM em 1×3090 → DB-01 → promover imagem → deploy gateway → smoke.
 
 ## O que já foi feito (commit `c2e6408`, branch develop, PUSHADO)
 
