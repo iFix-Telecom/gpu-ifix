@@ -3821,14 +3821,13 @@ func TestProgressStall_PostDownloadStartup_Rides(t *testing.T) {
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
-	// Full download COMPLETE (all 4 mandatory ok — qwen+whisper+bge-m3+chatterbox,
-	// expectedWeightFiles=4) then healthy-but-slow startup lines with no further
+	// Full download COMPLETE (all 3 mandatory ok — qwen+whisper+bge-m3,
+	// expectedWeightFiles=3) then healthy-but-slow startup lines with no further
 	// progress bytes → the download-stall detector must DISARM.
 	fullText := dlText(
 		dlFetching("qwen"), dlProgress("qwen", 1000), dlOK("qwen"),
 		dlFetching("whisper"), dlProgress("whisper", 2000), dlOK("whisper"),
 		dlFetching("bge-m3"), dlProgress("bge-m3", 3000), dlOK("bge-m3"),
-		dlFetching("chatterbox"), dlProgress("chatterbox", 4000), dlOK("chatterbox"),
 		"[2026-07-10T00:01:00+00:00] docker compose up -d",
 		"[2026-07-10T00:02:00+00:00] waiting for /health/ready",
 	)
@@ -3962,7 +3961,7 @@ func TestParseDownloadProgress(t *testing.T) {
 // running poll (lifecycle 137). The fix skips the port-bind timeout while the
 // download is armed-but-not-done, then measures the tight budget from
 // download-completion. Proof of riding: destroy fires only AFTER the onstart
-// log flips to all-4-ok (disarm), not on the first running poll.
+// log flips to all-3-ok (disarm), not on the first running poll.
 func TestPortBind_DownloadInFlight_RidesThenFiresAfterDone(t *testing.T) {
 	withTestPollInterval(t, 2*time.Millisecond)
 	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
@@ -3980,15 +3979,15 @@ func TestPortBind_DownloadInFlight_RidesThenFiresAfterDone(t *testing.T) {
 		},
 		onstartLogFn: func(_ context.Context, _ int64) (vast.OnstartLogResult, error) {
 			n := logCalls.Add(1)
-			// armed-but-not-done: fetching + 3 non-qwen ok (okCount=3 < 4) while
+			// armed-but-not-done: fetching + 2 non-qwen ok (okCount=2 < 3) while
 			// qwen is still downloading. bytes constant (ProgressStallBudgetS high
 			// so FF-02 never fires during the ride).
 			lines := []string{
 				dlFetching("qwen"), dlProgress("qwen", 1000),
-				dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+				dlOK("bge-m3"), dlOK("whisper"),
 			}
 			if n >= disarmAt {
-				lines = append(lines, dlOK("qwen")) // 4th mandatory ok → disarm
+				lines = append(lines, dlOK("qwen")) // 3rd mandatory ok → disarm
 			}
 			return vast.OnstartLogResult{Status: vast.OnstartLogAvailable, Text: dlText(lines...)}, nil
 		},
@@ -4062,21 +4061,21 @@ func TestPortBind_TelemetryUnavailable_FiresFromFirstRunning(t *testing.T) {
 	require.True(t, rr.has("public_port_bind_timeout"))
 }
 
-// TestFF02_ThreeOfFourOk_StaysArmed proves expectedWeightFiles=4: with only the
-// 3 non-qwen mandatory files logged `ok` (qwen still downloading) and bytes
+// TestFF02_TwoOfThreeOk_StaysArmed proves expectedWeightFiles=3: with only the
+// 2 non-qwen mandatory files logged `ok` (qwen still downloading) and bytes
 // frozen past progress_stall_budget_s=0, the stall detector must STILL be armed
-// and fire progress_stall_timeout. At the old value 3 it would have disarmed
-// prematurely and skipped the stall check.
-func TestFF02_ThreeOfFourOk_StaysArmed(t *testing.T) {
+// and fire progress_stall_timeout. At a stale lower value it would have disarmed
+// prematurely and skipped the stall check. (Phase 21 dropped chatterbox: 4→3.)
+func TestFF02_TwoOfThreeOk_StaysArmed(t *testing.T) {
 	withTestPollInterval(t, 2*time.Millisecond)
 	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
-	// 3 non-qwen ok + qwen fetching/progress frozen → okCount=3 < 4 (armed).
+	// 2 non-qwen ok + qwen fetching/progress frozen → okCount=2 < 3 (armed).
 	text := dlText(
 		dlFetching("qwen"), dlProgress("qwen", 1000),
-		dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+		dlOK("bge-m3"), dlOK("whisper"),
 	)
 	fakeV := &fakeVast{
 		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
@@ -4100,25 +4099,25 @@ func TestFF02_ThreeOfFourOk_StaysArmed(t *testing.T) {
 	defer cancel()
 	err := runWait(r, ctx, 99, 42, 0.30, testLogger())
 
-	require.Error(t, err, "3-of-4 ok with qwen frozen must stay ARMED and trip the stall detector")
+	require.Error(t, err, "2-of-3 ok with qwen frozen must stay ARMED and trip the stall detector")
 	require.Equal(t, int32(1), fakeV.destroyCalls.Load())
 	require.True(t, rr.has("progress_stall_timeout"),
-		"expectedWeightFiles=4: the 3 non-qwen files must NOT disarm while qwen downloads")
+		"expectedWeightFiles=3: the 2 non-qwen files must NOT disarm while qwen downloads")
 }
 
-// TestFF02_FourthOk_Disarms asserts the disarm boundary: once ALL 4 mandatory
+// TestFF02_ThirdOk_Disarms asserts the disarm boundary: once ALL 3 mandatory
 // files log `ok`, the detector disarms — a subsequent healthy-but-slow startup
 // with frozen bytes must NOT trip the stall detector (rides).
-func TestFF02_FourthOk_Disarms(t *testing.T) {
+func TestFF02_ThirdOk_Disarms(t *testing.T) {
 	withTestPollInterval(t, 2*time.Millisecond)
 	setOnstartLogIntervalForTest(t, 2*time.Millisecond)
 	cfg := testCfg(t)
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
-	// all 4 mandatory ok (okCount=4 >= 4) with bytes frozen → disarmed.
+	// all 3 mandatory ok (okCount=3 >= 3) with bytes frozen → disarmed.
 	text := dlText(
 		dlFetching("qwen"), dlProgress("qwen", 1000),
-		dlOK("qwen"), dlOK("bge-m3"), dlOK("whisper"), dlOK("chatterbox"),
+		dlOK("qwen"), dlOK("bge-m3"), dlOK("whisper"),
 	)
 	fakeV := &fakeVast{
 		getInstanceFn: func(_ context.Context, _ int64) (vast.Instance, error) {
@@ -4143,7 +4142,7 @@ func TestFF02_FourthOk_Disarms(t *testing.T) {
 	go func() { errCh <- runWait(r, ctx, 99, 42, 0.30, testLogger()) }()
 	time.Sleep(60 * time.Millisecond)
 	require.Equal(t, int32(0), fakeV.destroyCalls.Load(),
-		"all 4 mandatory ok → disarmed; a slow startup with frozen bytes must ride, never trip the stall")
+		"all 3 mandatory ok → disarmed; a slow startup with frozen bytes must ride, never trip the stall")
 	require.False(t, rr.has("progress_stall_timeout"))
 	cancel()
 	<-errCh

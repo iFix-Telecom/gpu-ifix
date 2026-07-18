@@ -128,13 +128,16 @@ const (
 	// the newest 20 known-good hosts. Decision #5 (20-CONTEXT.md).
 	allowlistCap = 20
 	// expectedWeightFiles is the number of MANDATORY weights the PRIMARY onstart
-	// fetches (qwen + whisper + bge-m3 + chatterbox — onstart.go buildPrimaryOnstart
-	// runs 4 download_with_verify calls, each logging one `[download-weights] ok`).
-	// FF-02 disarms the download-stall detector only once all 4 have logged `ok`;
-	// at 3 the qwen download (the slow ~18GB one) could still be in flight while the
-	// 3 smaller files disarmed early. The optional 5th (jinja, only when
-	// PRIMARY_QWEN_JINJA_KEY is set) pushes okCount to 5 >= 4 — still disarms.
-	expectedWeightFiles = 4
+	// fetches (qwen + whisper + bge-m3 — onstart.go buildPrimaryOnstart runs 3
+	// download_with_verify calls, each logging one `[download-weights] ok`).
+	// Phase 21 removed chatterbox TTS (was the 4th mandatory download) → 4→3; a
+	// stale 4 would keep FF-02 armed forever (okCount peaks at 3 < 4, never
+	// disarms) and false-stall a healthy pod once the post-download bytes froze.
+	// FF-02 disarms the download-stall detector only once all 3 have logged `ok`;
+	// at 2 the qwen download (the slow ~18GB one) could still be in flight while
+	// the 2 smaller files disarmed early. The optional 4th (jinja, only when
+	// PRIMARY_QWEN_JINJA_KEY is set) pushes okCount to 4 >= 3 — still disarms.
+	expectedWeightFiles = 3
 )
 
 // Start begins the reconciler. Spawns three goroutines:
