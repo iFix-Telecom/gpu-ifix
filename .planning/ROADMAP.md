@@ -395,7 +395,7 @@ Plans:
 
 **Depends on:** Phase 21 (STT in-house no pod — o offload que o funnel vai medir), Phase 113 converseai-v4 (código de roteamento LLM/STT secundárias pelo gateway JÁ mergeado + inerte, opt-in por env — CV-01 só ativa), Phase 15 (dashboard economia — reuso opcional p/ MEASURE-01), Phase 20 (auto-blocklist/allowlist + coldstart budgets — provisão do pod que o ROI avalia).
 
-**Plans:** 1/7 plans executed
+**Plans:** 2/7 plans executed
 
 Plans:
 **Wave 1**
@@ -404,7 +404,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 22-02-PLAN.md — CV-01 GATE de runtime: a imagem do stack 15 tem o código Phase 113? (dangling em develop) — re-land condicional sob checkpoint humano
+- [x] 22-02-PLAN.md — CV-01 GATE de runtime: a imagem do stack 15 tem o código Phase 113? (dangling em develop) — re-land condicional sob checkpoint humano
 - [ ] 22-04-PLAN.md — CV-02: gateway serve chat Gemini (decisão A upstream-nativo vs B alias→openrouter-chat, provada por path-test) + validar tool_choice
 
 **Wave 3** *(blocked on Wave 2 completion)*
