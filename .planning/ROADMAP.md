@@ -395,12 +395,12 @@ Plans:
 
 **Depends on:** Phase 21 (STT in-house no pod — o offload que o funnel vai medir), Phase 113 converseai-v4 (código de roteamento LLM/STT secundárias pelo gateway JÁ mergeado + inerte, opt-in por env — CV-01 só ativa), Phase 15 (dashboard economia — reuso opcional p/ MEASURE-01), Phase 20 (auto-blocklist/allowlist + coldstart budgets — provisão do pod que o ROI avalia).
 
-**Plans:** 7 plans
+**Plans:** 1/7 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 22-01-PLAN.md — PRICE-01 (GATE): corrigir ai_gateway.prices por (model,provider,unit) + fx via gatewayctl (hot-reload), cruzado com faturas Google/OpenAI
+- [x] 22-01-PLAN.md — PRICE-01 (GATE): corrigir ai_gateway.prices por (model,provider,unit) + fx via gatewayctl (hot-reload), cruzado com faturas Google/OpenAI
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
