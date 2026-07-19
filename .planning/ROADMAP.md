@@ -395,11 +395,16 @@ Plans:
 
 **Depends on:** Phase 21 (STT in-house no pod — o offload que o funnel vai medir), Phase 113 converseai-v4 (código de roteamento LLM/STT secundárias pelo gateway JÁ mergeado + inerte, opt-in por env — CV-01 só ativa), Phase 15 (dashboard economia — reuso opcional p/ MEASURE-01), Phase 20 (auto-blocklist/allowlist + coldstart budgets — provisão do pod que o ROI avalia).
 
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Plans:
-
-- [ ] TBD (run /gsd:plan-phase 22 to break down)
+- [ ] 22-01-PLAN.md — PRICE-01 (GATE): corrigir ai_gateway.prices por (model,provider,unit) + fx via gatewayctl (hot-reload), cruzado com faturas Google/OpenAI
+- [ ] 22-02-PLAN.md — CV-01 GATE de runtime: a imagem do stack 15 tem o código Phase 113? (dangling em develop) — re-land condicional sob checkpoint humano
+- [ ] 22-03-PLAN.md — CV-01 STT: setar STT_GATEWAY_KEY no stack 15 + UAT usage 0→N + rollback (menor blast-radius, ataca $38)
+- [ ] 22-04-PLAN.md — CV-02: gateway serve chat Gemini (decisão A upstream-nativo vs B alias→openrouter-chat, provada por path-test) + validar tool_choice
+- [ ] 22-05-PLAN.md — CV-03: branch gateway em apps/worker/src/shared/followup-llm.ts (model=qwen), opt-in por FOLLOWUP_GATEWAY_KEY
+- [ ] 22-06-PLAN.md — CV-01 secundárias: classifier→format-hint→ai-match, UMA por vez + UAT + rollback (grosso do R$238 Gemini)
+- [ ] 22-07-PLAN.md — MEASURE-01: query ROI mensal por upstream/tenant vs custo pod + cross-check GET /admin/economy (reuso Phase 15)
 
 ---
 
