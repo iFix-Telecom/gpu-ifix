@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-07-11T01:58:58.024Z"
+last_updated: "2026-07-19T16:58:16.473Z"
 progress:
-  total_phases: 17
-  completed_phases: 14
-  total_plans: 85
-  completed_plans: 83
-  percent: 82
+  total_phases: 21
+  completed_phases: 15
+  total_plans: 92
+  completed_plans: 85
+  percent: 71
 ---
 
 # STATE: ifix-ai-gateway
@@ -132,7 +132,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
   - **Integration tests (emerg suite): RESOLVED 2026-05-14.** First real CI run of `gateway/internal/integration_test/emerg_*` (Phase 6.5 deferred them to CI runtime — never executed before) failed 8 tests. 3 root causes found+fixed via `/gsd-debug`: (1) `freshSchema` missing `emergency_lifecycles` TRUNCATE → cross-test DB contamination (commit 9772d71); (2) stale Plan 06.5-05 force-provision/D-C5 test assertions vs reconciler evolved by 06.5-06+ (commit 355843b); (3) re-trigger oscillation race — `offer_race_lost` abort returned FSM straight to Healthy instead of Cooldown, `evaluateHealthy` re-fired the trigger every tick — fixed via new `ProvisionFailureCooldownSeconds` config (commit 85ba3da). All 22 emerg integration tests GREEN in CI run 25891568768 (build-gateway, develop). Debug sessions: `.planning/debug/emerg-integration-tests-ci.md` + `.planning/debug/emerg-bid-race-lost.md`.
 
 - **Phases 7–10:** Not started (no phase directories) — Phase 07 unblocked 2026-05-19 by Phase 6.6 closeout.
-- **Status:** Executing Phase 20
+- **Status:** Ready to execute
 
 ## Performance Metrics
 

@@ -398,12 +398,29 @@ Plans:
 **Plans:** 7 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 22-01-PLAN.md — PRICE-01 (GATE): corrigir ai_gateway.prices por (model,provider,unit) + fx via gatewayctl (hot-reload), cruzado com faturas Google/OpenAI
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 22-02-PLAN.md — CV-01 GATE de runtime: a imagem do stack 15 tem o código Phase 113? (dangling em develop) — re-land condicional sob checkpoint humano
-- [ ] 22-03-PLAN.md — CV-01 STT: setar STT_GATEWAY_KEY no stack 15 + UAT usage 0→N + rollback (menor blast-radius, ataca $38)
 - [ ] 22-04-PLAN.md — CV-02: gateway serve chat Gemini (decisão A upstream-nativo vs B alias→openrouter-chat, provada por path-test) + validar tool_choice
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 22-03-PLAN.md — CV-01 STT: setar STT_GATEWAY_KEY no stack 15 + UAT usage 0→N + rollback (menor blast-radius, ataca $38)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 22-05-PLAN.md — CV-03: branch gateway em apps/worker/src/shared/followup-llm.ts (model=qwen), opt-in por FOLLOWUP_GATEWAY_KEY
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 22-06-PLAN.md — CV-01 secundárias: classifier→format-hint→ai-match, UMA por vez + UAT + rollback (grosso do R$238 Gemini)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 22-07-PLAN.md — MEASURE-01: query ROI mensal por upstream/tenant vs custo pod + cross-check GET /admin/economy (reuso Phase 15)
 
 ---

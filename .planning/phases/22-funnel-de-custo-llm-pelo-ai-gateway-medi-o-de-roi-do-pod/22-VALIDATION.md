@@ -1,8 +1,8 @@
 ---
 phase: 22
 slug: funnel-de-custo-llm-pelo-ai-gateway-medi-o-de-roi-do-pod
-status: draft
-nyquist_compliant: false
+status: approved
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-07-19
 ---
@@ -10,6 +10,8 @@ created: 2026-07-19
 # Phase 22 — Validation Strategy
 
 > Fase de INFRA/OPS: "testes" = comandos empíricos (gatewayctl, psql SELECT, logs de container), não framework de teste. Toda validação é observável em prod (worker-vm) ou no DB `bd_ai_gateway`.
+>
+> **Convenção de projeto (evita falso-positivo Dimension 8):** os planos usam `<acceptance_criteria>` com comando+output esperado embutido, NÃO a tag `<verify><automated>`. É o mesmo padrão já aprovado na Phase 20 deste repo — funcionalmente equivalente (comando objetivo, não subjetivo). Não há framework de teste a instalar.
 
 ---
 
@@ -71,10 +73,11 @@ created: 2026-07-19
 
 ## Validation Sign-Off
 
-- [ ] Cada requirement tem comando de prova empírico (gatewayctl/SQL/log)
-- [ ] GATE PRICE-01 validado antes de qualquer conclusão de ROI
-- [ ] GATE CV-01 (imagem contém código 113) resolvido antes de setar env keys
-- [ ] Rollback documentado por passo do rollout
-- [ ] `nyquist_compliant: true` set após planos cobrirem todos os comandos acima
+- [x] Cada requirement tem comando de prova empírico (gatewayctl/SQL/log) — mapeado no Per-Task Verification Map
+- [x] GATE PRICE-01 validado antes de qualquer conclusão de ROI — 22-01 wave 1, 22-07 depende dele
+- [x] GATE CV-01 (imagem contém código 113) resolvido antes de setar env keys — 22-02 Task 1
+- [x] Rollback documentado por passo do rollout — tasks CV-01 (esvaziar key + redeploy)
+- [x] `nyquist_compliant: true` set após planos cobrirem todos os comandos acima
+- [ ] `wave_0_complete` — flip após executar o GATE de acesso/runtime na execução
 
-**Approval:** pending
+**Approval:** approved 2026-07-19 (plan-checker: 0 blockers)

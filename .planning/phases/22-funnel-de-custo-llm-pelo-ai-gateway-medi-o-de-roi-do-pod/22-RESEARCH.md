@@ -424,7 +424,9 @@ upstream/tenant se o painel atual só mostrar o agregado.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> Cada questão foi operacionalizada como task/gate concreto num plano da fase (não fica pendente pré-execução): Q1→22-02 Task 1 (GATE runtime); Q2→22-01 Task 1 (cruzar faturas); Q3→22-04 Task 1 (path-test Gemini OpenAI-compat); Q4→22-04 (reconciliação de escopo R$238); Q5→22-05 read_first (`getFollowupClient`); Q6→22-07 (recorte por-upstream/tenant do `/admin/economy`). O comando de resolução de cada uma vira acceptance_criteria da task correspondente.
 
 1. **[GATE CV-01] O código Phase 113 está na imagem rodando do stack 15?** `origin/develop` NÃO tem
    (dangling). Resolve: `ssh vps-ifix-vm 'docker inspect <converseai-api-container> --format "{{.Config.Image}}"'`
