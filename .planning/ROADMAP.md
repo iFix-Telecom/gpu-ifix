@@ -387,6 +387,20 @@ Plans:
 - Confia no preço phantom — NÃO validar antes (já corrigido via daily timer)
 - Gaps NÃO incluídos nesta fase (capturados em note/seed): metering `audio_seconds`/`embeds_count`=0 não gravam; latency chart vira série temporal (seed separado); Tier 3 GPU/RAM/CPU (HANDOFF-tier3-gpu-metrics.md)
 
+### Phase 22: Funnel de custo LLM pelo ai-gateway + medição de ROI do pod
+
+**Goal:** Rotear TODO o gasto de LLM/STT/embeddings da converseai-v4 (e opcionalmente n8n/vps-claude) **pelo ai-gateway** — mesmo quando o gateway cai em fallback google/openai **direto** — para que `billing_events` capture 100% do consumo e vire o painel real de "**alugar pod compensa ou não?**" (custo do pod vs custo external, mensal). Hoje é impossível medir: metade do gasto passa fora do gateway. **Motivação (medido 2026-07-19):** OpenAI **$53** (projeto ai-gateway $38 + Vps-Claude-Pedro $14,6 + N8N $0,27) + Google **Gemini R$238,59** no mês; o gateway em si só gastou ~R$13 externo — o grosso é **converseai-v4-dev (stack 15 Portainer, ep3)** chamando Gemini/OpenAI/OpenRouter **DIRETO** com keys próprias (`GOOGLE_AI_API_KEY=AIzaSyCSvh…`, `OPENAI_API_KEY=sk-proj-dLD68…`, `OPENROUTER_API_KEY=sk-or-v1-…`), bypassando o gateway. Ver memory [[gateway-cost-funnel-and-pod-roi]] + [[stt-cpu-and-billing-columns]] + [[coldstart-pod-economics]].
+
+**Requirements:** PRICE-01 (**PRÉ-REQUISITO da medição** — corrigir a tabela `ai_gateway.prices`: `cost_external_brl` está subvalorizado, ex gemini-stt 754min por R$1,33 é irreal → sem preço real por upstream/modelo o ROI sai errado a favor do pod; `prices` tem NOTIFY hot-reload, é UPDATE/INSERT no DB sem deploy; preencher preços reais BRL por provider/modelo/unit incl. áudio $/min e token in/out), CV-01 (ativar **Phase 113 rollout gradual** — setar `*_GATEWAY_KEY` no stack 15 **uma por vez** + UAT + rollback [esvaziar key + redeploy]; keys já mintadas: `STT_GATEWAY_KEY`=ifix_sk_jj7h…, `AGENT_CLASSIFIER_GATEWAY_KEY`=ifix_sk_hu3x…, `AGENT_FORMAT_HINT_GATEWAY_KEY`=ifix_sk_2h7i…, `AGENT_AI_MATCH_GATEWAY_KEY`=ifix_sk_4u3d…; **começar por STT** que ataca os $38; validar `gatewayctl usage --tenant <slug>` > 0 + log `gateway_enabled=True`), CV-02 (agente **principal** + `GOOGLE_AI_API_KEY` da converseai → gateway; **maior corte R$238**; PRÉ: gateway precisa de upstream de **fallback gemini de CHAT** — hoje só existe gemini-stt; repointar base_url+key p/ tenant do gateway preservando comportamento), CV-03 (followup worker TS → gateway; caminho próprio, spec `docs/route-secondary-llms-through-gateway.md`, NÃO Phase 113), MEASURE-01 (painel/query de ROI mensal: `sum(cost_external_brl)` por upstream/tenant vs custo do pod [dph × horas up] — resposta objetiva "pod compensa?"; opcional expor no dashboard economia Phase 15). GATE: PRICE-01 antes de qualquer conclusão de ROI (número inválido sem preços reais).
+
+**Depends on:** Phase 21 (STT in-house no pod — o offload que o funnel vai medir), Phase 113 converseai-v4 (código de roteamento LLM/STT secundárias pelo gateway JÁ mergeado + inerte, opt-in por env — CV-01 só ativa), Phase 15 (dashboard economia — reuso opcional p/ MEASURE-01), Phase 20 (auto-blocklist/allowlist + coldstart budgets — provisão do pod que o ROI avalia).
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 22 to break down)
+
 ---
 
 ### Phase 20: Primary-pod provisioning resilience — coldstart fast-fail + auto-blocklist/allowlist (INSERTED, promoted from SEED-009)
