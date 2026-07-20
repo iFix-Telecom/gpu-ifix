@@ -362,3 +362,85 @@ func TestBuildGeminiSTTDirector_TranslatesGeminiErrorEnvelope(t *testing.T) {
 		t.Fatalf("resp body missing translated message; got: %s", bodyStr)
 	}
 }
+
+// buildMultipartWithLanguage extends buildMultipart with an OpenAI-style
+// "language" form field (Phase 22-03 fix — Gemini director must fold it into
+// the prompt since generateContent has no language param).
+func buildMultipartWithLanguage(t *testing.T, model, language string, audio []byte, audioMIME string) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", model); err != nil {
+		t.Fatalf("WriteField model: %v", err)
+	}
+	if language != "" {
+		if err := w.WriteField("language", language); err != nil {
+			t.Fatalf("WriteField language: %v", err)
+		}
+	}
+	hdr := make(map[string][]string)
+	hdr["Content-Disposition"] = []string{`form-data; name="file"; filename="audio.wav"`}
+	if audioMIME != "" {
+		hdr["Content-Type"] = []string{audioMIME}
+	}
+	fw, err := w.CreatePart(hdr)
+	if err != nil {
+		t.Fatalf("CreatePart file: %v", err)
+	}
+	if _, err := fw.Write(audio); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	return buf.Bytes(), w.FormDataContentType()
+}
+
+// TestBuildGeminiSTTDirector_LanguageFoldedIntoPrompt proves the `language`
+// form field lands in the Gemini prompt with a no-translate instruction — the
+// Phase 22-03 UAT regression (pt-BR audio transcribed as English) root cause.
+func TestBuildGeminiSTTDirector_LanguageFoldedIntoPrompt(t *testing.T) {
+	f := newGeminiFixture(t, "k", nil)
+	body, ct := buildMultipartWithLanguage(t, "whisper", "pt", []byte("AUDIOBYTES"), "audio/wav")
+	_ = doRequest(t, f, body, ct)
+
+	f.mu.Lock()
+	captured := append([]byte(nil), f.capturedBody...)
+	f.mu.Unlock()
+
+	var payload geminiRequest
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("unmarshal forwarded body: %v; raw=%s", err, string(captured))
+	}
+	if len(payload.Contents) == 0 || len(payload.Contents[0].Parts) == 0 {
+		t.Fatalf("contents shape wrong: %+v", payload)
+	}
+	prompt := payload.Contents[0].Parts[0].Text
+	if !strings.Contains(prompt, `"pt"`) {
+		t.Errorf("prompt should pin language code pt; got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Do NOT translate") {
+		t.Errorf("prompt should forbid translation; got %q", prompt)
+	}
+}
+
+// TestBuildGeminiSTTDirector_NoLanguageUsesOriginalLanguagePrompt proves the
+// language-neutral fallback still forbids translation (no English default).
+func TestBuildGeminiSTTDirector_NoLanguageUsesOriginalLanguagePrompt(t *testing.T) {
+	f := newGeminiFixture(t, "k", nil)
+	body, ct := buildMultipart(t, "whisper", []byte("AUDIOBYTES"), "audio/wav")
+	_ = doRequest(t, f, body, ct)
+
+	f.mu.Lock()
+	captured := append([]byte(nil), f.capturedBody...)
+	f.mu.Unlock()
+
+	var payload geminiRequest
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prompt := payload.Contents[0].Parts[0].Text
+	if !strings.Contains(prompt, "original spoken language") || !strings.Contains(prompt, "Do NOT translate") {
+		t.Errorf("neutral prompt should keep original-language + no-translate; got %q", prompt)
+	}
+}

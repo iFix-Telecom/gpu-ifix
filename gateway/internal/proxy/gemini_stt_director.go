@@ -53,9 +53,25 @@ import (
 // threshold; an explicit 413 wrapper is deferred to a follow-up.
 const geminiMaxInlineBytes = 20 * 1024 * 1024
 
-// geminiTranscribePrompt is the system-style instruction prepended to the
-// audio inline_data part. Keeps the model from emitting commentary.
-const geminiTranscribePrompt = "Transcribe this audio. Return only the transcription text, no commentary."
+// geminiTranscribePrompt is the language-neutral fallback instruction prepended
+// to the audio inline_data part. It pins verbatim transcription in the ORIGINAL
+// spoken language and forbids translation — the previous prompt omitted both and
+// Gemini defaulted to English on short/ambiguous pt-BR audio (Phase 22-03 UAT).
+const geminiTranscribePrompt = "Transcribe this audio verbatim in its original spoken language. Do NOT translate. Return only the transcription text, no commentary."
+
+// geminiTranscribePromptFor builds the transcription instruction, pinning the
+// output language when the client supplied one via the OpenAI `language` form
+// field (ISO-639-1, e.g. "pt"). Whisper honors that field; the Gemini director
+// must fold it into the prompt because generateContent has no language param.
+func geminiTranscribePromptFor(language string) string {
+	if language = strings.TrimSpace(language); language != "" {
+		return fmt.Sprintf(
+			"Transcribe this audio verbatim in the language with ISO-639 code %q. Do NOT translate. Return only the transcription text, no commentary.",
+			language,
+		)
+	}
+	return geminiTranscribePrompt
+}
 
 // geminiDefaultModel is the fallback when neither env nor schema yields a
 // target via resolver.Resolve (D-B7 default).
@@ -173,9 +189,14 @@ func BuildGeminiSTTDirector(
 			}
 		}
 
+		// Fold the OpenAI `language` form field into the prompt — generateContent
+		// has no language param, so without this Gemini defaults to English on
+		// short/ambiguous audio (Phase 22-03 UAT regression).
+		language := extractMultipartField(body, ct, "language")
+
 		req := geminiRequest{
 			Contents: []geminiContent{{Parts: []geminiPart{
-				{Text: geminiTranscribePrompt},
+				{Text: geminiTranscribePromptFor(language)},
 				{InlineData: &geminiInlineData{
 					MimeType: mimeType,
 					Data:     base64.StdEncoding.EncodeToString(audioBytes),
@@ -325,6 +346,39 @@ func extractAudioFromMultipart(body []byte, contentType string) ([]byte, string,
 		_ = part.Close()
 	}
 	return nil, "", fmt.Errorf("no file part")
+}
+
+// extractMultipartField returns the value of a non-file form field (e.g.
+// "language") from an OpenAI-style multipart body, or "" when absent/unparseable.
+// Best-effort: a second lightweight pass over the in-memory body — the "file"
+// part is drained without buffering its bytes.
+func extractMultipartField(body []byte, contentType, fieldName string) string {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		return ""
+	}
+	boundary, ok := params["boundary"]
+	if !ok || boundary == "" {
+		return ""
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, perr := mr.NextPart()
+		if perr != nil {
+			break
+		}
+		if part.FormName() == fieldName {
+			val, rerr := io.ReadAll(part)
+			_ = part.Close()
+			if rerr != nil {
+				return ""
+			}
+			return strings.TrimSpace(string(val))
+		}
+		_, _ = io.Copy(io.Discard, part)
+		_ = part.Close()
+	}
+	return ""
 }
 
 // sniffAudioMIME detects the audio container/codec from the leading magic
