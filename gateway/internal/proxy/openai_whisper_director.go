@@ -63,6 +63,29 @@ const whisperDuplicateModelMessage = `{"error":{"message":"duplicate 'model' fie
 //
 // New tier-1 upstreams MUST add an entry here alongside their schema row
 // AND their entry in models.upstreamEnvVarMap.
+// resolveSTTTarget resolves the upstream's real STT model for the inbound
+// `model` alias. If the alias is unregistered (the resolver echoes it back
+// unchanged), it falls back to the upstream's canonical STT alias — so an
+// arbitrary client model name (e.g. Maestro's "whisper-large-v3-turbo") is
+// still mapped to what the upstream actually serves instead of reaching it as
+// a model it doesn't have and 404-ing (Phase 22 — the gateway routes STT to the
+// right model regardless of the inbound name). When neither resolves it returns
+// the passthrough (safe: preserves prior behavior for a misconfigured upstream).
+func resolveSTTTarget(resolver *models.Resolver, alias, upstreamName string) string {
+	target := resolver.Resolve(alias, upstreamName)
+	if target != alias {
+		return target // registered alias → real per-upstream target
+	}
+	canon := canonicalAliasForUpstream[upstreamName]
+	if canon == "" || canon == alias {
+		return target
+	}
+	if canonTarget := resolver.Resolve(canon, upstreamName); canonTarget != canon {
+		return canonTarget
+	}
+	return target
+}
+
 var canonicalAliasForUpstream = map[string]string{
 	"openai-whisper": "whisper",
 	// Phase 11.2 D-B8 — Groq STT endpoint is OpenAI-compatible
@@ -238,7 +261,7 @@ func rewriteMultipartModelViaResolver(
 				return nil, "", 0, rerr
 			}
 			alias := string(aliasBytes)
-			target := resolver.Resolve(alias, upstreamName)
+			target := resolveSTTTarget(resolver, alias, upstreamName)
 
 			// Write a fresh "model" part with the same headers but the new value.
 			fw, werr := w.CreatePart(part.Header)

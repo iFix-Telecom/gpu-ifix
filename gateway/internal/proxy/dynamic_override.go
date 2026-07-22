@@ -51,6 +51,13 @@ func dynamicOverrideDirector(overrideURL func() (string, bool)) func(*http.Reque
 // (-1 for SSE/chat, 0 for buffered audio/tts). transport tunes timeouts.
 // interceptors run in ModifyResponse exactly like the static proxies.
 func NewDynamicOverrideProxy(role string, overrideURL func() (string, bool), flushInterval time.Duration, transport *http.Transport, log *slog.Logger, interceptors ...ProxyResponseInterceptor) http.Handler {
+	// Fix B (Phase 22): for the STT override (emergency_pod_stt), a retryable
+	// upstream status (404 model-not-found, 408/425/429, 5xx) must cascade to
+	// the next candidate — same as the static NewAudioProxy path. Prepended so a
+	// failed pod response never bills and re-routes instead of being returned.
+	if role == "stt" {
+		interceptors = append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)
+	}
 	return &httputil.ReverseProxy{
 		Director:      dynamicOverrideDirector(overrideURL),
 		FlushInterval: flushInterval,

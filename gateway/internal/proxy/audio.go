@@ -49,8 +49,45 @@ func NewAudioProxy(upstreamURL string, log *slog.Logger, resolver *models.Resolv
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
-		ErrorHandler:   ErrorHandler("stt", log),
-		ModifyResponse: ComposeInterceptors(interceptors...),
+		ErrorHandler: ErrorHandler("stt", log),
+		// Fix B (Phase 22): a retryable upstream HTTP status (404 model-not-found,
+		// 408/425/429, 5xx) raises errUpstreamRetryable FIRST — the sentinel-aware
+		// ErrorHandler suppresses the write and records fallthrough_ so the
+		// dispatcher cascades to the next STT candidate instead of returning the
+		// error. Prepended before billing/other interceptors so a failed upstream
+		// never bills. Non-retryable 4xx (400/401/403/413/415/422) stay terminal.
+		ModifyResponse: ComposeInterceptors(
+			append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)...,
+		),
 	}
 	return rp, nil
+}
+
+// sttRetryableStatusInterceptor raises errUpstreamRetryable when an STT upstream
+// returns a status that should cascade to the next candidate rather than being
+// returned verbatim. Client-error statuses that a retry cannot fix (bad audio,
+// auth, payload) are left terminal.
+type sttRetryableStatusInterceptor struct{}
+
+func (sttRetryableStatusInterceptor) Intercept(resp *http.Response) error {
+	if resp != nil && isRetryableSTTStatus(resp.StatusCode) {
+		return errUpstreamRetryable
+	}
+	return nil
+}
+
+// isRetryableSTTStatus reports whether an STT upstream status warrants a cascade
+// to the next candidate: 404 (model/route not found — e.g. a model the upstream
+// doesn't serve), 408/425/429 (timeout/too-early/rate-limit or quota), and all
+// 5xx. Excludes 400/401/403/413/415/422 (a retry to another upstream can't fix a
+// genuinely bad or unauthorized request).
+func isRetryableSTTStatus(code int) bool {
+	switch code {
+	case http.StatusNotFound, // 404
+		http.StatusRequestTimeout,  // 408
+		http.StatusTooEarly,        // 425
+		http.StatusTooManyRequests: // 429
+		return true
+	}
+	return code >= 500 && code <= 599
 }
