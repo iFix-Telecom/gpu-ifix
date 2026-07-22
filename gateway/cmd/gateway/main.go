@@ -1277,8 +1277,15 @@ func main() {
 	// usage producer's ELSE branch relies on this ctx value). The middleware
 	// reads the multipart body ONCE (bounded) and restores Body+GetBody
 	// byte-identical, so the dispatcher's fallback replay chain stays intact.
+	// STT_DEFAULT_LANGUAGE (default "pt"): injected into transcription requests
+	// that omit `language`, so whisper/gemini don't auto-detect and mis-transcribe
+	// short pt-BR audio (Phase 22 chatifix dictation bug). Set "" to disable.
+	sttDefaultLang := os.Getenv("STT_DEFAULT_LANGUAGE")
+	if _, set := os.LookupEnv("STT_DEFAULT_LANGUAGE"); !set {
+		sttDefaultLang = "pt"
+	}
 	audioHandler := wrapWithTimeout(
-		proxy.RequestAudioSecondsMiddleware(log)(audioDispatcher),
+		proxy.RequestAudioSecondsMiddleware(log, sttDefaultLang)(audioDispatcher),
 		cfg.WriteTimeoutAudioS,
 	)
 	// Phase 06.7 — TTS speech shares the audio write-timeout budget (long synth).

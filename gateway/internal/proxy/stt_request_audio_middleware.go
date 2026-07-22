@@ -41,7 +41,13 @@ import (
 // RequestAudioSecondsMiddleware returns an http middleware that stamps the
 // request-derived audio duration onto the context for /v1/audio/transcriptions
 // multipart POSTs. log may be nil (falls back to slog.Default()).
-func RequestAudioSecondsMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
+//
+// defaultLang (STT_DEFAULT_LANGUAGE, e.g. "pt"): when non-empty, a
+// `language=<defaultLang>` form field is injected into any transcription
+// request that omits one, so whisper/gemini don't auto-detect the language
+// (which mis-transcribes short/robotic pt-BR audio as English/Italian — the
+// Phase 22 chatifix dictation bug). Empty disables the injection.
+func RequestAudioSecondsMiddleware(log *slog.Logger, defaultLang string) func(http.Handler) http.Handler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -49,7 +55,7 @@ func RequestAudioSecondsMiddleware(log *slog.Logger) func(http.Handler) http.Han
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			seconds, ok := deriveRequestAudioSeconds(r, log)
+			seconds, ok := deriveRequestAudioSeconds(r, log, defaultLang)
 			if ok && seconds > 0 {
 				ctx := auditctx.WithRequestAudioSeconds(r.Context(), seconds)
 				r = r.WithContext(ctx)
@@ -66,7 +72,7 @@ func RequestAudioSecondsMiddleware(log *slog.Logger) func(http.Handler) http.Han
 //
 // On every path that consumed r.Body it sets r.Body + r.GetBody back so the
 // downstream proxy + dispatcher replay see the original bytes.
-func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger) (float64, bool) {
+func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang string) (float64, bool) {
 	if r == nil || r.Body == nil || r.Body == http.NoBody {
 		return 0, false
 	}
@@ -92,7 +98,16 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger) (float64, bool
 	// Read the whole body BOUNDED to maxSTTBodyBuffer (+1 to detect overflow).
 	buf, rerr := io.ReadAll(io.LimitReader(r.Body, maxSTTBodyBuffer+1))
 	_ = r.Body.Close()
-	// Always restore the body byte-identical, regardless of what follows.
+	// Inject a default `language` field BEFORE restoring the body, so the pod +
+	// every tier-1 upstream (and the dispatcher replay) forward it. Only when the
+	// body was fully & cleanly buffered — never touch an over-cap / errored read.
+	if rerr == nil && defaultLang != "" && int64(len(buf)) <= maxSTTBodyBuffer {
+		if newBuf, changed := injectDefaultMultipartField(buf, boundary, "language", defaultLang); changed {
+			buf = newBuf
+			log.Debug("stt default language injected (client omitted it)", "language", defaultLang)
+		}
+	}
+	// Always restore the body byte-identical (or with the injected field).
 	restoreRequestBody(r, buf)
 	if rerr != nil {
 		log.Debug("stt request-audio read failed; forwarding unstamped", "err", rerr)
@@ -129,6 +144,47 @@ func restoreRequestBody(r *http.Request, buf []byte) {
 	r.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(buf)), nil
 	}
+}
+
+// multipartHasField reports whether the buffered multipart body already carries
+// a form field with the given name (e.g. the client-supplied "language").
+func multipartHasField(buf []byte, boundary, name string) bool {
+	mr := multipart.NewReader(bytes.NewReader(buf), boundary)
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			return false
+		}
+		fn := part.FormName()
+		_ = part.Close()
+		if fn == name {
+			return true
+		}
+	}
+}
+
+// injectDefaultMultipartField appends a simple text form field just before the
+// closing multipart delimiter, preserving every existing part (incl. the binary
+// "file" audio part) byte-identical and keeping the SAME boundary — so the
+// Content-Type header stays valid and the file bytes are untouched. Returns
+// (buf, false) when the field already exists or the closing delimiter is absent.
+func injectDefaultMultipartField(buf []byte, boundary, name, value string) ([]byte, bool) {
+	if multipartHasField(buf, boundary, name) {
+		return buf, false
+	}
+	closing := []byte("--" + boundary + "--")
+	idx := bytes.LastIndex(buf, closing)
+	if idx < 0 {
+		return buf, false
+	}
+	part := "--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +
+		value + "\r\n"
+	out := make([]byte, 0, len(buf)+len(part))
+	out = append(out, buf[:idx]...)
+	out = append(out, part...)
+	out = append(out, buf[idx:]...)
+	return out, true
 }
 
 // extractMultipartFile walks the buffered multipart body and returns the

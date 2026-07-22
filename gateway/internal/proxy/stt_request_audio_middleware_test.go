@@ -3,6 +3,7 @@ package proxy_test
 import (
 	"bytes"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -68,7 +69,7 @@ func TestRequestAudioSecondsMiddlewareStampsAndReplays(t *testing.T) {
 		}
 	})
 
-	h := proxy.RequestAudioSecondsMiddleware(nil)(next)
+	h := proxy.RequestAudioSecondsMiddleware(nil, "")(next)
 	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", ct)
 	h.ServeHTTP(httptest.NewRecorder(), req)
@@ -105,7 +106,7 @@ func TestRequestAudioSecondsMiddlewareNonAudioRoutePassthrough(t *testing.T) {
 		downstream, _ = io.ReadAll(r.Body)
 	})
 
-	h := proxy.RequestAudioSecondsMiddleware(nil)(next)
+	h := proxy.RequestAudioSecondsMiddleware(nil, "")(next)
 	// /v1/chat/completions is not a transcription route → no stamp.
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", ct)
@@ -132,7 +133,7 @@ func TestRequestAudioSecondsMiddlewareNonMultipartPassthrough(t *testing.T) {
 		gotSeconds = auditctx.RequestAudioSecondsFrom(r.Context())
 		downstream, _ = io.ReadAll(r.Body)
 	})
-	h := proxy.RequestAudioSecondsMiddleware(nil)(next)
+	h := proxy.RequestAudioSecondsMiddleware(nil, "")(next)
 	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(httptest.NewRecorder(), req)
@@ -142,5 +143,117 @@ func TestRequestAudioSecondsMiddlewareNonMultipartPassthrough(t *testing.T) {
 	}
 	if !bytes.Equal(downstream, jsonBody) {
 		t.Fatalf("non-multipart body mutated: %q", downstream)
+	}
+}
+
+// parseMultipartField returns the value of a non-file form field from a
+// multipart body, or "" if absent.
+func parseMultipartField(t *testing.T, body []byte, contentType, name string) string {
+	t.Helper()
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatalf("ParseMediaType: %v", err)
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return ""
+		}
+		if p.FormName() == name {
+			v, _ := io.ReadAll(p)
+			_ = p.Close()
+			return string(v)
+		}
+		_ = p.Close()
+	}
+}
+
+// TestRequestAudioSecondsMiddlewareInjectsDefaultLanguage: a transcription
+// request that OMITS `language` gets `language=pt` injected (Phase 22 dictation
+// fix), while the "file" audio part + duration stamp stay intact.
+func TestRequestAudioSecondsMiddlewareInjectsDefaultLanguage(t *testing.T) {
+	wav := buildWAV(16000, 1, 16, 32000) // 2.0s
+	body, ct := buildMultipartAudio(t, "audio/wav", wav)
+	if got := parseMultipartField(t, body, ct, "language"); got != "" {
+		t.Fatalf("precondition: body already has language=%q", got)
+	}
+
+	var (
+		gotSeconds float64
+		downstream []byte
+	)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSeconds = auditctx.RequestAudioSecondsFrom(r.Context())
+		downstream, _ = io.ReadAll(r.Body)
+	})
+	h := proxy.RequestAudioSecondsMiddleware(nil, "pt")(next)
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got := parseMultipartField(t, downstream, ct, "language"); got != "pt" {
+		t.Fatalf("injected language: want pt, got %q", got)
+	}
+	// file part preserved byte-identical.
+	if got := parseMultipartFileBytes(t, downstream, ct); !bytes.Equal(got, wav) {
+		t.Fatalf("file part mutated: want %d bytes, got %d", len(wav), len(got))
+	}
+	// duration still stamped (injection ran before derivation).
+	if gotSeconds <= 0 {
+		t.Fatalf("ctx seconds: want >0 after injection, got %.4f", gotSeconds)
+	}
+}
+
+// TestRequestAudioSecondsMiddlewareKeepsClientLanguage: a request that already
+// carries `language` is NOT modified (client wins).
+func TestRequestAudioSecondsMiddlewareKeepsClientLanguage(t *testing.T) {
+	wav := buildWAV(16000, 1, 16, 32000)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	hdr := map[string][]string{
+		"Content-Disposition": {`form-data; name="file"; filename="a.wav"`},
+		"Content-Type":        {"audio/wav"},
+	}
+	part, _ := mw.CreatePart(hdr)
+	_, _ = part.Write(wav)
+	_ = mw.WriteField("model", "whisper-1")
+	_ = mw.WriteField("language", "en") // client-supplied
+	_ = mw.Close()
+	body, ct := buf.Bytes(), mw.FormDataContentType()
+
+	var downstream []byte
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downstream, _ = io.ReadAll(r.Body)
+	})
+	h := proxy.RequestAudioSecondsMiddleware(nil, "pt")(next)
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got := parseMultipartField(t, downstream, ct, "language"); got != "en" {
+		t.Fatalf("client language must win: want en, got %q", got)
+	}
+	if !bytes.Equal(downstream, body) {
+		t.Fatalf("body mutated despite client language present")
+	}
+}
+
+// parseMultipartFileBytes returns the "file" part bytes from a multipart body.
+func parseMultipartFileBytes(t *testing.T, body []byte, contentType string) []byte {
+	t.Helper()
+	_, params, _ := mime.ParseMediaType(contentType)
+	mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return nil
+		}
+		if p.FormName() == "file" {
+			b, _ := io.ReadAll(p)
+			_ = p.Close()
+			return b
+		}
+		_ = p.Close()
 	}
 }
