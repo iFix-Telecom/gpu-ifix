@@ -239,6 +239,60 @@ func TestRequestAudioSecondsMiddlewareKeepsClientLanguage(t *testing.T) {
 	}
 }
 
+// TestRequestAudioSecondsMiddlewareOverridesBlankLanguage: a request that carries
+// an EMPTY `language=` field gets the default injected (blank counts as absent),
+// so whisper still pins pt-BR instead of mis-detecting English (chatifix dictation).
+func TestRequestAudioSecondsMiddlewareOverridesBlankLanguage(t *testing.T) {
+	wav := buildWAV(16000, 1, 16, 32000)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	hdr := map[string][]string{
+		"Content-Disposition": {`form-data; name="file"; filename="a.wav"`},
+		"Content-Type":        {"audio/wav"},
+	}
+	part, _ := mw.CreatePart(hdr)
+	_, _ = part.Write(wav)
+	_ = mw.WriteField("model", "whisper-1")
+	_ = mw.WriteField("language", "") // client sent it blank
+	_ = mw.Close()
+	body, ct := buf.Bytes(), mw.FormDataContentType()
+
+	var downstream []byte
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downstream, _ = io.ReadAll(r.Body)
+	})
+	h := proxy.RequestAudioSecondsMiddleware(nil, "pt")(next)
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	// The pod takes the LAST value of a repeated field, so the appended pt must be
+	// the final `language` in the body (the blank one stays but is overridden).
+	if got := lastMultipartField(t, downstream, ct, "language"); got != "pt" {
+		t.Fatalf("blank language must be overridden: want pt as last value, got %q", got)
+	}
+}
+
+// lastMultipartField returns the LAST value of a repeated form field — mirrors the
+// pod's dup-key resolution (last wins).
+func lastMultipartField(t *testing.T, body []byte, contentType, name string) string {
+	t.Helper()
+	_, params, _ := mime.ParseMediaType(contentType)
+	mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	last := ""
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return last
+		}
+		if p.FormName() == name {
+			v, _ := io.ReadAll(p)
+			last = string(v)
+		}
+		_ = p.Close()
+	}
+}
+
 // parseMultipartFileBytes returns the "file" part bytes from a multipart body.
 func parseMultipartFileBytes(t *testing.T, body []byte, contentType string) []byte {
 	t.Helper()

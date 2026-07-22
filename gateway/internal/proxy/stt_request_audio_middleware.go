@@ -147,7 +147,10 @@ func restoreRequestBody(r *http.Request, buf []byte) {
 }
 
 // multipartHasField reports whether the buffered multipart body already carries
-// a form field with the given name (e.g. the client-supplied "language").
+// a form field with the given name AND a non-empty value. A present-but-blank
+// field (e.g. a client that sends `language=`) counts as absent, so the default
+// still gets injected — an empty `language` suppresses whisper's language pin and
+// mis-transcribes short pt-BR audio as English (the chatifix dictation bug).
 func multipartHasField(buf []byte, boundary, name string) bool {
 	mr := multipart.NewReader(bytes.NewReader(buf), boundary)
 	for {
@@ -155,11 +158,13 @@ func multipartHasField(buf []byte, boundary, name string) bool {
 		if err != nil {
 			return false
 		}
-		fn := part.FormName()
-		_ = part.Close()
-		if fn == name {
-			return true
+		if part.FormName() != name {
+			_ = part.Close()
+			continue
 		}
+		v, _ := io.ReadAll(part)
+		_ = part.Close()
+		return len(bytes.TrimSpace(v)) > 0
 	}
 }
 
