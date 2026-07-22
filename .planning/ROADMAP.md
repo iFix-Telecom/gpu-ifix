@@ -395,7 +395,7 @@ Plans:
 
 **Depends on:** Phase 21 (STT in-house no pod — o offload que o funnel vai medir), Phase 113 converseai-v4 (código de roteamento LLM/STT secundárias pelo gateway JÁ mergeado + inerte, opt-in por env — CV-01 só ativa), Phase 15 (dashboard economia — reuso opcional p/ MEASURE-01), Phase 20 (auto-blocklist/allowlist + coldstart budgets — provisão do pod que o ROI avalia).
 
-**Plans:** 3/7 plans executed
+**Plans:** 4/7 plans executed
 
 Plans:
 **Wave 1**
@@ -409,7 +409,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 22-03-PLAN.md — CV-01 STT: setar STT_GATEWAY_KEY no stack 15 + UAT usage 0→N + rollback (menor blast-radius, ataca $38)
+- [x] 22-03-PLAN.md — CV-01 STT: setar STT_GATEWAY_KEY no stack 15 + UAT usage 0→N + rollback (menor blast-radius, ataca $38)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
