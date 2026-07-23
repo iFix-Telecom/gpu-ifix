@@ -98,16 +98,24 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang st
 	// Read the whole body BOUNDED to maxSTTBodyBuffer (+1 to detect overflow).
 	buf, rerr := io.ReadAll(io.LimitReader(r.Body, maxSTTBodyBuffer+1))
 	_ = r.Body.Close()
-	// Inject a default `language` field BEFORE restoring the body, so the pod +
-	// every tier-1 upstream (and the dispatcher replay) forward it. Only when the
-	// body was fully & cleanly buffered — never touch an over-cap / errored read.
+	// FORCE the `language` field to defaultLang BEFORE restoring the body: drop any
+	// client-supplied copy and set exactly one, so the pod AND every tier-1 fallback
+	// (gemini/openai read the FIRST `language` value) transcribe in pt-BR. The
+	// chatifix/Chatwoot dictation mic sends language=en, which whisper honors and
+	// mis-transcribes pt-BR audio into fluent English ("oi bom dia" -> "oh yeah to
+	// the bank"). iFix STT is 100% pt-BR (voip calls + dictation), so overriding is
+	// correct here.
+	// ponytail: force-to-one-language assumes a single-language deployment; if a
+	// tenant ever needs another STT language, gate this on a per-tenant override.
 	if rerr == nil && defaultLang != "" && int64(len(buf)) <= maxSTTBodyBuffer {
-		if newBuf, changed := injectDefaultMultipartField(buf, boundary, "language", defaultLang); changed {
+		if newBuf, newBoundary, changed := forceMultipartField(buf, boundary, "language", defaultLang); changed {
 			buf = newBuf
-			log.Debug("stt default language injected (client omitted it)", "language", defaultLang)
+			boundary = newBoundary
+			r.Header.Set("Content-Type", "multipart/form-data; boundary="+newBoundary)
+			log.Debug("stt language forced", "language", defaultLang)
 		}
 	}
-	// Always restore the body byte-identical (or with the injected field).
+	// Restore the body (re-encoded with the forced language, or original bytes).
 	restoreRequestBody(r, buf)
 	if rerr != nil {
 		log.Debug("stt request-audio read failed; forwarding unstamped", "err", rerr)
@@ -146,50 +154,46 @@ func restoreRequestBody(r *http.Request, buf []byte) {
 	}
 }
 
-// multipartHasField reports whether the buffered multipart body already carries
-// a form field with the given name AND a non-empty value. A present-but-blank
-// field (e.g. a client that sends `language=`) counts as absent, so the default
-// still gets injected — an empty `language` suppresses whisper's language pin and
-// mis-transcribes short pt-BR audio as English (the chatifix dictation bug).
-func multipartHasField(buf []byte, boundary, name string) bool {
+// forceMultipartField re-encodes the multipart body so `name` has exactly one
+// value (`value`), dropping any client-supplied copies. Every other part —
+// including the binary "file" audio — is copied verbatim. The re-encode yields a
+// NEW boundary, so the caller MUST update the request Content-Type header to it.
+// Returns (buf, boundary, false) unchanged on any parse/encode failure (fail-safe:
+// forward the original request rather than corrupt it).
+func forceMultipartField(buf []byte, boundary, name, value string) ([]byte, string, bool) {
 	mr := multipart.NewReader(bytes.NewReader(buf), boundary)
+	var out bytes.Buffer
+	mw := multipart.NewWriter(&out)
 	for {
 		part, err := mr.NextPart()
-		if err != nil {
-			return false
+		if err == io.EOF {
+			break
 		}
-		if part.FormName() != name {
-			_ = part.Close()
+		if err != nil {
+			return buf, boundary, false
+		}
+		if part.FormName() == name {
+			_ = part.Close() // drop the client-supplied copy
 			continue
 		}
-		v, _ := io.ReadAll(part)
+		w, werr := mw.CreatePart(part.Header)
+		if werr != nil {
+			_ = part.Close()
+			return buf, boundary, false
+		}
+		if _, cerr := io.Copy(w, part); cerr != nil {
+			_ = part.Close()
+			return buf, boundary, false
+		}
 		_ = part.Close()
-		return len(bytes.TrimSpace(v)) > 0
 	}
-}
-
-// injectDefaultMultipartField appends a simple text form field just before the
-// closing multipart delimiter, preserving every existing part (incl. the binary
-// "file" audio part) byte-identical and keeping the SAME boundary — so the
-// Content-Type header stays valid and the file bytes are untouched. Returns
-// (buf, false) when the field already exists or the closing delimiter is absent.
-func injectDefaultMultipartField(buf []byte, boundary, name, value string) ([]byte, bool) {
-	if multipartHasField(buf, boundary, name) {
-		return buf, false
+	if werr := mw.WriteField(name, value); werr != nil {
+		return buf, boundary, false
 	}
-	closing := []byte("--" + boundary + "--")
-	idx := bytes.LastIndex(buf, closing)
-	if idx < 0 {
-		return buf, false
+	if cerr := mw.Close(); cerr != nil {
+		return buf, boundary, false
 	}
-	part := "--" + boundary + "\r\n" +
-		"Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +
-		value + "\r\n"
-	out := make([]byte, 0, len(buf)+len(part))
-	out = append(out, buf[:idx]...)
-	out = append(out, part...)
-	out = append(out, buf[idx:]...)
-	return out, true
+	return out.Bytes(), mw.Boundary(), true
 }
 
 // extractMultipartFile walks the buffered multipart body and returns the
