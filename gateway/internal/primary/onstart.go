@@ -218,11 +218,17 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # onstart (before llama loads) every card reads ~empty, tying to GPU0, the very
 # card qwen then loads onto → OOM (UAT B "instance terminal", 2026-06-19). On a
 # single-GPU shape above threshold there is no second card, so whisper shares
-# GPU0 with qwen. Phase 21: TTS/Chatterbox removed from the pod freed ~5GB, so a
-# 1x3090 (24GB) now fits Qwen (~18GB) + whisper (~4GB) = ~22GB with ~2GB margin —
-# threshold lowered 30000 -> 22000 so a 24576 MiB card qualifies for cuda. 22000
-# (not 24000) keeps margin against nvidia-smi total-VRAM read variance. Below
-# threshold export cpu so the gateway fail-safes STT to tier-1 gemini.
+# GPU0 with qwen. Phase 21 lowered the threshold 30000 -> 22000 so a 1x3090
+# (24576 MiB) qualified for cuda (Qwen ~18GB + whisper ~4GB = ~22GB). That left
+# only ~330 MiB free VRAM and long audio (>~1-2 min) deterministically CUDA-OOMed
+# (quick 260723-sgx: real 17-min call 500s on the shared 3090, 200 on a dedicated
+# 3060). STT moved to a dedicated cheap pod (UPSTREAM_STT_URL static upstream) —
+# threshold RAISED back 22000 -> 30000 so a single 24GB card is deliberately
+# DISQUALIFIED: whisper_device=cpu → the gateway does not register the stt
+# override → the dispatcher routes STT to local-stt (the dedicated pod), and the
+# 3090 is Qwen-only (freed ~3.2GB goes to KV cache). Multi-GPU shapes (2x3090=48G,
+# 5090=32G) still qualify — whisper gets the Qwen-free LAST card there. Below
+# threshold export cpu so the gateway routes STT to local-stt/tier-1.
 # These exports happen BEFORE exec supervisord so [program:speaches] inherits
 # them (supervisord.conf no longer pins WHISPER__INFERENCE_DEVICE — env
 # inheritance Option A, fail-open to speaches default auto/0 if ever unset).
@@ -239,7 +245,7 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: extraction done; exec supervisor
 # UAT-B OOM fix. (Documented at the supervisord [program:llama]/[program:speaches]
 # boundary too.)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-WHISPER_GPU_THRESHOLD_MIB=22000
+WHISPER_GPU_THRESHOLD_MIB=30000
 TOTAL_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END{print s}')
 NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'END{print NR}')
 if [ -z "${TOTAL_VRAM_MIB:-}" ]; then
