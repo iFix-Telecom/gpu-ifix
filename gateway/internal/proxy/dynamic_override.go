@@ -140,6 +140,14 @@ func dynamicOverrideSTTDirector(overrideURL func() (string, bool), resolver *mod
 // returns a single buffered JSON body). transport tunes timeouts. interceptors
 // run in ModifyResponse exactly like the other proxies.
 func NewDynamicOverrideSTTProxy(overrideURL func() (string, bool), flushInterval time.Duration, transport *http.Transport, resolver *models.Resolver, log *slog.Logger, interceptors ...ProxyResponseInterceptor) http.Handler {
+	// Fix B (Phase 22) — quick 260723-sgx: same retryable-status cascade as the
+	// generic NewDynamicOverrideProxy (L58-60) and the static NewAudioProxy. The
+	// Phase 22 fix landed only on the generic constructor; this STT-aware sibling
+	// (the one actually registered as "emergency_pod_stt", main.go) was missed —
+	// a pod 5xx (e.g. CUDA OOM on long audio) was committed raw to the client
+	// instead of cascading to gemini-stt/openai-whisper. Prepended so a failed
+	// pod response never bills and re-routes instead of being returned.
+	interceptors = append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)
 	return &httputil.ReverseProxy{
 		Director:      dynamicOverrideSTTDirector(overrideURL, resolver, log),
 		FlushInterval: flushInterval,

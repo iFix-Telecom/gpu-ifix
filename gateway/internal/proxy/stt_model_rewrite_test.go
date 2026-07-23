@@ -371,3 +371,74 @@ func TestDynamicOverrideProxy_LLMUnchangedForJSON(t *testing.T) {
 		t.Errorf("llm override mutated Content-Type: got %q want application/json", fwdCT)
 	}
 }
+
+// TestOverrideSTTProxy_Retryable500RaisesFallthrough — quick 260723-sgx: the
+// STT-aware override constructor (the one actually registered as
+// "emergency_pod_stt") must carry the same retryable-status cascade as the
+// generic NewDynamicOverrideProxy (Phase 22 Fix B landed only on the generic;
+// this sibling was missed). A pod 500 (e.g. CUDA OOM on long audio) must raise
+// errUpstreamRetryable so the dispatcher cascades to the next STT candidate.
+//
+// Black-box assert: WITHOUT a dispatcher-installed dispatchResult in context,
+// the sentinel-aware ErrorHandler takes the standalone path and writes the
+// OpenAI-shaped 502 — proving the interceptor fired. Before the fix the raw
+// upstream 500 ("Internal Server Error") was committed verbatim to the client.
+func TestOverrideSTTProxy_Retryable500RaisesFallthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal Server Error"))
+	}))
+	t.Cleanup(srv.Close)
+
+	resolver := models.NewResolverForTesting(sttLocalAliasFixture)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return srv.URL, true },
+		0, &http.Transport{ResponseHeaderTimeout: 60 * time.Second}, resolver, discardLogger(),
+	)
+
+	wav := loadProbeWAV(t)
+	body, ct := buildMultipartBody(t, []string{"whisper"}, "probe.wav", wav)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (sentinel-aware ErrorHandler); raw 500 means the retryable interceptor is missing", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("upstream_unreachable")) {
+		t.Errorf("body = %q, want OpenAI error envelope with upstream_unreachable", rec.Body.String())
+	}
+}
+
+// TestOverrideSTTProxy_200PassesThrough asserts the retryable interceptor does
+// not disturb a healthy 200 transcription response on the override path.
+func TestOverrideSTTProxy_200PassesThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	resolver := models.NewResolverForTesting(sttLocalAliasFixture)
+	h := NewDynamicOverrideSTTProxy(
+		func() (string, bool) { return srv.URL, true },
+		0, &http.Transport{ResponseHeaderTimeout: 60 * time.Second}, resolver, discardLogger(),
+	)
+
+	wav := loadProbeWAV(t)
+	body, ct := buildMultipartBody(t, []string{"whisper"}, "probe.wav", wav)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"text":"ok"`)) {
+		t.Errorf("body = %q, want transcription JSON passthrough", rec.Body.String())
+	}
+}
