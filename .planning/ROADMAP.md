@@ -462,3 +462,24 @@ Três regimes de falha (SEED-009 companion problem 1): (1) host morto = preso em
 **Goal:** Provar E2E ao vivo o `created_state_timeout` (FF-01 regime 1) — host que trava em `actual_status=created` e é morto ao `created_budget_s`.
 
 **Resolução (2026-07-12):** ✅ PROVADO. Implementada a feature **force_machine_id** (opção b) — migration 0034 + config PATCH/GET + picker pin, deployada em prod (`develop-b57788a`, migration aplicada via MIGRATE_ON_BOOT). UAT ao vivo: `force_machine_id=24953` (Norway, seed) → picker logou "offer FORCED by force_machine_id (bypasses market/cap)" e pinou machine 24953 exatamente. O host ficou preso em `actual_status=created`; o FF-01 contou `elapsed_since_created_s` até 120 e fechou o lifecycle 143 com **`shutdown_reason=created_state_timeout`** ("created-state budget exhausted (host morto)") no budget exato, com **0 órfãos Vast** (BestEffortDestroy ok). BL-01 NÃO blocklistou 24953 — foi a 1ª falha (parka só na 2ª consecutiva, correto). force_machine_id revertido p/ 0 pós-UAT. Custo ~R$0.02.
+
+### Phase 999.3: Dashboard — card do pod STT/TTS (up→destroy)
+
+**Goal:** Dar visibilidade no ai-dashboard ao pod STT/TTS 3060, cujo controle
+(`ops/vast-3060/vast3060.py` — provision fresco 07:00, destroy 22:00, ensure
+15min com teto elástico 1.3x/1.6x/2x + machine_avoid + WhatsApp) vive fora do
+gateway (state.json + systemd no ops-claude) e hoje só aparece indiretamente
+nos probes `local-stt`/`kokoro-tts`.
+
+**Escopo:**
+1. Script publica estado no gateway — endpoint admin POST ou chave Redis
+   `gw:sttpod:state` (máquina, $/h, ip:porta, uptime, últimos provisions/falhas,
+   machine_avoid).
+2. Dashboard: card "STT/TTS pod" na página de operação/saúde (tier-2, criada no
+   quick 260625-v04) com histórico de provisions e custo/dia.
+3. Opcional: botões provision/destroy manuais via admin API.
+
+**Contexto:** modelo up→destroy decidido pelo Pedro 2026-07-25 (commit 2d2b925)
+após incidentes 24-25/07 (GPU ocupada de manhã; teto rígido secou mercado).
+Docs: `.planning/quick/260724-ktg-3060-auto-migrate/` + memória
+`stt-funnel-sizing-benchmarks`.
