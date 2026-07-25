@@ -56,12 +56,17 @@ WINDOW_END_H = 22
 MIGRATE_THRESHOLD = 8   # ensures falhos consecutivos (~2h a cada 15min)
 
 # Oferta substituta: mesma régua do vetting manual de 2026-07-23.
+# PRICE_CAP é o teto do Pedro; quando o mercado seca (0 ofertas — visto
+# 2026-07-25, dia inteiro sem pod por $0,005/h), escala 1.3x/1.6x/2x em vez de
+# ficar mudo. A escalação é POR TENTATIVA (não persiste): a próxima migração
+# volta a tentar o teto base primeiro.
+PRICE_CAP = 0.035
+CAP_STEPS = [1.0, 1.3, 1.6, 2.0]
 OFFER_QUERY = {
     "gpu_name": {"in": ["RTX 3060", "RTX 3060 Ti", "RTX 3080"]},
     "num_gpus": {"eq": 1},
     "rentable": {"eq": True},
     "type": "on-demand",
-    "dph_total": {"lte": 0.035},
     "gpu_ram": {"gte": 8000},
     "reliability2": {"gte": 0.97},
     "inet_down": {"gte": 100},
@@ -258,7 +263,14 @@ def pick_offer(env: dict, avoid: list[int]) -> dict | None:
         return None
     offers = [o for o in data.get("offers", []) if o.get("machine_id") not in avoid]
     offers.sort(key=lambda o: o.get("dph_total", 9))
-    return offers[0] if offers else None
+    for mult in CAP_STEPS:
+        cap = PRICE_CAP * mult
+        hit = [o for o in offers if o.get("dph_total", 9) <= cap]
+        if hit:
+            if mult > 1.0:
+                log(f"pick_offer: teto escalado {mult}x -> ${cap:.4f} (mercado seco no base)")
+            return hit[0]
+    return None
 
 
 def migrate(env: dict, st: dict, reason: str) -> None:
@@ -268,9 +280,16 @@ def migrate(env: dict, st: dict, reason: str) -> None:
 
     offer = pick_offer(env, avoid)
     if offer is None:
-        log("MIGRATE abortada: nenhuma oferta elegível <=0.035")
-        notify(env, f"⚠️ pod 3060: bloqueado ({reason}) e SEM oferta substituta "
-                    f"<=$0,035. STT em tier-1, TTS mudo. Vou re-tentar a cada 15min.")
+        log("MIGRATE abortada: nenhuma oferta elegível (mesmo com teto 2x)")
+        # dedup: notifica só na TRANSIÇÃO pra "sem oferta" (2026-07-25 o loop
+        # de 15min virou spam de WhatsApp o dia todo).
+        if not st.get("alerted_no_offer"):
+            st["alerted_no_offer"] = True
+            save_state(st)
+            notify(env, f"⚠️ pod 3060: bloqueado ({reason}) e SEM oferta "
+                        f"substituta até ${PRICE_CAP * CAP_STEPS[-1]:.3f}/h. "
+                        f"STT em tier-1, TTS mudo. Re-tento a cada 15min "
+                        f"(silencioso até resolver).")
         return
 
     code, resp = http_json(
@@ -346,7 +365,7 @@ def migrate(env: dict, st: dict, reason: str) -> None:
                     f"validação via edge falhou ({why}). Instância velha {old_id} "
                     f"MANTIDA pra rollback manual. Verificar!")
         st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
-                  ip=ip, port=port, fail_count=0, machine_avoid=avoid)
+                  ip=ip, port=port, fail_count=0, alerted_no_offer=False)
         save_state(st)
         return
     log("MIGRATE: validação via edge ok")
@@ -354,8 +373,12 @@ def migrate(env: dict, st: dict, reason: str) -> None:
     http("DELETE", f"{VAST}/instances/{old_id}/", vast_headers(env), timeout=40)
     log(f"MIGRATE: velha {old_id} destruída")
 
+    # machine_avoid persiste APENAS máquinas que falharam provision (bail).
+    # A máquina "atual" (ocupada por terceiro) NÃO entra: ela é boa — só
+    # estava alugada — e pode voltar ao pool no futuro. (Bug 2026-07-25:
+    # persistir o avoid da busca baniu as 2 melhores máquinas pra sempre.)
     st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
-              ip=ip, port=port, fail_count=0, machine_avoid=avoid)
+              ip=ip, port=port, fail_count=0, alerted_no_offer=False)
     save_state(st)
     notify(env, f"✅ pod 3060 MIGRADO: machine {offer.get('machine_id')} "
                 f"({offer.get('geolocation')}, ${offer.get('dph_total', 0):.4f}/h), "
