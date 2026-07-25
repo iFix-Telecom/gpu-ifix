@@ -4,21 +4,22 @@
 quick 260723 (agenda 7-22) + quick 260724-ktg (auto-migração).
 
 O pod roda speaches (faster-whisper-large-v3 + Kokoro-82M TTS) numa GPU barata
-de mercado spot. Stop/start do Vast prende a instância no MESMO host (o disco é
-local); se um terceiro aluga a GPU enquanto estamos parados, o start fica
-bloqueado indefinidamente. Este script:
+de mercado spot. Modelo **up→destroy** (Pedro 2026-07-25): provision fresco
+custa ~2-7min + 8GB de download — não compensa manter instância parada presa a
+um host (stop/start prende no mesmo host; GPU ocupada por terceiro = manhã sem
+pod, incidentes 2026-07-24/25).
 
-  ensure   (timer 15min, 07-21h59) — religa se não estiver running+healthy;
-           fail_count >= MIGRATE_THRESHOLD (~2h) dispara migrate().
-  stop     (timer 22:00) — para a instância (paga só storage).
-  migrate  — provisiona substituta, instala modelos, valida direto E via edge,
-           flipa os envs do stack 38 (Portainer), destrói a velha, atualiza o
-           state e notifica no WhatsApp. Falha pré-flip → destrói a nova e
-           mantém a velha (estado intacto).
-  status   — dump do state + situação live.
+  ensure    (timer 15min, 07-21h59) — healthy = no-op; senão PROVISIONA nova:
+            offer ≤teto (escala 1.3x/1.6x/2x se mercado seco, por tentativa) →
+            cria → instala modelos → valida direto → flipa stack 38 → valida
+            via edge → destrói a anterior (se houver) → WhatsApp. Falha
+            pré-flip → destrói a nova, machine → avoid, re-tenta em 15min.
+  stop      (timer 22:00) — DESTRÓI a instância (custo noturno zero).
+  provision — dispara o provision manualmente (alias legado: migrate).
+  status    — dump do state + situação live.
 
 State:   /var/lib/vast-3060/state.json  {instance_id, machine_id, ip, port,
-         fail_count, machine_avoid[]}
+         machine_avoid[], alerted_no_offer}
 Secrets: /etc/onboard/secrets/vast-3060.env (root-600)
 Log:     /var/log/vast-3060-sched.log
 """
@@ -53,7 +54,6 @@ MODELS = ["Systran/faster-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]
 
 WINDOW_START_H = 7   # janela 07:00–21:59 (stop às 22:00 pelo timer)
 WINDOW_END_H = 22
-MIGRATE_THRESHOLD = 8   # ensures falhos consecutivos (~2h a cada 15min)
 
 # Oferta substituta: mesma régua do vetting manual de 2026-07-23.
 # PRICE_CAP é o teto do Pedro; quando o mercado seca (0 ofertas — visto
@@ -273,14 +273,24 @@ def pick_offer(env: dict, avoid: list[int]) -> dict | None:
     return None
 
 
-def migrate(env: dict, st: dict, reason: str) -> None:
-    old_id = st["instance_id"]
-    avoid = list(set(st.get("machine_avoid", []) + [st.get("machine_id")]))
-    log(f"MIGRATE start (motivo: {reason}); avoid={avoid}")
+def provision(env: dict, st: dict, reason: str) -> None:
+    """Provisiona um pod NOVO e flipa o gateway pra ele (modelo up→destroy,
+    decisão Pedro 2026-07-25: provision fresco ~2-7min + 8GB de download não
+    justificam manter instância parada presa a uma máquina). Se existir
+    instância antiga no state, ela é destruída após o flip validado."""
+    old_id = st.get("instance_id")
+    # A máquina "atual" só é excluída quando existe instância antiga viva-porém-
+    # doente (self-heal: não adianta recriar no mesmo host quebrado). Na manhã
+    # (old_id None, destruída às 22h) a máquina de ontem é candidata NORMAL —
+    # costuma ser a melhor conhecida (ex: 143493 Romênia).
+    avoid = list(st.get("machine_avoid", []))
+    if old_id and st.get("machine_id") and st["machine_id"] not in avoid:
+        avoid.append(st["machine_id"])
+    log(f"PROVISION start (motivo: {reason}); avoid={avoid}")
 
     offer = pick_offer(env, avoid)
     if offer is None:
-        log("MIGRATE abortada: nenhuma oferta elegível (mesmo com teto 2x)")
+        log("PROVISION abortado: nenhuma oferta elegível (mesmo com teto 2x)")
         # dedup: notifica só na TRANSIÇÃO pra "sem oferta" (2026-07-25 o loop
         # de 15min virou spam de WhatsApp o dia todo).
         if not st.get("alerted_no_offer"):
@@ -300,24 +310,23 @@ def migrate(env: dict, st: dict, reason: str) -> None:
          "runtype": "args"}, timeout=60)
     new_id = resp.get("new_contract")
     if code != 200 or not new_id:
-        log(f"MIGRATE: create falhou HTTP {code}: {resp}")
-        notify(env, f"❌ pod 3060: migração falhou no create ({code}). Velha mantida.")
+        log(f"PROVISION: create falhou HTTP {code}: {resp}")
+        notify(env, f"❌ pod 3060: provision falhou no create ({code}).")
         return
-    log(f"MIGRATE: criada {new_id} (machine {offer.get('machine_id')}, "
+    log(f"PROVISION: criada {new_id} (machine {offer.get('machine_id')}, "
         f"${offer.get('dph_total', 0):.4f}/h, {offer.get('geolocation')})")
 
     def bail(step: str) -> None:
-        log(f"MIGRATE: {step} — destruindo a nova {new_id}, velha mantida")
+        log(f"PROVISION: {step} — destruindo a nova {new_id}")
         http("DELETE", f"{VAST}/instances/{new_id}/", vast_headers(env), timeout=40)
         # máquina que falhou o provision entra no avoid — sem isso o próximo
-        # migrate escolhe a mesma barata-ruim de novo (drill 1: 38103 CN).
+        # provision escolhe a mesma barata-ruim de novo (drill 1: 38103 CN).
         bad = offer.get("machine_id")
         if bad and bad not in st.get("machine_avoid", []):
             st.setdefault("machine_avoid", []).append(bad)
             save_state(st)
-        notify(env, f"❌ pod 3060: migração abortada em '{step}' "
-                    f"(machine {bad} → avoid). Instância velha mantida; "
-                    f"re-tento no próximo ciclo.")
+        notify(env, f"❌ pod 3060: provision abortado em '{step}' "
+                    f"(machine {bad} → avoid). Re-tento no próximo ciclo (15min).")
 
     # boot + health (~8min cap)
     addr = None
@@ -331,19 +340,19 @@ def migrate(env: dict, st: dict, reason: str) -> None:
     else:
         return bail("boot/health timeout 8min")
     ip, port = addr
-    log(f"MIGRATE: nova healthy em {ip}:{port}")
+    log(f"PROVISION: nova healthy em {ip}:{port}")
 
     for m in MODELS:
         code, resp = http_json("POST", f"http://{ip}:{port}/v1/models/{m}", None, None,
                                timeout=600)
         if code != 200:
             return bail(f"install {m} HTTP {code}")
-    log("MIGRATE: modelos instalados")
+    log("PROVISION: modelos instalados")
 
     ok, why = validate_pod_direct(ip, port)
     if not ok:
         return bail(f"validação direta: {why}")
-    log("MIGRATE: validação direta ok")
+    log("PROVISION: validação direta ok")
 
     try:
         portainer_flip(env, ip, port)
@@ -358,20 +367,21 @@ def migrate(env: dict, st: dict, reason: str) -> None:
         if ok:
             edge_ok = True
             break
-        log(f"MIGRATE: edge ainda não ok ({why}), retry")
+        log(f"PROVISION: edge ainda não ok ({why}), retry")
     if not edge_ok:
         # flip já aconteceu — NÃO reverter às cegas; humano decide.
-        notify(env, f"⚠️ pod 3060: migrei pra {ip}:{port} e flipei o gateway, mas a "
+        notify(env, f"⚠️ pod 3060: provisionei {ip}:{port} e flipei o gateway, mas a "
                     f"validação via edge falhou ({why}). Instância velha {old_id} "
                     f"MANTIDA pra rollback manual. Verificar!")
         st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
                   ip=ip, port=port, fail_count=0, alerted_no_offer=False)
         save_state(st)
         return
-    log("MIGRATE: validação via edge ok")
+    log("PROVISION: validação via edge ok")
 
-    http("DELETE", f"{VAST}/instances/{old_id}/", vast_headers(env), timeout=40)
-    log(f"MIGRATE: velha {old_id} destruída")
+    if old_id:
+        http("DELETE", f"{VAST}/instances/{old_id}/", vast_headers(env), timeout=40)
+        log(f"PROVISION: velha {old_id} destruída")
 
     # machine_avoid persiste APENAS máquinas que falharam provision (bail).
     # A máquina "atual" (ocupada por terceiro) NÃO entra: ela é boa — só
@@ -380,61 +390,57 @@ def migrate(env: dict, st: dict, reason: str) -> None:
     st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
               ip=ip, port=port, fail_count=0, alerted_no_offer=False)
     save_state(st)
-    notify(env, f"✅ pod 3060 MIGRADO: machine {offer.get('machine_id')} "
+    notify(env, f"✅ pod 3060 UP: machine {offer.get('machine_id')} "
                 f"({offer.get('geolocation')}, ${offer.get('dph_total', 0):.4f}/h), "
-                f"{ip}:{port}. STT+TTS validados via gateway. Velha destruída.")
-    log("MIGRATE: completa")
+                f"{ip}:{port}. STT+TTS validados via gateway.")
+    log("PROVISION: completo")
 
 
 # ------------------------------------------------------------------- comandos
 
 def cmd_ensure(env: dict, st: dict) -> None:
+    """Modelo up→destroy (Pedro 2026-07-25): dentro da janela, healthy = no-op;
+    qualquer outra situação (sem instância, morta, doente) = provisiona NOVA.
+    Não existe mais 'religar a parada' — de manhã sempre nasce fresca no
+    mercado, então nunca ficamos presos a uma máquina ocupada."""
     h = datetime.now().hour
     if h < WINDOW_START_H or h >= WINDOW_END_H:
-        return  # fora da janela — quem manda é o stop das 22h
-    inst = get_instance(env, st["instance_id"])
+        return  # fora da janela — quem manda é o destroy das 22h
+    inst = get_instance(env, st["instance_id"]) if st.get("instance_id") else None
     if inst and inst.get("actual_status") == "running":
         addr = instance_addr(inst)
         if addr and pod_health(*addr):
-            if st.get("fail_count"):
-                st["fail_count"] = 0
+            if st.get("alerted_no_offer"):
+                st["alerted_no_offer"] = False
                 save_state(st)
             return
-    # não está servindo — tenta religar
-    http_json("PUT", f"{VAST}/instances/{st['instance_id']}/", vast_headers(env),
-              {"state": "running"}, timeout=40)
-    for _ in range(8):
-        time.sleep(15)
-        if pod_health(st["ip"], st["port"]):
-            log("ensure: START OK")
-            st["fail_count"] = 0
-            save_state(st)
-            return
-    st["fail_count"] = st.get("fail_count", 0) + 1
-    save_state(st)
-    log(f"ensure: bloqueada (fail_count={st['fail_count']}/{MIGRATE_THRESHOLD})")
-    if st["fail_count"] >= MIGRATE_THRESHOLD:
-        migrate(env, st, f"{st['fail_count']} ensures falhos (~2h) na "
-                         f"machine {st.get('machine_id')}")
+    provision(env, st, "ensure: sem pod healthy na janela")
 
 
 def cmd_stop(env: dict, st: dict) -> None:
-    code, _ = http_json("PUT", f"{VAST}/instances/{st['instance_id']}/",
-                        vast_headers(env), {"state": "stopped"}, timeout=40)
-    log(f"stop -> HTTP {code}")
+    """22:00 — DESTRÓI (não para). Custo noturno zero; manhã provisiona fresca."""
+    inst_id = st.get("instance_id")
+    if not inst_id:
+        return
+    code, _ = http("DELETE", f"{VAST}/instances/{inst_id}/", vast_headers(env),
+                   timeout=40)
+    log(f"destroy noturno {inst_id} -> HTTP {code}")
+    st.update(instance_id=None, ip=None, port=None)
+    # machine_id fica: é a "última boa conhecida" (candidata amanhã)
+    save_state(st)
 
 
 def cmd_status(env: dict, st: dict) -> None:
-    inst = get_instance(env, st["instance_id"])
+    inst = get_instance(env, st["instance_id"]) if st.get("instance_id") else None
     live = inst.get("actual_status") if inst else "GONE"
-    healthy = pod_health(st["ip"], st["port"]) if inst else False
+    healthy = pod_health(st["ip"], st["port"]) if inst and st.get("ip") else False
     print(json.dumps({"state": st, "live_status": live, "healthy": healthy}, indent=2))
 
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd not in ("ensure", "stop", "migrate", "status"):
-        print("uso: vast3060.py ensure|stop|migrate|status")
+    if cmd not in ("ensure", "stop", "provision", "migrate", "status"):
+        print("uso: vast3060.py ensure|stop|provision|status")
         return 1
     env = load_env()
     st = load_state()
@@ -442,8 +448,8 @@ def main() -> int:
         cmd_ensure(env, st)
     elif cmd == "stop":
         cmd_stop(env, st)
-    elif cmd == "migrate":
-        migrate(env, st, "manual/drill")
+    elif cmd in ("provision", "migrate"):  # migrate = alias legado
+        provision(env, st, "manual")
     else:
         cmd_status(env, st)
     return 0
