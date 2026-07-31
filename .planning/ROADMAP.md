@@ -483,3 +483,14 @@ nos probes `local-stt`/`kokoro-tts`.
 após incidentes 24-25/07 (GPU ocupada de manhã; teto rígido secou mercado).
 Docs: `.planning/quick/260724-ktg-3060-auto-migrate/` + memória
 `stt-funnel-sizing-benchmarks`.
+
+**Plans:** 7 plans (3 waves)
+
+Plans:
+- [ ] 999.3-01-PLAN.md — gateway: handler POST /admin/sttpod/{state,command} + namespace redisx + testes
+- [ ] 999.3-02-PLAN.md — gateway: campo `sttpod` fail-soft no /admin/operations + wiring das rotas no main.go
+- [ ] 999.3-03-PLAN.md — script vast3060.py: publish, poll de comando, custo acumulado, eventos capped + pytest + units systemd
+- [ ] 999.3-04-PLAN.md — dashboard lib: tipos OperationsSttPod + server action owner-gated sttPodCommand + testes
+- [ ] 999.3-05-PLAN.md — dashboard UI: 5º painel STT/TTS pod + client island + RSC shell da /operacao
+- [ ] 999.3-06-PLAN.md — fechamento dos 3 todos dobrados (incidents filter, stt-embed metering, UAT sign-off)
+- [ ] 999.3-07-PLAN.md — deploy das 3 frentes + UAT E2E (checkpoint humano)
