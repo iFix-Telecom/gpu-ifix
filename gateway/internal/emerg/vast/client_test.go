@@ -367,6 +367,58 @@ func TestSearchOffers_HappyPath(t *testing.T) {
 	require.Contains(t, parsed, "dph_total")
 }
 
+// TestListInstances_HappyPath — GET /instances/ returns an ARRAY of instances
+// under the "instances" key (dashboard secondary-pods panel source). Mirrors
+// TestSearchOffers_HappyPath: assert len==2 and the new gpu_name/num_gpus/
+// start_date fields parse.
+func TestListInstances_HappyPath(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/instances/", r.URL.Path)
+		require.Equal(t, http.MethodGet, r.Method)
+		_, _ = w.Write([]byte(`{"instances":[` +
+			`{"id":48294952,"gpu_name":"RTX 3060","num_gpus":1,"actual_status":"running","label":"stt-tts-3060","dph_total":0.08,"start_date":1755800000.5},` +
+			`{"id":99999,"gpu_name":"RTX 3090","num_gpus":2,"actual_status":"loading","label":"llm-primary","dph_total":0.30,"start_date":1755900000}` +
+			`]}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	insts, err := c.ListInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, insts, 2)
+	require.Equal(t, int64(48294952), insts[0].ID)
+	require.Equal(t, "RTX 3060", insts[0].GpuName)
+	require.Equal(t, 1, insts[0].NumGpus)
+	require.Equal(t, "running", insts[0].ActualStatus)
+	require.Equal(t, "stt-tts-3060", insts[0].Label)
+	require.InDelta(t, 0.08, insts[0].DphTotal, 0.0001)
+	require.InDelta(t, 1755800000.5, insts[0].StartDate, 0.01)
+	require.Equal(t, int64(99999), insts[1].ID)
+	require.Equal(t, 2, insts[1].NumGpus)
+}
+
+// TestListInstances_EmptyArray — {"instances":[]} (or missing key) returns a
+// non-nil empty slice + nil error (mirror SearchOffers nil→empty).
+func TestListInstances_EmptyArray(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"instances":[]}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	insts, err := c.ListInstances(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, insts, "empty result must be a non-nil slice (mirror SearchOffers)")
+	require.Len(t, insts, 0)
+}
+
+// TestListInstances_Non200 — non-200 maps to a parseErrorBody error.
+func TestListInstances_Non200(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_key"}`))
+	})
+	c := NewClientWithBaseURL("k", srv.URL)
+	_, err := c.ListInstances(context.Background())
+	require.ErrorIs(t, err, ErrUnauthorized)
+}
+
 // TestSearchOffers_PrimaryHostExcluded — when primaryHostID > 0, filter
 // must include host_id: {neq: primaryHostID}.
 func TestSearchOffers_PrimaryHostExcluded(t *testing.T) {
