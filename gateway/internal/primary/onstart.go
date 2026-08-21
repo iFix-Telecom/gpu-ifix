@@ -26,7 +26,7 @@ var primaryLlamaArgsDefault = []string{
 	"-m", "/weights/qwen/model.gguf",
 	"-ngl", "99",
 	"-np", "2",
-	"--ctx-size", "16384",
+	"--ctx-size", "32768",
 	"--jinja",
 }
 

@@ -105,7 +105,7 @@ Vast.ai 4090 host (~$0.30-0.40/h)
          │
          ├── [program:llama]    /app/llama-server --host 0.0.0.0 --port 8000
          │                       -m /weights/qwen/model.gguf -ngl 99 -np 2
-         │                       --ctx-size 16384 --jinja
+         │                       --ctx-size 32768 --jinja
          │                       (Qwen3.6 27B Q4_K_M + B1 embedded Jinja)
          │
          ├── [program:speaches] /app/speaches-bin/speaches --host 0.0.0.0

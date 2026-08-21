@@ -46,8 +46,13 @@ const (
 	tokenCacheTTL = 60 * time.Second
 
 	// ChatContextCap is the input-token ceiling for /v1/chat/completions
-	// per CONTEXT.md "Enforcement do 16k cap" (RES-07). Matches the
-	// llama-server --ctx-size baked into the pod image.
+	// per CONTEXT.md "Enforcement do 16k cap" (RES-07). Equals the
+	// PER-SLOT context of llama-server: total --ctx-size 32768 split
+	// across -np 2 slots = 16384 tokens/slot. Previously the cap was
+	// calibrated against the TOTAL --ctx-size (16384 total / 2 slots =
+	// 8192/slot), so an 11184-token request passed the gateway guard and
+	// 400'd at the slot with exceed_context_size_error (OPERACOES-26306,
+	// chamada_id 12294412, 2026-08-21).
 	ChatContextCap = 16384
 
 	// EmbedContextCap is the input-token ceiling for /v1/embeddings.

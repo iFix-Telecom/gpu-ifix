@@ -645,7 +645,7 @@ var emergencyLlamaArgsDefault = []string{
 	"-m", "/weights/qwen/model.gguf",
 	"-ngl", "99",
 	"-np", "2",
-	"--ctx-size", "16384",
+	"--ctx-size", "32768",
 	"--jinja",
 	"--chat-template-file", "/app/templates/qwen3.5-27b-tool-calling.jinja",
 }

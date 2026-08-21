@@ -26,7 +26,8 @@ var ErrSensitiveRetryExhausted = errors.New("proxy: sensitive retry exhausted")
 var ErrToolCallPartialStream = errors.New("proxy: tool call partial stream")
 
 // ErrContextLengthExceeded is raised by tokencount.go pre-dispatch when
-// input_tokens > 16384 (chat) or > 8192 (embed BGE-M3 native cap).
+// input_tokens > 16384 (chat per-slot cap, see ChatContextCap in
+// tokencount.go) or > 8192 (embed BGE-M3 native cap).
 // Maps to HTTP 400 with envelope code "context_length_exceeded" per RES-07.
 var ErrContextLengthExceeded = errors.New("proxy: context length exceeded")
 
