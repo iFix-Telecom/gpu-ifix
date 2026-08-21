@@ -56,9 +56,19 @@ export default function ChallengePage() {
       setVerifying(false);
       if (res.error) {
         setOtpState("invalid");
-        setError(
-          "Código incorreto. Confirme o código atual no seu app autenticador e tente novamente.",
-        );
+        // Distinguish rate-limit (429) from a wrong code: the shared
+        // "Código incorreto" copy used to mask a 429 as a bad code, sending
+        // operators on a wild goose chase (dashboard 2FA audit 2026-08-21).
+        const status = res.error.status;
+        if (status === 429) {
+          setError(
+            "Muitas tentativas em sequência. Aguarde cerca de 1 minuto e tente novamente.",
+          );
+        } else {
+          setError(
+            "Código incorreto. Confirme o código atual no seu app autenticador e tente novamente. Se o relógio do seu celular estiver dessincronizado, ative a hora automática.",
+          );
+        }
         return;
       }
       setOtpState("success");
