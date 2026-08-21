@@ -35,6 +35,29 @@ export function formatCount(value: number): string {
 }
 
 /**
+ * Humanize an uptime in seconds to a compact pt-BR form:
+ *   < 60s     → "Ns"
+ *   < 3600s   → "Nm"
+ *   < 86400s  → "Nh Mm"
+ *   else      → "Nd Mh"
+ * Negative / NaN inputs render as "—".
+ */
+export function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  return `${d}d ${h}h`;
+}
+
+/**
  * Error-rate → status tier (UI-SPEC §Semantic status palette thresholds):
  *   < 1%   → healthy
  *   1–5%   → warning

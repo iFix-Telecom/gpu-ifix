@@ -19,6 +19,7 @@ import { OperacaoBreakerBadges } from "@/components/operacao-breaker-badges";
 import { OperacaoCostPanel } from "@/components/operacao-cost-panel";
 import { OperacaoFsmPanel } from "@/components/operacao-fsm-panel";
 import { OperacaoLifecycleTimeline } from "@/components/operacao-lifecycle-timeline";
+import { OperacaoSecondaryPodsPanel } from "@/components/operacao-secondary-pods-panel";
 import { StaleIndicator } from "@/components/stale-indicator";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,6 +70,7 @@ export default function OperacaoPage() {
             schedule={query.data.schedule}
           />
           <OperacaoCostPanel vastCost={query.data.vast_cost} />
+          <OperacaoSecondaryPodsPanel pods={query.data.secondary_pods} />
           <OperacaoBreakerBadges breakers={query.data.breakers} />
           <OperacaoLifecycleTimeline lifecycles={query.data.lifecycles} />
         </>

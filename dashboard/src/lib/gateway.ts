@@ -252,6 +252,22 @@ export interface OperationsVastCost {
 }
 
 /**
+ * One non-primary Vast instance on the account (the "Outros pods" panel).
+ * Mirrors `admin.SecondaryPodRow` in gateway/internal/admin/operations.go
+ * FIELD-FOR-FIELD. Read-only projection — no ssh/ports/image surface. `dph_brl`
+ * is pre-converted to BRL server-side (reuse formatBrl, never raw USD).
+ */
+export interface OperationsSecondaryPod {
+  id: number;
+  gpu_name: string;
+  num_gpus: number;
+  status: string; // Vast actual_status: running|loading|exited|offline|...
+  label: string;
+  dph_brl: number;
+  uptime_seconds: number;
+}
+
+/**
  * `/admin/operations` JSON — the Tier-2 "Operação" panel's single fetch.
  * Mirrors `admin.OperationsResponse` in gateway/internal/admin/operations.go.
  */
@@ -261,6 +277,7 @@ export interface OperationsResponse {
   lifecycles: OperationsLifecycle[];
   breakers: OperationsBreaker[];
   vast_cost: OperationsVastCost;
+  secondary_pods: OperationsSecondaryPod[];
 }
 
 // --- /admin/economy (OBS-09) ----------------------------------------------
