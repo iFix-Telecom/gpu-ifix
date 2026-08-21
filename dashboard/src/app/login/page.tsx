@@ -67,6 +67,7 @@ function LoginPageInner() {
   const router = useRouter();
   const params = useSearchParams();
   const sessionExpired = params.get("session_expired") === "1";
+  const twoFactorExpired = params.get("two_factor_expired") === "1";
   const rateLimitedParam = params.get("rate_limited");
   const rateLimited = rateLimitedParam !== null && rateLimitedParam !== "0";
   const retryAfterSeconds = rateLimited
@@ -152,6 +153,18 @@ function LoginPageInner() {
                   Sessão encerrada por inatividade.
                 </span>{" "}
                 Faça login novamente. Sessões expiram após 30 min sem atividade.
+              </AlertDescription>
+            </Alert>
+          )}
+          {twoFactorExpired && !rateLimited && (
+            <Alert variant="default" className="mb-4" role="status">
+              <Clock className="size-4 text-muted-foreground" aria-hidden />
+              <AlertDescription>
+                <span className="font-semibold">
+                  A verificação em duas etapas expirou.
+                </span>{" "}
+                Refaça o login desde o início — a etapa 2FA tem 10 min de
+                validade a partir da senha.
               </AlertDescription>
             </Alert>
           )}

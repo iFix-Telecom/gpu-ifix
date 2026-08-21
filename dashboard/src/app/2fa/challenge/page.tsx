@@ -56,9 +56,19 @@ export default function ChallengePage() {
       setVerifying(false);
       if (res.error) {
         setOtpState("invalid");
+        // The challenge cookie set by /sign-in/email lives 10 min. Landing on
+        // /2fa/challenge directly (stale tab, bookmark) with an expired or
+        // absent cookie makes verify fail with INVALID_TWO_FACTOR_COOKIE — NOT
+        // a wrong code. Bounce back to /login so a fresh sign-in re-issues the
+        // cookie, instead of stranding the user on a code that can never pass
+        // (dashboard 2FA audit 2026-08-21).
+        if (res.error.code === "INVALID_TWO_FACTOR_COOKIE") {
+          router.push("/login?two_factor_expired=1");
+          return;
+        }
         // Distinguish rate-limit (429) from a wrong code: the shared
         // "Código incorreto" copy used to mask a 429 as a bad code, sending
-        // operators on a wild goose chase (dashboard 2FA audit 2026-08-21).
+        // operators on a wild goose chase.
         const status = res.error.status;
         if (status === 429) {
           setError(
