@@ -16,9 +16,27 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 )
+
+// fakeVastLister is an in-memory vastLister double — returns a fixed instance
+// slice (or an error) so the secondary-pods section can be tested without real
+// Vast traffic.
+type fakeVastLister struct {
+	insts []vast.Instance
+	err   error
+	calls int
+}
+
+func (f *fakeVastLister) ListInstances(_ context.Context) ([]vast.Instance, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.insts, nil
+}
 
 // fakeOperationsQueries is an in-memory operationsQueries double — no
 // pgxpool. It returns canned lifecycle rows and records the StartedAt
@@ -183,7 +201,7 @@ func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
 
 	bset := newOpBreakerSet(t, []string{"primary", "tier1-openrouter"})
 	cfg := opTestCfg()
-	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, cfg, discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, nil, cfg, discardLog())
 
 	rec, body := doOperationsRequest(t, h)
 
@@ -285,7 +303,7 @@ func TestOperationsHandler_NilReconciler_Unknown(t *testing.T) {
 func TestOperationsHandler_QueryError_500(t *testing.T) {
 	fake := &fakeOperationsQueries{err: context.DeadlineExceeded}
 	bset := newOpBreakerSet(t, []string{"primary"})
-	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, opTestCfg(), discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, nil, nil, opTestCfg(), discardLog())
 
 	rec, _ := doOperationsRequest(t, h)
 	if rec.Code != http.StatusInternalServerError {
@@ -306,7 +324,7 @@ func TestOperationsHandler_BudgetFromPodConfig(t *testing.T) {
 		podconfig.PodConfigBounds{},
 		discardLog(),
 	)
-	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, loader, opTestCfg(), discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, nil, nil, loader, nil, opTestCfg(), discardLog())
 
 	rec, body := doOperationsRequest(t, h)
 	if rec.Code != http.StatusOK {
@@ -353,7 +371,7 @@ func TestOperationsHandler_ScheduleFromLiveRule(t *testing.T) {
 
 	// cfg carries a DIFFERENT env schedule (opTestCfg: hours 0/0) so any
 	// regression back to ParseScheduleEnv fails the up/down assertions.
-	h := newOperationsHandlerWithQueries(fake, bset, rec, nil, nil, opTestCfg(), discardLog())
+	h := newOperationsHandlerWithQueries(fake, bset, rec, nil, nil, nil, opTestCfg(), discardLog())
 
 	rr, body := doOperationsRequest(t, h)
 	if rr.Code != http.StatusOK {
@@ -368,5 +386,94 @@ func TestOperationsHandler_ScheduleFromLiveRule(t *testing.T) {
 	}
 	if len(body.Schedule.Days) != 5 {
 		t.Errorf("schedule days = %v, want 5 weekdays from the snapshot", body.Schedule.Days)
+	}
+}
+
+// TestOperationsHandler_SecondaryPods_FiltersPrimary: the vastLister returns
+// two instances — one whose ID matches the active primary and one that does
+// not. secondaryPods must return EXACTLY the non-primary one, with dph_brl =
+// dph_total(USD) × USDToBRLRate and uptime_seconds = now - start_date (>=0).
+func TestOperationsHandler_SecondaryPods_FiltersPrimary(t *testing.T) {
+	const primaryID int64 = 99999
+	const secondaryID int64 = 48294952
+	startedAgo := time.Now().Add(-2 * time.Hour)
+	fakeVast := &fakeVastLister{insts: []vast.Instance{
+		{ID: primaryID, GpuName: "RTX 3090", NumGpus: 2, ActualStatus: "running", Label: "llm-primary", DphTotal: 0.30, StartDate: float64(time.Now().Add(-time.Hour).Unix())},
+		{ID: secondaryID, GpuName: "RTX 3060", NumGpus: 1, ActualStatus: "running", Label: "stt-tts-3060", DphTotal: 0.08, StartDate: float64(startedAgo.Unix())},
+	}}
+	cfg := opTestCfg() // USDToBRLRate = 5.0
+	h := newOperationsHandlerWithQueries(&fakeOperationsQueries{}, newOpBreakerSet(t, []string{"primary"}), nil, nil, nil, fakeVast, cfg, discardLog())
+
+	rows := h.secondaryPods(context.Background(), primaryID)
+	if len(rows) != 1 {
+		t.Fatalf("secondary pods len = %d, want 1 (primary filtered out)", len(rows))
+	}
+	got := rows[0]
+	if got.ID != secondaryID {
+		t.Errorf("secondary id = %d, want %d (the non-primary instance)", got.ID, secondaryID)
+	}
+	if got.GpuName != "RTX 3060" || got.NumGpus != 1 || got.Status != "running" || got.Label != "stt-tts-3060" {
+		t.Errorf("secondary row fields mismatch: %+v", got)
+	}
+	wantBRL := 0.08 * cfg.USDToBRLRate
+	if diff := got.DphBRL - wantBRL; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("dph_brl = %v, want %v (dph_total × USDToBRLRate)", got.DphBRL, wantBRL)
+	}
+	if got.UptimeSeconds < 7000 || got.UptimeSeconds > 7300 {
+		t.Errorf("uptime_seconds = %d, want ~7200 (2h)", got.UptimeSeconds)
+	}
+}
+
+// TestOperationsHandler_SecondaryPods_NilVast: a nil vastLister yields a
+// non-nil empty slice and the /admin/operations response is still 200.
+func TestOperationsHandler_SecondaryPods_NilVast(t *testing.T) {
+	h := newOperationsHandlerWithQueries(&fakeOperationsQueries{}, newOpBreakerSet(t, []string{"primary"}), nil, nil, nil, nil, opTestCfg(), discardLog())
+	// vast left nil (Vast disabled / VAST_AI_API_KEY unset).
+	rows := h.secondaryPods(context.Background(), 0)
+	if rows == nil {
+		t.Fatal("secondaryPods must return a non-nil slice when vast is nil")
+	}
+	if len(rows) != 0 {
+		t.Errorf("secondary pods len = %d, want 0 (nil vast)", len(rows))
+	}
+
+	rec, _ := doOperationsRequest(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (nil vast must not break the response)", rec.Code)
+	}
+}
+
+// TestOperationsHandler_SecondaryPods_ErrorNever5xx: a vastLister error must
+// degrade the section to empty (or last-good) and NEVER 5xx the endpoint.
+func TestOperationsHandler_SecondaryPods_ErrorNever5xx(t *testing.T) {
+	fakeVast := &fakeVastLister{err: context.DeadlineExceeded}
+	h := newOperationsHandlerWithQueries(&fakeOperationsQueries{}, newOpBreakerSet(t, []string{"primary"}), nil, nil, nil, fakeVast, opTestCfg(), discardLog())
+
+	rows := h.secondaryPods(context.Background(), 0)
+	if rows == nil {
+		t.Fatal("secondaryPods must return a non-nil slice on vast error")
+	}
+	if len(rows) != 0 {
+		t.Errorf("secondary pods len = %d, want 0 (vast error → empty)", len(rows))
+	}
+
+	rec, _ := doOperationsRequest(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (vast error must not break the response)", rec.Code)
+	}
+}
+
+// TestOperationsHandler_SecondaryPods_Cached: two calls within the 60s cache
+// window hit the lister only once.
+func TestOperationsHandler_SecondaryPods_Cached(t *testing.T) {
+	fakeVast := &fakeVastLister{insts: []vast.Instance{
+		{ID: 1, GpuName: "RTX 3060", NumGpus: 1, ActualStatus: "running", DphTotal: 0.08},
+	}}
+	h := newOperationsHandlerWithQueries(&fakeOperationsQueries{}, newOpBreakerSet(t, []string{"primary"}), nil, nil, nil, fakeVast, opTestCfg(), discardLog())
+
+	_ = h.secondaryPods(context.Background(), 0)
+	_ = h.secondaryPods(context.Background(), 0)
+	if fakeVast.calls != 1 {
+		t.Errorf("ListInstances called %d times, want 1 (60s cache)", fakeVast.calls)
 	}
 }

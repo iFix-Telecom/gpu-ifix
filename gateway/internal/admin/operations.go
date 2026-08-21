@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -35,11 +36,18 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 )
+
+// secondaryPodsCacheTTL bounds how often the /admin/operations handler calls
+// Vast's account-wide ListInstances. The panel is polled ~every 10s; a 60s
+// cache keeps Vast API pressure to ~1 req/min per replica (T-secpods-02 DoS
+// mitigation) while staying fresh enough for a read-only inventory view.
+const secondaryPodsCacheTTL = 60 * time.Second
 
 // operationsLifecycleLimit caps the lifecycle rows pulled for the month
 // window — the panel renders a compact timeline, not an audit ledger.
@@ -49,11 +57,38 @@ const operationsLifecycleLimit = 50
 // Mirrored field-for-field by the dashboard's TS OperationsResponse —
 // this Go struct is the source of truth (260625-v04-RESEARCH §2).
 type OperationsResponse struct {
-	FSM        FSMSection      `json:"fsm"`
-	Schedule   ScheduleSection `json:"schedule"`
-	Lifecycles []LifecycleRow  `json:"lifecycles"`
-	Breakers   []BreakerRow    `json:"breakers"`
-	VastCost   VastCostSection `json:"vast_cost"`
+	FSM           FSMSection        `json:"fsm"`
+	Schedule      ScheduleSection   `json:"schedule"`
+	Lifecycles    []LifecycleRow    `json:"lifecycles"`
+	Breakers      []BreakerRow      `json:"breakers"`
+	VastCost      VastCostSection   `json:"vast_cost"`
+	SecondaryPods []SecondaryPodRow `json:"secondary_pods"`
+}
+
+// SecondaryPodRow is one Vast instance on the account that is NOT the active
+// primary (the gateway-managed 3090 LLM pod). It surfaces externally-managed
+// pods — e.g. the 3060 STT/TTS box driven by ops/vast-3060/vast3060.py — in a
+// read-only "Outros pods" panel. Only non-secret projection fields are
+// exposed (T-secpods-01 Information-Disclosure mitigation): no ssh_host,
+// ports, image_uuid, or API key leaves the handler. DphBRL is pre-converted
+// to BRL server-side (DphTotal USD × cfg.USDToBRLRate) so the whole
+// operations response stays BRL-consistent (matches VastCostSection) and the
+// dashboard reuses formatBrl — raw USD is never shipped to the client.
+type SecondaryPodRow struct {
+	ID            int64   `json:"id"`
+	GpuName       string  `json:"gpu_name"`
+	NumGpus       int     `json:"num_gpus"`
+	Status        string  `json:"status"` // from ActualStatus
+	Label         string  `json:"label"`
+	DphBRL        float64 `json:"dph_brl"`
+	UptimeSeconds int64   `json:"uptime_seconds"`
+}
+
+// vastLister is the minimal Vast surface the secondary-pods section needs —
+// the account-wide read-only instance list. Kept as an interface so tests
+// inject a fake without real Vast traffic; *vast.Client satisfies it.
+type vastLister interface {
+	ListInstances(ctx context.Context) ([]vast.Instance, error)
 }
 
 // FSMSection is the current primary + emergency FSM state.
@@ -122,8 +157,17 @@ type OperationsHandler struct {
 	rec      *primary.Reconciler // nil-safe: Vast off
 	emergFSM *emerg.FSM          // nil-safe
 	podCfg   *podconfig.Loader   // nil-safe: Phase 17 live budget; falls back to boot cfg
+	vast     vastLister          // nil-safe: Vast off / VAST_AI_API_KEY unset → secondary_pods empty
 	cfg      config.Config
 	log      *slog.Logger
+
+	// secondary-pods cache — Vast's account-wide list is fetched at most once
+	// per secondaryPodsCacheTTL to bound API pressure (T-secpods-02). Guarded
+	// by mu; secCache holds the last-good raw instances, secCacheAt its fetch
+	// time.
+	mu         sync.Mutex
+	secCacheAt time.Time
+	secCache   []vast.Instance
 }
 
 // NewOperationsHandler wires the production dependencies. Accepts the
@@ -131,7 +175,7 @@ type OperationsHandler struct {
 // Vast/Phase-6/Phase-17 is disabled — the handler reports "unknown"
 // (or falls back to the boot budget) rather than panicking.
 func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconciler,
-	emergFSM *emerg.FSM, podCfg *podconfig.Loader, cfg config.Config, log *slog.Logger) *OperationsHandler {
+	emergFSM *emerg.FSM, podCfg *podconfig.Loader, vastL vastLister, cfg config.Config, log *slog.Logger) *OperationsHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -141,6 +185,7 @@ func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconcile
 		rec:      rec,
 		emergFSM: emergFSM,
 		podCfg:   podCfg,
+		vast:     vastL,
 		cfg:      cfg,
 		log:      log.With("module", "ADMIN_OPERATIONS"),
 	}
@@ -149,7 +194,7 @@ func NewOperationsHandler(q *gen.Queries, b *breaker.Set, rec *primary.Reconcile
 // newOperationsHandlerWithQueries is the test constructor: accepts any
 // operationsQueries (fake or real) plus the rest of the deps.
 func newOperationsHandlerWithQueries(q operationsQueries, b *breaker.Set, rec *primary.Reconciler,
-	emergFSM *emerg.FSM, podCfg *podconfig.Loader, cfg config.Config, log *slog.Logger) *OperationsHandler {
+	emergFSM *emerg.FSM, podCfg *podconfig.Loader, vastL vastLister, cfg config.Config, log *slog.Logger) *OperationsHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -159,6 +204,7 @@ func newOperationsHandlerWithQueries(q operationsQueries, b *breaker.Set, rec *p
 		rec:      rec,
 		emergFSM: emergFSM,
 		podCfg:   podCfg,
+		vast:     vastL,
 		cfg:      cfg,
 		log:      log.With("module", "ADMIN_OPERATIONS"),
 	}
@@ -270,6 +316,11 @@ func (h *OperationsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// deferred (260625-v04-RESEARCH §5).
 	}
 
+	// Secondary pods: every account instance EXCEPT the active primary (which
+	// resp.FSM.ActiveInstanceID surfaces). A nil/failing Vast client degrades
+	// THIS section to empty and NEVER 5xxs the endpoint (T-secpods-02).
+	resp.SecondaryPods = h.secondaryPods(ctx, resp.FSM.ActiveInstanceID)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
@@ -291,6 +342,65 @@ func (h *OperationsHandler) fsmSection() FSMSection {
 		sec.IsLeader = snap.IsLeader
 	}
 	return sec
+}
+
+// secondaryPods returns the account-wide Vast instances EXCEPT the active
+// primary (activeInstanceID), mapped to the read-only SecondaryPodRow
+// projection. It is nil/failure-safe by contract: a data-source problem
+// degrades this ONE section (empty or last-good), it NEVER fails the whole
+// /admin/operations response — mirroring the schedule parse-error posture.
+//
+//   - h.vast nil (Vast off / VAST_AI_API_KEY unset) → empty non-nil slice.
+//   - cache hit (< secondaryPodsCacheTTL since last fetch) → serve secCache.
+//   - cache miss → ListInstances; on error WARN + fall back to last-good
+//     (or empty), on success refresh secCache + timestamp.
+//
+// The returned slice is always non-nil. dph_brl converts USD/h → BRL/h with
+// cfg.USDToBRLRate; uptime_seconds is now - start_date clamped to >= 0.
+func (h *OperationsHandler) secondaryPods(ctx context.Context, activeInstanceID int64) []SecondaryPodRow {
+	if h.vast == nil {
+		return []SecondaryPodRow{}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	insts := h.secCache
+	if time.Since(h.secCacheAt) >= secondaryPodsCacheTTL {
+		fresh, err := h.vast.ListInstances(ctx)
+		if err != nil {
+			// Degrade to last-good (or empty) — never fail the response.
+			h.log.Warn("ListInstances failed; serving cached/empty secondary pods", "err", err)
+		} else {
+			h.secCache = fresh
+			h.secCacheAt = time.Now()
+			insts = fresh
+		}
+	}
+
+	now := time.Now().Unix()
+	rows := make([]SecondaryPodRow, 0, len(insts))
+	for _, inst := range insts {
+		if inst.ID == activeInstanceID {
+			continue // the primary pod is shown by the FSM panel, not here
+		}
+		uptime := int64(0)
+		if inst.StartDate > 0 {
+			if u := now - int64(inst.StartDate); u > 0 {
+				uptime = u
+			}
+		}
+		rows = append(rows, SecondaryPodRow{
+			ID:            inst.ID,
+			GpuName:       inst.GpuName,
+			NumGpus:       inst.NumGpus,
+			Status:        inst.ActualStatus,
+			Label:         inst.Label,
+			DphBRL:        inst.DphTotal * h.cfg.USDToBRLRate,
+			UptimeSeconds: uptime,
+		})
+	}
+	return rows
 }
 
 // scheduleSection reports the schedule rule + next transition. When the

@@ -1337,7 +1337,22 @@ func main() {
 	// Set effective states, the schedule rule (recomputed from cfg), and
 	// aggregates Vast cost over the month's primary_lifecycles. rec +
 	// emergFSM may be nil when Vast/Phase-6 is disabled → "unknown".
-	adminOperationsHandler := admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, podCfgLoader, cfg, log)
+	// A dedicated read-only Vast client for the "Outros pods" panel — lists
+	// account-wide instances so the dashboard shows externally-managed pods
+	// (e.g. the 3060 STT/TTS). When VAST_AI_API_KEY is unset the section
+	// serves empty and NEVER breaks /admin/operations. NOT the reconciler's
+	// block-scoped client; this one lives at the handler site.
+	//
+	// We pass an UNTYPED nil (not a nil *vast.Client) in the disabled branch
+	// so the handler receives a genuine nil interface — a typed nil pointer
+	// wrapped in the vastLister interface would be != nil and panic inside
+	// secondaryPods on the first call.
+	var adminOperationsHandler *admin.OperationsHandler
+	if cfg.VastAIAPIKey != "" {
+		adminOperationsHandler = admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, podCfgLoader, vast.NewClient(cfg.VastAIAPIKey), cfg, log)
+	} else {
+		adminOperationsHandler = admin.NewOperationsHandler(gen.New(pool), breakerSet, primaryReconciler, emergFSM, podCfgLoader, nil, cfg, log)
+	}
 
 	// Phase 15 (OBS-09) — "Economia" panel: gateway-wide phantom vs Vast
 	// economy + daily series. cfg supplies USDToBRLRate for the live accrual.
