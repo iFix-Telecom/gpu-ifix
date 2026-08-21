@@ -177,6 +177,12 @@ type Instance struct {
 	ImageUUID      string                   `json:"image_uuid"`
 	Label          string                   `json:"label"`
 	Ports          map[string][]PortBinding `json:"ports"`
+	// GpuName / NumGpus / StartDate are projected by ListInstances for the
+	// dashboard secondary-pods panel (read-only account inventory). Vast
+	// returns start_date as epoch seconds encoded as a JSON float.
+	GpuName   string  `json:"gpu_name"`
+	NumGpus   int     `json:"num_gpus"`
+	StartDate float64 `json:"start_date"`
 	// StatusMsg surfaces operator-actionable Vast.ai status messages — most
 	// often empty during normal lifecycles, but populated with strings like
 	// "Error: Container failed to start" or "GPU error" when the host

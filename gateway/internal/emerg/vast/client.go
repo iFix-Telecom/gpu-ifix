@@ -339,6 +339,50 @@ func (c *Client) GetInstance(ctx context.Context, instanceID int64) (Instance, e
 	return Instance{}, fmt.Errorf("vast: instances field is neither object nor non-empty array")
 }
 
+// ListInstances issues GET /instances/ and returns the account-wide instance
+// list — every instance the VAST_AI_API_KEY owner currently rents, regardless
+// of who provisioned it. Consumed READ-ONLY by the dashboard secondary-pods
+// panel (/admin/operations) to surface externally-managed pods (e.g. the 3060
+// STT/TTS box run by ops/vast-3060/vast3060.py) alongside the gateway-managed
+// primary. It performs NO lifecycle side effects.
+//
+// The list endpoint returns `{"instances": [ ...array... ]}` under the SAME
+// key GetInstance's single-object endpoint uses — decode straight into an
+// array (mirroring SearchOffers), NOT GetInstance's single-object peek. A nil
+// decoded slice becomes an empty non-nil slice (mirror SearchOffers), so
+// callers never branch on nil.
+func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
+	u := c.baseURL + "/instances/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuthHeader(req)
+
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("list", "started").Inc()
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		obs.GatewayVastAPIRequestsTotal.WithLabelValues("list", "transport_error").Inc()
+		return nil, err
+	}
+	defer resp.Body.Close()
+	obs.GatewayVastAPIRequestsTotal.WithLabelValues("list", strconv.Itoa(resp.StatusCode)).Inc()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseErrorBody(resp)
+	}
+	var body struct {
+		Instances []Instance `json:"instances"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("vast: decode list instances response: %w", err)
+	}
+	if body.Instances == nil {
+		body.Instances = []Instance{}
+	}
+	return body.Instances, nil
+}
+
 // ReportMachine issues PUT /machines/{machine_id}/report/ — files a
 // bad-machine report with Vast.ai (the console UI "Report Machine" action).
 // See ReportMachineRequest for the active-instance constraint: this must be
