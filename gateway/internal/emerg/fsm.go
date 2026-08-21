@@ -178,9 +178,12 @@ type FSM struct {
 
 // SetAuditWriter threads the shared append-only audit writer into the FSM
 // (OBS-07). Every subsequent transition emits a WriteStateChange row with
-// event_kind = "fsm_transition". Call once at boot, BEFORE the reconciler
-// starts driving transitions. Passing a nil writer is a no-op — the FSM
-// keeps auditWriter nil and the transition path skips the audit call.
+// event_kind = "emerg_state_change" (renamed from "fsm_transition" in the
+// dashboard ops audit 2026-08-21 to distinguish emerg rows from the
+// primary FSM's "primary_state_change" in the /incidents feed). Call once
+// at boot, BEFORE the reconciler starts driving transitions. Passing a
+// nil writer is a no-op — the FSM keeps auditWriter nil and the
+// transition path skips the audit call.
 //
 // A setter (rather than a NewFSM parameter) keeps the constructor
 // signature stable for the many existing test call sites that do not
@@ -328,20 +331,29 @@ func (f *FSM) commitTransitionSideEffects(from, to State, now time.Time, reason 
 	// is non-blocking, so this never stalls the FSM CAS path. A nil
 	// auditWriter (tests, early-boot wiring) skips the call entirely.
 	if f.auditWriter != nil {
-		f.auditWriter.WriteStateChange("fsm_transition", audit.Event{
+		f.auditWriter.WriteStateChange("emerg_state_change", audit.Event{
 			TS:       now,
 			Route:    "emerg_fsm_transition",
 			Method:   from.String() + "->" + to.String(),
 			Upstream: to.String(),
+			// DataClass "normal" is MANDATORY — audit_log.data_class is a
+			// NOT NULL ai_gateway.data_class enum (migration 0003) and the
+			// flusher passes it raw into CopyFrom; an empty value fails
+			// the enum cast and poisons the ENTIRE batch (same defensive
+			// default writeBreakerAudit uses in cmd/gatewayctl/breaker.go).
+			// Fixed in the dashboard ops audit 2026-08-21.
+			DataClass: "normal",
 			// CR-03: the transition reason rides the dedicated `reason`
 			// column (audit_log.reason, migration 0022) — NOT ErrorCode.
 			// ErrorCode is reserved for genuine request error codes;
 			// overloading it made "a request failed" and "the FSM
 			// transitioned" indistinguishable in the /admin/audit feed.
+			// Formatted "from→to (reason)" for parity with the primary
+			// FSM's primary_state_change rows in the /incidents feed.
 			// RequestID is left zero — WriteStateChange mints a fresh
 			// uuid.New() so the row has a unique, non-nil request_id
 			// (audit_log.request_id is NOT NULL + part of the PK).
-			Reason: reason,
+			Reason: fmt.Sprintf("%s→%s (%s)", from.String(), to.String(), reason),
 		})
 	}
 	if f.onChange != nil {

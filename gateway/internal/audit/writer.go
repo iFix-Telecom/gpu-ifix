@@ -152,10 +152,16 @@ func (w *Writer) Enqueue(e Event) {
 // Enqueue — it deliberately reuses the one async writer goroutine and the
 // one channel; there is NO second goroutine or channel for state changes.
 //
-// kind is one of: "fsm_transition" | "tenant_activate" | "pod_lifecycle" |
-// "threshold_change". Callers (the alerter in 07-05, tenant/pod lifecycle
-// hooks) typically pass an Event with only the relevant fields populated;
-// per-request fields stay zero-value, which the flusher maps to SQL NULL.
+// kind is one of: "primary_state_change" (primary FSM via
+// PrimaryFSMAuditAdapter) | "emerg_state_change" (emergency FSM) |
+// "tenant_activate" | "pod_lifecycle" | "threshold_change" |
+// "breaker_force_*" (gatewayctl). There is NO runtime validation of
+// kinds — the column is TEXT (migration 0020). Callers (the alerter in
+// 07-05, tenant/pod lifecycle hooks) typically pass an Event with only
+// the relevant fields populated; per-request fields stay zero-value,
+// which the flusher maps to SQL NULL. NOTE: ev.DataClass must be set
+// ("normal") — audit_log.data_class is a NOT NULL enum and an empty
+// value poisons the whole CopyFrom batch.
 //
 // CR-03: audit_log.request_id is NOT NULL and part of the
 // PRIMARY KEY (request_id, ts). State-change callers (the emergency FSM)

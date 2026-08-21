@@ -982,11 +982,15 @@ func main() {
 			os.Exit(1)
 		}
 
+		// The FSM's writer hook records every primary transition as an
+		// audit_log row (event_kind primary_state_change) via the shared
+		// async audit.Writer — feeds the dashboard /incidents history
+		// (dashboard ops audit 2026-08-21; previously nil → dead hook).
 		// onChange mirrors FSM transitions to Redis for cross-replica +
-		// gatewayctl observability. Best-effort writes — failures logged
+		// gatewayctl observability. Both are best-effort — failures logged
 		// but do NOT block the in-process FSM (mirror philosophy from
 		// breaker/shed/emerg packages).
-		primaryFSM := primary.NewFSM(nil, func(from, to primary.State, at time.Time, reason string) {
+		primaryFSM := primary.NewFSM(&audit.PrimaryFSMAuditAdapter{W: auditWriter, Log: log}, func(from, to primary.State, at time.Time, reason string) {
 			ev := redisx.PrimaryEvent{
 				Type:      "transition",
 				State:     to.String(),

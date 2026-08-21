@@ -10,6 +10,7 @@ package emerg
 
 import (
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -350,8 +351,8 @@ func TestFSMTransitionEmitsAuditRow(t *testing.T) {
 		t.Fatalf("want exactly 1 audit call, got %d: %+v", len(calls), calls)
 	}
 	c := calls[0]
-	if c.kind != "fsm_transition" {
-		t.Fatalf("audit kind = %q, want fsm_transition", c.kind)
+	if c.kind != "emerg_state_change" {
+		t.Fatalf("audit kind = %q, want emerg_state_change", c.kind)
 	}
 	if c.event.Method != "healthy->degraded" {
 		t.Fatalf("audit event Method = %q, want healthy->degraded", c.event.Method)
@@ -361,9 +362,19 @@ func TestFSMTransitionEmitsAuditRow(t *testing.T) {
 	}
 	// CR-03: the transition reason rides the dedicated Reason field
 	// (audit_log.reason column), NOT ErrorCode — ErrorCode is reserved
-	// for genuine request error codes.
-	if c.event.Reason != "breaker_flap" {
-		t.Fatalf("audit event Reason = %q, want breaker_flap", c.event.Reason)
+	// for genuine request error codes. Formatted "from→to (reason)" for
+	// parity with primary_state_change rows (dashboard ops audit
+	// 2026-08-21).
+	if c.event.Reason != "healthy→degraded (breaker_flap)" {
+		t.Fatalf("audit event Reason = %q, want healthy→degraded (breaker_flap)", c.event.Reason)
+	}
+	if !strings.Contains(c.event.Reason, "→") {
+		t.Fatalf("audit event Reason = %q, want from→to arrow format", c.event.Reason)
+	}
+	// data_class is a NOT NULL enum (migration 0003); an empty value
+	// poisons the whole CopyFrom batch. Must be "normal".
+	if c.event.DataClass != "normal" {
+		t.Fatalf("audit event DataClass = %q, want normal", c.event.DataClass)
 	}
 	if c.event.ErrorCode != "" {
 		t.Fatalf("audit event ErrorCode = %q, want empty (reason must not overload ErrorCode)", c.event.ErrorCode)
