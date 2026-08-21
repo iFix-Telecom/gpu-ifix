@@ -13,8 +13,9 @@ import (
 
 // TestIntegration_10_PartitionAutomation verifies db.EnsurePartitions
 // creates the expected monthly partitions (current + N months ahead) for
-// both audit_log and audit_log_content. Codex review [LOW] 02-02 regression
-// guard.
+// audit_log, audit_log_content and billing_events. Codex review [LOW] 02-02
+// regression guard; billing_events added 2026-08-21 after prod billing
+// flushes 23514'd when the migration-seeded partitions ran out.
 func TestIntegration_10_PartitionAutomation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -32,7 +33,7 @@ func TestIntegration_10_PartitionAutomation(t *testing.T) {
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i <= 3; i++ {
 		m := start.AddDate(0, i, 0)
-		for _, table := range []string{"audit_log", "audit_log_content"} {
+		for _, table := range []string{"audit_log", "audit_log_content", "billing_events"} {
 			partName := fmt.Sprintf("%s_%04d%02d", table, m.Year(), int(m.Month()))
 			var exists bool
 			err := pool.QueryRow(ctx, `
