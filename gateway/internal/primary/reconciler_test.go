@@ -4492,3 +4492,43 @@ func TestReconcilerForceMachineID_NoOffer_FailsClosed(t *testing.T) {
 	require.True(t, rr.has("forced_machine_no_offer"), "close reason must be forced_machine_no_offer")
 	require.Equal(t, int32(0), created.Load(), "must NOT create any instance when the pin has no offer")
 }
+
+// TestLiveRule_Exported (dashboard ops audit 2026-08-21): LiveRule() is the
+// exported read-only observer seam consumed by admin's /admin/operations
+// schedule section. It must share liveRule's exact fallback semantics:
+// (a) no pod_config loader → boot rule verbatim; (b) live snapshot present
+// → the snapshot's 6 HOT schedule fields win over the boot rule.
+func TestLiveRule_Exported(t *testing.T) {
+	bootRule := alwaysInPeakRule()
+	bootRule.UpHour, bootRule.DownHour = 9, 17
+	bootRule.Disabled = true
+
+	// (a) PodCfg nil → LiveRule returns the immutable boot rule.
+	r := buildReconciler(t, Deps{Rule: bootRule})
+	got := r.LiveRule()
+	require.Equal(t, 9, got.UpHour)
+	require.Equal(t, 17, got.DownHour)
+	require.True(t, got.Disabled)
+
+	// (b) live snapshot (8→19 enabled) DIFFERS from the boot rule (9→17
+	// disabled) — LiveRule must reflect the snapshot.
+	loader := podconfig.NewStaticLoaderForTest(podconfig.PodConfig{
+		ScheduleUpHour:   8,
+		ScheduleDownHour: 19,
+		ScheduleDays:     []string{"mon", "tue", "wed", "thu", "fri"},
+		ScheduleDisabled: false,
+		GraceRampDownS:   300,
+		ProvisionLeadS:   1800,
+	}, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, nil)
+	r2 := buildReconciler(t, Deps{Rule: bootRule, PodCfg: loader})
+	got2 := r2.LiveRule()
+	require.Equal(t, 8, got2.UpHour)
+	require.Equal(t, 19, got2.DownHour)
+	require.False(t, got2.Disabled)
+	require.Equal(t, 300, got2.GraceRampDownS)
+	require.Equal(t, 1800, got2.ProvisionLeadS)
+	require.True(t, got2.Days[time.Monday])
+	require.False(t, got2.Days[time.Saturday])
+	// Timezone stays the STRUCTURAL boot-resolved location.
+	require.Equal(t, bootRule.Timezone, got2.Timezone)
+}

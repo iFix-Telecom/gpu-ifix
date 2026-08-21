@@ -293,17 +293,29 @@ func (h *OperationsHandler) fsmSection() FSMSection {
 	return sec
 }
 
-// scheduleSection recomputes the schedule rule from cfg (pure) and the
-// next transition. On a parse error (bad tz) it returns a minimal section
-// flagged disabled rather than failing the whole request.
+// scheduleSection reports the schedule rule + next transition. When the
+// reconciler is wired (rec non-nil) it reads rec.LiveRule() — the SAME
+// pod_config-snapshot-backed rule the reconciler evaluates every tick —
+// so the panel can never contradict the pod's real behavior (dashboard
+// ops audit 2026-08-21: the static env said 9→17 disabled while the live
+// snapshot said 8→19 enabled). LiveRule never errors (it falls back to
+// the boot rule internally). With rec nil (Vast off / tests) it falls
+// back to the pure env parse; on a parse error (bad tz) it returns a
+// minimal section flagged disabled rather than failing the whole request.
 func (h *OperationsHandler) scheduleSection(now time.Time) ScheduleSection {
-	rule, err := primary.ParseScheduleEnv(h.cfg)
-	if err != nil {
-		h.log.Warn("ParseScheduleEnv failed; reporting schedule disabled", "err", err)
-		return ScheduleSection{
-			Timezone: h.cfg.PrimaryPodScheduleTimezone,
-			Disabled: true,
-			Days:     []string{},
+	var rule primary.ScheduleRule
+	if h.rec != nil {
+		rule = h.rec.LiveRule()
+	} else {
+		var err error
+		rule, err = primary.ParseScheduleEnv(h.cfg)
+		if err != nil {
+			h.log.Warn("ParseScheduleEnv failed; reporting schedule disabled", "err", err)
+			return ScheduleSection{
+				Timezone: h.cfg.PrimaryPodScheduleTimezone,
+				Disabled: true,
+				Days:     []string{},
+			}
 		}
 	}
 	days := make([]string, 0, len(rule.Days))

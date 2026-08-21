@@ -1271,6 +1271,18 @@ func (r *Reconciler) liveRule() ScheduleRule {
 	return r.rule
 }
 
+// LiveRule exposes the live, evaluable schedule rule to read-only
+// observers OUTSIDE this package (admin's GET /admin/operations schedule
+// section — dashboard ops audit 2026-08-21). It delegates to liveRule and
+// therefore shares its exact fallback semantics: pod_config snapshot
+// re-parse first, immutable boot rule when the loader is nil, no snapshot
+// exists yet, or the re-parse errors (last-good, T-17-06). LiveRule never
+// errors. ScheduleRule is a value type — returning it by value hands the
+// caller an independent copy safe to read from any goroutine.
+func (r *Reconciler) LiveRule() ScheduleRule {
+	return r.liveRule()
+}
+
 // provisionLifecycle runs SearchOffers → CreateInstance → waitForReady.
 // gpuShapeLabel renders a human-readable "<num>x<name>" label for the
 // shape index used by DefaultSearchFilters / the primary+fallback pair.

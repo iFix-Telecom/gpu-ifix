@@ -17,6 +17,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/podconfig"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/primary"
 )
 
 // fakeOperationsQueries is an in-memory operationsQueries double — no
@@ -99,6 +100,8 @@ type opResponse struct {
 		IsLeader     bool   `json:"is_leader"`
 	} `json:"fsm"`
 	Schedule struct {
+		UpHour             int      `json:"up_hour"`
+		DownHour           int      `json:"down_hour"`
 		Days               []string `json:"days"`
 		Disabled           bool     `json:"disabled"`
 		NextTransitionKind string   `json:"next_transition_kind"`
@@ -311,5 +314,59 @@ func TestOperationsHandler_BudgetFromPodConfig(t *testing.T) {
 	}
 	if body.VastCost.BudgetBRL != 1234.0 {
 		t.Errorf("budget_brl = %v, want 1234 (from pod_config snapshot, not boot cfg 800)", body.VastCost.BudgetBRL)
+	}
+}
+
+// TestOperationsHandler_ScheduleFromLiveRule (dashboard ops audit
+// 2026-08-21): with a wired reconciler, the schedule section MUST read
+// rec.LiveRule() — the pod_config-snapshot-backed rule the reconciler
+// actually evaluates — NOT the static env schedule. Boot/env says 9→17
+// DISABLED; the live snapshot says 8→19 enabled mon-fri. The panel must
+// show the snapshot values.
+func TestOperationsHandler_ScheduleFromLiveRule(t *testing.T) {
+	fake := &fakeOperationsQueries{}
+	bset := newOpBreakerSet(t, []string{"primary"})
+
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	bootRule := primary.ScheduleRule{
+		Timezone: loc,
+		UpHour:   9, DownHour: 17,
+		Days:     map[time.Weekday]bool{time.Monday: true},
+		Disabled: true, // env kill-switch ON — must NOT surface
+	}
+	loader := podconfig.NewStaticLoaderForTest(podconfig.PodConfig{
+		ScheduleUpHour:   8,
+		ScheduleDownHour: 19,
+		ScheduleDays:     []string{"mon", "tue", "wed", "thu", "fri"},
+		ScheduleDisabled: false,
+		GraceRampDownS:   300,
+		ProvisionLeadS:   1800,
+	}, podconfig.ScheduleRule{}, podconfig.PodConfigBounds{}, discardLog())
+	rec := primary.NewReconcilerFull(primary.Deps{
+		Rule:   bootRule,
+		PodCfg: loader,
+		Log:    discardLog(),
+	})
+
+	// cfg carries a DIFFERENT env schedule (opTestCfg: hours 0/0) so any
+	// regression back to ParseScheduleEnv fails the up/down assertions.
+	h := newOperationsHandlerWithQueries(fake, bset, rec, nil, nil, opTestCfg(), discardLog())
+
+	rr, body := doOperationsRequest(t, h)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if body.Schedule.UpHour != 8 || body.Schedule.DownHour != 19 {
+		t.Errorf("schedule hours = %d→%d, want 8→19 (live snapshot, not env)",
+			body.Schedule.UpHour, body.Schedule.DownHour)
+	}
+	if body.Schedule.Disabled {
+		t.Errorf("schedule disabled = true, want false (snapshot enabled must win over env kill-switch)")
+	}
+	if len(body.Schedule.Days) != 5 {
+		t.Errorf("schedule days = %v, want 5 weekdays from the snapshot", body.Schedule.Days)
 	}
 }
