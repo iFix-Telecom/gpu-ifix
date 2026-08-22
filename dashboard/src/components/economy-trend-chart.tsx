@@ -1,20 +1,28 @@
 "use client";
 
 /**
- * Economia trend chart — a Recharts `LineChart` (via the shadcn `chart` block)
- * with three series merged by BRT day:
- *   phantom_brl  → --chart-2         (custo phantom evitado/dia)
- *   vast_brl     → --status-warning  (custo Vast real/dia)
- *   economia_brl → --primary         (economia líquida/dia — o número-chave)
+ * Economia trend chart — a Recharts `ComposedChart` over the daily
+ * `/admin/economy` series:
+ *   vast_brl     → grouped BAR, --chart-llm  (custo Vast real/dia)
+ *   phantom_brl  → grouped BAR, --chart-ext  (custo externo evitado/dia)
+ *   economia_brl → LINE overlay, --primary   (economia líquida/dia)
  *
- * Unlike consumo-trend-chart.tsx (tokens vs cost, dual axis), every series
- * here is BRL on the same scale → ONE shared Y axis (the per-series axis
- * binding is dropped).
+ * The two cost quantities are what the day IS — discrete daily amounts, best
+ * compared side by side as bars. The net saving is the derived headline, so it
+ * rides over them as a line: here the X axis IS time, so a line is legitimate
+ * (unlike latency-by-route, where the axis is categorical).
  *
- * Axis labels are Label 12/600 per the UI-SPEC typography table.
+ * Every series is BRL on the same scale → ONE shared Y axis.
  */
 
-import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import {
   ChartContainer,
@@ -26,10 +34,15 @@ import {
 } from "@/components/ui/chart";
 import type { EconomyDayRow } from "@/lib/gateway";
 
-/** Three BRL/dia series → status palette tokens (single shared axis). */
+/**
+ * Categorical palette: the two costs are DIFFERENT KINDS of money (own GPU vs
+ * external provider), not two tiers of the same status — so they take the
+ * llm/ext category hues, not the green/amber ramp. The net saving keeps the
+ * brand accent because it is the number the screen exists to show.
+ */
 const chartConfig = {
-  phantom_brl: { label: "Phantom R$/dia", color: "var(--chart-2)" },
-  vast_brl: { label: "Vast R$/dia", color: "var(--status-warning)" },
+  vast_brl: { label: "Vast R$/dia", color: "var(--chart-llm)" },
+  phantom_brl: { label: "Phantom R$/dia", color: "var(--chart-ext)" },
   economia_brl: { label: "Economia R$/dia", color: "var(--primary)" },
 } satisfies ChartConfig;
 
@@ -41,37 +54,36 @@ export interface EconomyTrendChartProps {
 export function EconomyTrendChart({ rows }: EconomyTrendChartProps) {
   return (
     <ChartContainer config={chartConfig} className="aspect-auto h-[260px] w-full">
-      <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+      <ComposedChart
+        data={rows}
+        margin={{ top: 8, right: 16, bottom: 8, left: 8 }}
+      >
         <CartesianGrid vertical={false} />
         <XAxis
           dataKey="date"
           tickLine={false}
           axisLine={false}
           tickMargin={8}
-          className="text-[12px] font-semibold"
+          className="font-mono text-[11px]"
         />
         <YAxis
           tickLine={false}
           axisLine={false}
           tickMargin={8}
           width={56}
-          className="text-[12px] font-semibold tabular-nums"
+          className="font-mono text-[11px] tabular-nums"
         />
         <ChartTooltip content={<ChartTooltipContent />} />
         <ChartLegend content={<ChartLegendContent />} />
-        <Line
-          dataKey="phantom_brl"
-          type="monotone"
-          stroke="var(--color-phantom_brl)"
-          strokeWidth={2}
-          dot={false}
-        />
-        <Line
+        <Bar
           dataKey="vast_brl"
-          type="monotone"
-          stroke="var(--color-vast_brl)"
-          strokeWidth={2}
-          dot={false}
+          fill="var(--color-vast_brl)"
+          radius={[4, 4, 0, 0]}
+        />
+        <Bar
+          dataKey="phantom_brl"
+          fill="var(--color-phantom_brl)"
+          radius={[4, 4, 0, 0]}
         />
         <Line
           dataKey="economia_brl"
@@ -80,7 +92,7 @@ export function EconomyTrendChart({ rows }: EconomyTrendChartProps) {
           strokeWidth={2}
           dot={false}
         />
-      </LineChart>
+      </ComposedChart>
     </ChartContainer>
   );
 }
