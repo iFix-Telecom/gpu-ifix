@@ -1,0 +1,353 @@
+<title>Gateway ifix-ai — Redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+
+<style>
+:root {
+  --ground: #0b0f16; --surface: #141a24; --surface-2: #1b222e; --line: #263041;
+  --ink: #eef2f7; --ink-2: #aab6c6; --ink-3: #6d798a;
+  --accent: #a3e635; --accent-dim: #7fb320;
+  --c-llm: #3d8fe0; --c-stt: #c9791e; --c-ext: #9d5fe0; --c-embed: #1f9e6d;
+  --ok: #35c07a; --warn: #e0a92b; --crit: #e05555;
+  --radius: 14px; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+:root:not([data-theme="light"]) {}
+:root[data-theme="light"] {
+  --ground: #f2f5f9; --surface: #ffffff; --surface-2: #f7fafc; --line: #dde5ee;
+  --ink: #131a24; --ink-2: #4a5769; --ink-3: #8592a3;
+  --accent: #5f8c14; --accent-dim: #6f9d1f;
+  --c-llm: #2f6fbe; --c-stt: #b06a12; --c-ext: #7d47c4; --c-embed: #157a54;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--ground); color: var(--ink); font-family: Inter, system-ui, sans-serif; line-height: 1.5; -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+.wrap { display: flex; min-height: 100vh; }
+.side { width: 232px; flex-shrink: 0; border-right: 1px solid var(--line); background: var(--surface); padding: 22px 16px; position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 3px; }
+.brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 18px; }
+.brand svg { width: 22px; height: 22px; }
+.brand b { font-family: "Space Grotesk", sans-serif; font-size: 16.5px; font-weight: 700; letter-spacing: -0.01em; }
+.side .eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.11em; color: var(--ink-3); padding: 12px 8px 6px; font-weight: 600; }
+.nav { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; color: var(--ink-2); font-size: 13.5px; font-weight: 500; text-decoration: none; cursor: pointer; border: none; background: none; width: 100%; text-align: left; font-family: inherit; }
+.nav.on { background: var(--surface-2); color: var(--ink); }
+.nav.on::before { content: ""; width: 3px; height: 15px; border-radius: 2px; background: var(--accent); margin-left: -4px; }
+.nav svg { width: 16px; height: 16px; opacity: 0.75; }
+.side .acct { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; font-size: 12px; color: var(--ink-3); }
+.side .acct b { display: block; color: var(--ink-2); font-weight: 600; font-size: 12.5px; }
+
+.main { flex: 1; padding: 26px 32px 60px; max-width: 1180px; }
+.top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+.top h1 { font-family: "Space Grotesk", sans-serif; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.top .fresh { font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.sub { color: var(--ink-2); font-size: 13.5px; margin-bottom: 24px; }
+.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-3); font-weight: 600; margin: 30px 0 12px; display: flex; align-items: center; gap: 10px; }
+.section-label::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.kpi .cap { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.kpi .val { font-family: "Space Grotesk", sans-serif; font-size: 29px; font-weight: 700; letter-spacing: -0.02em; margin: 6px 0 2px; }
+.kpi .val.warn { color: var(--warn); }
+.kpi .foot { font-size: 12px; color: var(--ink-3); }
+.spark { height: 26px; margin-top: 8px; display: block; width: 100%; }
+
+.pods { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.pod { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; position: relative; overflow: hidden; }
+.pod::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.pod.llm::before { background: var(--c-llm); } .pod.stt::before { background: var(--c-stt); }
+.pod-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.pod-head .name { display: flex; align-items: center; gap: 9px; font-family: "Space Grotesk", sans-serif; font-weight: 600; font-size: 16px; }
+.chip { width: 9px; height: 9px; border-radius: 2px; }
+.chip.llm { background: var(--c-llm); } .chip.stt { background: var(--c-stt); }
+.pill { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px; }
+.pill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.pill.sleep { background: color-mix(in srgb, var(--ink-3) 20%, transparent); color: var(--ink-2); }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pod .role { font-size: 12.5px; color: var(--ink-3); margin-bottom: 14px; }
+.pod-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 8px; }
+.metric .m-cap { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-3); font-weight: 600; }
+.metric .m-val { font-family: var(--mono); font-size: 17px; font-weight: 600; margin-top: 2px; }
+.metric .m-val small { font-size: 11px; color: var(--ink-3); font-weight: 500; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
+.card h3 { font-family: "Space Grotesk", sans-serif; font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+.card .hint { font-size: 12px; color: var(--ink-3); margin-bottom: 16px; }
+.legend { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.legend span { font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+.two-eq { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+.bars { display: flex; align-items: flex-end; gap: 26px; height: 180px; padding: 0 6px; border-bottom: 1px solid var(--line); }
+.bargroup { flex: 1; display: flex; align-items: flex-end; justify-content: center; gap: 7px; height: 100%; position: relative; }
+.bar { width: 26px; border-radius: 4px 4px 0 0; position: relative; }
+.bargroup .xlab { position: absolute; bottom: -22px; left: 0; right: 0; text-align: center; font-size: 11px; color: var(--ink-2); font-family: var(--mono); }
+.barval { position: absolute; top: -17px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--ink-3); font-family: var(--mono); }
+
+.breakers { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.bk { display: flex; align-items: center; justify-content: space-between; padding: 8px 11px; background: var(--surface-2); border-radius: 8px; font-size: 12.5px; }
+.bk .st { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+.bk .st.closed { color: var(--ok); background: color-mix(in srgb, var(--ok) 15%, transparent); }
+.bk .st.half { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.bk .u { font-family: var(--mono); font-size: 12px; }
+.bk .tier { color: var(--ink-3); font-size: 10.5px; }
+
+/* horizontal tenant bars */
+.hbars { display: flex; flex-direction: column; gap: 11px; }
+.hbar { display: grid; grid-template-columns: 150px 1fr 64px; align-items: center; gap: 12px; }
+.hbar .lab { font-size: 12.5px; color: var(--ink-2); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar .track { height: 20px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
+.hbar .fill { height: 100%; border-radius: 5px; }
+.hbar .num { font-family: var(--mono); font-size: 12.5px; text-align: right; color: var(--ink); }
+
+.note { margin-top: 34px; padding: 16px 18px; border: 1px dashed var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.note b { color: var(--accent-dim); }
+.note p { font-size: 13px; color: var(--ink-2); margin-top: 4px; }
+
+.screen { display: none; }
+.screen.on { display: block; }
+
+@media (max-width: 900px) {
+  .side { display: none; }
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .pods, .two-col, .two-eq { grid-template-columns: 1fr; }
+  .main { padding: 20px; }
+  .hbar { grid-template-columns: 110px 1fr 54px; }
+}
+</style>
+
+<div class="wrap">
+  <aside class="side">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M2 13h4l2-7 4 14 3-9 2 4h5" stroke="#a3e635" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <b>Gateway ifix-ai</b>
+    </div>
+    <div class="eyebrow">Observabilidade</div>
+    <button class="nav on" data-scr="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Visão geral</button>
+    <button class="nav" data-scr="consumo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Consumo</button>
+    <button class="nav" data-scr="economia"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/></svg>Economia</button>
+    <button class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>Operação</button>
+    <button class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v12H8l-4 4z"/></svg>Incidentes</button>
+    <div class="acct"><b>Claude Ops</b>operator · dados reais jul–ago 2026</div>
+  </aside>
+
+  <main class="main">
+
+  <!-- ============ VISÃO GERAL ============ -->
+  <section class="screen on" id="overview">
+    <div class="top"><h1>Visão geral</h1><span class="fresh"><span class="dot"></span>ao vivo · há 3s</span></div>
+    <p class="sub">Janela 5 min · 2 pods GPU · fallback externo armado · média 7d de 4.190 req/dia</p>
+
+    <div class="kpis">
+      <div class="kpi"><div class="cap">Requests / dia</div><div class="val">4.190</div><div class="foot">média 7d · 2 em voo</div>
+        <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none"><polyline points="0,7 8,2 16,8 24,22 32,24 40,9 48,12 56,9 64,11 72,7 80,21 88,23 96,4 104,5 112,10 120,9" fill="none" stroke="var(--accent)" stroke-width="1.5"/><circle cx="120" cy="9" r="2" fill="var(--accent)"/></svg></div>
+      <div class="kpi"><div class="cap">P95 latência</div><div class="val warn">3,7 s</div><div class="foot">LLM 3,2s · STT 3,7s</div>
+        <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none"><polyline points="0,14 12,12 24,16 36,10 48,13 60,9 72,16 84,8 96,12 108,6 120,8" fill="none" stroke="var(--warn)" stroke-width="1.5"/></svg></div>
+      <div class="kpi"><div class="cap">Taxa de erro</div><div class="val">0,0 %</div><div class="foot">ponderada por requests</div>
+        <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none"><line x1="0" y1="23" x2="120" y2="23" stroke="var(--ok)" stroke-width="1.5"/></svg></div>
+      <div class="kpi"><div class="cap">Custo GPU hoje</div><div class="val">R$ 6,42</div><div class="foot">mês R$ 84,71 · budget 8,5%</div>
+        <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none"><polyline points="0,10 15,8 30,12 45,7 60,10 75,8 90,9 105,7 120,10" fill="none" stroke="var(--c-llm)" stroke-width="1.5"/></svg></div>
+    </div>
+
+    <div class="section-label">Por pod</div>
+    <div class="pods">
+      <div class="pod llm">
+        <div class="pod-head"><span class="name"><span class="chip llm"></span>Pod primário — LLM</span><span class="pill sleep">dormindo</span></div>
+        <div class="role">RTX 3090 · <span style="font-family:var(--mono)">model.gguf</span> · agenda 08h–19h · gateway FSM</div>
+        <div class="pod-grid">
+          <div class="metric"><div class="m-cap">Rota</div><div class="m-val" style="font-size:13px">/chat</div></div>
+          <div class="metric"><div class="m-cap">P95</div><div class="m-val">3,2<small>s</small></div></div>
+          <div class="metric"><div class="m-cap">Req 24h</div><div class="m-val">2,4<small>k</small></div></div>
+          <div class="metric"><div class="m-cap">Custo/h</div><div class="m-val">R$0,66</div></div>
+          <div class="metric"><div class="m-cap">Breaker</div><div class="m-val" style="font-size:13px;color:var(--warn)">half-open</div></div>
+          <div class="metric"><div class="m-cap">Fallback</div><div class="m-val" style="font-size:13px">OpenRouter</div></div>
+        </div>
+      </div>
+      <div class="pod stt">
+        <div class="pod-head"><span class="name"><span class="chip stt"></span>Pod secundário — STT/TTS</span><span class="pill ok">running</span></div>
+        <div class="role">RTX 3060 · faster-whisper + Kokoro · 24/7 · script vast3060</div>
+        <div class="pod-grid">
+          <div class="metric"><div class="m-cap">Rota</div><div class="m-val" style="font-size:13px">/audio</div></div>
+          <div class="metric"><div class="m-cap">P95</div><div class="m-val">3,7<small>s</small></div></div>
+          <div class="metric"><div class="m-cap">Req 24h</div><div class="m-val">1,8<small>k</small></div></div>
+          <div class="metric"><div class="m-cap">Custo/h</div><div class="m-val">R$0,13</div></div>
+          <div class="metric"><div class="m-cap">No ar há</div><div class="m-val">14<small>h</small></div></div>
+          <div class="metric"><div class="m-cap">#inst</div><div class="m-val" style="font-size:12px">48294952</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Tendência</div>
+    <div class="two-col">
+      <div class="card">
+        <h3>Requests por dia</h3>
+        <p class="hint">Últimos 30d · lacuna 01–20/ago = incidente de billing (partição faltante), já corrigido</p>
+        <svg viewBox="0 0 620 190" style="width:100%;height:auto">
+          <line x1="34" y1="10" x2="34" y2="158" stroke="var(--line)"/><line x1="34" y1="158" x2="612" y2="158" stroke="var(--line)"/>
+          <text x="28" y="14" text-anchor="end" font-size="10" fill="var(--ink-3)">6k</text>
+          <text x="28" y="88" text-anchor="end" font-size="10" fill="var(--ink-3)">3k</text>
+          <text x="28" y="160" text-anchor="end" font-size="10" fill="var(--ink-3)">0</text>
+          <line x1="34" y1="84" x2="612" y2="84" stroke="var(--line)" stroke-dasharray="2 4"/>
+          <g fill="var(--accent)">
+            <rect x="40" y="51" width="18" height="107"/><rect x="70" y="11" width="18" height="147"/><rect x="100" y="52" width="18" height="106"/><rect x="130" y="130" width="18" height="28"/><rect x="160" y="137" width="18" height="21"/><rect x="190" y="55" width="18" height="103"/><rect x="220" y="64" width="18" height="94"/><rect x="250" y="55" width="18" height="103"/><rect x="280" y="63" width="18" height="95"/><rect x="310" y="57" width="18" height="101"/><rect x="340" y="132" width="18" height="26"/><rect x="370" y="140" width="18" height="18"/><rect x="400" y="45" width="18" height="113"/><rect x="430" y="44" width="18" height="114"/><rect x="460" y="55" width="18" height="103"/><rect x="490" y="51" width="18" height="107"/><rect x="520" y="66" width="18" height="92"/>
+          </g>
+          <rect x="538" y="11" width="60" height="147" fill="color-mix(in srgb, var(--crit) 8%, transparent)"/>
+          <text x="568" y="80" text-anchor="middle" font-size="9.5" fill="var(--crit)">lacuna</text>
+          <text x="568" y="92" text-anchor="middle" font-size="9.5" fill="var(--crit)">billing</text>
+          <g fill="var(--accent-dim)"><rect x="540" y="113" width="18" height="45"/></g>
+          <text x="49" y="172" text-anchor="middle" font-size="9" fill="var(--ink-3)" font-family="JetBrains Mono">15/7</text>
+          <text x="319" y="172" text-anchor="middle" font-size="9" fill="var(--ink-3)" font-family="JetBrains Mono">27/7</text>
+          <text x="549" y="172" text-anchor="middle" font-size="9" fill="var(--ink-3)" font-family="JetBrains Mono">21/8</text>
+        </svg>
+      </div>
+      <div class="card">
+        <h3>Latência por rota</h3>
+        <p class="hint">Barras agrupadas P50/P95/P99 — não linha ligando categorias</p>
+        <div class="legend"><span><i style="background:var(--c-llm)"></i>/chat (LLM)</span><span><i style="background:var(--c-stt)"></i>/audio (STT)</span></div>
+        <div class="bars">
+          <div class="bargroup">
+            <div class="bar" style="height:44%;background:color-mix(in srgb,var(--c-llm) 50%,transparent)"><span class="barval">2,5s</span></div>
+            <div class="bar" style="height:57%;background:var(--c-llm)"><span class="barval">3,2s</span></div>
+            <div class="bar" style="height:62%;background:color-mix(in srgb,var(--c-llm) 78%,transparent)"><span class="barval">3,3s</span></div>
+            <span class="xlab">LLM</span>
+          </div>
+          <div class="bargroup">
+            <div class="bar" style="height:52%;background:color-mix(in srgb,var(--c-stt) 50%,transparent)"><span class="barval">3,0s</span></div>
+            <div class="bar" style="height:66%;background:var(--c-stt)"><span class="barval">3,7s</span></div>
+            <div class="bar" style="height:70%;background:color-mix(in srgb,var(--c-stt) 78%,transparent)"><span class="barval">3,9s</span></div>
+            <span class="xlab">STT</span>
+          </div>
+        </div>
+        <div class="legend" style="margin-top:26px;font-size:11px"><span style="color:var(--ink-3)">claro→escuro = P50 → P95 → P99</span></div>
+      </div>
+    </div>
+
+    <div class="section-label">Upstreams &amp; disjuntores</div>
+    <div class="card">
+      <div class="breakers">
+        <div class="bk"><span class="u">local-llm <span class="tier">tier0</span></span><span class="st half">half-open</span></div>
+        <div class="bk"><span class="u">openrouter-chat <span class="tier">tier1</span></span><span class="st closed">closed</span></div>
+        <div class="bk"><span class="u">local-stt <span class="tier">tier0</span></span><span class="st closed">closed</span></div>
+        <div class="bk"><span class="u">openai-whisper <span class="tier">tier2</span></span><span class="st closed">closed</span></div>
+        <div class="bk"><span class="u">kokoro-tts <span class="tier">tier0</span></span><span class="st closed">closed</span></div>
+        <div class="bk"><span class="u">local-embed <span class="tier">tier0</span></span><span class="st closed">closed</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONSUMO ============ -->
+  <section class="screen" id="consumo">
+    <div class="top"><h1>Consumo</h1><span class="fresh">período 01–31 jul · dados reais</span></div>
+    <p class="sub">92.412 requests · 49,7M tokens entrada · 13,9M saída · 26,8h de áudio STT</p>
+
+    <div class="kpis">
+      <div class="kpi"><div class="cap">Requests</div><div class="val">92,4<span style="font-size:18px">k</span></div><div class="foot">19 tenants ativos</div></div>
+      <div class="kpi"><div class="cap">Tokens entrada</div><div class="val">49,7<span style="font-size:18px">M</span></div><div class="foot">saída 13,9M</div></div>
+      <div class="kpi"><div class="cap">Áudio STT</div><div class="val">26,8<span style="font-size:18px">h</span></div><div class="foot">96,6k segundos</div></div>
+      <div class="kpi"><div class="cap">Custo externo</div><div class="val">R$ 20,18</div><div class="foot">tier-1 pago (fallback)</div></div>
+    </div>
+
+    <div class="section-label">Top tenants por volume</div>
+    <div class="card">
+      <div class="legend"><span><i style="background:var(--c-llm)"></i>chat (LLM)</span><span><i style="background:var(--c-stt)"></i>áudio (STT)</span><span><i style="background:var(--c-embed)"></i>embed</span></div>
+      <div class="hbars">
+        <div class="hbar"><span class="lab">analise-transcr-voip</span><div class="track"><div class="fill" style="width:100%;background:var(--c-llm)"></div></div><span class="num">39.435</span></div>
+        <div class="hbar"><span class="lab">transcricao-voip</span><div class="track"><div class="fill" style="width:99.8%;background:var(--c-stt)"></div></div><span class="num">39.365</span></div>
+        <div class="hbar"><span class="lab">ia-kanban</span><div class="track"><div class="fill" style="width:25.2%;background:var(--c-llm)"></div></div><span class="num">9.936</span></div>
+        <div class="hbar"><span class="lab">chat-ifix</span><div class="track"><div class="fill" style="width:2.8%;background:var(--c-llm)"></div></div><span class="num">1.118</span></div>
+        <div class="hbar"><span class="lab">campanhas</span><div class="track"><div class="fill" style="width:2.5%;background:var(--c-stt)"></div></div><span class="num">1.003</span></div>
+        <div class="hbar"><span class="lab">voice-api</span><div class="track"><div class="fill" style="width:1.7%;background:var(--c-stt)"></div></div><span class="num">688</span></div>
+        <div class="hbar"><span class="lab">chat-ifix (embed)</span><div class="track"><div class="fill" style="width:0.6%;background:var(--c-embed)"></div></div><span class="num">229</span></div>
+      </div>
+    </div>
+
+    <div class="section-label">Séries</div>
+    <div class="two-eq">
+      <div class="card"><h3>Áudio transcrito por dia</h3><p class="hint">segundos processados no pod STT (3060)</p>
+        <svg viewBox="0 0 560 150" style="width:100%;height:auto">
+          <line x1="30" y1="8" x2="30" y2="124" stroke="var(--line)"/><line x1="30" y1="124" x2="552" y2="124" stroke="var(--line)"/>
+          <text x="24" y="12" text-anchor="end" font-size="9" fill="var(--ink-3)">8k</text><text x="24" y="126" text-anchor="end" font-size="9" fill="var(--ink-3)">0</text>
+          <polyline points="30,92 82,80 134,48 186,110 238,104 290,10 342,42 394,22 446,16 498,64 550,58" fill="none" stroke="var(--c-stt)" stroke-width="2"/>
+          <polygon points="30,92 82,80 134,48 186,110 238,104 290,10 342,42 394,22 446,16 498,64 550,58 550,124 30,124" fill="color-mix(in srgb,var(--c-stt) 12%,transparent)"/>
+          <circle cx="550" cy="58" r="3" fill="var(--c-stt)"/>
+          <text x="30" y="140" font-size="9" fill="var(--ink-3)" font-family="JetBrains Mono">22/7</text><text x="530" y="140" font-size="9" fill="var(--ink-3)" font-family="JetBrains Mono">21/8</text>
+        </svg>
+      </div>
+      <div class="card"><h3>Distribuição LLM: local vs externo</h3><p class="hint">jul · o phantom cost mede o que o pod local economizou</p>
+        <div style="display:flex;align-items:center;gap:22px;padding:8px 0">
+          <svg viewBox="0 0 120 120" width="120" height="120">
+            <circle cx="60" cy="60" r="46" fill="none" stroke="var(--surface-2)" stroke-width="18"/>
+            <circle cx="60" cy="60" r="46" fill="none" stroke="var(--c-ext)" stroke-width="18" stroke-dasharray="147 289" transform="rotate(-90 60 60)"/>
+            <circle cx="60" cy="60" r="46" fill="none" stroke="var(--c-llm)" stroke-width="18" stroke-dasharray="142 289" stroke-dashoffset="-147" transform="rotate(-90 60 60)"/>
+            <text x="60" y="58" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)" font-family="Space Grotesk">51k</text>
+            <text x="60" y="72" text-anchor="middle" font-size="8.5" fill="var(--ink-3)">chamadas</text>
+          </svg>
+          <div style="display:flex;flex-direction:column;gap:11px">
+            <div style="font-size:12.5px"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:var(--c-ext);margin-right:7px"></span>OpenRouter (externo)<br><b style="font-family:var(--mono);font-size:15px">26.030</b> <span style="color:var(--ink-3)">· R$15,91</span></div>
+            <div style="font-size:12.5px"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:var(--c-llm);margin-right:7px"></span>Pod local (grátis)<br><b style="font-family:var(--mono);font-size:15px">25.484</b> <span style="color:var(--ink-3)">· economizou R$15,07</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ECONOMIA ============ -->
+  <section class="screen" id="economia">
+    <div class="top"><h1>Economia</h1><span class="fresh">GPU local vs. custo evitado</span></div>
+    <p class="sub">O pod local serve tier-0 de graça; o "phantom cost" é o que teria custado no provedor externo</p>
+
+    <div class="kpis">
+      <div class="kpi"><div class="cap">Custo Vast (mês)</div><div class="val">R$ 84,71</div><div class="foot">GPU real · budget R$1.000</div></div>
+      <div class="kpi"><div class="cap">OpenRouter (ago)</div><div class="val">US$ 3,12</div><div class="foot">fallback tier-1 real</div></div>
+      <div class="kpi"><div class="cap">% servido local</div><div class="val">52,2 %</div><div class="foot">requests na GPU própria</div></div>
+      <div class="kpi"><div class="cap">Lifecycles/dia</div><div class="val">2,9</div><div class="foot">provisões do 3090 (ago)</div></div>
+    </div>
+
+    <div class="section-label">Custo do pod primário por dia</div>
+    <div class="card">
+      <p class="hint">R$/dia do 3090 na Vast (ago) · o dia 21 teve 7 lifecycles — os testes de deploy de hoje</p>
+      <div class="bars" style="gap:14px;height:150px">
+        <div class="bargroup"><div class="bar" style="width:24px;height:65%;background:var(--c-llm)"><span class="barval">5,43</span></div><span class="xlab">10</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:98%;background:var(--c-llm)"><span class="barval">8,20</span></div><span class="xlab">11</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:82%;background:var(--c-llm)"><span class="barval">6,89</span></div><span class="xlab">12</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:65%;background:var(--c-llm)"><span class="barval">5,45</span></div><span class="xlab">13</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:68%;background:var(--c-llm)"><span class="barval">5,69</span></div><span class="xlab">14</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:83%;background:var(--c-llm)"><span class="barval">6,99</span></div><span class="xlab">17</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:82%;background:var(--c-llm)"><span class="barval">6,87</span></div><span class="xlab">18</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:81%;background:var(--c-llm)"><span class="barval">6,83</span></div><span class="xlab">19</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:74%;background:var(--c-llm)"><span class="barval">6,23</span></div><span class="xlab">20</span></div>
+        <div class="bargroup"><div class="bar" style="width:24px;height:77%;background:var(--accent)"><span class="barval">6,42</span></div><span class="xlab">21</span></div>
+      </div>
+    </div>
+
+    <div class="section-label">OpenRouter agosto — por modelo</div>
+    <div class="card">
+      <div class="hbars">
+        <div class="hbar"><span class="lab">gpt-5.5</span><div class="track"><div class="fill" style="width:100%;background:var(--c-ext)"></div></div><span class="num">$0,97</span></div>
+        <div class="hbar"><span class="lab">deepseek-v4-flash</span><div class="track"><div class="fill" style="width:97%;background:var(--c-llm)"></div></div><span class="num">$0,94</span></div>
+        <div class="hbar"><span class="lab">kimi-k3</span><div class="track"><div class="fill" style="width:59%;background:var(--c-ext)"></div></div><span class="num">$0,57</span></div>
+        <div class="hbar"><span class="lab">lyria-3-pro</span><div class="track"><div class="fill" style="width:50%;background:var(--c-ext)"></div></div><span class="num">$0,48</span></div>
+        <div class="hbar"><span class="lab">qwen3.5-9b</span><div class="track"><div class="fill" style="width:10%;background:var(--c-llm)"></div></div><span class="num">$0,10</span></div>
+      </div>
+      <p class="hint" style="margin:14px 0 0">deepseek-v4-flash + qwen3.5-9b = o fallback do gateway/análise; gpt-5.5/kimi/lyria são outros usos da conta</p>
+    </div>
+  </section>
+
+  <div class="note">
+    <b>Proposta — redesign das 8 telas · dados reais jul–ago 2026</b>
+    <p>① <b>Por pod</b> (3090 vs 3060) na Visão geral — o 3060 saiu da invisibilidade. ② KPIs com <b>sparkline</b>. ③ <b>Séries temporais</b> reais (requests/dia, áudio/dia, custo/dia) com a lacuna de billing marcada. ④ Latência em <b>barras agrupadas</b> por pod. ⑤ <b>Top tenants</b> em barras horizontais, <b>local vs externo</b> em donut, <b>OpenRouter por modelo</b>. ⑥ Paleta <b>validada p/ daltonismo</b>, status separado do accent. Navegue pelo menu à esquerda: Visão geral · Consumo · Economia.</p>
+  </div>
+  </main>
+</div>
+
+<script>
+document.querySelectorAll(".nav[data-scr]").forEach(function(b){
+  b.addEventListener("click", function(){
+    var id = b.getAttribute("data-scr");
+    document.querySelectorAll(".nav").forEach(function(n){ n.classList.remove("on"); });
+    b.classList.add("on");
+    document.querySelectorAll(".screen").forEach(function(s){ s.classList.toggle("on", s.id === id); });
+    window.scrollTo(0, 0);
+  });
+});
+</script>
