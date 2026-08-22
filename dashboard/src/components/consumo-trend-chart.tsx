@@ -3,14 +3,18 @@
 /**
  * Consumption trend chart — a Recharts `LineChart` (via the shadcn `chart`
  * block) with two series merged by date across all tenants:
- *   tokens   → --primary (tokens/dia)
- *   cost_brl → --status-warning (custo R$/dia)
+ *   tokens   → --chart-llm (tokens/dia)
+ *   cost_brl → --chart-ext (custo R$/dia)
  *
  * Tokens are large counts and cost is a sparse/small BRL value, so a shared
  * Y axis would flatten cost to zero. Each line gets its own axis via
  * `yAxisId`: tokens on the left, cost on the right.
  *
- * Axis labels are Label 12/600 per the UI-SPEC typography table.
+ * GAPS ARE LOAD-BEARING: the rows carry `null` for days with no billing row
+ * (see `fillDateGaps`), and `connectNulls={false}` keeps the line BROKEN over
+ * them. Bridging the gap would draw a smooth interpolation across days we have
+ * no record for — exactly the artifact that made the ago/2026 billing-partition
+ * outage look like normal traffic.
  */
 
 import {
@@ -29,17 +33,20 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import type { DailyAggRow } from "@/lib/consumo";
+import type { DailyGapRow } from "@/lib/consumo";
 
-/** tokens/dia + custo R$/dia → status palette tokens. */
+/** tokens/dia + custo R$/dia → categorical palette (kind of thing, not status). */
 const chartConfig = {
-  tokens: { label: "Tokens/dia", color: "var(--primary)" },
-  cost_brl: { label: "Custo R$/dia", color: "var(--status-warning)" },
+  tokens: { label: "Tokens/dia", color: "var(--chart-llm)" },
+  cost_brl: { label: "Custo R$/dia", color: "var(--chart-ext)" },
 } satisfies ChartConfig;
 
 export interface ConsumoTrendChartProps {
-  /** Merged per-day rows — derived via `aggregateDaily(responses)`. */
-  rows: DailyAggRow[];
+  /**
+   * Per-day rows over the FULL requested range — `fillDateGaps(aggregateDaily(…))`.
+   * A `null` value means "no billing row for this day", not zero.
+   */
+  rows: DailyGapRow[];
 }
 
 export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
@@ -52,7 +59,7 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           tickLine={false}
           axisLine={false}
           tickMargin={8}
-          className="text-[12px] font-semibold"
+          className="font-mono text-[11px]"
         />
         <YAxis
           yAxisId="tokens"
@@ -60,7 +67,7 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           axisLine={false}
           tickMargin={8}
           width={56}
-          className="text-[12px] font-semibold tabular-nums"
+          className="font-mono text-[11px] tabular-nums"
         />
         <YAxis
           yAxisId="cost"
@@ -69,7 +76,7 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           axisLine={false}
           tickMargin={8}
           width={56}
-          className="text-[12px] font-semibold tabular-nums"
+          className="font-mono text-[11px] tabular-nums"
         />
         <ChartTooltip content={<ChartTooltipContent />} />
         <ChartLegend content={<ChartLegendContent />} />
@@ -80,6 +87,7 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           stroke="var(--color-tokens)"
           strokeWidth={2}
           dot={false}
+          connectNulls={false}
         />
         <Line
           yAxisId="cost"
@@ -88,6 +96,7 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           stroke="var(--color-cost_brl)"
           strokeWidth={2}
           dot={false}
+          connectNulls={false}
         />
       </LineChart>
     </ChartContainer>

@@ -3,13 +3,17 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * radix-nova preset tokens — reproduced verbatim from the converseai-v4
- * standard (apps/web/src/app/globals.css). The dashboard renders dark-only
- * (UI-SPEC §Theme mode), so <html> carries `class="dark"`; the :root light
- * set is kept for preset fidelity.
+ * Design tokens.
  *
- * --status-warning is the ONLY token added beyond the radix-nova preset
- * (UI-SPEC §Semantic status palette — the amber/degraded tier).
+ * The `.dark` block carries the APPROVED redesign identity (mockup validated
+ * with the product owner on 2026-08-21, .planning/quick/260821-uhr-.../mockup.html):
+ * dark-navy ground, lime accent, status colors kept SEPARATE from the accent,
+ * and a colorblind-safe categorical palette (llm/stt/ext/embed).
+ *
+ * The dashboard renders dark-only (UI-SPEC §Theme mode) — <html> carries
+ * `class="dark"` unconditionally, so only the `.dark` set is ever rendered.
+ * The `:root` light set is the original radix-nova preset, kept for preset
+ * fidelity; it is intentionally NOT restyled.
  */
 
 :root {
@@ -45,45 +49,102 @@
   --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
   --sidebar-border: oklch(0.928 0.006 264.531);
   --sidebar-ring: oklch(0.707 0.022 261.325);
+  /*
+   * Status + categorical fallbacks so `bg-chart-llm` / `text-status-ok` never
+   * resolve to an empty value if a subtree renders outside `.dark`. Values are
+   * the mockup's light variant (`:root[data-theme="light"]`) — same hues,
+   * darkened for contrast on a light ground.
+   */
+  --status-ok: #157a54;
   --status-warning: oklch(0.769 0.188 70.08);
+  --chart-llm: #2f6fbe;
+  --chart-stt: #b06a12;
+  --chart-ext: #7d47c4;
+  --chart-embed: #157a54;
 }
 
 .dark {
-  --background: oklch(0.13 0.028 261.692);
-  --foreground: oklch(0.985 0.002 247.839);
-  --card: oklch(0.21 0.034 264.665);
-  --card-foreground: oklch(0.985 0.002 247.839);
-  --popover: oklch(0.21 0.034 264.665);
-  --popover-foreground: oklch(0.985 0.002 247.839);
-  --primary: oklch(0.648 0.2 131.684);
-  --primary-foreground: oklch(0.986 0.031 120.757);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.278 0.033 256.848);
-  --muted-foreground: oklch(0.707 0.022 261.325);
-  --accent: oklch(0.278 0.033 256.848);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.551 0.027 264.364);
-  --chart-1: oklch(0.871 0.15 154.449);
-  --chart-2: oklch(0.723 0.219 149.579);
-  --chart-3: oklch(0.627 0.194 149.214);
-  --chart-4: oklch(0.527 0.154 150.069);
-  --chart-5: oklch(0.448 0.119 151.328);
-  --sidebar: oklch(0.21 0.034 264.665);
-  --sidebar-foreground: oklch(0.985 0.002 247.839);
-  --sidebar-primary: oklch(0.768 0.233 130.85);
-  --sidebar-primary-foreground: oklch(0.986 0.031 120.757);
-  --sidebar-accent: oklch(0.278 0.033 256.848);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.551 0.027 264.364);
+  /* --- Surfaces + ink (mockup :root --ground/--surface/--surface-2/--line) --- */
+  --background: #0b0f16;
+  --foreground: #eef2f7;
+  --card: #141a24;
+  --card-foreground: #eef2f7;
+  --popover: #141a24;
+  --popover-foreground: #eef2f7;
+  --secondary: #1b222e;
+  --secondary-foreground: #eef2f7;
+  --muted: #1b222e;
+  --muted-foreground: #aab6c6;
+  --accent: #1b222e;
+  --accent-foreground: #eef2f7;
+  --border: #263041;
+  --input: #263041;
+
+  /* --- Brand accent (lime). Dark ink on lime is the only readable pairing. --- */
+  --primary: #a3e635;
+  --primary-foreground: #0b0f16;
+  --ring: #a3e635;
+
+  /*
+   * --- Semantic status, DELIBERATELY separate from the accent ---
+   * The accent is brand/navigation; ok/warning/critical must never be read as
+   * "the highlighted thing". Keeping --status-ok distinct from --primary is
+   * what makes a green badge mean "healthy" instead of "selected".
+   */
+  --status-ok: #35c07a;
+  --status-warning: #e0a92b;
+  --destructive: #e05555;
+
+  /*
+   * --- Categorical palette, validated for deuteranopia/protanopia ---
+   * blue / orange / purple / teal — four hues that stay distinguishable
+   * without relying on red-green separation. These name a MODALITY, not a
+   * status: llm=chat, stt=audio, ext=external upstream, embed=embeddings.
+   */
+  --chart-llm: #3d8fe0;
+  --chart-stt: #c9791e;
+  --chart-ext: #9d5fe0;
+  --chart-embed: #1f9e6d;
+
+  /*
+   * --chart-1..5 are the shadcn generic slots. Repointed onto the categorical
+   * palette so charts still using the numeric tokens inherit the new hues
+   * instead of the old monochrome-green ramp (which made 5 series unreadable).
+   */
+  --chart-1: var(--chart-llm);
+  --chart-2: var(--chart-embed);
+  --chart-3: var(--chart-stt);
+  --chart-4: var(--chart-ext);
+  --chart-5: var(--primary);
+
+  --radius: 0.875rem;
+
+  --sidebar: #141a24;
+  --sidebar-foreground: #eef2f7;
+  --sidebar-primary: #a3e635;
+  --sidebar-primary-foreground: #0b0f16;
+  --sidebar-accent: #1b222e;
+  --sidebar-accent-foreground: #eef2f7;
+  --sidebar-border: #263041;
+  --sidebar-ring: #a3e635;
 }
 
 @theme inline {
-  --font-sans: var(--font-sans);
+  /*
+   * Font families — the three `--font-*` vars are injected on <html> by
+   * next/font/google in layout.tsx (self-hosted, no runtime CDN request).
+   *   font-sans    → Inter          (body / UI)
+   *   font-display → Space Grotesk  (headings + KPI values)
+   *   font-mono    → JetBrains Mono (every raw number/id/route)
+   */
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-space-grotesk);
+  --font-mono: var(--font-jetbrains-mono);
+  --color-chart-llm: var(--chart-llm);
+  --color-chart-stt: var(--chart-stt);
+  --color-chart-ext: var(--chart-ext);
+  --color-chart-embed: var(--chart-embed);
+  --color-status-ok: var(--status-ok);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -130,6 +191,18 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans;
+    /* Digits must not jitter between React Query refetches. */
+    font-variant-numeric: tabular-nums;
+  }
+  /*
+   * Headings carry the display face. Applied at the base layer so every
+   * existing page inherits the identity without touching its markup.
+   */
+  h1,
+  h2,
+  h3 {
+    @apply font-display;
+    letter-spacing: -0.02em;
   }
 }

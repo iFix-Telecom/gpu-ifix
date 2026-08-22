@@ -58,6 +58,29 @@ export function formatUptime(seconds: number): string {
 }
 
 /**
+ * YYYY-MM-DD from the LOCAL date components — the `/admin/usage` and
+ * `/admin/economy` from/to query format.
+ *
+ * WR-08: round-tripping through `toISOString()` shifts the calendar day by the
+ * operator's UTC offset (BRT is UTC-3, so local midnight is the PREVIOUS day in
+ * UTC), producing wrong cost numbers on the boundary days. The gateway
+ * interprets from/to in America/Sao_Paulo, so the string must be exactly the
+ * calendar day the operator sees.
+ */
+export function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** The current month so far: day 1 → today (local calendar). */
+export function currentMonthRange(): { from: string; to: string } {
+  const now = new Date();
+  return {
+    from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)),
+    to: isoDate(now),
+  };
+}
+
+/**
  * Error-rate → status tier (UI-SPEC §Semantic status palette thresholds):
  *   < 1%   → healthy
  *   1–5%   → warning

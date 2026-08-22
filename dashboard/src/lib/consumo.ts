@@ -34,6 +34,22 @@ export interface DailyAggRow {
   cost_brl: number;
 }
 
+/**
+ * What a tenant actually spends its requests on. DERIVED from the usage
+ * counters — the gateway has no "modality" column, and guessing from the
+ * tenant's NAME would be fiction.
+ */
+export type TenantModality = "llm" | "stt" | "embed";
+
+/** One horizontal volume bar — a tenant's request count for the period. */
+export interface TenantVolumeRow {
+  tenant_id: string;
+  label: string;
+  /** `summary.requests_count` — straight from the gateway. */
+  requests_count: number;
+  modality: TenantModality;
+}
+
 /** One per-tenant table row, taken from that tenant's `summary`. */
 export interface TenantUsageRow {
   tenant_id: string;
@@ -126,4 +142,109 @@ export function perTenantRows(responses: UsageResponse[]): TenantUsageRow[] {
       embeds_count: r.summary.embeds_count,
     }))
     .sort((a, b) => b.cost_local_phantom_brl - a.cost_local_phantom_brl);
+}
+
+/**
+ * Classify a tenant's traffic from its usage counters alone.
+ *
+ * The rules are deliberately conservative: a tenant only counts as "stt" or
+ * "embed" when it has NO token traffic at all. A tenant that transcribes audio
+ * AND then summarizes it with an LLM is an LLM tenant with an audio step, and
+ * painting it orange would misreport where the token spend lives.
+ */
+function classifyModality(
+  s: UsageResponse["summary"],
+): TenantModality {
+  const tokens = s.tokens_in + s.tokens_out;
+  if (s.audio_seconds > 0 && tokens === 0) return "stt";
+  if (s.embeds_count > 0 && tokens === 0 && s.audio_seconds === 0)
+    return "embed";
+  return "llm";
+}
+
+/**
+ * The busiest tenants by REQUEST COUNT for the period, highest first.
+ *
+ * Volume, not cost: `perTenantRows` already ranks by spend, and the two
+ * answers differ — a tenant can dominate request volume on the free local pod
+ * while costing nothing. Both questions are legitimate; this one answers "who
+ * is hammering the gateway".
+ *
+ * @param responses - the fulfilled `fetchUsage` results, one per tenant.
+ * @param limit - how many rows to keep (default 10).
+ */
+export function topTenantsByVolume(
+  responses: UsageResponse[],
+  limit = 10,
+): TenantVolumeRow[] {
+  return responses
+    .map((r) => ({
+      tenant_id: r.tenant.id,
+      // Same fallback chain as perTenantRows: a since-renamed tenant stays
+      // identifiable instead of collapsing to a blank label.
+      label: r.tenant.name || r.tenant.slug || r.tenant.id,
+      requests_count: r.summary.requests_count,
+      modality: classifyModality(r.summary),
+    }))
+    .sort((a, b) => b.requests_count - a.requests_count)
+    .slice(0, limit);
+}
+
+/** A trend point that can be MISSING — `null` means "no billing row", not zero. */
+export interface DailyGapRow {
+  date: string;
+  tokens: number | null;
+  cost_brl: number | null;
+}
+
+/** One calendar day in ms — the step used to walk the range in UTC. */
+const DAY_MS = 86_400_000;
+
+/**
+ * Expand a sparse daily series over the FULL requested range, emitting `null`
+ * for days with no billing row.
+ *
+ * This is the whole point: a missing day and a zero day are different facts. A
+ * zero says "the gateway ran and served nothing"; a gap says "we have no
+ * record for this day" — which in this system has meant a real ingestion
+ * incident (the ago/2026 `billing_events` partition gap dropped 21 days of
+ * billing while traffic was normal). Filling gaps with 0 would have drawn a
+ * plausible valley and hidden the outage.
+ *
+ * The walk is done on `Date.UTC` epoch arithmetic so a DST shift or a negative
+ * local offset can never skip or duplicate a day.
+ *
+ * @param rows - the merged per-day rows from `aggregateDaily`.
+ * @param from - inclusive start, YYYY-MM-DD.
+ * @param to - inclusive end, YYYY-MM-DD.
+ */
+export function fillDateGaps(
+  rows: DailyAggRow[],
+  from: string,
+  to: string,
+): DailyGapRow[] {
+  const start = Date.parse(`${from}T00:00:00Z`);
+  const end = Date.parse(`${to}T00:00:00Z`);
+  // Unparseable or inverted range — return the data untouched rather than
+  // inventing a window the caller did not ask for.
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return rows.map((r) => ({
+      date: r.date,
+      tokens: r.tokens,
+      cost_brl: r.cost_brl,
+    }));
+  }
+
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const out: DailyGapRow[] = [];
+  for (let t = start; t <= end; t += DAY_MS) {
+    const date = new Date(t).toISOString().slice(0, 10);
+    const hit = byDate.get(date);
+    out.push({
+      date,
+      tokens: hit ? hit.tokens : null,
+      cost_brl: hit ? hit.cost_brl : null,
+    });
+  }
+  return out;
 }

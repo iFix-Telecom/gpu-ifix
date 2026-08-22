@@ -1,25 +1,26 @@
 "use client";
 
 /**
- * Latency percentile chart — a Recharts `LineChart` (via the shadcn `chart`
- * block) with three series: P50 / P95 / P99.
+ * Latency percentile chart — a Recharts `BarChart` (via the shadcn `chart`
+ * block) with three GROUPED bars per route: P50 / P95 / P99.
  *
- * UI-SPEC §Semantic status palette — "Chart series for P50/P95/P99 use
- * green / amber / red respectively so the three percentile lines are
- * distinguishable at a glance":
- *   P50 → --primary (green)
- *   P95 → --status-warning (amber)
- *   P99 → --destructive (red)
- * Axis labels are Label 12/600.
+ * WHY BARS AND NOT A LINE (approved-mockup rule #4):
+ * the X axis here is a set of ROUTES (/chat, /embeddings, /audio) — unordered
+ * CATEGORIES, not a continuum. A line connecting them draws a slope between
+ * "chat" and "audio", which asserts a rate of change that does not exist;
+ * operators read that slope as a trend and misjudge which route is degrading.
+ * Grouped bars compare categories without implying any continuity. Latency
+ * over TIME would legitimately be a line — but `/admin/metrics` is a 5-minute
+ * rolling window with no history, so that chart cannot be drawn honestly yet.
+ *
+ * UI-SPEC §Semantic status palette — the P50/P95/P99 series keep the
+ * green / amber / red status ramp so the worst percentile reads as the worst:
+ *   P50 → --primary          (green)
+ *   P95 → --status-warning   (amber)
+ *   P99 → --destructive      (red)
  */
 
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import {
   ChartContainer,
@@ -46,48 +47,29 @@ export interface LatencyChartProps {
 export function LatencyChart({ rows }: LatencyChartProps) {
   return (
     <ChartContainer config={chartConfig} className="aspect-auto h-[260px] w-full">
-      <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+      <BarChart data={rows} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
         <CartesianGrid vertical={false} />
         <XAxis
           dataKey="key"
           tickLine={false}
           axisLine={false}
           tickMargin={8}
-          // Label 12/600 axis labels.
-          className="text-[12px] font-semibold"
+          className="font-mono text-[11px]"
         />
         <YAxis
           tickLine={false}
           axisLine={false}
           tickMargin={8}
           width={48}
-          className="text-[12px] font-semibold tabular-nums"
+          className="font-mono text-[11px] tabular-nums"
           unit=" ms"
         />
         <ChartTooltip content={<ChartTooltipContent />} />
         <ChartLegend content={<ChartLegendContent />} />
-        <Line
-          dataKey="p50"
-          type="monotone"
-          stroke="var(--color-p50)"
-          strokeWidth={2}
-          dot={false}
-        />
-        <Line
-          dataKey="p95"
-          type="monotone"
-          stroke="var(--color-p95)"
-          strokeWidth={2}
-          dot={false}
-        />
-        <Line
-          dataKey="p99"
-          type="monotone"
-          stroke="var(--color-p99)"
-          strokeWidth={2}
-          dot={false}
-        />
-      </LineChart>
+        <Bar dataKey="p50" fill="var(--color-p50)" radius={[4, 4, 0, 0]} />
+        <Bar dataKey="p95" fill="var(--color-p95)" radius={[4, 4, 0, 0]} />
+        <Bar dataKey="p99" fill="var(--color-p99)" radius={[4, 4, 0, 0]} />
+      </BarChart>
     </ChartContainer>
   );
 }

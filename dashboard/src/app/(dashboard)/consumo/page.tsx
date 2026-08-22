@@ -22,7 +22,9 @@ import type { DateRange } from "react-day-picker";
 import { ConsumoTable } from "@/components/consumo-table";
 import { ConsumoTrendChart } from "@/components/consumo-trend-chart";
 import { KpiCard } from "@/components/kpi-card";
+import { LocalVsExternalDonut } from "@/components/local-vs-external-donut";
 import { StaleIndicator } from "@/components/stale-indicator";
+import { TenantVolumeBars } from "@/components/tenant-volume-bars";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import {
@@ -40,10 +42,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   aggregateDaily,
   aggregateSummary,
+  fillDateGaps,
   perTenantRows,
+  topTenantsByVolume,
 } from "@/lib/consumo";
 import { formatBrl, formatCount } from "@/lib/format";
-import { fetchMetrics, fetchUsage, GatewayError } from "@/lib/gateway";
+import {
+  fetchEconomy,
+  fetchMetrics,
+  fetchUsage,
+  GatewayError,
+} from "@/lib/gateway";
 
 /** WR-06: the specific proxy/gateway cause, or the generic fallback. */
 function errorMessage(error: unknown): string {
@@ -114,12 +123,30 @@ export default function ConsumoPage() {
       const failures = settled.length - responses.length;
       return {
         summary: aggregateSummary(responses),
-        daily: aggregateDaily(responses),
+        // Expanded over the FULL range so days with no billing row render as
+        // a gap in the line instead of a fabricated zero.
+        daily: fillDateGaps(
+          aggregateDaily(responses),
+          applied.from,
+          applied.to,
+        ),
         tenants: perTenantRows(responses),
+        topTenants: topTenantsByVolume(responses),
         failures,
         total: settled.length,
       };
     },
+  });
+
+  /*
+   * SEPARATE query on purpose: `/admin/economy` is a single gateway-wide
+   * aggregate with a different failure mode from the per-tenant `/admin/usage`
+   * fan-out. Folding it into the query above would mean one economy 500 blanks
+   * the entire screen; kept apart, only the donut degrades.
+   */
+  const economyQuery = useQuery({
+    queryKey: ["economia-consumo", applied],
+    queryFn: () => fetchEconomy(applied.from, applied.to),
   });
 
   function applyPeriod() {
@@ -188,7 +215,11 @@ export default function ConsumoPage() {
           ) : null}
 
           {/* Aggregated KPI row. */}
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
+            <KpiCard
+              caption="Requests"
+              value={formatCount(query.data.summary.requests_count)}
+            />
             <KpiCard
               caption="Custo total"
               value={formatBrl(query.data.summary.cost_local_phantom_brl)}
@@ -211,20 +242,70 @@ export default function ConsumoPage() {
             />
           </div>
 
+          {/* Volume ranking + local-vs-external split. */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-[16px] font-semibold">
+                  Top tenants por volume
+                </CardTitle>
+                <p className="text-[12px] text-muted-foreground">
+                  Requests do período · a cor indica a modalidade, derivada dos
+                  próprios contadores do tenant.
+                </p>
+              </CardHeader>
+              <CardContent>
+                <TenantVolumeBars rows={query.data.topTenants} />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-[16px] font-semibold">
+                  Local vs externo
+                </CardTitle>
+                <p className="text-[12px] text-muted-foreground">
+                  Quanto do tráfego a GPU própria serviu — e o que isso evitou
+                  de gasto externo.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {economyQuery.data ? (
+                  <LocalVsExternalDonut summary={economyQuery.data.summary} />
+                ) : economyQuery.isLoading ? (
+                  <Skeleton className="h-32 w-full" />
+                ) : (
+                  <p className="py-8 text-center text-[14px] text-muted-foreground">
+                    Não foi possível carregar a economia do período.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
           {/* Trend chart. */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-[20px] font-semibold">
+              <CardTitle className="text-[16px] font-semibold">
                 Tendência
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {query.data.daily.length === 0 ? (
+              {/* Every day in the range is present after fillDateGaps, so the
+                  emptiness test is "no day carries data", not "no rows". */}
+              {query.data.daily.every((d) => d.tokens === null) ? (
                 <p className="py-8 text-center text-[14px] text-muted-foreground">
                   Sem dados no período.
                 </p>
               ) : (
-                <ConsumoTrendChart rows={query.data.daily} />
+                <>
+                  <ConsumoTrendChart rows={query.data.daily} />
+                  <p className="mt-3 text-[12px] text-muted-foreground">
+                    Dias sem nenhum registro de billing aparecem como lacuna na
+                    linha — não como zero. Uma lacuna dentro de um período com
+                    tráfego indica incidente de ingestão, não queda de uso.
+                  </p>
+                </>
               )}
             </CardContent>
           </Card>
