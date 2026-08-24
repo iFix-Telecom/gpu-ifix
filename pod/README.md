@@ -135,7 +135,7 @@ Phase 5 (Load Shedding) usa esse baseline para tunar thresholds reais de satura�
 
 | Gate falhou | Primeira hipótese | Onde investigar |
 |---|---|---|
-| `vram_peak_gb > 21` (exit 2) | `--ctx-size 32768` ou `-np 2` alto demais para a carga real | Reduzir `--ctx-size` em pod/docker-compose.yml (D-09: fallback para 12288); re-rode smoke |
+| `vram_peak_gb > 21` (exit 2) | `--ctx-size 65536` ou `-np 2` alto demais para a carga real | Reduzir `--ctx-size` em pod/docker-compose.yml (D-09: fallback para 12288); re-rode smoke |
 | `tool_call_valid == false` (exit 3) | Template Jinja quebrado (upstream llama.cpp mudou) | `pod/templates/qwen3.5-27b-tool-calling.jinja` — comparar com gist upstream; fork próprio se necessário |
 | OOM/CUDA errors (exit 4) | llama --ctx-size / -np alto demais para a GPU | Reduzir `--ctx-size`; considerar llama `-np 1` |
 | `p95_ttft > 3s` (exit 5) | host Vast.ai lento ou GPU thermal-throttled | Re-rode smoke; filtrar `inet_down≥500` em vast-ai.sh search |
