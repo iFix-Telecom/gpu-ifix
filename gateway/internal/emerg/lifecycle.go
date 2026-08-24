@@ -633,19 +633,29 @@ func (r *Reconciler) vastAPI() VastAPI {
 // instanceID). The 30s background-ctx destroy budget invariant
 // (Pitfall 8) is preserved inside vastutil.)
 
-// emergencyLlamaArgsDefault is the canonical 13-flag llama-server CLI
+// emergencyLlamaArgsDefault is the canonical llama-server CLI
 // invocation for the emergency pod (CONTEXT.md D-07-B, revised pattern
 // per 06-WAVE0-GATES.md Decision 4). Embedded into the onstart bash
 // script's final `exec /app/llama-server ...` line. Operator may
 // override via EMERGENCY_LLAMA_ARGS env CSV (Cfg.EmergencyLlamaArgs);
 // when overridden, this default is replaced wholesale.
+//
+// KV cache quantizado q8_0 dobra o contexto por slot de 16384 para 32768
+// (--ctx-size 65536 total / -np 2), ao custo de +278 MiB de VRAM e ~6% de
+// geracao (medido 2026-08-24 em RTX 3090 24 GB). "-fa on" e OBRIGATORIO:
+// sem flash-attn o llama-server RECUSA carregar V cache quantizado
+// ("quantized V cache requires flash_attn to be enabled" ->
+// "failed to create context"), matando o pod no boot.
 var emergencyLlamaArgsDefault = []string{
 	"--host", "0.0.0.0",
 	"--port", "8000",
 	"-m", "/weights/qwen/model.gguf",
 	"-ngl", "99",
 	"-np", "2",
-	"--ctx-size", "32768",
+	"--ctx-size", "65536",
+	"--cache-type-k", "q8_0",
+	"--cache-type-v", "q8_0",
+	"-fa", "on",
 	"--jinja",
 	"--chat-template-file", "/app/templates/qwen3.5-27b-tool-calling.jinja",
 }

@@ -1,5 +1,5 @@
 // Package proxy (tokencount.go): pre-dispatch token-count enforcement for
-// the chat (16k) and embed (8k BGE-M3) caps per CONTEXT.md RES-07 / SC-5.
+// the chat (32k) and embed (8k BGE-M3) caps per CONTEXT.md RES-07 / SC-5.
 //
 // TokenCounter queries llama.cpp's built-in /tokenize endpoint to obtain
 // the authoritative token count for the resolved model, with a 60-second
@@ -30,7 +30,7 @@ import (
 )
 
 // TokenCounter queries llama.cpp /tokenize with a Redis cache to enforce
-// the 16k context window cap (RES-07 / SC-5). Cache key includes the
+// the 32k context window cap (RES-07 / SC-5). Cache key includes the
 // resolved model name to prevent cross-tokenizer collisions (Pitfall 6).
 type TokenCounter struct {
 	rdb    *redis.Client
@@ -46,14 +46,19 @@ const (
 	tokenCacheTTL = 60 * time.Second
 
 	// ChatContextCap is the input-token ceiling for /v1/chat/completions
-	// per CONTEXT.md "Enforcement do 16k cap" (RES-07). Equals the
-	// PER-SLOT context of llama-server: total --ctx-size 32768 split
-	// across -np 2 slots = 16384 tokens/slot. Previously the cap was
-	// calibrated against the TOTAL --ctx-size (16384 total / 2 slots =
-	// 8192/slot), so an 11184-token request passed the gateway guard and
+	// per CONTEXT.md "Enforcement do cap de contexto" (RES-07). Equals the
+	// PER-SLOT context of llama-server: total --ctx-size 65536 split
+	// across -np 2 slots = 32768 tokens/slot. The 65536 total is only
+	// affordable on the 24 GB 3090 because the KV cache is quantized
+	// (--cache-type-k/v q8_0 + the mandatory -fa on); see
+	// pod/primary/supervisord.conf, which is the actual runtime.
+	//
+	// The cap MUST track the PER-SLOT value, never the TOTAL --ctx-size:
+	// when it was calibrated against the total (16384 total / 2 slots =
+	// 8192/slot), an 11184-token request passed the gateway guard and
 	// 400'd at the slot with exceed_context_size_error (OPERACOES-26306,
 	// chamada_id 12294412, 2026-08-21).
-	ChatContextCap = 16384
+	ChatContextCap = 32768
 
 	// EmbedContextCap is the input-token ceiling for /v1/embeddings.
 	// BGE-M3 native max sequence length is 8192; longer inputs would

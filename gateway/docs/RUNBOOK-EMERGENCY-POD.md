@@ -399,7 +399,10 @@ The `emergencyOnstart` raw-string (lifecycle.go) does, in order:
    the key env is empty (legacy/test mode — operator must ensure image
    has bundled template OR llama-server falls back to default).
 4. **`exec /app/llama-server --host 0.0.0.0 --port 8000 -m /weights/qwen/model.gguf
-   -ngl 99 -np 2 --ctx-size 32768 --jinja --chat-template-file <path>`**.
+   -ngl 99 -np 2 --ctx-size 65536 --cache-type-k q8_0 --cache-type-v q8_0 -fa on
+   --jinja --chat-template-file <path>`** (KV cache q8_0 → 32768 tokens/slot;
+   `-fa on` é obrigatório, sem flash-attn o llama-server recusa V cache
+   quantizado e aborta no boot).
 
 The `exec` is critical: bash overlays itself with llama-server, so
 **llama-server becomes PID 1** in the container. Crash detection works

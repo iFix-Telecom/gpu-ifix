@@ -33,7 +33,7 @@ x-gpu-all: &gpu-all
 services:
   # -----------------------------------------------------------------------
   # llama: Qwen 3.5 27B Q4_K_M via llama-server CUDA binary (D-07, D-24)
-  # Flags locked: -np 2, --ctx-size 32768 (32768 total / -np 2 = 16384/slot — OPERACOES-26306), --jinja, --chat-template-file (D-08, POD-06)
+  # Flags locked: -np 2, --ctx-size 65536, --cache-type-k/v q8_0, -fa on (65536 total / -np 2 = 32768/slot — OPERACOES-26306; -fa on obrigatório com KV quantizado), --jinja, --chat-template-file (D-08, POD-06)
   # -----------------------------------------------------------------------
   llama:
     image: ${IFIX_AI_POD_IMAGE:-ghcr.io/ifixtelecom/ifix-ai-pod:latest}
@@ -46,7 +46,10 @@ services:
       --port 8000
       -m /weights/qwen/model.gguf
       -np 2
-      --ctx-size 32768
+      --ctx-size 65536
+      --cache-type-k q8_0
+      --cache-type-v q8_0
+      -fa on
       --jinja
       --chat-template-file /app/templates/qwen3.5-27b-tool-calling.jinja
       --log-format json
