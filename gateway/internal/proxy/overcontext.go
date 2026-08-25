@@ -107,12 +107,21 @@ func (ic chatOverContextInterceptor) Intercept(resp *http.Response) error {
 	if !stamped || streaming {
 		return nil
 	}
-	// (e) RES-08 / LGPD PRIMARY GATE (T-ucv-01): a sensitive tenant's payload
-	// must NEVER be routed to an external tier-1. Not emitting the sentinel
-	// means the tier-0 400 is returned verbatim and no external byte flows.
-	// Missing auth ctx → fail-safe, same treatment.
+	// (e) An AuthContext is required — it carries the tenant label that makes
+	// the cascade auditable. Without it we cannot attribute the external spend
+	// (nor the payload), so we decline: fail-safe passthrough.
+	//
+	// POLICY (decisão Pedro, 2026-08-24): data_class is deliberately NOT a gate
+	// on the over-context class. Sensitive tenants cascade too. Rationale: the
+	// clients (n8n) already fall back straight to OpenRouter when the gateway
+	// errors, so blocking here did not keep the payload inside the perimeter —
+	// it only removed billing, audit and metrics from the path. Cascading
+	// THROUGH the gateway is strictly better observability for the same data
+	// exposure. RES-08 remains fully in force for every OTHER cause of
+	// fallthrough (breaker OPEN, dial failure, shed) — see the dispatcher's
+	// writeSensitiveBlock hard gate, which is bypassed for over-context ONLY.
 	ac, ok := auth.FromContext(ctx)
-	if !ok || ac.DataClass == auth.DataClassSensitive {
+	if !ok {
 		return nil
 	}
 	if resp.Body == nil {
@@ -136,11 +145,14 @@ func (ic chatOverContextInterceptor) Intercept(resp *http.Response) error {
 	upstream := auditctx.BillingUpstreamFrom(ctx)
 	obs.OverContextCascadedTotal.WithLabelValues(ac.TenantID, upstream).Inc()
 	if ic.log != nil {
+		// data_class is logged because for a sensitive tenant this line is the
+		// audit trail of a payload leaving the perimeter (policy above).
 		ic.log.WarnContext(ctx, "tier-0 over-context; routing to tier-1",
 			"module", "OVERCONTEXT",
 			"upstream", upstream,
 			"status", resp.StatusCode,
 			"tenant", ac.TenantID,
+			"data_class", string(ac.DataClass),
 			"request_id", httpx.RequestIDFrom(ctx),
 		)
 	}

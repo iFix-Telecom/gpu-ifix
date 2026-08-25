@@ -96,14 +96,17 @@ func TestOverContext_StreamingNeverCascades(t *testing.T) {
 	}
 }
 
-// TestOverContext_SensitiveNeverCascades locks RES-08/LGPD: a sensitive tenant
-// payload must NEVER be routed to the external tier-1, so the sentinel is never
-// emitted and the 400 reaches the client verbatim.
-func TestOverContext_SensitiveNeverCascades(t *testing.T) {
+// TestOverContext_SensitiveAlsoCascades locks the POLICY decided by Pedro on
+// 2026-08-24: data_class is NOT a gate on the over-context class. The clients
+// (n8n) already fall back straight to OpenRouter when the gateway errors, so
+// blocking here removed billing/audit/metrics without keeping the payload
+// inside the perimeter. RES-08 still governs every OTHER fallthrough cause.
+func TestOverContext_SensitiveAlsoCascades(t *testing.T) {
 	o := eligibleOpts()
 	o.dataClass = auth.DataClassSensitive
-	if err := newOverContextInterceptor().Intercept(newOverContextResp(o)); err != nil {
-		t.Fatalf("err = %v, want nil (RES-08: sensitive never cascades)", err)
+	err := newOverContextInterceptor().Intercept(newOverContextResp(o))
+	if !errors.Is(err, errOverContextFallthrough) {
+		t.Fatalf("err = %v, want errOverContextFallthrough (sensitive cascades too)", err)
 	}
 }
 
@@ -199,9 +202,9 @@ func TestOverContext_BodyRestoredByteIdentical(t *testing.T) {
 			o.body = `{"error":{"code":"invalid_api_param","message":"nope","type":"invalid_request_error"}}`
 			return o
 		}()},
-		{"sensitive short-circuit", func() overContextRespOpts {
+		{"no-auth short-circuit", func() overContextRespOpts {
 			o := eligibleOpts()
-			o.dataClass = auth.DataClassSensitive
+			o.noAuth = true
 			return o
 		}()},
 	}

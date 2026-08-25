@@ -760,25 +760,35 @@ func TestDispatcher_OverContext400CascadesToTier1(t *testing.T) {
 	}
 }
 
-// TestDispatcher_OverContext400_SensitiveNoCascade locks T-ucv-01 / RES-08:
-// a sensitive tenant gets the raw 400 back and NOT ONE BYTE reaches the
-// external tier-1.
-func TestDispatcher_OverContext400_SensitiveNoCascade(t *testing.T) {
+// TestDispatcher_OverContext400_SensitiveAlsoCascades encodes the POLICY
+// decided by Pedro on 2026-08-24: over-context cascades for EVERY data_class.
+// The n8n clients already fall back straight to OpenRouter on a gateway error,
+// so the old block removed billing/audit/metrics without keeping the payload
+// inside the perimeter. The dispatcher's writeSensitiveBlock hard gate is
+// bypassed for this class ONLY — RES-08 still holds for dial failures, breaker
+// OPEN and shed (locked by the sensitive tests above, which stay green).
+func TestDispatcher_OverContext400_SensitiveAlsoCascades(t *testing.T) {
 	f := newOverContextTier0Fixture(t, true)
 	defer f.cleanup()
 
+	const tenant = "tenant-oc-sensitive"
 	rw := httptest.NewRecorder()
 	r := makeRequestTenant(t, `{"model":"qwen","messages":[{"role":"user","content":"huge"}]}`,
-		auth.DataClassSensitive, "tenant-oc-sensitive")
+		auth.DataClassSensitive, tenant)
 	f.disp.ServeHTTP(rw, r)
 
-	if rw.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (sensitive stays terminal); body=%s", rw.Code, rw.Body.String())
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (sensitive cascades too); body=%s", rw.Code, rw.Body.String())
 	}
-	if !strings.Contains(rw.Body.String(), "exceed_context_size_error") {
-		t.Errorf("body should be the verbatim tier-0 envelope; got: %s", rw.Body.String())
+	if !strings.Contains(rw.Body.String(), `"tier-1"`) {
+		t.Errorf("body should come from tier-1; got: %s", rw.Body.String())
 	}
-	if got := atomic.LoadInt64(f.tier1Hits); got != 0 {
-		t.Fatalf("tier-1 hits = %d, want 0 (LGPD: sensitive payload must never leave)", got)
+	if got := atomic.LoadInt64(f.tier1Hits); got != 1 {
+		t.Errorf("tier-1 hits = %d, want 1", got)
+	}
+	// The metric is the audit trail for a sensitive payload leaving the
+	// perimeter — it MUST carry the tenant label.
+	if got := testutil.ToFloat64(obs.OverContextCascadedTotal.WithLabelValues(tenant, "primary-llm")); got != 1 {
+		t.Errorf("OverContextCascadedTotal{%s,primary-llm} = %v, want 1", tenant, got)
 	}
 }

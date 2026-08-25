@@ -317,7 +317,15 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 
 			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
 			// to an external tier-1 — emit the sensitive 503 block.
-			if sensitive {
+			//
+			// OVER-CONTEXT CARVE-OUT (decisão Pedro, 2026-08-24): the gate is
+			// bypassed for the over-context class ONLY. The clients (n8n) already
+			// fall back straight to OpenRouter when the gateway errors, so
+			// blocking here never kept the payload inside the perimeter — it only
+			// stripped billing, audit and metrics from the path. Every OTHER
+			// fallthrough cause (dial failure here, breaker OPEN below, shed)
+			// keeps the hard gate untouched.
+			if sensitive && !overCtx {
 				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
 				cfg.writeSensitiveBlock(w, r)
 				return
