@@ -288,61 +288,209 @@ func TestDispatcher_NoAuthContextReturnsUnauthorized(t *testing.T) {
 	}
 }
 
-// TestDispatcher_OverContextCapReturns400 verifies token-cap enforcement
-// hooks correctly into the dispatcher: an over-cap body returns 400
-// invalid_request_error/context_length_exceeded BEFORE breaker check.
-func TestDispatcher_OverContextCapReturns400(t *testing.T) {
-	f := newDispatcherFixture(t, "llm")
-	defer f.cleanup()
+// ---------------------------------------------------------------------------
+// quick 260824-ucv — Fix B: the RES-07 guard tokenizes against the EFFECTIVE
+// tier-0 and an over-cap request is routed to tier-1 pre-dispatch instead of
+// spending the call that is guaranteed to 400.
+// ---------------------------------------------------------------------------
 
+// overCapBackend is a mock tier upstream that ALSO serves /tokenize — exactly
+// like the real llama-server, whose base URL is both the inference endpoint and
+// the tokenizer. tokenizeHits/backendHits are counted separately so tests can
+// prove the doomed inference call was skipped while the tokenizer was consulted.
+type overCapBackend struct {
+	srv          *httptest.Server
+	tokenizeHits *int64
+	backendHits  *int64
+}
+
+func newOverCapBackend(t *testing.T, tokens int, label string) *overCapBackend {
+	t.Helper()
+	var tokHits, backHits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tokenize" {
+			atomic.AddInt64(&tokHits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			out := bytes.NewBufferString(`{"tokens":[`)
+			for i := 0; i < tokens; i++ {
+				if i > 0 {
+					out.WriteByte(',')
+				}
+				out.WriteByte('1')
+			}
+			out.WriteString(`]}`)
+			_, _ = w.Write(out.Bytes())
+			return
+		}
+		atomic.AddInt64(&backHits, 1)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"upstream":"` + label + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return &overCapBackend{srv: srv, tokenizeHits: &tokHits, backendHits: &backHits}
+}
+
+// overCapFixture wires a dispatcher whose tier-0 tokenizer answers over-cap.
+type overCapFixture struct {
+	disp   http.Handler
+	loader *upstreams.Loader
+	tier0  *overCapBackend
+	tier1  *overCapBackend
+	extra  map[string]http.Handler
+}
+
+// newOverCapFixture builds the dispatcher. tier0Tokens is what the tier-0
+// backend's /tokenize answers; withTier1 controls whether a tier-1 row exists.
+func newOverCapFixture(t *testing.T, tier0Tokens int, withTier1 bool) *overCapFixture {
+	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
 	}
-	defer mr.Close()
+	t.Cleanup(mr.Close)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-	// Mock /tokenize that returns 16385 tokens (over cap).
-	tokenizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Build response inline — 16385 tokens.
-		out := bytes.NewBufferString(`{"tokens":[`)
-		for i := 0; i < ChatContextCap+1; i++ {
-			if i > 0 {
-				out.WriteByte(',')
-			}
-			out.WriteByte('1')
-		}
-		out.WriteString(`]}`)
-		_, _ = w.Write(out.Bytes())
-	}))
-	defer tokenizeSrv.Close()
+	t.Cleanup(func() { _ = rdb.Close() })
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	tc := NewTokenCounter(rdb, tokenizeSrv.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	cfg := DispatcherConfig{
-		Role:         "llm",
-		Loader:       f.loader,
-		Breaker:      f.breakerSet,
-		TokenCounter: tc,
-		ContextCap:   ChatContextCap,
-		Proxies: map[string]http.Handler{
-			"primary-llm":  newPassthroughProxy(t, "http://localhost:0"),
-			"fallback-llm": newPassthroughProxy(t, "http://localhost:0"),
-		},
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	t0 := newOverCapBackend(t, tier0Tokens, "tier-0")
+	t1 := newOverCapBackend(t, 1, "tier-1")
+
+	rows := []upstreams.UpstreamConfig{
+		{Name: "primary-llm", Role: "llm", Tier: 0, URL: t0.srv.URL, Enabled: true},
 	}
-	disp := NewDispatcher(cfg)
+	if withTier1 {
+		rows = append(rows, upstreams.UpstreamConfig{
+			Name: "fallback-llm", Role: "llm", Tier: 1, URL: t1.srv.URL, Enabled: true,
+		})
+	}
+	loader := upstreams.NewLoaderInMemory(rows...)
+	bs := breaker.NewSet(rdb, discard,
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 30 * time.Second},
+		loader.Names())
+
+	proxies := map[string]http.Handler{
+		"primary-llm":  newPassthroughProxy(t, t0.srv.URL),
+		"fallback-llm": newPassthroughProxy(t, t1.srv.URL),
+	}
+	f := &overCapFixture{loader: loader, tier0: t0, tier1: t1, extra: proxies}
+	f.disp = NewDispatcher(DispatcherConfig{
+		Role:         "llm",
+		Loader:       loader,
+		Breaker:      bs,
+		TokenCounter: NewTokenCounter(rdb, "", discard),
+		ContextCap:   ChatContextCap,
+		Proxies:      proxies,
+		Log:          discard,
+	})
+	return f
+}
+
+// TestDispatcher_OverCap_NormalCascadesToTier1 is the Fix B happy path: the
+// guard detects over-cap BEFORE dispatching, so the doomed tier-0 inference
+// call never happens and tier-1 serves the request.
+func TestDispatcher_OverCap_NormalCascadesToTier1(t *testing.T) {
+	f := newOverCapFixture(t, ChatContextCap+1, true)
+
+	const tenant = "tenant-overcap-normal"
+	rw := httptest.NewRecorder()
+	f.disp.ServeHTTP(rw, makeRequestTenant(t,
+		`{"model":"qwen","messages":[{"role":"user","content":"long..."}]}`,
+		auth.DataClassNormal, tenant))
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), `"tier-1"`) {
+		t.Errorf("body should come from tier-1; got: %s", rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier0.backendHits); got != 0 {
+		t.Errorf("tier-0 inference hits = %d, want 0 (the doomed call must be skipped)", got)
+	}
+	if got := atomic.LoadInt64(f.tier1.backendHits); got != 1 {
+		t.Errorf("tier-1 hits = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(obs.OverContextCascadedTotal.WithLabelValues(tenant, "primary-llm")); got != 1 {
+		t.Errorf("OverContextCascadedTotal{%s,primary-llm} = %v, want 1", tenant, got)
+	}
+}
+
+// TestDispatcher_OverCap_SensitiveAlsoCascades: policy decided by Pedro on
+// 2026-08-24 — over-context cascades for every data_class, pre-dispatch too.
+func TestDispatcher_OverCap_SensitiveAlsoCascades(t *testing.T) {
+	f := newOverCapFixture(t, ChatContextCap+1, true)
+
+	const tenant = "tenant-overcap-sensitive"
+	rw := httptest.NewRecorder()
+	f.disp.ServeHTTP(rw, makeRequestTenant(t,
+		`{"model":"qwen","messages":[{"role":"user","content":"long..."}]}`,
+		auth.DataClassSensitive, tenant))
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (sensitive cascades too); body=%s", rw.Code, rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier1.backendHits); got != 1 {
+		t.Errorf("tier-1 hits = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(obs.OverContextCascadedTotal.WithLabelValues(tenant, "primary-llm")); got != 1 {
+		t.Errorf("OverContextCascadedTotal{%s,primary-llm} = %v, want 1 (audit trail)", tenant, got)
+	}
+}
+
+// TestDispatcher_OverCap_NoTier1Returns400 preserves today's semantics when
+// there is nowhere to cascade — notably /v1/embeddings, whose BGE-M3 8192 cap is
+// a PHYSICAL model limit: an explicit 400 is the best possible answer.
+func TestDispatcher_OverCap_NoTier1Returns400(t *testing.T) {
+	f := newOverCapFixture(t, ChatContextCap+1, false)
 
 	rw := httptest.NewRecorder()
-	r := makeRequest(t, `{"model":"qwen","messages":[{"role":"user","content":"long..."}]}`,
-		auth.DataClassNormal)
-	disp.ServeHTTP(rw, r)
+	f.disp.ServeHTTP(rw, makeRequestTenant(t,
+		`{"model":"qwen","messages":[{"role":"user","content":"long..."}]}`,
+		auth.DataClassNormal, "tenant-overcap-notier1"))
 
 	if rw.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400; body=%s", rw.Code, rw.Body.String())
+		t.Fatalf("status = %d, want 400; body=%s", rw.Code, rw.Body.String())
 	}
 	if !strings.Contains(rw.Body.String(), "context_length_exceeded") {
 		t.Errorf("body missing context_length_exceeded: %s", rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier0.backendHits); got != 0 {
+		t.Errorf("tier-0 inference hits = %d, want 0", got)
+	}
+}
+
+// TestDispatcher_OverCap_TokenizesEffectiveTier0 is the CORE Fix B regression:
+// with OverrideTier0 active the guard must tokenize against the POD, not the
+// static tier-0 row. Before the fix the static (dead) URL was consulted, every
+// /tokenize failed → fail-open → the guard was silently inert all day.
+func TestDispatcher_OverCap_TokenizesEffectiveTier0(t *testing.T) {
+	// Static tier-0 tokenizer says the request FITS (10 tokens); the pod says
+	// it does NOT (cap+1). Only the pod's verdict may be used.
+	f := newOverCapFixture(t, 10, true)
+	pod := newOverCapBackend(t, ChatContextCap+1, "emergency-pod")
+	f.extra["emergency_pod_llm"] = newPassthroughProxy(t, pod.srv.URL)
+	f.loader.OverrideTier0("llm", pod.srv.URL)
+
+	const tenant = "tenant-overcap-override"
+	rw := httptest.NewRecorder()
+	f.disp.ServeHTTP(rw, makeRequestTenant(t,
+		`{"model":"qwen","messages":[{"role":"user","content":"long..."}]}`,
+		auth.DataClassNormal, tenant))
+
+	if got := atomic.LoadInt64(pod.tokenizeHits); got != 1 {
+		t.Errorf("pod /tokenize hits = %d, want 1 (guard must follow the override)", got)
+	}
+	if got := atomic.LoadInt64(f.tier0.tokenizeHits); got != 0 {
+		t.Errorf("static tier-0 /tokenize hits = %d, want 0 (dead boot URL must not be consulted)", got)
+	}
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (cascade); body=%s", rw.Code, rw.Body.String())
+	}
+	if got := atomic.LoadInt64(pod.backendHits); got != 0 {
+		t.Errorf("pod inference hits = %d, want 0 (the doomed call must be skipped)", got)
+	}
+	// The metric attributes the skip to the EFFECTIVE tier-0 name.
+	if got := testutil.ToFloat64(obs.OverContextCascadedTotal.WithLabelValues(tenant, "emergency_pod_llm")); got != 1 {
+		t.Errorf("OverContextCascadedTotal{%s,emergency_pod_llm} = %v, want 1", tenant, got)
 	}
 }
 
