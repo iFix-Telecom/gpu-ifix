@@ -1,3 +1,12 @@
+> **✅ RESOLVIDO 2026-08-24 (quick 260824-ucv, gateway `develop-06e209a` em prod).**
+> A (cascata over-context) + B (tokenizer no tier-0 efetivo) implementados e validados E2E:
+> 72k tokens → tier-1 200 com log de cascata e métrica `gateway_over_context_cascaded_total{tenant,upstream}`;
+> guard contou 72.015 vs 72.017 do provider; zero WARN de tokenize pós-deploy; 20.9k fica no pod.
+> MUDANÇA DE POLÍTICA (Pedro): sensitive TAMBÉM cascateia em over-context (RES-08 intacto nos demais caminhos).
+> Item E era falso alarme: 2026-08-24 é SEGUNDA (não domingo) e o gatewayctl lia schedule do env, não do pod_config.
+> Bônus: ctx do pod dobrou p/ 32k/slot (KV q8_0, quick 260824-s2t) — os 400 de 18-21k morreram por DOIS caminhos.
+> Fix C (alertas) segue aberto. Bug NOVO descoberto: audit trunca request >128KiB (STATE.md 260824-ucv).
+
 # HANDOFF — guard de contexto fail-open deixa passar 18k p/ slot de 16384 (400 no cliente)
 
 **Aberto por:** sessão do crm-dev/Maestro (campanhas-chatifix), 2026-08-24. **Não executei nada no gateway** — trabalho é desta sessão (gpu-ifix).
