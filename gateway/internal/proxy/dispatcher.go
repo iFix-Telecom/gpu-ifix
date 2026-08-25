@@ -275,12 +275,22 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 					// client error — when a tier-1 exists we go straight there
 					// instead of spending a tier-0 call that is guaranteed to
 					// answer 400 exceed_context_size_error.
-					t1Candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
-					if len(t1Candidates) == 0 {
-						// Nowhere to cascade → the explicit 400 IS the best
-						// answer. Notably /v1/embeddings, whose BGE-M3 8192 cap
-						// is a physical model limit with no larger sibling.
-						log.Warn("over-context and no tier-1 configured; rejecting",
+					// Cascading is only worth it when a tier-1 exists AND its
+					// window is genuinely larger, which is a ROLE property:
+					//   - llm: openrouter-chat serves hundreds of thousands of
+					//     tokens vs the pod's 32k/slot — the whole point of the
+					//     fix (the same 18k requests were served fine by
+					//     openrouter until the pod took over tier-0).
+					//   - embed: BOTH sides cap at ~8k (BGE-M3 8192 /
+					//     text-embedding-3-small 8191), so cascading would ship
+					//     the payload to an external provider only to be
+					//     rejected there too. 400 is the honest answer.
+					//     (seed 0008 DOES define openai-embed at tier 1, so the
+					//     "no tier-1 configured" test alone is NOT enough to
+					//     keep embed on the 400 path.)
+					canCascade := cfg.Role == "llm" && len(cfg.Loader.ResolveAllTier1(cfg.Role)) > 0
+					if !canCascade {
+						log.Warn("over-context with no larger tier-1 for role; rejecting",
 							"tokens", n, "cap", cfg.ContextCap, "upstream", t0.Name,
 							"tenant", ac.TenantID,
 							"request_id", httpx.RequestIDFrom(r.Context()),

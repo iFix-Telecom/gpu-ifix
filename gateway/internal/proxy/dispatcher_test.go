@@ -339,9 +339,15 @@ type overCapFixture struct {
 	extra  map[string]http.Handler
 }
 
-// newOverCapFixture builds the dispatcher. tier0Tokens is what the tier-0
-// backend's /tokenize answers; withTier1 controls whether a tier-1 row exists.
+// newOverCapFixture builds an "llm"-role dispatcher. tier0Tokens is what the
+// tier-0 backend's /tokenize answers; withTier1 controls whether a tier-1 row
+// exists.
 func newOverCapFixture(t *testing.T, tier0Tokens int, withTier1 bool) *overCapFixture {
+	t.Helper()
+	return newOverCapFixtureRole(t, "llm", ChatContextCap, tier0Tokens, withTier1)
+}
+
+func newOverCapFixtureRole(t *testing.T, role string, contextCap, tier0Tokens int, withTier1 bool) *overCapFixture {
 	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -356,11 +362,11 @@ func newOverCapFixture(t *testing.T, tier0Tokens int, withTier1 bool) *overCapFi
 	t1 := newOverCapBackend(t, 1, "tier-1")
 
 	rows := []upstreams.UpstreamConfig{
-		{Name: "primary-llm", Role: "llm", Tier: 0, URL: t0.srv.URL, Enabled: true},
+		{Name: "primary-" + role, Role: role, Tier: 0, URL: t0.srv.URL, Enabled: true},
 	}
 	if withTier1 {
 		rows = append(rows, upstreams.UpstreamConfig{
-			Name: "fallback-llm", Role: "llm", Tier: 1, URL: t1.srv.URL, Enabled: true,
+			Name: "fallback-" + role, Role: role, Tier: 1, URL: t1.srv.URL, Enabled: true,
 		})
 	}
 	loader := upstreams.NewLoaderInMemory(rows...)
@@ -369,16 +375,16 @@ func newOverCapFixture(t *testing.T, tier0Tokens int, withTier1 bool) *overCapFi
 		loader.Names())
 
 	proxies := map[string]http.Handler{
-		"primary-llm":  newPassthroughProxy(t, t0.srv.URL),
-		"fallback-llm": newPassthroughProxy(t, t1.srv.URL),
+		"primary-" + role:  newPassthroughProxy(t, t0.srv.URL),
+		"fallback-" + role: newPassthroughProxy(t, t1.srv.URL),
 	}
 	f := &overCapFixture{loader: loader, tier0: t0, tier1: t1, extra: proxies}
 	f.disp = NewDispatcher(DispatcherConfig{
-		Role:         "llm",
+		Role:         role,
 		Loader:       loader,
 		Breaker:      bs,
 		TokenCounter: NewTokenCounter(rdb, "", discard),
-		ContextCap:   ChatContextCap,
+		ContextCap:   contextCap,
 		Proxies:      proxies,
 		Log:          discard,
 	})
@@ -436,9 +442,32 @@ func TestDispatcher_OverCap_SensitiveAlsoCascades(t *testing.T) {
 	}
 }
 
+// TestDispatcher_OverCap_EmbedNeverCascades: /v1/embeddings keeps the 400 EVEN
+// WITH a tier-1 configured. Seed 0008 defines openai-embed at tier 1, but both
+// sides cap at ~8k (BGE-M3 8192 / text-embedding-3-small 8191) — cascading
+// would export the payload to an external provider for a request that fails
+// there too. The over-cap cascade is an "llm"-role behaviour.
+func TestDispatcher_OverCap_EmbedNeverCascades(t *testing.T) {
+	f := newOverCapFixtureRole(t, "embed", EmbedContextCap, EmbedContextCap+1, true)
+
+	rw := httptest.NewRecorder()
+	r := makeRequestTenant(t, `{"model":"bge-m3","input":["long..."]}`,
+		auth.DataClassNormal, "tenant-overcap-embed")
+	f.disp.ServeHTTP(rw, r)
+
+	if rw.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "context_length_exceeded") {
+		t.Errorf("body missing context_length_exceeded: %s", rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier1.backendHits); got != 0 {
+		t.Errorf("tier-1 embed hits = %d, want 0 (no pointless external round-trip)", got)
+	}
+}
+
 // TestDispatcher_OverCap_NoTier1Returns400 preserves today's semantics when
-// there is nowhere to cascade — notably /v1/embeddings, whose BGE-M3 8192 cap is
-// a PHYSICAL model limit: an explicit 400 is the best possible answer.
+// there is nowhere to cascade at all.
 func TestDispatcher_OverCap_NoTier1Returns400(t *testing.T) {
 	f := newOverCapFixture(t, ChatContextCap+1, false)
 
