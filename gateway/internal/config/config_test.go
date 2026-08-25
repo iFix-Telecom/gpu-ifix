@@ -355,6 +355,44 @@ func TestLoad_UpstreamTTSKokoroURL(t *testing.T) {
 	}
 }
 
+// TestLoad_UpstreamRerankURLs asserts UPSTREAM_RERANK_URL and
+// UPSTREAM_RERANK_FALLBACK_URL (quick 260825, migration 0035) parse into their
+// config fields and default to empty when unset (tier disabled — the loader
+// also drops the DB row on a missing url_env, so both sides stay consistent).
+func TestLoad_UpstreamRerankURLs(t *testing.T) {
+	clearAll(t)
+	unsetLegacyPrimary(t)
+	setAllRequired(t)
+
+	// Unset → empty (both rerank tiers disabled).
+	t.Setenv("UPSTREAM_RERANK_URL", "")
+	t.Setenv("UPSTREAM_RERANK_FALLBACK_URL", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.UpstreamRerankURL != "" {
+		t.Errorf("UpstreamRerankURL = %q, want empty when unset", cfg.UpstreamRerankURL)
+	}
+	if cfg.UpstreamRerankFallbackURL != "" {
+		t.Errorf("UpstreamRerankFallbackURL = %q, want empty when unset", cfg.UpstreamRerankFallbackURL)
+	}
+
+	// Set → parsed through verbatim.
+	t.Setenv("UPSTREAM_RERANK_URL", "http://91.150.160.38:15165")
+	t.Setenv("UPSTREAM_RERANK_FALLBACK_URL", "http://10.10.10.50:7998")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.UpstreamRerankURL != "http://91.150.160.38:15165" {
+		t.Errorf("UpstreamRerankURL = %q, want http://91.150.160.38:15165", cfg.UpstreamRerankURL)
+	}
+	if cfg.UpstreamRerankFallbackURL != "http://10.10.10.50:7998" {
+		t.Errorf("UpstreamRerankFallbackURL = %q, want http://10.10.10.50:7998", cfg.UpstreamRerankFallbackURL)
+	}
+}
+
 // TestLoad_Phase3ExternalURLsOptional asserts the Phase-3 external upstream
 // env vars (OpenRouter, OpenAI Whisper/Embed) are NOT required at boot.
 // The Loader will warn-log if a row in ai_gateway.upstreams is enabled but

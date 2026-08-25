@@ -312,6 +312,17 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 			}
 			req.Header.Set("Content-Type", "application/json")
 		}
+	case "rerank":
+		// quick 260825 — synthetic rerank probe. Both rerank tiers are Infinity
+		// servers (served-model-name bge-reranker-v2-m3) exposing OpenAI-Cohere-
+		// shaped POST /v1/rerank. A 1-query/1-document body bounds scoring cost
+		// to a single cross-encoder forward pass (~ms on GPU, <1s on CPU).
+		body := []byte(`{"model":"bge-reranker-v2-m3","query":"ping","documents":["ping"]}`)
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, u.URL+"/v1/rerank", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 	case "stt":
 		buf := &bytes.Buffer{}
 		mw := multipart.NewWriter(buf)

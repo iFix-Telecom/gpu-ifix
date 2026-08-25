@@ -85,6 +85,7 @@ type proxies struct {
 	embed           http.Handler
 	audio           http.Handler
 	tts             http.Handler         // Phase 06.7 — POST /v1/audio/speech (tts dispatcher: tier-0 pod Chatterbox -> tier-1 Piper adapter)
+	rerank          http.Handler         // quick 260825 — POST /v1/rerank (rerank dispatcher: tier-0 rerank-gpu -> tier-1 rerank-cpu)
 	voices          *proxy.VoiceHandlers // Phase 06.7 — /v1/audio/voices CRUD (nil disables the routes in the scaffold variant)
 	voicesMaxBytes  int64                // Phase 06.7 — VOICE_MAX_UPLOAD_BYTES cap applied to the upload route
 	auditWriter     *audit.Writer
@@ -801,6 +802,30 @@ func main() {
 		}
 	}
 
+	// quick 260825 — rerank role proxies (migration 0035). Both tiers are
+	// Infinity servers with served-model-name bge-reranker-v2-m3, so the
+	// gateway forwards the JSON body unchanged (NewRerankProxy passthrough,
+	// mold: kokoro-tts wiring above). Each tier is OPTIONAL: an unset env
+	// drops the proxy from the map AND the loader drops the DB row (missing
+	// url_env), so the dispatcher cascades or 503s cleanly.
+	rerankRoleProxies := map[string]http.Handler{}
+	if cfg.UpstreamRerankURL != "" {
+		rerankGPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankURL, log)
+		if rerr != nil {
+			log.Warn("build rerank-gpu proxy", "err", rerr)
+		} else {
+			rerankRoleProxies["rerank-gpu"] = rerankGPU
+		}
+	}
+	if cfg.UpstreamRerankFallbackURL != "" {
+		rerankCPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankFallbackURL, log)
+		if rerr != nil {
+			log.Warn("build rerank-cpu proxy", "err", rerr)
+		} else {
+			rerankRoleProxies["rerank-cpu"] = rerankCPU
+		}
+	}
+
 	// Token counter — uses the LOCAL llm URL (tier-0) for /tokenize. This
 	// is the authoritative tokenizer because llama-server's BPE matches
 	// the model that will actually serve the request. Fail-open if the
@@ -1266,6 +1291,18 @@ func main() {
 		Proxies:      ttsRoleProxies,
 		Log:          log,
 	})
+	// quick 260825 — rerank dispatcher. Same tier-0->tier-1 breaker fallback
+	// wrap as tts. Rerank skips token-cap enforcement (the body is a query +
+	// document list scored by a cross-encoder, not chat tokens).
+	rerankDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
+		Role:         "rerank",
+		Loader:       loader,
+		Breaker:      breakerSet,
+		TokenCounter: nil,
+		ContextCap:   0,
+		Proxies:      rerankRoleProxies,
+		Log:          log,
+	})
 
 	// Per-route WriteTimeout (Phase 4 folded TODO — integer-second env
 	// vars preferred over the legacy time.Duration fields). wrapWithTimeout
@@ -1294,6 +1331,10 @@ func main() {
 	)
 	// Phase 06.7 — TTS speech shares the audio write-timeout budget (long synth).
 	ttsHandler := wrapWithTimeout(ttsDispatcher, cfg.WriteTimeoutAudioS)
+	// quick 260825 — rerank shares the audio write-timeout budget: the CPU
+	// tier-1 can take ~20s on a 30-document pool, so the tighter embed budget
+	// would kill legitimate fallback requests mid-flight.
+	rerankHandler := wrapWithTimeout(rerankDispatcher, cfg.WriteTimeoutAudioS)
 
 	// Phase 06.7 — voice-clone CRUD handlers. The MinIO S3 client is built from
 	// config.Minio* creds; if those are unset (scaffold/dev without MinIO) the
@@ -1385,6 +1426,7 @@ func main() {
 		embed:                  embedHandler,
 		audio:                  audioHandler,
 		tts:                    ttsHandler,
+		rerank:                 rerankHandler,
 		voices:                 voiceHandlers,
 		voicesMaxBytes:         cfg.VoiceMaxUploadBytes,
 		auditWriter:            auditWriter,
@@ -1577,6 +1619,9 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		// (D-10 tenant isolation). The upload route is wrapped with
 		// http.MaxBytesHandler (VOICE_MAX_UPLOAD_BYTES) for the T-06.7-15 DoS cap.
 		mount(http.MethodPost, "/v1/audio/speech", px.tts)
+		// quick 260825 — rerank (tier-0 rerank-gpu -> tier-1 rerank-cpu
+		// dispatcher). Same authed /v1/* group as the other proxied routes.
+		mount(http.MethodPost, "/v1/rerank", px.rerank)
 		if px.voices != nil {
 			maxBytes := px.voicesMaxBytes
 			if maxBytes <= 0 {
@@ -1602,6 +1647,7 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		pg.MethodFunc(http.MethodGet, "/v1/chat/completions", scaffoldNotImplemented)
 		pg.MethodFunc(http.MethodGet, "/v1/embeddings", scaffoldNotImplemented)
 		pg.MethodFunc(http.MethodGet, "/v1/audio/transcriptions", scaffoldNotImplemented)
+		pg.MethodFunc(http.MethodGet, "/v1/rerank", scaffoldNotImplemented)
 		pg.MethodFunc(http.MethodPost, "/v1/health/upstreams", scaffoldNotImplemented)
 	})
 

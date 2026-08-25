@@ -20,6 +20,10 @@ const (
 	// Phase 06.7 (D-12). The wire value "tts" is persisted in Redis keys
 	// (gw:rate:{tenant}:tts:*) and must not change once deployed.
 	RouteClassTTS RouteClass = "tts"
+	// RouteClassRerank covers /v1/rerank (cross-encoder reranking).
+	// quick 260825. The wire value "rerank" is persisted in Redis keys
+	// (gw:rate:{tenant}:rerank:*) and must not change once deployed.
+	RouteClassRerank RouteClass = "rerank"
 )
 
 // BucketConfig is the per-tenant + per-route bucket capacity pair. It is
