@@ -51,6 +51,7 @@
  * schema.ts file does NOT mirror the twoFactor plugin tables — see
  * the top-of-file comment in schema.ts.
  */
+import { eq } from "drizzle-orm";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
@@ -98,6 +99,44 @@ const operatorRole = ac.newRole({ user: [], session: [] });
 const RATE_LIMIT_STORAGE: "memory" | "secondary-storage" = process.env.REDIS_URL
   ? "secondary-storage"
   : "memory";
+
+// Known verify endpoint paths across Better Auth 1.4.x. If a future version
+// renames the route (e.g. /two-factor/totp/verify), add the new path here AND
+// extend the auth.test.ts coverage so a missed rename fails in CI.
+const VERIFY_PATHS = new Set<string>([
+  "/two-factor/verify-totp",
+  "/two-factor/verify-backup-code",
+  "/two-factor/verify-otp",
+]);
+
+/**
+ * Decides the `twoFactorVerified` value stamped on a session at creation
+ * time, given the endpoint path that created it (CR-04 path inference).
+ *
+ * - 2FA verify endpoints → true (challenge passed).
+ * - `/sign-in/email` for a 2FA-ENABLED user → true. Trusted-device sign-in
+ *   (twoFactor plugin, trustDevice:true) creates the session on this path
+ *   and KEEPS it only when the trust-device cookie is valid — for a
+ *   non-trusted device the plugin's after-hook DELETES the session and
+ *   issues the challenge cookie instead, so a surviving session on this
+ *   path implies 2FA was proven on this device <30d ago. Without this rule
+ *   a trusted sign-in produced twoFactorVerified=false → middleware bounced
+ *   to /2fa/challenge with no challenge cookie → INVALID_TWO_FACTOR_COOKIE
+ *   → "verificação expirou" login loop (incident 2026-08-25).
+ * - `/sign-in/email` for a user WITHOUT 2FA → false (claim contract,
+ *   auth.test.ts (c)) — the middleware never reads the flag for them.
+ *
+ * Exported for direct unit coverage (auth.test.ts) — the twoFactor plugin's
+ * verifyTOTP api mode returns empty headers, so the trusted-device flow
+ * cannot be exercised end-to-end in the memoryAdapter harness.
+ */
+export function twoFactorVerifiedOnCreate(
+  path: string,
+  userTwoFactorEnabled: boolean,
+): boolean {
+  if (VERIFY_PATHS.has(path)) return true;
+  return path === "/sign-in/email" && userTwoFactorEnabled;
+}
 
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL,
@@ -279,17 +318,20 @@ export const auth = betterAuth({
           const candidate2 =
             typeof ctx?.path === "string" ? ctx.path : "";
           const path = candidate1 || candidate2;
-          // Known verify endpoint paths across Better Auth 1.4.x. If a
-          // future version renames the route (e.g. /two-factor/totp/verify),
-          // add the new path here AND extend the auth.test.ts integration
-          // test below so a missed rename fails in CI.
-          const VERIFY_PATHS = new Set<string>([
-            "/two-factor/verify-totp",
-            "/two-factor/verify-backup-code",
-            "/two-factor/verify-otp",
-          ]);
-          const fromChallenge = VERIFY_PATHS.has(path);
-          if (fromChallenge) {
+          // Decision extracted to twoFactorVerifiedOnCreate (see its doc:
+          // verify endpoints AND trusted-device /sign-in/email — incident
+          // 2026-08-25). The DB lookup resolves the user's 2FA enrollment;
+          // only needed for the /sign-in/email branch.
+          let enabled = false;
+          if (path === "/sign-in/email") {
+            const row = await db
+              .select({ enabled: schema.user.twoFactorEnabled })
+              .from(schema.user)
+              .where(eq(schema.user.id, session.userId))
+              .limit(1);
+            enabled = row[0]?.enabled === true;
+          }
+          if (twoFactorVerifiedOnCreate(path, enabled)) {
             return { data: { ...session, twoFactorVerified: true } };
           }
           return { data: session };

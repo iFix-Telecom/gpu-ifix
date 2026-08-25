@@ -28,6 +28,7 @@ import { defaultStatements } from "better-auth/plugins/admin/access";
 import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { isAllowedEmail } from "@/lib/allowlist";
+import { twoFactorVerifiedOnCreate } from "@/lib/auth";
 
 type MemDB = { [k: string]: any[] };
 
@@ -166,6 +167,19 @@ function buildTestAuth(opts?: { rateLimitWindow?: number; rateLimitMax?: number 
             ]);
             if (VERIFY_PATHS.has(path)) {
               return { data: { ...session, twoFactorVerified: true } };
+            }
+            // Mirror of the production trusted-device branch — see auth.ts
+            // VERIFY_PATHS comment (incident 2026-08-25): /sign-in/email
+            // sessions of a 2FA-enabled user only survive when the device
+            // is trusted, so they are marked verified; non-2FA users keep
+            // the false default (claim contract, test (c)).
+            if (path === "/sign-in/email") {
+              const u = db.user.find(
+                (x: any) => x.id === (session as any).userId,
+              );
+              if (u?.twoFactorEnabled === true) {
+                return { data: { ...session, twoFactorVerified: true } };
+              }
             }
             return { data: session };
           },
@@ -458,6 +472,35 @@ describe("auth — CR-04 session.create.before hook fires on verify-totp", () =>
     // !user.twoFactorEnabled branch of totp/index.mjs).
     const finalUser = (finalSession as any).user;
     expect(finalUser?.twoFactorEnabled).toBe(true);
+  });
+
+  it("(e2) twoFactorVerifiedOnCreate: verify paths + trusted-device sign-in semantics", () => {
+    // Incident 2026-08-25: verifyTOTP({trustDevice:true}) plants a
+    // trust-device cookie; the NEXT /sign-in/email skips the 2FA challenge
+    // and KEEPS the session it created on that path (better-auth 1.4.22
+    // two-factor after-hook only deletes the session for non-trusted
+    // devices — verified in dist/plugins/two-factor/index.mjs). Without the
+    // /sign-in/email rule that surviving session carried
+    // twoFactorVerified=false → middleware bounced to /2fa/challenge with no
+    // challenge cookie → INVALID_TWO_FACTOR_COOKIE → login loop.
+    //
+    // Unit-level because the memoryAdapter harness cannot capture the
+    // trust-device cookie: auth.api.verifyTOTP returns EMPTY headers in api
+    // mode (test (e) above only passes via its || fallback), so the
+    // end-to-end trusted flow is untestable here. The decision logic is
+    // exported from auth.ts and exercised directly instead.
+    // Challenge verify endpoints → always verified.
+    expect(twoFactorVerifiedOnCreate("/two-factor/verify-totp", true)).toBe(true);
+    expect(twoFactorVerifiedOnCreate("/two-factor/verify-totp", false)).toBe(true);
+    expect(twoFactorVerifiedOnCreate("/two-factor/verify-backup-code", true)).toBe(true);
+    expect(twoFactorVerifiedOnCreate("/two-factor/verify-otp", true)).toBe(true);
+    // Trusted-device sign-in (2FA-enabled user, session survived) → verified.
+    expect(twoFactorVerifiedOnCreate("/sign-in/email", true)).toBe(true);
+    // Non-2FA user signing in → keeps the false default (claim contract (c)).
+    expect(twoFactorVerifiedOnCreate("/sign-in/email", false)).toBe(false);
+    // Any other session-creating path → false.
+    expect(twoFactorVerifiedOnCreate("/sign-up/email", true)).toBe(false);
+    expect(twoFactorVerifiedOnCreate("", true)).toBe(false);
   });
 
   it("(f) CR-01 defense-in-depth: enableTwoFactor on already-enrolled user is rejected", async () => {
