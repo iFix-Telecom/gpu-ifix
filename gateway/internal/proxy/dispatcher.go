@@ -1,11 +1,15 @@
 // Package proxy (dispatcher.go): role-based fallback chain dispatcher.
 // One handler per role (llm / stt / embed) — at request time:
 //
-//  1. enforce token cap (chat=16k, embed=8k); 400 on over-cap
+//  1. resolve tier-0 upstream via upstreams.Loader (FIRST since quick
+//     260824-ucv Fix B — the token guard tokenizes against the EFFECTIVE
+//     tier-0, which Resolve provides by honoring OverrideTier0)
 //
-//  2. detect stream:true (chat-specific)
+//  2. enforce token cap (chat=32k per slot, embed=8k). Over-cap routes
+//     straight to tier-1 when one exists (skipping the tier-0 call that would
+//     certainly 400) and only 400s when there is nowhere to cascade
 //
-//  3. resolve tier-0 upstream via upstreams.Loader
+//  3. detect stream:true (chat-specific)
 //
 //  4. consult breaker.Set state to choose dispatch path:
 //
@@ -61,7 +65,7 @@ const UpstreamBlockedSensitiveValue = "blocked_sensitive"
 // cmd/gateway/main.go:1189 via http.MaxBytesHandler(r, cfg.MaxBodyBytes),
 // where cfg.MaxBodyBytes is the fixed 25 MiB STT/audio limit set at
 // internal/config/config.go:350 (`MaxBodyBytes: 25 * (1 << 20)`). Chat/embed
-// bodies are additionally token-capped (16k/8k) so they always sit far below
+// bodies are additionally token-capped (32k/8k) so they always sit far below
 // this; the cap is effectively the STT upload ceiling.
 const maxSTTBodyBuffer = 25 * (1 << 20) // 25 MiB — mirrors config.MaxBodyBytes
 
@@ -235,7 +239,23 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			return
 		}
 
-		// 1. Token-count enforcement (RES-07) — non-STT only.
+		// 1. Resolve tier-0. quick 260824-ucv Fix B moved this AHEAD of token
+		// enforcement: the guard must tokenize against the upstream that will
+		// actually serve. Resolve honors OverrideTier0, so with the dynamic pod
+		// active t0.URL is the pod. Previously enforcement ran first and always
+		// tokenized against the boot-time UPSTREAM_LLM_URL — dead all day while
+		// the pod served chat, so every /tokenize dialed a closed port and the
+		// fail-open policy waved every request through (HANDOFF Part 1).
+		t0, ok := cfg.Loader.Resolve(cfg.Role, 0)
+		if !ok {
+			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+				"service_unavailable", "upstream_unavailable",
+				"No primary upstream configured for role.")
+			return
+		}
+		sensitive := ac.DataClass == auth.DataClassSensitive
+
+		// 2. Token-count enforcement (RES-07) — non-STT only.
 		if cfg.TokenCounter != nil && cfg.ContextCap > 0 {
 			body, err := readAndRestoreBody(r)
 			if err == nil && len(body) > 0 {
@@ -249,33 +269,63 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				if modelName == "" {
 					modelName = cfg.Role
 				}
-				if _, terr := cfg.TokenCounter.Enforce(r.Context(), body, modelName, cfg.ContextCap); terr != nil {
-					httpx.WriteOpenAIError(w, http.StatusBadRequest,
-						"invalid_request_error", "context_length_exceeded",
-						"Request exceeds context cap.")
+				if n, terr := cfg.TokenCounter.Enforce(r.Context(), body, modelName, cfg.ContextCap, t0.URL); errors.Is(terr, ErrContextLengthExceeded) {
+					// The request does not fit the EFFECTIVE tier-0 window.
+					// quick 260824-ucv Fix B: this is a routing decision, not a
+					// client error — when a tier-1 exists we go straight there
+					// instead of spending a tier-0 call that is guaranteed to
+					// answer 400 exceed_context_size_error.
+					t1Candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
+					if len(t1Candidates) == 0 {
+						// Nowhere to cascade → the explicit 400 IS the best
+						// answer. Notably /v1/embeddings, whose BGE-M3 8192 cap
+						// is a physical model limit with no larger sibling.
+						log.Warn("over-context and no tier-1 configured; rejecting",
+							"tokens", n, "cap", cfg.ContextCap, "upstream", t0.Name,
+							"tenant", ac.TenantID,
+							"request_id", httpx.RequestIDFrom(r.Context()),
+						)
+						httpx.WriteOpenAIError(w, http.StatusBadRequest,
+							"invalid_request_error", "context_length_exceeded",
+							"Request exceeds context cap.")
+						return
+					}
+					// POLICY (decisão Pedro, 2026-08-24): data_class is NOT a
+					// gate here. Sensitive tenants cascade too — the clients
+					// (n8n) already fall back straight to OpenRouter on a
+					// gateway error, so blocking only stripped billing, audit
+					// and metrics from a payload that left anyway. The metric
+					// below (tenant-labelled) is that audit trail. RES-08 is
+					// untouched for every other cause (breaker OPEN, dial
+					// failure, shed).
+					obs.OverContextCascadedTotal.WithLabelValues(ac.TenantID, t0.Name).Inc()
+					log.Warn("over-context pre-dispatch; routing to tier-1",
+						"tokens", n, "cap", cfg.ContextCap, "skipped_upstream", t0.Name,
+						"tenant", ac.TenantID, "data_class", string(ac.DataClass),
+						"request_id", httpx.RequestIDFrom(r.Context()),
+					)
+					// streaming==true is ALLOWED on this path: D-07 only forbids
+					// failover after bytes reached the client, and here tier-0
+					// was never even called — nothing has been written.
+					overCapStreaming := IsStreamingRequest(r)
+					restoreBody, _ := prepareReplayBody(r)
+					// EmergTraffic.RegisterTraffic() is deliberately NOT called:
+					// the pod did not serve this request, so it must not count
+					// toward the idle-grace timer.
+					cfg.cascadeTier1(w, r, overCapStreaming, restoreBody, log)
 					return
 				}
 			}
 		}
 
-		// 2. Detect streaming (chat-specific; embed/audio always non-stream).
+		// 3. Detect streaming (chat-specific; embed/audio always non-stream).
 		streaming := IsStreamingRequest(r)
 
-		// 3. Resolve tier-0.
-		t0, ok := cfg.Loader.Resolve(cfg.Role, 0)
-		if !ok {
-			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
-				"service_unavailable", "upstream_unavailable",
-				"No primary upstream configured for role.")
-			return
-		}
 		// Phase 06.9 Plan 04: EffectiveState combines operator force-override
 		// (via gatewayctl breaker force-open) with the observation-driven
 		// gobreaker state. Force-open SHORT-CIRCUITS routing to tier-1 without
 		// requiring the probe loop to first accumulate ConsecutiveFailures.
 		t0State := cfg.Breaker.EffectiveState(t0.Name)
-
-		sensitive := ac.DataClass == auth.DataClassSensitive
 
 		// Plan 06-08 D-E3: when the resolved tier-0 upstream is the
 		// emergency pod (Loader.Resolve set IsEmergency=true because

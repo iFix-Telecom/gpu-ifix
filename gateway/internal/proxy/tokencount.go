@@ -5,12 +5,21 @@
 // the authoritative token count for the resolved model, with a 60-second
 // Redis cache keyed on sha256(body) PLUS the model name (Pitfall 6 — two
 // models with different tokenizers can encode the same body to different
-// counts; sharing a cache slot would silently approve over-cap requests).
+// counts; sharing a cache slot would silently approve over-cap requests)
+// PLUS a fingerprint of the tokenizer URL (quick 260824-ucv Fix B — same
+// hazard between two different llama-server processes).
 //
-// Fail-open policy: any error talking to /tokenize or the cache returns
-// (0, nil) so the request proceeds to the dispatcher. The breaker on the
-// local-llm upstream catches actual outage; we never block legitimate
-// requests because the tokenizer endpoint hiccupped.
+// WHO gets tokenized (quick 260824-ucv Fix B): the EFFECTIVE tier-0, passed
+// per request by the dispatcher from Loader.Resolve(role, 0) — which honors
+// OverrideTier0, so with the dynamic pod active the guard measures against the
+// pod. The constructor's llmURL (UPSTREAM_LLM_URL) is only a boot fallback.
+//
+// Fail-open policy (UNCHANGED and intentional): any error talking to /tokenize
+// or the cache returns (0, nil) so the request proceeds to the dispatcher. The
+// breaker on the tier-0 upstream catches actual outage; we never block
+// legitimate requests because the tokenizer endpoint hiccupped. What Fix B
+// changed is not the policy but its blast radius: the guard used to fail open
+// PERMANENTLY because it was pointed at an address nothing was listening on.
 package proxy
 
 import (
@@ -31,7 +40,16 @@ import (
 
 // TokenCounter queries llama.cpp /tokenize with a Redis cache to enforce
 // the 32k context window cap (RES-07 / SC-5). Cache key includes the
-// resolved model name to prevent cross-tokenizer collisions (Pitfall 6).
+// resolved model name AND a fingerprint of the tokenizer URL to prevent
+// cross-tokenizer collisions (Pitfall 6 + quick 260824-ucv Fix B).
+//
+// quick 260824-ucv Fix B: llmURL is only a FALLBACK. Enforce tokenizes against
+// the EFFECTIVE tier-0 URL the dispatcher passes per request (which already
+// honors Loader.OverrideTier0, i.e. the live pod). Pinning the tokenizer to the
+// boot-time UPSTREAM_LLM_URL is what made the guard inert in production: the
+// static local-llm was dead all day while the dynamic pod served chat, so every
+// /tokenize dialed a closed port and the fail-open policy waved the request
+// through — until the pod itself 400'd it.
 type TokenCounter struct {
 	rdb    *redis.Client
 	llmURL string
@@ -72,9 +90,10 @@ const (
 	tokenizeTimeout = 1 * time.Second
 )
 
-// NewTokenCounter constructs a TokenCounter. llmURL is the PRIMARY
-// local-llm base URL (typically resolved from upstreams loader as the
-// tier-0 llm row) — /tokenize is appended on Enforce.
+// NewTokenCounter constructs a TokenCounter. llmURL is the boot-time
+// local-llm base URL, used ONLY as the fallback when the caller passes no
+// per-request tokenizer URL — /tokenize is appended on Enforce. The signature
+// is deliberately unchanged by Fix B so cmd/gateway/main.go stays untouched.
 func NewTokenCounter(rdb *redis.Client, llmURL string, log *slog.Logger) *TokenCounter {
 	return &TokenCounter{
 		rdb:    rdb,
@@ -84,25 +103,51 @@ func NewTokenCounter(rdb *redis.Client, llmURL string, log *slog.Logger) *TokenC
 	}
 }
 
-// tokenCacheKey returns the namespaced Redis key. Includes both model and
-// body hash so two different tokenizers cannot poison each other's slot.
-func tokenCacheKey(model, bodyHash string) string {
-	return "gw:tokenize:" + model + ":" + bodyHash
+// tokenCacheKey returns the namespaced Redis key. Includes the model, a
+// fingerprint of the TOKENIZER URL, and the body hash, so two different
+// tokenizers cannot poison each other's slot.
+//
+// urlFingerprint (quick 260824-ucv Fix B) is the same class of protection the
+// model name already provides (Pitfall 6), one level up: the pod's llama-server
+// and the static local-llm are DISTINCT tokenizer processes — possibly distinct
+// models/quantizations entirely. Sharing a cache slot between them would let a
+// small count measured on one silently approve a request that does not fit the
+// other.
+func tokenCacheKey(model, urlFingerprint, bodyHash string) string {
+	return "gw:tokenize:" + model + ":" + urlFingerprint + ":" + bodyHash
+}
+
+// tokenizerFingerprint returns the first 8 hex chars of sha256(url) — enough to
+// separate cache namespaces without putting a full URL (with its host/port, and
+// for Vast pods a rotating one) into every Redis key.
+func tokenizerFingerprint(url string) string {
+	sum := sha256.Sum256([]byte(url))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 // Enforce extracts tokenizable text from body, counts tokens via /tokenize
 // (Redis-cached), and returns ErrContextLengthExceeded if count > cap.
 //
+// tokenizeURL is the EFFECTIVE tier-0 base URL for this request (quick
+// 260824-ucv Fix B) — the dispatcher resolves it via Loader.Resolve(role, 0),
+// which honors OverrideTier0, so the guard measures against the upstream that
+// will actually serve. Empty → falls back to the boot-time llmURL.
+//
 // Returns (count, nil) on success, (count, ErrContextLengthExceeded) if
 // over cap, or (0, nil) fail-open on any /tokenize or Redis transport
-// error so the dispatcher can proceed.
-func (t *TokenCounter) Enforce(ctx context.Context, body []byte, model string, cap int) (int, error) {
-	if t.rdb == nil || t.llmURL == "" {
+// error so the dispatcher can proceed. The fail-open policy is UNCHANGED by
+// Fix B — only the tokenization TARGET moved.
+func (t *TokenCounter) Enforce(ctx context.Context, body []byte, model string, cap int, tokenizeURL string) (int, error) {
+	effective := tokenizeURL
+	if effective == "" {
+		effective = t.llmURL
+	}
+	if t.rdb == nil || effective == "" {
 		// Fail-open if not wired (tests / boot before loader is ready).
 		return 0, nil
 	}
 	sum := sha256.Sum256(body)
-	key := tokenCacheKey(model, hex.EncodeToString(sum[:]))
+	key := tokenCacheKey(model, tokenizerFingerprint(effective), hex.EncodeToString(sum[:]))
 
 	// Cache hit?
 	if raw, err := t.rdb.Get(ctx, key).Bytes(); err == nil {
@@ -123,7 +168,7 @@ func (t *TokenCounter) Enforce(ctx context.Context, body []byte, model string, c
 	if err != nil {
 		return 0, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.llmURL+"/tokenize", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, effective+"/tokenize", bytes.NewReader(reqBody))
 	if err != nil {
 		return 0, nil
 	}
