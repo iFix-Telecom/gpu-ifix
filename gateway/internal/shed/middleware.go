@@ -94,6 +94,11 @@ func defaultClassifyRoute(path string) string {
 		return "tts"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
+	case strings.HasPrefix(path, "/v1/rerank"):
+		// quick 260825 — rerank role (mirrors the tts CR-01 rationale: the
+		// path must classify so trackAndPass increments Inflight for the
+		// resolved rerank upstream and in-flight requests hold the drain gate).
+		return "rerank"
 	}
 	return ""
 }

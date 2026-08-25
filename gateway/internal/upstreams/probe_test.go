@@ -358,3 +358,68 @@ func TestProbe_TierGatingPreserved(t *testing.T) {
 		t.Errorf("tier-1 NOT probed while tier-0 OPEN; want ≥1 (D-15 gating)")
 	}
 }
+
+// TestProbe_Rerank_PostsRerank (quick 260825) asserts that Probe.dispatch,
+// given an UpstreamConfig with Role=="rerank", POSTs the synthetic 1-doc body
+// to <URL>/v1/rerank and classifies 200 as success / 5xx as *breaker.HTTPError
+// failure — mirroring the tts case assertions above.
+func TestProbe_Rerank_PostsRerank(t *testing.T) {
+	t.Run("200_success", func(t *testing.T) {
+		var gotPath, gotMethod, gotCT string
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotMethod = r.Method
+			gotCT = r.Header.Get("Content-Type")
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &gotBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"results":[{"index":0,"relevance_score":0.5}]}`))
+		}))
+		defer srv.Close()
+
+		u := UpstreamConfig{Name: "rerank-gpu", Role: "rerank", Tier: 0, URL: srv.URL, Enabled: true}
+		p := newTTSProbe(u.Name, u)
+
+		resp, err := p.dispatch(context.Background(), u)
+		if err != nil {
+			t.Fatalf("dispatch(rerank) returned error on 200: %v", err)
+		}
+		if resp == nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 response, got %+v", resp)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want POST", gotMethod)
+		}
+		if gotPath != "/v1/rerank" {
+			t.Errorf("path = %q, want /v1/rerank", gotPath)
+		}
+		if gotCT != "application/json" {
+			t.Errorf("content-type = %q, want application/json", gotCT)
+		}
+		if gotBody["query"] != "ping" {
+			t.Errorf("body.query = %v, want ping", gotBody["query"])
+		}
+		docs, ok := gotBody["documents"].([]any)
+		if !ok || len(docs) != 1 || docs[0] != "ping" {
+			t.Errorf("body.documents = %v, want [ping]", gotBody["documents"])
+		}
+	})
+
+	t.Run("5xx_breaker_failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		u := UpstreamConfig{Name: "rerank-gpu", Role: "rerank", Tier: 0, URL: srv.URL, Enabled: true}
+		p := newTTSProbe(u.Name, u)
+
+		_, err := p.dispatch(context.Background(), u)
+		var he *breaker.HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusInternalServerError {
+			t.Fatalf("expected *breaker.HTTPError 500, got %v", err)
+		}
+	})
+}

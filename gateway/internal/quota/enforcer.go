@@ -301,6 +301,8 @@ func classifyRoute(path string) RouteClass {
 		return RouteClassSTT
 	case "/v1/audio/speech":
 		return RouteClassTTS
+	case "/v1/rerank":
+		return RouteClassRerank
 	}
 	return RouteClassChat
 }
