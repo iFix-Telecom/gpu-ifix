@@ -436,3 +436,72 @@ func TestHealthHandler_Cache2s(t *testing.T) {
 		t.Fatalf("cache did not expire after 2s: local-llm.state = %v, want open", llm2["state"])
 	}
 }
+
+// eightUpstreams returns sixUpstreams + the two rerank rows seeded by
+// migration 0035 (rerank-gpu tier-0, rerank-cpu tier-1). quick-260825-anq:
+// used to pin the health semantics once "rerank" joined the tier0Roles
+// roster (fix B).
+func eightUpstreams() []upstreams.UpstreamConfig {
+	return append(sixUpstreams(),
+		upstreams.UpstreamConfig{Name: "rerank-gpu", Role: "rerank", Tier: 0, URL: "http://pod:7998", Enabled: true},
+		upstreams.UpstreamConfig{Name: "rerank-cpu", Role: "rerank", Tier: 1, URL: "http://worker:7998", Enabled: true},
+	)
+}
+
+// TestHealthHandler_RerankTier0OpenCPUClosed_Degraded — quick-260825-anq:
+// rerank-gpu (tier-0) OPEN while rerank-cpu (tier-1) stays CLOSED (all other
+// tier-0s closed) → status "degraded", HTTP 200 — NEVER "failed"/503. Same
+// allTier0Closed/allRolesHaveAnyClosed semantics as the other roles.
+func TestHealthHandler_RerankTier0OpenCPUClosed_Degraded(t *testing.T) {
+	loader := upstreams.NewLoaderForTest(eightUpstreams()...)
+	rdb := newMinRedis(t)
+	bs := breaker.NewSet(rdb, discardLogger(),
+		breaker.Options{ConsecutiveFailures: 3, Cooldown: 30 * time.Second},
+		loaderNames(loader))
+	tripBreaker(t, bs, "rerank-gpu")
+
+	h := upstreams.NewHealthHandler(loader, bs, discardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/health/upstreams", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degraded keeps 200)", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["status"] != "degraded" {
+		t.Fatalf("status = %v, want degraded (rerank tier-0 open with CPU closed must not fail the gateway)", body["status"])
+	}
+}
+
+// TestHealthHandler_RerankBothOpen_Failed — quick-260825-anq: rerank-gpu AND
+// rerank-cpu OPEN → role rerank has no closed upstream → "failed" 503
+// (parity with the other roles).
+func TestHealthHandler_RerankBothOpen_Failed(t *testing.T) {
+	loader := upstreams.NewLoaderForTest(eightUpstreams()...)
+	rdb := newMinRedis(t)
+	bs := breaker.NewSet(rdb, discardLogger(),
+		breaker.Options{ConsecutiveFailures: 3, Cooldown: 30 * time.Second},
+		loaderNames(loader))
+	tripBreaker(t, bs, "rerank-gpu")
+	tripBreaker(t, bs, "rerank-cpu")
+
+	h := upstreams.NewHealthHandler(loader, bs, discardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/health/upstreams", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["status"] != "failed" {
+		t.Fatalf("status = %v, want failed", body["status"])
+	}
+}

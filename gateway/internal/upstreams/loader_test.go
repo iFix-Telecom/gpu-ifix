@@ -630,3 +630,39 @@ func TestCircuitConfigParsed_GeminiCooldownS120(t *testing.T) {
 		t.Errorf("CircuitConfig.CooldownS = %d, want 120 (D-B11)", u.CircuitConfig.CooldownS)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// quick-260825-anq — fix B: "rerank" missing from the tier0Roles roster meant
+// rerank-gpu was NEVER probed (verified in prod: LAST_PROBE = "-"). The
+// prober and health handler both iterate ResolveTier0Roles, which walks the
+// fixed roster — a role absent from the roster is invisible to both even
+// when its tier-0 row is loaded and resolvable.
+// ---------------------------------------------------------------------------
+
+// TestResolveTier0Roles_IncludesRerank — a snapshot with rerank-gpu (tier-0)
+// + rerank-cpu (tier-1) MUST yield a tier-0 resolution for role "rerank"
+// with the static rerank-gpu row as Effective.
+func TestResolveTier0Roles_IncludesRerank(t *testing.T) {
+	l := NewLoaderForTest(
+		UpstreamConfig{Name: "rerank-gpu", Role: "rerank", Tier: 0, URL: "http://pod:7998", Enabled: true},
+		UpstreamConfig{Name: "rerank-cpu", Role: "rerank", Tier: 1, URL: "http://worker:7998", Enabled: true},
+	)
+
+	var got *tier0Resolution
+	for _, res := range l.ResolveTier0Roles() {
+		if res.Role == "rerank" {
+			r := res
+			got = &r
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("ResolveTier0Roles() missing role \"rerank\" — roster tier0Roles does not include it (rerank-gpu never probed)")
+	}
+	if got.Effective.Name != "rerank-gpu" {
+		t.Errorf("rerank tier-0 Effective.Name = %q, want rerank-gpu", got.Effective.Name)
+	}
+	if got.Overridden {
+		t.Errorf("rerank tier-0 Overridden = true, want false (no emergency slot for rerank)")
+	}
+}

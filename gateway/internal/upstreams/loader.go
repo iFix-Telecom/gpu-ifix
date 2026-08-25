@@ -281,7 +281,12 @@ type tier0Resolution struct {
 // tier0Roles is the fixed roster of roles that carry a tier-0 upstream
 // (D-11). Resolution iterates this set rather than enumerating the raw
 // snapshot so an active override is honored per role.
-var tier0Roles = []string{"llm", "stt", "tts", "embed"}
+//
+// quick-260825-anq: "rerank" added — the 0035 rerank role landed without a
+// roster entry, so rerank-gpu (tier-0) was NEVER probed (verified in prod:
+// LAST_PROBE = "-") and was invisible to the health aggregate. A role
+// missing here is invisible to both the prober and buildHealthResponse.
+var tier0Roles = []string{"llm", "stt", "tts", "embed", "rerank"}
 
 // ResolveTier0Roles resolves the effective tier-0 for every role through the
 // SAME override-honoring path the dispatcher uses (Resolve(role, 0)). RES-12:
