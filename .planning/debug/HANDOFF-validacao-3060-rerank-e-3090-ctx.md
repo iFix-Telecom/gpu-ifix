@@ -46,13 +46,25 @@ Já validado sinteticamente E2E (5/5, ver STATE 260824-ucv). Falta observar TRÁ
 - Guard n8n "Cabe no Pod?" ≤14000 est_tokens — desatualizado (cap real agora 32k/slot); afrouxar dobra o
   que o n8n manda pro pod grátis.
 
-## Embed na 3060? (análise 2026-08-25 00:15)
-**Medido:** 3060 unificada com **9,6 GB VRAM livres** (2,67 usados / 12,3). bge-m3 = 1,2 GiB de arquivo
-(R2), ~2,5 GB servido fp16 → **cabe com folga**. O pod já roda Infinity (rerank bge-reranker-v2-m3) e o
-Infinity serve múltiplos modelos no mesmo processo — embed entraria barato.
-**MAS dois poréns:** (1) hoje o embed tier-0 é `embed:7997` no worker-vm (CPU, estável, sem spot-churn);
-mover pra pod spot troca estabilidade por velocidade num role que raramente é gargalo. (2) **dimensão:**
-bge-m3 = 1024 dims; o tier-1 `openai-embed` (text-embedding-3-small) = 1536 — fallback JÁ é incoerente
-pra vetores armazenados (pendência Phase 114). Colocar o tier-0 num pod que migra AUMENTA a frequência
-de fallback incoerente. Recomendação: só mover depois de resolver a política de fallback do embed
-(pin de dimensão ou 503 explícito).
+## Embed na 3060? SIM — decisão Pedro 2026-08-25, com a topologia certa
+**Medido:** 3060 unificada com **9,6 GB VRAM livres** (2,67/12,3). bge-m3 = 1,2 GiB de arquivo (R2),
+~2,5 GB servido fp16 → cabe com folga. O pod já roda Infinity (rerank) e Infinity serve múltiplos
+modelos no mesmo processo.
+
+**Topologia definida (Pedro): o fallback é a CPU** — espelho exato do padrão rerank da 0035:
+
+| tier | upstream | onde | dims |
+|---|---|---|---|
+| 0 | `embed-gpu` (novo) | pod 3060 unificado, Infinity bge-m3 | 1024 |
+| 1 | `local-embed` (o atual, demovido de 0→1) | worker-vm CPU `embed:7997`, bge-m3 | 1024 |
+| 2 ou fora | `openai-embed` (text-embedding-3-small) | externo | **1536 ≠** |
+
+Isso **resolve** a incoerência de dimensão da Phase 114 em vez de agravá-la: pod caiu → CPU serve o
+MESMO modelo/dims; o openai-embed sai do caminho prático (demover pra tier-2 com shed explícito, ou
+desabilitar — vetor 1536 em índice 1024 é corrupção silenciosa, melhor 503 que vetor errado).
+
+**Implementação (espelhar a 0035):** migration nova (re-tier local-embed 0→1 + seed embed-gpu tier-0
+`UPSTREAM_EMBED_GPU_URL` + decidir destino do openai-embed) + env no stack 38 + `--model-id` adicional
+no Infinity do pod unificado (mudança na config do pod da sessão do rerank) + `EmbedContextCap` inalterado
+(8192, é do modelo). GOTCHA herdado: interceptor over-context NÃO cobre embed (deviation Rule 1 do
+260824-ucv — embed over-cap continua 400, correto pois todos os tiers bge-m3 têm o mesmo limite 8192).
