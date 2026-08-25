@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/sony/gobreaker/v2"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auditctx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/upstreams"
 )
 
@@ -135,10 +137,18 @@ func tripBreaker(t *testing.T, bs *breaker.Set, name string) {
 // makeRequest builds an authenticated request body+ctx ready for dispatch.
 func makeRequest(t *testing.T, body string, dataClass auth.DataClass) *http.Request {
 	t.Helper()
+	return makeRequestTenant(t, body, dataClass, "tenant-1")
+}
+
+// makeRequestTenant is makeRequest with an explicit tenant id. Tests that
+// assert on tenant-labelled Prometheus counters MUST use a unique tenant so
+// the (process-global) counter value is not polluted by sibling tests.
+func makeRequestTenant(t *testing.T, body string, dataClass auth.DataClass, tenantID string) *http.Request {
+	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	ctx := auth.WithContext(r.Context(), auth.AuthContext{
-		TenantID:  "tenant-1",
+		TenantID:  tenantID,
 		APIKeyID:  "key-1",
 		DataClass: dataClass,
 	})
@@ -633,5 +643,142 @@ func TestDispatcher_TierOneFallthrough_AllOpen_Returns503(t *testing.T) {
 	if atomic.LoadInt64(f.geminiHits)+atomic.LoadInt64(f.groqHits)+atomic.LoadInt64(f.openaiHits) != 0 {
 		t.Errorf("expected 0 backend hits when all OPEN; got gemini=%d groq=%d openai=%d",
 			atomic.LoadInt64(f.geminiHits), atomic.LoadInt64(f.groqHits), atomic.LoadInt64(f.openaiHits))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// quick 260824-ucv — Fix A: a tier-0 over-context 400 (exceed_context_size_error)
+// is a ROUTING signal, not a client error.
+// See .planning/debug/HANDOFF-tokenizer-fail-open-pod-ctx-16k.md.
+// ---------------------------------------------------------------------------
+
+// overContextTier0Fixture wires a REAL NewChatProxy (so the over-context
+// interceptor sits in ModifyResponse) in front of a tier-0 backend answering
+// the llama.cpp over-context 400, plus a tier-1 backend answering 200. tier-1
+// deliberately uses a passthrough proxy WITHOUT the interceptor — mirroring
+// openrouter-chat, whose 400 is a terminal, legitimate answer to the client.
+type overContextTier0Fixture struct {
+	disp       http.Handler
+	breakerSet *breaker.Set
+	tier0Hits  *int64
+	tier1Hits  *int64
+	cleanup    func()
+}
+
+func newOverContextTier0Fixture(t *testing.T, withTier1 bool) *overContextTier0Fixture {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var t0Hits, t1Hits int64
+	t0srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&t0Hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(llamaOverContextBody))
+	}))
+	t1srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&t1Hits, 1)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"upstream":"tier-1"}`))
+	}))
+
+	rows := []upstreams.UpstreamConfig{
+		{Name: "primary-llm", Role: "llm", Tier: 0, URL: t0srv.URL, Enabled: true},
+	}
+	if withTier1 {
+		rows = append(rows, upstreams.UpstreamConfig{
+			Name: "fallback-llm", Role: "llm", Tier: 1, URL: t1srv.URL, Enabled: true,
+		})
+	}
+	loader := upstreams.NewLoaderInMemory(rows...)
+	bs := breaker.NewSet(rdb, discard,
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 30 * time.Second},
+		loader.Names())
+
+	t0Proxy, err := NewChatProxy(t0srv.URL, discard)
+	if err != nil {
+		t.Fatalf("NewChatProxy: %v", err)
+	}
+	cfg := DispatcherConfig{
+		Role:    "llm",
+		Loader:  loader,
+		Breaker: bs,
+		Proxies: map[string]http.Handler{
+			"primary-llm":  t0Proxy,
+			"fallback-llm": newPassthroughProxy(t, t1srv.URL),
+		},
+		Log: discard,
+	}
+	return &overContextTier0Fixture{
+		disp:       NewDispatcher(cfg),
+		breakerSet: bs,
+		tier0Hits:  &t0Hits,
+		tier1Hits:  &t1Hits,
+		cleanup: func() {
+			t0srv.Close()
+			t1srv.Close()
+			_ = rdb.Close()
+			mr.Close()
+		},
+	}
+}
+
+// TestDispatcher_OverContext400CascadesToTier1 is the Fix A end-to-end proof:
+// the tier-0 400 exceed_context_size_error is suppressed pre-byte and the
+// request is served by tier-1, WITHOUT opening the tier-0 breaker (T-ucv-05 —
+// a request that is merely too big is not upstream degradation; opening the
+// breaker would divert ALL traffic, including what fits, to the paid provider).
+func TestDispatcher_OverContext400CascadesToTier1(t *testing.T) {
+	f := newOverContextTier0Fixture(t, true)
+	defer f.cleanup()
+
+	const tenant = "tenant-oc-cascade"
+	rw := httptest.NewRecorder()
+	r := makeRequestTenant(t, `{"model":"qwen","messages":[{"role":"user","content":"huge"}]}`,
+		auth.DataClassNormal, tenant)
+	f.disp.ServeHTTP(rw, r)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), `"tier-1"`) {
+		t.Errorf("body should come from tier-1; got: %s", rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier1Hits); got != 1 {
+		t.Errorf("tier-1 hits = %d, want 1", got)
+	}
+	if st := f.breakerSet.EffectiveState("primary-llm"); st != gobreaker.StateClosed {
+		t.Errorf("tier-0 breaker = %v, want Closed (over-context must NOT open it)", st)
+	}
+	if got := testutil.ToFloat64(obs.OverContextCascadedTotal.WithLabelValues(tenant, "primary-llm")); got != 1 {
+		t.Errorf("OverContextCascadedTotal{%s,primary-llm} = %v, want 1", tenant, got)
+	}
+}
+
+// TestDispatcher_OverContext400_SensitiveNoCascade locks T-ucv-01 / RES-08:
+// a sensitive tenant gets the raw 400 back and NOT ONE BYTE reaches the
+// external tier-1.
+func TestDispatcher_OverContext400_SensitiveNoCascade(t *testing.T) {
+	f := newOverContextTier0Fixture(t, true)
+	defer f.cleanup()
+
+	rw := httptest.NewRecorder()
+	r := makeRequestTenant(t, `{"model":"qwen","messages":[{"role":"user","content":"huge"}]}`,
+		auth.DataClassSensitive, "tenant-oc-sensitive")
+	f.disp.ServeHTTP(rw, r)
+
+	if rw.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (sensitive stays terminal); body=%s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "exceed_context_size_error") {
+		t.Errorf("body should be the verbatim tier-0 envelope; got: %s", rw.Body.String())
+	}
+	if got := atomic.LoadInt64(f.tier1Hits); got != 0 {
+		t.Fatalf("tier-1 hits = %d, want 0 (LGPD: sensitive payload must never leave)", got)
 	}
 }
