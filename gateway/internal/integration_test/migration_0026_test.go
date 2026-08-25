@@ -104,10 +104,11 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	// 260704-ubt HEAD bump: Down(4)→Down(5) when 0032 landed on HEAD.
 	// Phase 20 HEAD bump: Down(5)→Down(6) when 0033 landed on HEAD.
 	// Phase 999.2 HEAD bump: Down(6)→Down(7) when 0034 landed on HEAD.
-	// Down(7) peels 0034+0033+0032+0031+0030+0029+0028 to reach the same point the
-	// old Down(2) did when 0029 was HEAD.
-	if err := db.Down(ctx, pool, 7); err != nil {
-		t.Fatalf("db.Down(7) revert 0034+0033+0032+0031+0030+0029+0028: %v", err)
+	// quick-260824-ucv HEAD bump: Down(7)→Down(8) when 0035 (rerank role) landed on HEAD.
+	// Down(8) peels 0035+0034+0033+0032+0031+0030+0029+0028 to reach the same point
+	// the old Down(2) did when 0029 was HEAD.
+	if err := db.Down(ctx, pool, 8); err != nil {
+		t.Fatalf("db.Down(8) revert 0035+0034+0033+0032+0031+0030+0029+0028: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
 		`DELETE FROM ai_gateway.model_aliases WHERE alias='whisper' AND upstream_name='local-stt'`); err != nil {
@@ -236,11 +237,12 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	// bumped Down(5)→Down(6) when 0031 landed on HEAD. 260704-ubt HEAD bump:
 	// Down(6)→Down(7) when 0032 landed on HEAD. Phase 20 HEAD bump:
 	// Down(7)→Down(8) when 0033 landed on HEAD. Phase 999.2 HEAD bump:
-	// Down(8)→Down(9) when 0034 landed on HEAD. Down(9) peels
-	// 0034+0033+0032+0031+0030+0029+0028+0027 then fires 0026's R3 guard.
-	err := db.Down(ctx, pool, 9)
+	// Down(8)→Down(9) when 0034 landed on HEAD. quick-260824-ucv HEAD bump:
+	// Down(9)→Down(10) when 0035 (rerank role) landed on HEAD. Down(10) peels
+	// 0035+0034+0033+0032+0031+0030+0029+0028+0027 then fires 0026's R3 guard.
+	err := db.Down(ctx, pool, 10)
 	if err == nil {
-		t.Fatal("db.Down(9) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
+		t.Fatal("db.Down(10) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {
