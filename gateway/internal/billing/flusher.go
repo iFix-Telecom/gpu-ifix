@@ -30,7 +30,7 @@ type Event struct {
 	RequestID           uuid.UUID
 	TenantID            uuid.UUID
 	APIKeyID            uuid.UUID
-	Route               string // "chat" | "embed" | "stt"
+	Route               string // "chat" | "embed" | "stt" | "rerank"
 	Upstream            string // "local-llm" | "openrouter-chat" | ...
 	Model               string
 	TokensIn            int

@@ -340,3 +340,123 @@ func TestSttBillingModel(t *testing.T) {
 		}
 	}
 }
+
+// ── quick-260825-anq — fix C: rerank billing ─────────────────────────────────
+// POST /v1/rerank 200 produced NOTHING in usage (verified in prod). Double
+// cause: NewRerankProxy was built WITHOUT the usageInterceptor (main.go) AND
+// routeToBillingRoute had no /v1/rerank case (fell through to "chat"; the
+// all-zero enqueue guard then dropped the row). These tests pin the route
+// mapping, the Infinity usage parse, the self-hosted cost gate, and the
+// applyAudioEmbedUsage no-op for rerank.
+
+// TestRouteToBillingRouteRerank: /v1/rerank maps to the "rerank" billing
+// route (table alongside the existing prefixes; default stays "chat").
+func TestRouteToBillingRouteRerank(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/v1/rerank", "rerank"},
+		{"/v1/chat/completions", "chat"},
+		{"/v1/embeddings", "embed"},
+		{"/v1/audio/transcriptions", "stt"},
+		{"/something/else", "chat"},
+	}
+	for _, tc := range cases {
+		if got := routeToBillingRoute(tc.path); got != tc.want {
+			t.Errorf("routeToBillingRoute(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestIsSelfHostedUpstream: the cost gate must treat local-* (prefix) AND the
+// named self-hosted rows (rerank-gpu, rerank-cpu, embed-gpu) as zero external
+// cost; external upstreams keep the priced path.
+func TestIsSelfHostedUpstream(t *testing.T) {
+	cases := []struct {
+		upstream string
+		want     bool
+	}{
+		{"local-llm", true},
+		{"local-embed", true},
+		{"rerank-gpu", true},
+		{"rerank-cpu", true},
+		{"embed-gpu", true},
+		{"openrouter-chat", false},
+		{"openai-embed", false},
+		{"gemini-stt", false},
+	}
+	for _, tc := range cases {
+		if got := isSelfHostedUpstream(tc.upstream); got != tc.want {
+			t.Errorf("isSelfHostedUpstream(%q) = %v, want %v", tc.upstream, got, tc.want)
+		}
+	}
+}
+
+// TestUsageExtractorRerankJSONBody: the Infinity rerank response
+// {"results":[...],"usage":{"prompt_tokens":29,"total_tokens":29}} (shape
+// measured in prod 2026-08-25) traverses the usageJSONBuffer Close path with
+// the ctx-stamped route=rerank + upstream=rerank-gpu → TokensIn==29,
+// TokensOut==0 (no completion_tokens key), slot Deleted after Close (BL-02).
+// DB-free harness: flusher nil (FinalizeRequest still Deletes the slot); the
+// enqueue Route/cost fields are pinned by TestRouteToBillingRouteRerank +
+// TestIsSelfHostedUpstream above.
+func TestUsageExtractorRerankJSONBody(t *testing.T) {
+	acct := billing.NewAccountant()
+	ix := NewUsageInterceptor(acct, nil, nil, nil, nil, 0, discardLog())
+
+	ctx := httpx.ContextWithRequestID(context.Background(), "req-rerank")
+	ctx = auditctx.WithBillingRoute(ctx, "rerank")
+	ctx = auditctx.WithBillingUpstream(ctx, "rerank-gpu")
+	body := `{"results":[{"index":0,"relevance_score":0.98}],"usage":{"prompt_tokens":29,"total_tokens":29}}`
+	req, _ := http.NewRequestWithContext(ctx, "POST", "http://x/v1/rerank", nil)
+	resp := &http.Response{
+		Header:  http.Header{"Content-Type": []string{"application/json"}},
+		Body:    io.NopCloser(strings.NewReader(body)),
+		Request: req,
+	}
+	if err := ix.Intercept(resp); err != nil {
+		t.Fatalf("Intercept: %v", err)
+	}
+	var sink bytes.Buffer
+	if _, err := io.Copy(&sink, resp.Body); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+
+	// JSON path parses usage in Close; grab the slot pointer BEFORE Close
+	// (Close Deletes it per BL-02).
+	u := acct.Get("req-rerank")
+	if u == nil {
+		t.Fatal("accountant returned nil RequestUsage")
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := u.TokensIn.Load(); got != 29 {
+		t.Errorf("TokensIn: want 29 (usage.prompt_tokens from Infinity), got %d", got)
+	}
+	if got := u.TokensOut.Load(); got != 0 {
+		t.Errorf("TokensOut: want 0 (rerank has no completion_tokens), got %d", got)
+	}
+	if acct.Get("req-rerank") != nil {
+		t.Fatal("slot should be Deleted after Close (BL-02)")
+	}
+}
+
+// TestApplyAudioEmbedUsageRerankNoOp: route "rerank" is a deliberate no-op in
+// applyAudioEmbedUsage — the tokens come from the top-level usage parse in
+// Close (same as chat/embed); there is no extra dimension (seconds/embeds).
+func TestApplyAudioEmbedUsageRerankNoOp(t *testing.T) {
+	usage := &billing.RequestUsage{}
+	body := []byte(`{"results":[{"index":0,"relevance_score":0.5}],"usage":{"prompt_tokens":29,"total_tokens":29}}`)
+	applyAudioEmbedUsage(usage, "rerank", body, context.Background())
+	if got := usage.AudioSecondsMs10.Load(); got != 0 {
+		t.Errorf("AudioSecondsMs10: want 0 (no-op), got %d", got)
+	}
+	if got := usage.EmbedsCount.Load(); got != 0 {
+		t.Errorf("EmbedsCount: want 0 (no-op), got %d", got)
+	}
+	if got := usage.TokensIn.Load(); got != 0 {
+		t.Errorf("TokensIn: want 0 (applyAudioEmbedUsage must not touch tokens), got %d", got)
+	}
+}

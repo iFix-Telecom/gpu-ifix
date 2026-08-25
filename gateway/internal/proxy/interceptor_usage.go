@@ -250,14 +250,14 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 	model := usage.Model()
 
 	// Cost attribution:
-	//   - cost_external_brl: the upstream's real pricing when non-local.
-	//     0 when upstream is local-*.
+	//   - cost_external_brl: the upstream's real pricing when non-self-hosted.
+	//     0 when upstream is self-hosted (local-* / rerank-gpu / rerank-cpu /
+	//     embed-gpu — quick-260825-anq isSelfHostedUpstream gate).
 	//   - cost_local_phantom_brl: openrouter-fireworks reference pricing
 	//     regardless of the actual upstream (D-B4) so reports can answer
 	//     "how much did the GPU save us".
-	isLocal := strings.HasPrefix(upstream, "local-")
 	costExternal := 0.0
-	if !isLocal {
+	if !isSelfHostedUpstream(upstream) {
 		provider := providerForUpstream(upstream)
 		costExternal = priceTokens(u, model, provider, tokensIn, tokensOut, audioSeconds, embedsCount)
 	}
@@ -367,8 +367,11 @@ func sttBillingModel(upstream string) string {
 //     int64(seconds*10)). The ×10 is mandatory for the FinalizeRequest /10.0
 //     flush + quota/counters.go /60 math.
 //   - route "embed": EmbedsCount.Store(len(data[])) — one per data[] element.
-//   - route "chat" / default / nil usage: no-op (the chat token path is
-//     produced elsewhere and MUST NOT be touched here).
+//   - route "chat" / "rerank" / default / nil usage: no-op (the chat token
+//     path is produced elsewhere and MUST NOT be touched here; rerank tokens
+//     come from the top-level usage parse in Close — Infinity responds
+//     {"usage":{"prompt_tokens":N,"total_tokens":N}} — with no extra
+//     dimension, so no branch is needed: quick-260825-anq decision).
 //
 // Called by usageJSONBuffer.Close ONLY (it has both reqCtx + reqPath).
 // Deliberately NOT added to ExtractFromBody: that path has no reqCtx (can't
@@ -423,9 +426,32 @@ func routeToBillingRoute(path string) string {
 		return "embed"
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
+	case strings.HasPrefix(path, "/v1/rerank"):
+		// quick-260825-anq (fix C): without this case rerank fell through to
+		// "chat" — the dispatcher stamped route=chat into ctx (inbound path,
+		// dispatcher.go WithBillingRoute) and the all-zero enqueue guard
+		// dropped the row entirely.
+		return "rerank"
 	default:
 		return "chat"
 	}
+}
+
+// isSelfHostedUpstream reports whether an upstream is self-hosted (our own
+// pods/VMs) and therefore carries ZERO external cost by definition. Covers
+// the local-* naming convention plus the named self-hosted rows that do not
+// follow it (rerank-gpu/rerank-cpu from 0035, embed-gpu from 0036).
+//
+// quick-260825-anq: without this gate FinalizeRequest ran priceTokens on the
+// cost_external path for these upstreams — every request hit a prices.Get
+// miss → WARN "price missing" + gateway_prices_missing.Inc() per request
+// (cost.go), polluting the ME-05 alert. costPhantom is intentionally NOT
+// gated (D-B4 reference pricing applies to every request).
+func isSelfHostedUpstream(upstream string) bool {
+	return strings.HasPrefix(upstream, "local-") ||
+		upstream == "rerank-gpu" ||
+		upstream == "rerank-cpu" ||
+		upstream == "embed-gpu"
 }
 
 // sseUsageFrame is the minimal shape we need from an SSE data frame. Both

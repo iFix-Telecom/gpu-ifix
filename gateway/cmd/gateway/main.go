@@ -824,9 +824,12 @@ func main() {
 	// mold: kokoro-tts wiring above). Each tier is OPTIONAL: an unset env
 	// drops the proxy from the map AND the loader drops the DB row (missing
 	// url_env), so the dispatcher cascades or 503s cleanly.
+	// quick-260825-anq (fix C): both call sites now pass usageInterceptor so
+	// billing captures usage.prompt_tokens from the Infinity rerank response
+	// (route "rerank", cost_external 0 — self-hosted).
 	rerankRoleProxies := map[string]http.Handler{}
 	if cfg.UpstreamRerankURL != "" {
-		rerankGPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankURL, log)
+		rerankGPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankURL, log, usageInterceptor)
 		if rerr != nil {
 			log.Warn("build rerank-gpu proxy", "err", rerr)
 		} else {
@@ -834,7 +837,7 @@ func main() {
 		}
 	}
 	if cfg.UpstreamRerankFallbackURL != "" {
-		rerankCPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankFallbackURL, log)
+		rerankCPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankFallbackURL, log, usageInterceptor)
 		if rerr != nil {
 			log.Warn("build rerank-cpu proxy", "err", rerr)
 		} else {
