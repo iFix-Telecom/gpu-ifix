@@ -55,10 +55,10 @@ func TestCounter_CacheHit(t *testing.T) {
 	defer cleanup()
 
 	body := []byte(`{"messages":[{"role":"user","content":"ping"}]}`)
-	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap); err != nil {
+	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, ""); err != nil {
 		t.Fatalf("first call err: %v", err)
 	}
-	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap); err != nil {
+	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, ""); err != nil {
 		t.Fatalf("second call err: %v", err)
 	}
 	if got := atomic.LoadInt64(hits); got != 1 {
@@ -76,10 +76,10 @@ func TestCounter_CacheMissDifferentModel(t *testing.T) {
 	defer cleanup()
 
 	body := []byte(`{"messages":[{"role":"user","content":"ping"}]}`)
-	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap); err != nil {
+	if _, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, ""); err != nil {
 		t.Fatalf("qwen call err: %v", err)
 	}
-	if _, err := tc.Enforce(context.Background(), body, "llama-3", ChatContextCap); err != nil {
+	if _, err := tc.Enforce(context.Background(), body, "llama-3", ChatContextCap, ""); err != nil {
 		t.Fatalf("llama-3 call err: %v", err)
 	}
 	if got := atomic.LoadInt64(hits); got != 2 {
@@ -98,7 +98,7 @@ func TestCounter_OverCapReturnsContextLengthExceeded(t *testing.T) {
 	defer cleanup()
 
 	body := []byte(`{"messages":[{"role":"user","content":"long..."}]}`)
-	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap)
+	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, "")
 	if !errors.Is(err, ErrContextLengthExceeded) {
 		t.Fatalf("err = %v, want ErrContextLengthExceeded", err)
 	}
@@ -128,7 +128,7 @@ func TestCounter_FailOpenOnTokenizeError(t *testing.T) {
 
 	tc := NewTokenCounter(rdb, srv.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	body := []byte(`{"messages":[{"role":"user","content":"ping"}]}`)
-	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap)
+	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, "")
 	if err != nil {
 		t.Fatalf("err = %v, want nil (fail-open)", err)
 	}
@@ -152,7 +152,7 @@ func TestCounter_EmbedInputArrayConcatenated(t *testing.T) {
 	defer cleanup()
 
 	body := []byte(`{"input":["alpha","beta","gamma"],"model":"bge-m3"}`)
-	if _, err := tc.Enforce(context.Background(), body, "bge-m3", EmbedContextCap); err != nil {
+	if _, err := tc.Enforce(context.Background(), body, "bge-m3", EmbedContextCap, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	got := captured.Load()
@@ -169,8 +169,140 @@ func TestCounter_EmbedInputArrayConcatenated(t *testing.T) {
 // (config not yet loaded, etc.) get (0, nil) and proceed.
 func TestCounter_NilRedisOrEmptyURLFailsOpen(t *testing.T) {
 	tc := NewTokenCounter(nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	n, err := tc.Enforce(context.Background(), []byte(`{}`), "qwen", ChatContextCap)
+	n, err := tc.Enforce(context.Background(), []byte(`{}`), "qwen", ChatContextCap, "")
 	if err != nil || n != 0 {
 		t.Fatalf("nil-redis: got (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// quick 260824-ucv — Fix B: tokenize against the EFFECTIVE tier-0.
+// The constructor URL (UPSTREAM_LLM_URL) pins the STATIC local-llm, which was
+// dead all day while the dynamic pod served chat → every /tokenize dialed a
+// closed port → fail-open → the RES-07 guard was inert.
+// ---------------------------------------------------------------------------
+
+// newTokenizeServer returns a /tokenize mock answering a fixed token count,
+// plus its hit counter.
+func newTokenizeServer(t *testing.T, tokens int) (*httptest.Server, *int64) {
+	t.Helper()
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tokenize" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tokens": make([]int, tokens)})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestCounter_TokenizeURLOverridesConstructor: the per-request URL wins. This
+// is the whole point of Fix B — the dispatcher passes the RESOLVED tier-0 URL
+// (the live pod when OverrideTier0 is active) and the boot-time constructor URL
+// is demoted to a fallback.
+func TestCounter_TokenizeURLOverridesConstructor(t *testing.T) {
+	staticSrv, staticHits := newTokenizeServer(t, 10)
+	podSrv, podHits := newTokenizeServer(t, ChatContextCap+1)
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	tc := NewTokenCounter(rdb, staticSrv.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"messages":[{"role":"user","content":"huge"}]}`)
+
+	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, podSrv.URL)
+	if !errors.Is(err, ErrContextLengthExceeded) {
+		t.Fatalf("err = %v, want ErrContextLengthExceeded (pod tokenizer said over-cap)", err)
+	}
+	if n != ChatContextCap+1 {
+		t.Errorf("count = %d, want %d", n, ChatContextCap+1)
+	}
+	if got := atomic.LoadInt64(podHits); got != 1 {
+		t.Errorf("pod /tokenize hits = %d, want 1", got)
+	}
+	if got := atomic.LoadInt64(staticHits); got != 0 {
+		t.Errorf("static /tokenize hits = %d, want 0 (constructor URL must not be consulted)", got)
+	}
+}
+
+// TestCounter_EmptyTokenizeURLFallsBackToConstructor: with no resolved URL the
+// boot-time constructor URL is still used (fallback preserved).
+func TestCounter_EmptyTokenizeURLFallsBackToConstructor(t *testing.T) {
+	tc, _, hits, cleanup := newCounterTestEnv(t, func(_ []byte) []int { return make([]int, 42) })
+	defer cleanup()
+
+	if _, err := tc.Enforce(context.Background(),
+		[]byte(`{"messages":[{"role":"user","content":"ping"}]}`), "qwen", ChatContextCap, ""); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := atomic.LoadInt64(hits); got != 1 {
+		t.Errorf("constructor /tokenize hits = %d, want 1", got)
+	}
+}
+
+// TestCounter_CacheKeySeparatesTokenizers: same body, same model, two DIFFERENT
+// tokenizer endpoints → two cache slots. Sharing one slot would let a small
+// count produced by the static local-llm silently approve a request that does
+// not fit the pod (same class of bug as Pitfall 6, one level up).
+func TestCounter_CacheKeySeparatesTokenizers(t *testing.T) {
+	underSrv, underHits := newTokenizeServer(t, 10)
+	overSrv, overHits := newTokenizeServer(t, ChatContextCap+1)
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	tc := NewTokenCounter(rdb, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"messages":[{"role":"user","content":"same bytes"}]}`)
+
+	if n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, underSrv.URL); err != nil || n != 10 {
+		t.Fatalf("under-cap tokenizer: got (%d, %v), want (10, nil)", n, err)
+	}
+	n, err := tc.Enforce(context.Background(), body, "qwen", ChatContextCap, overSrv.URL)
+	if !errors.Is(err, ErrContextLengthExceeded) {
+		t.Fatalf("over-cap tokenizer: err = %v, want ErrContextLengthExceeded (cache must not be shared)", err)
+	}
+	if n != ChatContextCap+1 {
+		t.Errorf("count = %d, want %d", n, ChatContextCap+1)
+	}
+	if got := atomic.LoadInt64(underHits); got != 1 {
+		t.Errorf("under /tokenize hits = %d, want 1", got)
+	}
+	if got := atomic.LoadInt64(overHits); got != 1 {
+		t.Errorf("over /tokenize hits = %d, want 1", got)
+	}
+}
+
+// TestCounter_UnreachableTokenizeURLFailsOpen: the fail-open policy is
+// UNCHANGED by Fix B — only the target of the tokenization moved. An
+// unreachable resolved URL still yields (0, nil).
+func TestCounter_UnreachableTokenizeURLFailsOpen(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	tc := NewTokenCounter(rdb, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	n, err := tc.Enforce(context.Background(),
+		[]byte(`{"messages":[{"role":"user","content":"ping"}]}`),
+		"qwen", ChatContextCap, "http://127.0.0.1:1/dead")
+	if err != nil || n != 0 {
+		t.Fatalf("got (%d, %v), want (0, nil) fail-open", n, err)
 	}
 }

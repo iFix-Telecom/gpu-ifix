@@ -58,6 +58,14 @@ func NewDynamicOverrideProxy(role string, overrideURL func() (string, bool), flu
 	if role == "stt" {
 		interceptors = append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)
 	}
+	// quick 260824-ucv Fix A: this constructor produces "emergency_pod_llm" —
+	// the upstream that ACTUALLY serves chat in production and therefore the
+	// one that emitted the 63 exceed_context_size_error in 2h (HANDOFF Part 2).
+	// A tier-0 over-context 400/413 must cascade to tier-1 instead of reaching
+	// the client. Prepended so a cascading response never bills.
+	if role == "llm" {
+		interceptors = append([]ProxyResponseInterceptor{chatOverContextInterceptor{log: log}}, interceptors...)
+	}
 	return &httputil.ReverseProxy{
 		Director:      dynamicOverrideDirector(overrideURL),
 		FlushInterval: flushInterval,

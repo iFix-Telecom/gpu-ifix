@@ -45,7 +45,7 @@ var ErrContextLengthExceeded = errors.New("proxy: context length exceeded")
 var errDialFailedFallthrough = errors.New("proxy: dial failed, fall through to tier-1")
 
 // errUpstreamRetryable is the typed sentinel a Director's ModifyResponse
-// returns (STT only — see gemini_stt_director.go) when the upstream connected
+// returns when the upstream connected
 // but returned a retryable failure (non-200 / provider error envelope such as
 // Gemini UNAVAILABLE). ModifyResponse runs AFTER the full upstream response is
 // buffered but BEFORE any byte is copied to the client, so returning an error
@@ -55,9 +55,18 @@ var errDialFailedFallthrough = errors.New("proxy: dial failed, fall through to t
 // write, record fallthrough_ so cascadeTier1 advances AND records the upstream's
 // breaker failure (Gap B — real-traffic 5xx now opens the tier-1 breaker).
 //
-// Streaming responses NEVER reach this path (STT is always non-stream); a chat
-// director must NOT emit this sentinel — doing so would break D-07 once the SSE
-// tee has flushed bytes.
+// Two emitters exist today:
+//
+//   - STT: sttRetryableStatusInterceptor (audio.go) + the Gemini director
+//     (gemini_stt_director.go) on a retryable status / provider error envelope.
+//     STT is always non-streaming, so this is unconditionally pre-byte-safe.
+//   - CHAT over-context: chatOverContextInterceptor (overcontext.go) wraps this
+//     sentinel in errOverContextFallthrough when a TIER-0 chat upstream answers
+//     400/413 with an over-context envelope (quick 260824-ucv Fix A). That path
+//     is pre-byte-safe only because the interceptor refuses to fire unless the
+//     dispatch-time streaming flag is stamped AND false — D-07 still holds: a
+//     chat director must NOT emit this sentinel for a streaming response, since
+//     the SSE tee may already have flushed bytes.
 var errUpstreamRetryable = errors.New("proxy: upstream retryable error, fall through to next candidate")
 
 // ErrorHandler returns a ReverseProxy ErrorHandler that emits a 502

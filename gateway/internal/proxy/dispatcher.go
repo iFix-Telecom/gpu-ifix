@@ -1,11 +1,15 @@
 // Package proxy (dispatcher.go): role-based fallback chain dispatcher.
 // One handler per role (llm / stt / embed) — at request time:
 //
-//  1. enforce token cap (chat=16k, embed=8k); 400 on over-cap
+//  1. resolve tier-0 upstream via upstreams.Loader (FIRST since quick
+//     260824-ucv Fix B — the token guard tokenizes against the EFFECTIVE
+//     tier-0, which Resolve provides by honoring OverrideTier0)
 //
-//  2. detect stream:true (chat-specific)
+//  2. enforce token cap (chat=32k per slot, embed=8k). Over-cap routes
+//     straight to tier-1 when one exists (skipping the tier-0 call that would
+//     certainly 400) and only 400s when there is nowhere to cascade
 //
-//  3. resolve tier-0 upstream via upstreams.Loader
+//  3. detect stream:true (chat-specific)
 //
 //  4. consult breaker.Set state to choose dispatch path:
 //
@@ -61,7 +65,7 @@ const UpstreamBlockedSensitiveValue = "blocked_sensitive"
 // cmd/gateway/main.go:1189 via http.MaxBytesHandler(r, cfg.MaxBodyBytes),
 // where cfg.MaxBodyBytes is the fixed 25 MiB STT/audio limit set at
 // internal/config/config.go:350 (`MaxBodyBytes: 25 * (1 << 20)`). Chat/embed
-// bodies are additionally token-capped (16k/8k) so they always sit far below
+// bodies are additionally token-capped (32k/8k) so they always sit far below
 // this; the cap is effectively the STT upload ceiling.
 const maxSTTBodyBuffer = 25 * (1 << 20) // 25 MiB — mirrors config.MaxBodyBytes
 
@@ -235,7 +239,23 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			return
 		}
 
-		// 1. Token-count enforcement (RES-07) — non-STT only.
+		// 1. Resolve tier-0. quick 260824-ucv Fix B moved this AHEAD of token
+		// enforcement: the guard must tokenize against the upstream that will
+		// actually serve. Resolve honors OverrideTier0, so with the dynamic pod
+		// active t0.URL is the pod. Previously enforcement ran first and always
+		// tokenized against the boot-time UPSTREAM_LLM_URL — dead all day while
+		// the pod served chat, so every /tokenize dialed a closed port and the
+		// fail-open policy waved every request through (HANDOFF Part 1).
+		t0, ok := cfg.Loader.Resolve(cfg.Role, 0)
+		if !ok {
+			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+				"service_unavailable", "upstream_unavailable",
+				"No primary upstream configured for role.")
+			return
+		}
+		sensitive := ac.DataClass == auth.DataClassSensitive
+
+		// 2. Token-count enforcement (RES-07) — non-STT only.
 		if cfg.TokenCounter != nil && cfg.ContextCap > 0 {
 			body, err := readAndRestoreBody(r)
 			if err == nil && len(body) > 0 {
@@ -249,33 +269,73 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				if modelName == "" {
 					modelName = cfg.Role
 				}
-				if _, terr := cfg.TokenCounter.Enforce(r.Context(), body, modelName, cfg.ContextCap); terr != nil {
-					httpx.WriteOpenAIError(w, http.StatusBadRequest,
-						"invalid_request_error", "context_length_exceeded",
-						"Request exceeds context cap.")
+				if n, terr := cfg.TokenCounter.Enforce(r.Context(), body, modelName, cfg.ContextCap, t0.URL); errors.Is(terr, ErrContextLengthExceeded) {
+					// The request does not fit the EFFECTIVE tier-0 window.
+					// quick 260824-ucv Fix B: this is a routing decision, not a
+					// client error — when a tier-1 exists we go straight there
+					// instead of spending a tier-0 call that is guaranteed to
+					// answer 400 exceed_context_size_error.
+					// Cascading is only worth it when a tier-1 exists AND its
+					// window is genuinely larger, which is a ROLE property:
+					//   - llm: openrouter-chat serves hundreds of thousands of
+					//     tokens vs the pod's 32k/slot — the whole point of the
+					//     fix (the same 18k requests were served fine by
+					//     openrouter until the pod took over tier-0).
+					//   - embed: BOTH sides cap at ~8k (BGE-M3 8192 /
+					//     text-embedding-3-small 8191), so cascading would ship
+					//     the payload to an external provider only to be
+					//     rejected there too. 400 is the honest answer.
+					//     (seed 0008 DOES define openai-embed at tier 1, so the
+					//     "no tier-1 configured" test alone is NOT enough to
+					//     keep embed on the 400 path.)
+					canCascade := cfg.Role == "llm" && len(cfg.Loader.ResolveAllTier1(cfg.Role)) > 0
+					if !canCascade {
+						log.Warn("over-context with no larger tier-1 for role; rejecting",
+							"tokens", n, "cap", cfg.ContextCap, "upstream", t0.Name,
+							"tenant", ac.TenantID,
+							"request_id", httpx.RequestIDFrom(r.Context()),
+						)
+						httpx.WriteOpenAIError(w, http.StatusBadRequest,
+							"invalid_request_error", "context_length_exceeded",
+							"Request exceeds context cap.")
+						return
+					}
+					// POLICY (decisão Pedro, 2026-08-24): data_class is NOT a
+					// gate here. Sensitive tenants cascade too — the clients
+					// (n8n) already fall back straight to OpenRouter on a
+					// gateway error, so blocking only stripped billing, audit
+					// and metrics from a payload that left anyway. The metric
+					// below (tenant-labelled) is that audit trail. RES-08 is
+					// untouched for every other cause (breaker OPEN, dial
+					// failure, shed).
+					obs.OverContextCascadedTotal.WithLabelValues(ac.TenantID, t0.Name).Inc()
+					log.Warn("over-context pre-dispatch; routing to tier-1",
+						"tokens", n, "cap", cfg.ContextCap, "skipped_upstream", t0.Name,
+						"tenant", ac.TenantID, "data_class", string(ac.DataClass),
+						"request_id", httpx.RequestIDFrom(r.Context()),
+					)
+					// streaming==true is ALLOWED on this path: D-07 only forbids
+					// failover after bytes reached the client, and here tier-0
+					// was never even called — nothing has been written.
+					overCapStreaming := IsStreamingRequest(r)
+					restoreBody, _ := prepareReplayBody(r)
+					// EmergTraffic.RegisterTraffic() is deliberately NOT called:
+					// the pod did not serve this request, so it must not count
+					// toward the idle-grace timer.
+					cfg.cascadeTier1(w, r, overCapStreaming, restoreBody, log)
 					return
 				}
 			}
 		}
 
-		// 2. Detect streaming (chat-specific; embed/audio always non-stream).
+		// 3. Detect streaming (chat-specific; embed/audio always non-stream).
 		streaming := IsStreamingRequest(r)
 
-		// 3. Resolve tier-0.
-		t0, ok := cfg.Loader.Resolve(cfg.Role, 0)
-		if !ok {
-			httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
-				"service_unavailable", "upstream_unavailable",
-				"No primary upstream configured for role.")
-			return
-		}
 		// Phase 06.9 Plan 04: EffectiveState combines operator force-override
 		// (via gatewayctl breaker force-open) with the observation-driven
 		// gobreaker state. Force-open SHORT-CIRCUITS routing to tier-1 without
 		// requiring the probe loop to first accumulate ConsecutiveFailures.
 		t0State := cfg.Breaker.EffectiveState(t0.Name)
-
-		sensitive := ac.DataClass == auth.DataClassSensitive
 
 		// Plan 06-08 D-E3: when the resolved tier-0 upstream is the
 		// emergency pod (Loader.Resolve set IsEmergency=true because
@@ -300,14 +360,32 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				// error (D-07 — never re-dispatch after a byte was written).
 				return
 			}
-			// Pre-byte connection-class dial failure on tier-0.
+			// Pre-byte fallthrough on tier-0 (dial failure OR — quick
+			// 260824-ucv Fix A — an over-context 400/413 envelope).
 			// D-09: record a failure on the tier-0 breaker so it opens
 			// naturally after N dials.
-			cfg.recordUpstreamFailure(t0.Name)
+			//
+			// T-ucv-05 EXCEPTION: over-context is NOT upstream degradation.
+			// The pod is healthy; this particular request simply does not fit
+			// its window. Recording a failure here would open the tier-0
+			// breaker after N big requests and divert ALL traffic — including
+			// everything that fits — to the paid external provider.
+			overCtx := errors.Is(res.err, errOverContextFallthrough)
+			if !overCtx {
+				cfg.recordUpstreamFailure(t0.Name)
+			}
 
 			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
 			// to an external tier-1 — emit the sensitive 503 block.
-			if sensitive {
+			//
+			// OVER-CONTEXT CARVE-OUT (decisão Pedro, 2026-08-24): the gate is
+			// bypassed for the over-context class ONLY. The clients (n8n) already
+			// fall back straight to OpenRouter when the gateway errors, so
+			// blocking here never kept the payload inside the perimeter — it only
+			// stripped billing, audit and metrics from the path. Every OTHER
+			// fallthrough cause (dial failure here, breaker OPEN below, shed)
+			// keeps the hard gate untouched.
+			if sensitive && !overCtx {
 				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
 				cfg.writeSensitiveBlock(w, r)
 				return
@@ -407,9 +485,15 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 		}
 		res := cfg.dispatchTo(w, r, t1.Name, streaming, log)
 		if res.fallthrough_ && !res.wrote {
-			// This tier-1 candidate dial-failed pre-byte: record its breaker
+			// This tier-1 candidate fell through pre-byte: record its breaker
 			// failure and try the next CLOSED candidate.
-			cfg.recordUpstreamFailure(t1.Name)
+			//
+			// T-ucv-05: same exception as the tier-0 loop — an over-context
+			// fallthrough says the request did not FIT, not that the upstream
+			// is degraded, so it must not push the breaker toward OPEN.
+			if !errors.Is(res.err, errOverContextFallthrough) {
+				cfg.recordUpstreamFailure(t1.Name)
+			}
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
@@ -511,6 +595,12 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// RES-13 / Plan 12-03: install the request-scoped dispatchResult so the
 	// sentinel-aware ErrorHandler can carry the fallthrough signal back.
 	r = r.WithContext(withDispatchResult(r.Context(), res))
+	// quick 260824-ucv Fix A: stamp the dispatch-time streaming decision so
+	// chatOverContextInterceptor (which runs in ModifyResponse, where the
+	// request body is long gone) can enforce D-07 — over-context only ever
+	// cascades for non-streaming requests. The dispatchOverride path does NOT
+	// stamp this, which is exactly why it is ineligible for the cascade.
+	r = r.WithContext(withStreamingFlag(r.Context(), streaming))
 	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): also stamp the
 	// FACTUAL upstream into the request-id-keyed registry so the audit
 	// middleware (which sits OUTSIDE http.TimeoutHandler and therefore
