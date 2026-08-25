@@ -42,8 +42,20 @@ func NewChatProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyRes
 			ResponseHeaderTimeout: 30 * time.Second, // cold first-token <=20s
 			// No ReadTimeout on transport — SSE streams are open-ended.
 		}},
-		ErrorHandler:   ErrorHandler("llm", log),
-		ModifyResponse: ComposeInterceptors(interceptors...), // Codex [HIGH/MEDIUM] 02-05
+		ErrorHandler: ErrorHandler("llm", log),
+		// quick 260824-ucv Fix A: a tier-0 400 exceed_context_size_error is a
+		// ROUTING signal — chatOverContextInterceptor raises the fallthrough
+		// sentinel so the dispatcher cascades to tier-1 instead of returning
+		// the 400 verbatim. PREPENDED (same rationale as the STT interceptor
+		// in audio.go): a response that is going to cascade must never pass
+		// through the billing/audit interceptors first.
+		// NOTE: this is a TIER-0 constructor. openrouter-chat builds its own
+		// ReverseProxy in cmd/gateway/main.go and deliberately does NOT get
+		// this interceptor — an over-context at the last hop has nowhere to
+		// cascade and its 400 is legitimate information for the client.
+		ModifyResponse: ComposeInterceptors(
+			append([]ProxyResponseInterceptor{chatOverContextInterceptor{log: log}}, interceptors...)...,
+		), // Codex [HIGH/MEDIUM] 02-05
 	}
 	return rp, nil
 }

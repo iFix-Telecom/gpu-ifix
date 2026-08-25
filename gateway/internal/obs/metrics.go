@@ -563,6 +563,29 @@ var DialFallthroughTotal = promauto.NewCounterVec(
 	[]string{"role", "outcome"},
 )
 
+// OverContextCascadedTotal counts requests that did not fit the tier-0 context
+// window and were therefore routed to tier-1 (external, PAID) — quick
+// 260824-ucv Fix A/B.
+//
+// LABEL SEMANTICS (both increment sites obey it): `upstream` is ALWAYS the
+// tier-0 upstream that could NOT serve the request, never the tier-1 that
+// ended up serving it. The two increment sites are:
+//   - proxy/overcontext.go — post-response classification of a tier-0 400/413
+//     exceed_context_size_error envelope;
+//   - proxy/dispatcher.go — pre-dispatch RES-07 token-cap detection, which
+//     skips the doomed tier-0 call entirely.
+//
+// ALERTABLE: sustained growth = invisible external spend (every one of these
+// requests is billed by the external provider) AND, indirectly, a tier-0
+// context window that is too small for the real traffic mix.
+var OverContextCascadedTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_over_context_cascaded_total",
+		Help: "Requests that exceeded the tier-0 context window and were routed to tier-1 (external, paid), by tenant and the tier-0 upstream that could not serve them. ALERTABLE: sustained growth = invisible external spend.",
+	},
+	[]string{"tenant", "upstream"},
+)
+
 // PrimaryDeathDetectedTotal counts confirmed primary-pod deaths detected on
 // the Ready tick (RES-11, Plan 02). cause ∈ {billing_stopped, host_death,
 // not_found}. ALERTABLE: cause=billing_stopped (Vast account out of credit —

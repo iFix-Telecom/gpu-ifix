@@ -300,10 +300,20 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 				// error (D-07 — never re-dispatch after a byte was written).
 				return
 			}
-			// Pre-byte connection-class dial failure on tier-0.
+			// Pre-byte fallthrough on tier-0 (dial failure OR — quick
+			// 260824-ucv Fix A — an over-context 400/413 envelope).
 			// D-09: record a failure on the tier-0 breaker so it opens
 			// naturally after N dials.
-			cfg.recordUpstreamFailure(t0.Name)
+			//
+			// T-ucv-05 EXCEPTION: over-context is NOT upstream degradation.
+			// The pod is healthy; this particular request simply does not fit
+			// its window. Recording a failure here would open the tier-0
+			// breaker after N big requests and divert ALL traffic — including
+			// everything that fits — to the paid external provider.
+			overCtx := errors.Is(res.err, errOverContextFallthrough)
+			if !overCtx {
+				cfg.recordUpstreamFailure(t0.Name)
+			}
 
 			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
 			// to an external tier-1 — emit the sensitive 503 block.
@@ -407,9 +417,15 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 		}
 		res := cfg.dispatchTo(w, r, t1.Name, streaming, log)
 		if res.fallthrough_ && !res.wrote {
-			// This tier-1 candidate dial-failed pre-byte: record its breaker
+			// This tier-1 candidate fell through pre-byte: record its breaker
 			// failure and try the next CLOSED candidate.
-			cfg.recordUpstreamFailure(t1.Name)
+			//
+			// T-ucv-05: same exception as the tier-0 loop — an over-context
+			// fallthrough says the request did not FIT, not that the upstream
+			// is degraded, so it must not push the breaker toward OPEN.
+			if !errors.Is(res.err, errOverContextFallthrough) {
+				cfg.recordUpstreamFailure(t1.Name)
+			}
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
@@ -511,6 +527,12 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// RES-13 / Plan 12-03: install the request-scoped dispatchResult so the
 	// sentinel-aware ErrorHandler can carry the fallthrough signal back.
 	r = r.WithContext(withDispatchResult(r.Context(), res))
+	// quick 260824-ucv Fix A: stamp the dispatch-time streaming decision so
+	// chatOverContextInterceptor (which runs in ModifyResponse, where the
+	// request body is long gone) can enforce D-07 — over-context only ever
+	// cascades for non-streaming requests. The dispatchOverride path does NOT
+	// stamp this, which is exactly why it is ineligible for the cascade.
+	r = r.WithContext(withStreamingFlag(r.Context(), streaming))
 	// Phase 11.2 Plan 08 (D-B13 audit-distinguish fix): also stamp the
 	// FACTUAL upstream into the request-id-keyed registry so the audit
 	// middleware (which sits OUTSIDE http.TimeoutHandler and therefore
