@@ -68,3 +68,20 @@ desabilitar — vetor 1536 em índice 1024 é corrupção silenciosa, melhor 503
 no Infinity do pod unificado (mudança na config do pod da sessão do rerank) + `EmbedContextCap` inalterado
 (8192, é do modelo). GOTCHA herdado: interceptor over-context NÃO cobre embed (deviation Rule 1 do
 260824-ucv — embed over-cap continua 400, correto pois todos os tiers bge-m3 têm o mesmo limite 8192).
+
+---
+
+## RESOLUÇÃO 2026-08-25 (sessão continuação)
+
+**Frente 1 — FECHADA.** Checklist 1-5 validado:
+1. ✅ Envs existiam no stack 38 (suspeita era falsa); rows 0035 ok.
+2. ✅ /v1/rerank → 200 tier-0 GPU.
+3. ✅ Failover real (kill Infinity → dial-fail → rerank-cpu 200 → recovery half-open). Nota: `upstreams disable` do tier-0 = 503 by design, não cascateia.
+4. ✅ Billing NÃO existia → corrigido no quick 260825-anq (interceptor + route "rerank"); validado live.
+5. ✅ Pod velho DESTRUÍDO (aprovação Pedro); STT/TTS flipados pro unificado :15167; timers vast-3060 desabilitados (script é up→destroy+speaches-only — religaria sem Infinity). Automation unified-aware = backlog.
+
+**Embed na 3060 — IMPLEMENTADO E DEPLOYADO** (quick 260825-anq, migration 0036, develop-b29a0ef). Topologia exata do plano; openai-embed foi pra tier-2 (fora da cascata). Fix prober roster tier0Roles+="rerank" também entrou.
+
+**Frente 2 — parcial:** pod 3090 subiu (lifecycle-377 após 2 hosts Vast ruins auto-reportados), chat 200 via emergency_pod_llm, zero WARN tokenize pós-READY, zero exceed_context até 8h50. Observação do dia (Maestro ≥8h, P95, cascade metric) segue pendente.
+
+**Backlog novo:** price phantom missing p/ bge-m3/model.gguf/local-stt (WARN spam caminho phantom, pré-existente); automation vast3060 unified-aware; probe embed usa model "probe-default" → status "config" cosmético no embed-gpu.
