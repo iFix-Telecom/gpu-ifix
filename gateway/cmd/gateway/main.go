@@ -174,6 +174,7 @@ func main() {
 		"upstream_llm", cfg.UpstreamLLMURL,
 		"upstream_stt", cfg.UpstreamSTTURL,
 		"upstream_embed", cfg.UpstreamEmbedURL,
+		"upstream_embed_gpu", cfg.UpstreamEmbedGPUURL,
 		"upstream_health_bridge", cfg.UpstreamHealthBridgeURL,
 		"version", obs.BuildVersion,
 	)
@@ -685,7 +686,22 @@ func main() {
 			)
 		}
 	}
+	// quick 260825-anq (migration 0036) — embed role tiers: embed-gpu (tier-0,
+	// pod Vast 3060 unificado, Infinity bge-m3 dims 1024) → local-embed (tier-1,
+	// worker-vm CPU, MESMO modelo/dims — fallback via breaker). Ambos passthrough
+	// (served-model-name "bge-m3", paridade verificada live no worker-vm), então
+	// o mesmo construtor NewEmbeddingsProxy serve os dois. openai-embed fica no
+	// map mas em tier 2 nunca é resolvido pela cascata (ResolveAllTier1 filtra
+	// tier==1) — entrada dormente para re-enable manual.
 	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}
+	if cfg.UpstreamEmbedGPUURL != "" {
+		embedGPU, perr := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedGPUURL, log, usageInterceptor)
+		if perr != nil {
+			log.Warn("build embed-gpu proxy", "err", perr)
+		} else {
+			embedRoleProxies["embed-gpu"] = embedGPU
+		}
+	}
 	if u, ok := loader.Get("openai-embed"); ok && u.URL != "" {
 		oaEmbedProxy, perr := buildOpenAIEmbedProxy(u, log, resolver, usageInterceptor)
 		if perr != nil {
