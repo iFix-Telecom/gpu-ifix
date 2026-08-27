@@ -1,0 +1,5 @@
+[Unit]
+Description=Stop pod 3060 unificado (preserva disco)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/vast-3060/unified3060.py stop

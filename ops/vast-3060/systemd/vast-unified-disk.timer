@@ -1,0 +1,7 @@
+[Unit]
+Description=Disk check pod 3060 unificado 13:00
+[Timer]
+OnCalendar=*-*-* 13:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
