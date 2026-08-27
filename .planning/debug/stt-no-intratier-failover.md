@@ -1,7 +1,7 @@
 # Debug — STT sem failover intra-tier (gemini-stt → openai-whisper)
 
-status: FIXED (código) — pendente deploy + re-enable gemini-stt
-mitigação live: `gatewayctl upstreams disable --name gemini-stt` (2026-07-09 13:15 -03) — STT cai direto no openai-whisper AGORA
+status: RESOLVED — deployado em prod 2026-07-09 ~14:19 -03 (commit f78bad5, imagem develop-f78bad5, stack Portainer 38 ai-gateway-prod)
+validação live: smoke STT via edge público → HTTP 200 servido por gemini-stt (tier-1 barato). CI verde (unit+integration+build). gemini-stt religado (barato, agora com failover seguro).
 data: 2026-07-09
 rota: POST /v1/audio/transcriptions (alias `whisper`)
 

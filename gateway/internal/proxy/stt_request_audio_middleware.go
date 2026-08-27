@@ -133,11 +133,33 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang st
 		return 0, false
 	}
 
+	// Duration is derived from the ORIGINAL file bytes BEFORE any transcode —
+	// billing meters audio seconds, and compressing the container does not
+	// change how much audio was transcribed.
 	seconds := DeriveAudioSeconds(fileBytes, fileMime)
 	if seconds > 0 {
 		log.Debug("stt request-audio duration derived",
 			"seconds", seconds, "file_bytes", len(fileBytes), "mime", fileMime)
 	}
+
+	// Compress large raw-PCM uploads (WAV > 1 MiB → Ogg/Opus, see
+	// stt_transcode.go) so the pod and every tier-1 fallback receive ~16x
+	// fewer bytes. Fail-open: any transcode/re-encode failure forwards the
+	// already-restored original body untouched.
+	if shouldTranscodeSTTAudio(fileBytes) {
+		if opus, terr := transcodeWavToOpus(r.Context(), fileBytes); terr == nil {
+			if newBuf, newBoundary, changed := replaceMultipartFilePart(
+				buf, boundary, "recording.ogg", "audio/ogg", opus); changed {
+				r.Header.Set("Content-Type", "multipart/form-data; boundary="+newBoundary)
+				restoreRequestBody(r, newBuf)
+				log.Info("stt audio transcoded wav->opus",
+					"wav_bytes", len(fileBytes), "opus_bytes", len(opus), "seconds", seconds)
+			}
+		} else {
+			log.Warn("stt transcode failed; forwarding original wav", "err", terr)
+		}
+	}
+
 	return seconds, seconds > 0
 }
 

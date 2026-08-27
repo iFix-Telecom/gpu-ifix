@@ -1910,11 +1910,11 @@ func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 			ResponseHeaderTimeout: 60 * time.Second,
 		},
 		ErrorHandler: proxy.ErrorHandler("groq-whisper", log),
-		// Plan 16-02 — no prior ModifyResponse (groq returns OpenAI-shaped JSON
-		// transcription), so composing the usage interceptor alone meters the
-		// STT response (AudioSecondsMs10 from response duration ELSE the
-		// request-derived ctx value stamped by RequestAudioSecondsMiddleware).
-		ModifyResponse: proxy.ComposeInterceptors(usageInterceptor),
+		// Plan 16-02 usage metering + stt-400-disco-cheio (2026-08-27): the
+		// retryable-status interceptor comes FIRST so a groq error (4xx/5xx —
+		// rate limit, quota, transient) cascades to openai-whisper instead of
+		// committing to the client, and a failed upstream never bills.
+		ModifyResponse: proxy.ComposeInterceptors(proxy.STTRetryableStatusInterceptor(), usageInterceptor),
 	}
 	return rp, nil
 }

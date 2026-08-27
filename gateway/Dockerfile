@@ -61,6 +61,14 @@ ENV TZ=America/Sao_Paulo
 COPY --from=builder /gateway /gateway
 COPY --from=builder /gatewayctl /gatewayctl
 
+# Static ffmpeg for STT request-audio compression (stt_transcode.go, 2026-08-27:
+# WAV > 1 MiB → Ogg/Opus before hitting the pod / tier-1 STT providers). The
+# mwader/static-ffmpeg binary is fully static — runs on distroless with no
+# shell/libc. exec'd directly by the gateway via FFMPEG_PATH's default lookup
+# ($PATH is unset in distroless, so pin the location explicitly).
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
+ENV FFMPEG_PATH=/usr/local/bin/ffmpeg
+
 # Gateway HTTP port (fixed per CONTEXT.md Plumbing: :8080 on VPS; Traefik
 # / DNS added in Fase 10).
 EXPOSE 8080

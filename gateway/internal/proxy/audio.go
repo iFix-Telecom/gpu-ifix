@@ -50,12 +50,12 @@ func NewAudioProxy(upstreamURL string, log *slog.Logger, resolver *models.Resolv
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 		ErrorHandler: ErrorHandler("stt", log),
-		// Fix B (Phase 22): a retryable upstream HTTP status (404 model-not-found,
-		// 408/425/429, 5xx) raises errUpstreamRetryable FIRST — the sentinel-aware
+		// Fix B (Phase 22) + debug stt-400-disco-cheio (2026-08-27): ANY upstream
+		// HTTP status >= 400 raises errUpstreamRetryable FIRST — the sentinel-aware
 		// ErrorHandler suppresses the write and records fallthrough_ so the
 		// dispatcher cascades to the next STT candidate instead of returning the
 		// error. Prepended before billing/other interceptors so a failed upstream
-		// never bills. Non-retryable 4xx (400/401/403/413/415/422) stay terminal.
+		// never bills.
 		ModifyResponse: ComposeInterceptors(
 			append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)...,
 		),
@@ -65,9 +65,18 @@ func NewAudioProxy(upstreamURL string, log *slog.Logger, resolver *models.Resolv
 
 // sttRetryableStatusInterceptor raises errUpstreamRetryable when an STT upstream
 // returns a status that should cascade to the next candidate rather than being
-// returned verbatim. Client-error statuses that a retry cannot fix (bad audio,
-// auth, payload) are left terminal.
+// returned verbatim.
 type sttRetryableStatusInterceptor struct{}
+
+// STTRetryableStatusInterceptor exposes the cascade interceptor to cmd/gateway
+// so NON-FINAL tier-1 STT proxies (groq-whisper) also fall through to the next
+// candidate on an upstream error instead of committing it to the client. The
+// FINAL candidate (openai-whisper) deliberately does NOT compose it: with no
+// next hop, the sentinel would only swap the upstream's real error for the
+// generic exhaustion envelope, destroying the diagnostic.
+func STTRetryableStatusInterceptor() ProxyResponseInterceptor {
+	return sttRetryableStatusInterceptor{}
+}
 
 func (sttRetryableStatusInterceptor) Intercept(resp *http.Response) error {
 	if resp != nil && isRetryableSTTStatus(resp.StatusCode) {
@@ -77,17 +86,22 @@ func (sttRetryableStatusInterceptor) Intercept(resp *http.Response) error {
 }
 
 // isRetryableSTTStatus reports whether an STT upstream status warrants a cascade
-// to the next candidate: 404 (model/route not found — e.g. a model the upstream
-// doesn't serve), 408/425/429 (timeout/too-early/rate-limit or quota), and all
-// 5xx. Excludes 400/401/403/413/415/422 (a retry to another upstream can't fix a
-// genuinely bad or unauthorized request).
+// to the next candidate: EVERY status >= 400, including client-error 4xx.
+//
+// Rationale (debug stt-400-disco-cheio, 2026-08-27): the original Phase 22
+// policy kept 400/401/403/413/415/422 terminal on the theory that "a retry to
+// another upstream can't fix a genuinely bad request". In production that
+// assumption failed: the local-stt pod's disk filled up, its multipart spool
+// (>1 MiB uploads) started raising OSError, and FastAPI translated that into
+// HTTP 400 — a pure upstream-side fault wearing a client-error status. Every
+// call recording >~65s lost its transcription for 3 days while healthy tier-1
+// candidates sat idle. The gateway cannot reliably distinguish "bad request"
+// from "upstream bug reported as 4xx", and it has already validated the audio
+// itself (RequestAudioSecondsMiddleware parses the file to derive duration),
+// so the false-positive cost of cascading a genuinely bad request (a few extra
+// upstream attempts, then the exhaustion envelope) is far cheaper than the
+// false-negative cost (silent loss of the request's result). Decisão Pedro
+// 2026-08-27: "qualquer erro deveria ter acionado os fallbacks".
 func isRetryableSTTStatus(code int) bool {
-	switch code {
-	case http.StatusNotFound, // 404
-		http.StatusRequestTimeout,  // 408
-		http.StatusTooEarly,        // 425
-		http.StatusTooManyRequests: // 429
-		return true
-	}
-	return code >= 500 && code <= 599
+	return code >= 400
 }

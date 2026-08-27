@@ -33,10 +33,13 @@ func TestResolveSTTTarget_CanonicalFallback(t *testing.T) {
 	}
 }
 
-// TestIsRetryableSTTStatus (Fix B): cascade-worthy statuses only.
+// TestIsRetryableSTTStatus (Fix B + stt-400-disco-cheio): every >=400 cascades.
+// 4xx joined the retryable set on 2026-08-27 after the local-stt pod's full
+// disk surfaced as HTTP 400 and silently killed >65s transcriptions for days
+// while healthy tier-1 candidates sat idle.
 func TestIsRetryableSTTStatus(t *testing.T) {
-	retry := []int{404, 408, 425, 429, 500, 502, 503, 504, 599}
-	terminal := []int{200, 201, 400, 401, 403, 409, 413, 415, 422}
+	retry := []int{400, 401, 403, 404, 408, 409, 413, 415, 422, 425, 429, 500, 502, 503, 504, 599}
+	terminal := []int{200, 201, 204, 302}
 	for _, c := range retry {
 		if !isRetryableSTTStatus(c) {
 			t.Errorf("status %d: want retryable", c)
@@ -63,7 +66,7 @@ func TestSTTRetryableStatusInterceptor(t *testing.T) {
 	if err := ic.Intercept(&http.Response{StatusCode: 200}); err != nil {
 		t.Fatalf("200: want nil, got %v", err)
 	}
-	if err := ic.Intercept(&http.Response{StatusCode: 400}); err != nil {
-		t.Fatalf("400: want nil (terminal), got %v", err)
+	if err := ic.Intercept(&http.Response{StatusCode: 400}); err != errUpstreamRetryable {
+		t.Fatalf("400: want errUpstreamRetryable (upstream bug can wear 4xx — disco cheio 2026-08-27), got %v", err)
 	}
 }
