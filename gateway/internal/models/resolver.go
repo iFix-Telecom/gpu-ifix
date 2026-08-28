@@ -71,6 +71,12 @@ type Resolver struct {
 	log     *slog.Logger
 	mu      sync.RWMutex
 	aliases map[aliasKey]string
+	// pins is the alias → []upstream_name projection of the same table
+	// (quick 260828 — model-pinned routing). An alias with one or more rows
+	// PINS the request to exactly those upstreams: the dispatcher restricts
+	// its candidate roster to this set instead of the plain tier cascade.
+	// Rebuilt atomically together with aliases on every Refresh.
+	pins map[string][]string
 }
 
 // NewResolver wires the Postgres pool.
@@ -79,6 +85,7 @@ func NewResolver(pool *pgxpool.Pool, log *slog.Logger) *Resolver {
 		q:       gen.New(pool),
 		log:     log.With("module", "MODELS"),
 		aliases: map[aliasKey]string{},
+		pins:    map[string][]string{},
 	}
 }
 
@@ -95,11 +102,14 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		return err
 	}
 	fresh := make(map[aliasKey]string, len(rows))
+	freshPins := make(map[string][]string, len(rows))
 	for _, row := range rows {
 		fresh[aliasKey{Alias: row.Alias, Upstream: row.UpstreamName}] = row.Target
+		freshPins[row.Alias] = append(freshPins[row.Alias], row.UpstreamName)
 	}
 	r.mu.Lock()
 	r.aliases = fresh
+	r.pins = freshPins
 	r.mu.Unlock()
 	r.log.Info("model aliases refreshed", "count", len(fresh))
 
@@ -165,4 +175,20 @@ func (r *Resolver) Resolve(alias, upstream string) string {
 	}
 	// (3) Passthrough layer.
 	return alias
+}
+
+// PinnedUpstreams returns the upstream NAMES that carry a model_aliases row
+// for this alias (quick 260828 — model-pinned routing). Empty/nil when the
+// alias has no rows — the dispatcher then keeps its plain tier cascade. The
+// returned slice is a copy; callers may not mutate the cache.
+func (r *Resolver) PinnedUpstreams(alias string) []string {
+	r.mu.RLock()
+	names, ok := r.pins[alias]
+	r.mu.RUnlock()
+	if !ok || len(names) == 0 {
+		return nil
+	}
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
 }

@@ -1276,6 +1276,7 @@ func main() {
 		ContextCap:   proxy.ChatContextCap,
 		Proxies:      llmRoleProxies,
 		EmergTraffic: emergTraffic,
+		Pins:         resolver,
 		Log:          log,
 	})
 	embedDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
@@ -1285,6 +1286,7 @@ func main() {
 		TokenCounter: tokenCounter,
 		ContextCap:   proxy.EmbedContextCap,
 		Proxies:      embedRoleProxies,
+		Pins:         resolver,
 		Log:          log,
 	})
 	audioDispatcher := proxy.NewDispatcher(proxy.DispatcherConfig{
@@ -1295,6 +1297,7 @@ func main() {
 		TokenCounter: nil,
 		ContextCap:   0,
 		Proxies:      sttRoleProxies,
+		Pins:         resolver,
 		Log:          log,
 	})
 	// Phase 06.7 — tts dispatcher. Same tier-0->tier-1 breaker fallback wrap as
@@ -1308,6 +1311,7 @@ func main() {
 		TokenCounter: nil,
 		ContextCap:   0,
 		Proxies:      ttsRoleProxies,
+		Pins:         resolver,
 		Log:          log,
 	})
 	// quick 260825 — rerank dispatcher. Same tier-0->tier-1 breaker fallback
@@ -1320,6 +1324,7 @@ func main() {
 		TokenCounter: nil,
 		ContextCap:   0,
 		Proxies:      rerankRoleProxies,
+		Pins:         resolver,
 		Log:          log,
 	})
 

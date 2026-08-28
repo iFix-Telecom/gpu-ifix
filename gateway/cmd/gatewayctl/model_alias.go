@@ -91,6 +91,20 @@ var upstreamNameRole = map[string]string{
 	"openai-whisper":  "stt",
 	"local-embed":     "embed",
 	"openai-embed":    "embed",
+	// quick 260828 — model-pinned routing widened the useful target set:
+	// aliases may now pin ANY serving upstream, including the dynamic
+	// emergency/primary pod slot and the rows that predated this map's
+	// last update (they exist in ai_gateway.upstreams but were missing
+	// here, e.g. embed-gpu — the CLI refused legitimate rows).
+	"emergency_pod_llm": "llm",
+	"embed-gpu":         "embed",
+	"local-stt":         "stt",
+	"gemini-stt":        "stt",
+	"groq-whisper":      "stt",
+	"rerank-gpu":        "rerank",
+	"rerank-cpu":        "rerank",
+	"kokoro-tts":        "tts",
+	"local-tts":         "tts",
 }
 
 // runModelAlias dispatches `gatewayctl model-alias <subcommand>`.

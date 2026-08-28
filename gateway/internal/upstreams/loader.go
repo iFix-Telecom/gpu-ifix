@@ -352,6 +352,34 @@ func (l *Loader) ResolveAllTier1(role string) []UpstreamConfig {
 	return out
 }
 
+// ResolveFallbacks returns every enabled tier>=1 upstream for the role,
+// ordered by (tier, tier_priority) ASC. Superset of ResolveAllTier1 that
+// also includes last-resort tier-2 rows (openai-embed / openai-whisper) —
+// consumed by the model-pinned dispatch path (quick 260828), where an alias
+// may legitimately pin a tier-2 upstream and the candidate roster must be
+// able to reach it.
+//
+// Lock-free (atomic.Pointer read). nil when the snapshot is uninitialised.
+func (l *Loader) ResolveFallbacks(role string) []UpstreamConfig {
+	s := l.snap.Load()
+	if s == nil {
+		return nil
+	}
+	var out []UpstreamConfig
+	for _, u := range s.ordered {
+		if u.Role == role && u.Tier >= 1 && u.Enabled {
+			out = append(out, u)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Tier != out[j].Tier {
+			return out[i].Tier < out[j].Tier
+		}
+		return out[i].TierPriority < out[j].TierPriority
+	})
+	return out
+}
+
 // OverrideTier0 sets a runtime tier-0 override URL for the given role.
 // Plan 06-08 (D-E3) — called by emerg.Reconciler.markHealthy when the
 // emergency pod becomes healthy, so the dispatcher routes tier-0 LLM

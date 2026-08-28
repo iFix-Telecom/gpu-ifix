@@ -133,6 +133,22 @@ type EmergTrafficRegistrar interface {
 	RegisterTraffic()
 }
 
+// ModelPinner reports which upstream NAMES a model alias is pinned to
+// (quick 260828 — model-pinned routing). Implemented by *models.Resolver
+// (PinnedUpstreams), kept as a narrow interface here to avoid a
+// proxy → models import edge and to keep dispatcher tests mockable.
+//
+// Semantics: a model with one or more model_aliases rows is served ONLY by
+// the upstreams named in those rows (tier order preserved); a model with no
+// rows keeps the plain tier cascade. This is what lets two aliases of the
+// same role route to DIFFERENT upstreams (e.g. one alias pinned to the
+// local pod, another pinned to openrouter-chat) — before this, the
+// dispatcher chose the upstream purely by tier/health and the alias only
+// renamed the model afterwards.
+type ModelPinner interface {
+	PinnedUpstreams(alias string) []string
+}
+
 // DispatcherConfig groups the collaborators required to route a single
 // role's traffic. One DispatcherConfig per role (llm / stt / embed).
 type DispatcherConfig struct {
@@ -155,6 +171,12 @@ type DispatcherConfig struct {
 	// reconciler's idle-grace timer (D-D1, 5min default) sees recent
 	// activity and does NOT destroy the pod prematurely.
 	EmergTraffic EmergTrafficRegistrar
+
+	// Pins is the model-pinned routing surface (quick 260828). nil → feature
+	// off for this role (plain tier cascade for every model). When non-nil,
+	// a request whose model has model_aliases rows is served ONLY by the
+	// upstreams named in those rows — see dispatchPinned.
+	Pins ModelPinner
 
 	Log *slog.Logger
 }
@@ -237,6 +259,24 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			}
 			cfg.dispatchOverride(w, r, override, log)
 			return
+		}
+
+		// Model-pinned routing (quick 260828). When the requested model has
+		// model_aliases rows, the rows' upstream_name set is the ONLY roster
+		// eligible to serve it — this is what makes "alias A → pod local,
+		// alias B → openrouter" coexist on the same role. Runs AFTER the
+		// schedule/shed override block (operator/business overrides win) and
+		// BEFORE the plain tier-0 resolve. Multipart bodies (STT) carry no
+		// JSON model field → extractModelName returns "" → plain cascade.
+		if cfg.Pins != nil {
+			if body, berr := readAndRestoreBody(r); berr == nil && len(body) > 0 {
+				if model := extractModelName(body); model != "" {
+					if pinned := cfg.Pins.PinnedUpstreams(model); len(pinned) > 0 {
+						cfg.dispatchPinned(w, r, ac.DataClass == auth.DataClassSensitive, model, pinned, log)
+						return
+					}
+				}
+			}
 		}
 
 		// 1. Resolve tier-0. quick 260824-ucv Fix B moved this AHEAD of token
@@ -453,6 +493,118 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 		restoreBody, _ := prepareReplayBody(r)
 		cfg.cascadeTier1(w, r, streaming, restoreBody, log)
 	})
+}
+
+// dispatchPinned serves a model whose alias rows pin it to a specific set of
+// upstreams (quick 260828 — model-pinned routing). Candidate roster = the
+// effective tier-0 (override-honoring) followed by every enabled tier>=1
+// fallback in (tier, tier_priority) ASC order, FILTERED to the pinned names.
+//
+// Pin-matching for the tier-0 slot honors the dynamic emergency override: a
+// pin on the STATIC tier-0 name (e.g. "local-llm") also matches the
+// emergency pod currently serving that slot ("emergency_pod_llm") — the pin
+// follows the SLOT, so existing aliases like "qwen" keep riding the pod
+// exactly as before this feature.
+//
+// Semantics per candidate: breaker must be CLOSED (force-open skips, same as
+// cascadeTier1); a sensitive tenant NEVER dispatches to a tier>=1 external
+// (RES-08 hard gate — skipped, and exhaustion writes the sensitive block);
+// a tier-0 candidate that fails the token-cap guard is skipped instead of
+// burning a guaranteed-400 call (mirrors quick 260824-ucv Fix B). Pre-byte
+// dial failures record the candidate's breaker failure and advance.
+// Exhaustion writes a dedicated 503 so operators can tell "pinned roster
+// unavailable" apart from the generic cascade exhaustion.
+func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Request, sensitive bool, model string, pinned []string, log *slog.Logger) {
+	pinSet := make(map[string]struct{}, len(pinned))
+	for _, n := range pinned {
+		pinSet[n] = struct{}{}
+	}
+
+	type pinnedCand struct {
+		u        upstreams.UpstreamConfig
+		external bool // tier>=1 → RES-08 applies for sensitive tenants
+	}
+	var candidates []pinnedCand
+	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok {
+		_, direct := pinSet[t0.Name]
+		matched := direct
+		if !matched && t0.IsEmergency {
+			// Pin on the static tier-0 name follows the slot to the pod.
+			for _, res := range cfg.Loader.ResolveTier0Roles() {
+				if res.Role == cfg.Role && res.ReplacedStaticName != "" {
+					_, matched = pinSet[res.ReplacedStaticName]
+					break
+				}
+			}
+		}
+		if matched {
+			candidates = append(candidates, pinnedCand{u: t0})
+		}
+	}
+	for _, t1 := range cfg.Loader.ResolveFallbacks(cfg.Role) {
+		if _, ok := pinSet[t1.Name]; ok {
+			candidates = append(candidates, pinnedCand{u: t1, external: true})
+		}
+	}
+
+	streaming := IsStreamingRequest(r)
+	restoreBody, _ := prepareReplayBody(r)
+	skippedSensitive := false
+
+	for _, c := range candidates {
+		if sensitive && c.external {
+			skippedSensitive = true
+			continue
+		}
+		if cfg.Breaker.EffectiveState(c.u.Name) != gobreaker.StateClosed {
+			continue
+		}
+		if _, ok := cfg.Proxies[c.u.Name]; !ok {
+			log.Warn("pinned candidate has no registered proxy; skipping",
+				"upstream", c.u.Name, "model", model,
+				"request_id", httpx.RequestIDFrom(r.Context()))
+			continue
+		}
+		// Token-cap guard for the tier-0 candidate only (tier-1 providers
+		// enforce their own much larger windows). Over-cap → skip to the next
+		// pinned candidate instead of spending a guaranteed-400 call.
+		if !c.external && cfg.TokenCounter != nil && cfg.ContextCap > 0 {
+			if body, berr := readAndRestoreBody(r); berr == nil && len(body) > 0 {
+				if _, terr := cfg.TokenCounter.Enforce(r.Context(), body, model, cfg.ContextCap, c.u.URL); errors.Is(terr, ErrContextLengthExceeded) {
+					log.Warn("pinned tier-0 over-context; skipping candidate",
+						"upstream", c.u.Name, "model", model,
+						"request_id", httpx.RequestIDFrom(r.Context()))
+					continue
+				}
+			}
+		}
+		if c.u.IsEmergency && cfg.EmergTraffic != nil {
+			cfg.EmergTraffic.RegisterTraffic()
+		}
+		if restoreBody != nil {
+			restoreBody()
+		}
+		res := cfg.dispatchTo(w, r, c.u.Name, streaming, log)
+		if res.fallthrough_ && !res.wrote {
+			if !errors.Is(res.err, errOverContextFallthrough) {
+				cfg.recordUpstreamFailure(c.u.Name)
+			}
+			continue
+		}
+		return // committed (success or terminal error envelope)
+	}
+
+	if sensitive && skippedSensitive {
+		// Every reachable pinned upstream was external — RES-08 hard gate.
+		cfg.writeSensitiveBlock(w, r)
+		return
+	}
+	log.Warn("pinned upstream roster exhausted",
+		"model", model, "pinned", pinned,
+		"request_id", httpx.RequestIDFrom(r.Context()))
+	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
+		"service_unavailable", "pinned_upstreams_unavailable",
+		"No pinned upstream is available for this model.")
 }
 
 // cascadeTier1 dispatches to the first CLOSED tier-1 candidate (tier_priority
