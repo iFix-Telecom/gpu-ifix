@@ -1,7 +1,7 @@
 [Unit]
-Description=Desliga pod 3060 unificado 22:00
+Description=Desliga pod 3060 unificado 20:00
 [Timer]
-OnCalendar=*-*-* 22:00:00
+OnCalendar=*-*-* 20:00:00
 Persistent=true
 [Install]
 WantedBy=timers.target
