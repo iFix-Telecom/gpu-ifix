@@ -73,9 +73,15 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
   2026-08-29: 43503 e 84216 ambos em 137.175.76.24).
 
 ## Gotchas herdados
-- Download R2 (r2.dev) pode cair no meio (~7min) e o retry do llama recomeça em
-  silêncio — sem log de progresso; ciclos de ~7-10min. Paciência ou corrida com
-  2ª instância noutro host (matar a perdedora).
-- Campo `entrypoint` da API Vast é ignorado; usar `runtype: args`.
+- **r2.dev derruba conexões longas (~7-10min) — em QUALQUER host** (2026-08-29:
+  4 hosts/IPs distintos, mesmo `download failed: Failed to read connection`).
+  O `-mu` do llama recomeça do zero a cada retry → loop. **Receita certa:
+  onstart próprio com resume** — `runtype: args` + `entrypoint: /bin/bash` +
+  `args: ["-c", script]` (mesmo padrão do gateway em `lifecycle.go`):
+  `curl -sSL -C - --speed-time 60 --speed-limit 100000 -o /root/model.gguf URL`
+  em loop até exit 0 → `sha256sum -c` (sha em `model.gguf.sha256` no R2) →
+  `exec /app/llama-server -m /root/model.gguf ...`.
+- Campo `entrypoint` da API Vast **FUNCIONA** com `runtype: args` (o handoff
+  antigo dizia que era ignorado — errado; o gateway usa em produção).
 - Presigned R2 dá 403 no downloader do llama (re-encoding) — usar r2.dev público.
 - llama sem `-m` = router mode (ignora `-mu`).
