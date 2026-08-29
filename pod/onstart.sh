@@ -55,6 +55,16 @@ log "READINESS_TIMEOUT_SECONDS = ${READINESS_TIMEOUT_SECONDS}"
 : "${WEIGHTS_BGE_M3_KEY:?missing WEIGHTS_BGE_M3_KEY}"
 : "${WEIGHTS_BGE_M3_SHA256:?missing WEIGHTS_BGE_M3_SHA256}"
 
+section "GPU preflight (gate: GPU must be visible)"
+# Incidente 2026-08-29: host com driver quebrado deixa CUDA init falhar e o
+# llama cai para CPU silenciosamente (1,4 tok/s) passando no health. Gate aqui:
+# sem GPU visível o onstart aborta ANTES do compose — readiness nunca fica
+# pronto e o FSM do gateway re-provisiona em outro host.
+if ! nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; then
+  log "FATAL: nvidia-smi failed — GPU not visible in container (host driver broken?)"
+  exit 1
+fi
+
 section "install docker compose prerequisites (if missing)"
 # Vast.ai base images typically include docker + compose; if not, bail loudly.
 if ! command -v docker >/dev/null 2>&1; then
@@ -103,6 +113,28 @@ if [[ -f "${ENV_FILE}" ]]; then
   COMPOSE_ARGS+=(--env-file "${ENV_FILE}")
 fi
 docker compose "${COMPOSE_ARGS[@]}" up -d
+
+section "GPU-in-use gate (llama must offload to CUDA, not CPU-fallback)"
+# llama.cpp com CUDA quebrado NÃO aborta: loga "failed to initialize CUDA" /
+# "no usable GPU found" e serve em CPU. Vigia os logs do service llama por até
+# 120s; assinatura encontrada → derruba o compose e aborta (readiness nunca
+# fica pronto → FSM re-provisiona).
+GPU_GATE_DEADLINE=$(( SECONDS + 120 ))
+while [[ ${SECONDS} -lt ${GPU_GATE_DEADLINE} ]]; do
+  llama_logs="$(docker compose "${COMPOSE_ARGS[@]}" logs llama 2>/dev/null || true)"
+  if printf '%s' "${llama_logs}" | grep -qE 'failed to initialize CUDA|no usable GPU found'; then
+    log "FATAL: llama started WITHOUT GPU (CUDA init failed) — refusing CPU-fallback serving"
+    printf '%s\n' "${llama_logs}" | grep -iE 'cuda|gpu' | tail -5
+    docker compose "${COMPOSE_ARGS[@]}" down
+    exit 1
+  fi
+  # sinal positivo: offload de layers pra CUDA apareceu no log → gate passou
+  if printf '%s' "${llama_logs}" | grep -qE 'offloaded .*/.* layers to GPU|CUDA0'; then
+    log "llama GPU offload confirmed in logs (t=${SECONDS}s)"
+    break
+  fi
+  sleep 5
+done
 
 section "wait for health-bridge readiness (D-11 aggregate)"
 # Poll /health/ready until status != "unknown" (probes have run at least once).

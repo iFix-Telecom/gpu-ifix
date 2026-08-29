@@ -46,6 +46,23 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
    reinicia o container, não o driver do host; anotar machine_id ruim e
    filtrar na busca de oferta).
 
+## Gates AUTOMÁTICOS (já no código — não repetir na mão)
+- **Pod auto-provisionado pelo gateway (primário/emergency,
+  `gateway/internal/emerg/lifecycle.go` → `emergencyOnstartHead`):** preflight
+  `nvidia-smi` no onstart gerado — GPU invisível → exit antes de baixar pesos;
+  container morre, FSM re-provisiona noutro host. ⚠️ entra em vigor no PRÓXIMO
+  build+deploy do gateway. Gap conhecido: nvidia-smi ok mas CUDA init falhando
+  em runtime não é pego (llama vira CPU) — exec PID1 impede vigiar log.
+- **Pod compose completo (`pod/onstart.sh`, fluxo smoke/manual):** (a)
+  preflight `nvidia-smi` aborta antes do compose; (b) pós-compose, vigia 120s
+  os logs do service `llama` — `failed to initialize CUDA` / `no usable GPU
+  found` → `compose down` + abort (recusa servir em CPU).
+- **Pod 3060 unificado (`ops/vast-3060/unified3060.py` cmd_start):** após
+  health, `gpu_temp <= 0` na API Vast → NÃO flipa o stack 38 + WhatsApp notify
+  (fallbacks tier-1 servem melhor que pod em CPU).
+- Pods manuais/teste (imagem crua, sem gates): validar na mão com o checklist
+  acima — obrigatório o passo 3 (tok/s) e 4 (gpu_util/gpu_temp).
+
 ## Seleção de oferta (antes de criar)
 - **Blocklist de machines (download R2 lento / driver ruim):** 134131, 43503,
   43488 (handoff 2026-08-26), 24039 (CUDA morto 2026-08-29), 84216. SEMPRE

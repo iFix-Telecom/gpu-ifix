@@ -689,6 +689,16 @@ var emergencyLlamaArgsDefault = []string{
 // truth #4; Vast hard limit 4048).
 const emergencyOnstartHead = `set -e
 export DEBIAN_FRONTEND=noninteractive
+
+# GPU gate (incidente 2026-08-29): host com driver quebrado deixa llama cair
+# para CPU silenciosamente (health ok, ~1,4 tok/s). Sem GPU visível, aborta
+# ANTES de baixar pesos — o container morre, o FSM observa o lifecycle
+# não-healthy e re-provisiona em outro host.
+if ! nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
+  echo "FATAL: GPU not visible in container (nvidia-smi failed) — refusing CPU-fallback serving" >&2
+  exit 1
+fi
+
 mkdir -p /weights/qwen /app/templates /run/sshd /root/.ssh
 
 # Optional operator debug SSH (lifecycle 36 hang exposed need for realtime

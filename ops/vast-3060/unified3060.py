@@ -167,6 +167,18 @@ def cmd_start(env):
         time.sleep(15)
     if not (ok8000 and ok7998):
         notify(env, f"pod up mas servicos nao-healthy (8000={ok8000} 7998={ok7998})")
+    # gate GPU (incidente 2026-08-29: driver quebrado -> servicos caem pra CPU
+    # e passam no health): gpu_temp 0.0 na API Vast = GPU invisivel no
+    # container. Nesse estado NAO flipa o stack — fallbacks tier-1 do gateway
+    # servem melhor que pod em CPU.
+    fresh = vast_get(env) or inst
+    gpu_temp = fresh.get("gpu_temp") or 0
+    if gpu_temp <= 0:
+        notify(env, f"GPU INVISIVEL no pod (gpu_temp={gpu_temp}) — flip ABORTADO, "
+                    "gateway fica nos fallbacks. Acao: reboot; se persistir, host quebrado")
+        log(f"gpu gate FAIL gpu_temp={gpu_temp} — abortando sem flip")
+        sys.exit(1)
+    log(f"gpu gate ok (gpu_temp={gpu_temp})")
     # compara/flipa envs do stack 38
     hdr = {"X-API-Key": env["PORTAINER_API_KEY"]}
     c, raw = http("GET", f"{PORTAINER}/stacks/{STACK}", hdr)
