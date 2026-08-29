@@ -47,11 +47,13 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
    filtrar na busca de oferta).
 
 ## Gates AUTOMÁTICOS (já no código — não repetir na mão)
-- **Pod auto-provisionado pelo gateway (primário/emergency,
-  `gateway/internal/emerg/lifecycle.go` → `emergencyOnstartHead`):** preflight
-  `nvidia-smi` no onstart gerado — GPU invisível → exit antes de baixar pesos;
-  container morre, FSM re-provisiona noutro host. ⚠️ entra em vigor no PRÓXIMO
-  build+deploy do gateway. Gap conhecido: nvidia-smi ok mas CUDA init falhando
+- **Pods auto-provisionados pelo gateway — DOIS onstarts distintos:**
+  primário = `gateway/internal/primary/onstart.go` (`primaryOnstartHead`,
+  imagem converseai-primary-pod + supervisord); emergency = `gateway/internal/
+  emerg/lifecycle.go` (`emergencyOnstartHead`, llama.cpp cru). Ambos têm
+  preflight `nvidia-smi` logo após o `set -e` — GPU invisível → exit antes de
+  baixar pesos; container morre, FSM re-provisiona noutro host. Deployado:
+  emergency em develop-d8f73c7; primário no commit seguinte (2026-08-29). Gap conhecido: nvidia-smi ok mas CUDA init falhando
   em runtime não é pego (llama vira CPU) — exec PID1 impede vigiar log.
 - **Pod compose completo (`pod/onstart.sh`, fluxo smoke/manual):** (a)
   preflight `nvidia-smi` aborta antes do compose; (b) pós-compose, vigia 120s

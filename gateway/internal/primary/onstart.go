@@ -118,6 +118,18 @@ fi
 
 set -euo pipefail
 
+# GPU gate (incidente 2026-08-29): host com driver quebrado deixa CUDA init
+# falhar e o llama cair para CPU silenciosamente (health ok, ~1,4 tok/s).
+# Sem GPU visível aborta AQUI, antes dos ~17 GB de pesos — o container morre,
+# o FSM vê o lifecycle não-ready e re-provisiona em outro host. (O bloco
+# SEED-019 abaixo trata nvidia-smi ausente como "whisper=cpu" e segue — esse
+# fail-safe é para o whisper, não para o LLM; o gate cobre o LLM.)
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: gpu gate (nvidia-smi)"
+if ! nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: FATAL gpu gate — nvidia-smi failed, GPU not visible; refusing CPU-fallback pod" >&2
+  exit 1
+fi
+
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] onstart: checking env vars"
 : "${MINIO_ENDPOINT:?required}"
 : "${MINIO_BUCKET:?required}"
