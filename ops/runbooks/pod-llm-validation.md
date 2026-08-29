@@ -76,12 +76,16 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
 - **r2.dev derruba conexões longas (~7-10min) — em QUALQUER host** (2026-08-29:
   4 hosts/IPs distintos, mesmo `download failed: Failed to read connection`).
   O `-mu` do llama recomeça do zero a cada retry → loop. **Receita certa:
-  onstart próprio com resume** — `runtype: args` + `entrypoint: /bin/bash` +
-  `args: ["-c", script]` (mesmo padrão do gateway em `lifecycle.go`):
-  `curl -sSL -C - --speed-time 60 --speed-limit 100000 -o /root/model.gguf URL`
-  em loop até exit 0 → `sha256sum -c` (sha em `model.gguf.sha256` no R2) →
-  `exec /app/llama-server -m /root/model.gguf ...`.
-- Campo `entrypoint` da API Vast **FUNCIONA** com `runtype: args` (o handoff
-  antigo dizia que era ignorado — errado; o gateway usa em produção).
+  `runtype: "ssh"` + campo `onstart` = script** (mesmo padrão do pod 3060):
+  Vast substitui o entrypoint da imagem pelo bootstrap dela e roda o onstart
+  via bash. Script: `curl -sSL -C - --speed-time 60 --speed-limit 100000 -o
+  /root/model.gguf URL` em loop até exit 0 → `sha256sum -c` (sha em
+  `model.gguf.sha256` no R2) → `nohup /app/llama-server -m /root/model.gguf ...
+  &`. Bônus: runtype ssh dá SSH pro pod (`ssh_host/ssh_port` na API).
+- Campo `entrypoint` da API Vast com `runtype: args` é **IGNORADO** nesta
+  imagem (testado 2026-08-29: llama-server recebeu o `-c` → `error while
+  handling argument "-c": stoi`). O `lifecycle.go` do gateway usa
+  `Entrypoint: /bin/bash` com a imagem pinada `server-cuda-b9128` — não
+  assumir que vale pra `server-cuda` latest.
 - Presigned R2 dá 403 no downloader do llama (re-encoding) — usar r2.dev público.
 - llama sem `-m` = router mode (ignora `-mu`).
