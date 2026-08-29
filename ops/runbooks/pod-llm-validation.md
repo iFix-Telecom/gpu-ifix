@@ -46,6 +46,15 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
    reinicia o container, não o driver do host; anotar machine_id ruim e
    filtrar na busca de oferta).
 
+## Seleção de oferta (antes de criar)
+- **Blocklist de machines (download R2 lento / driver ruim):** 134131, 43503,
+  43488 (handoff 2026-08-26), 24039 (CUDA morto 2026-08-29), 84216. SEMPRE
+  filtrar `machine_id not in BAD` na busca — esquecer a blocklist custou 20min
+  num host 43503 em 2026-08-29.
+- **Corrida de 2 instâncias só vale com IP público DIFERENTE:** machine_id
+  distinto no MESMO IP = mesmo datacenter/uplink = mesmo gargalo (visto
+  2026-08-29: 43503 e 84216 ambos em 137.175.76.24).
+
 ## Gotchas herdados
 - Download R2 (r2.dev) pode cair no meio (~7min) e o retry do llama recomeça em
   silêncio — sem log de progresso; ciclos de ~7-10min. Paciência ou corrida com
