@@ -78,10 +78,13 @@ smoke ok a 1,4 tok/s, GPU parada, só detectado 1 dia depois).
   O `-mu` do llama recomeça do zero a cada retry → loop. **Receita certa:
   `runtype: "ssh"` + campo `onstart` = script** (mesmo padrão do pod 3060):
   Vast substitui o entrypoint da imagem pelo bootstrap dela e roda o onstart
-  via bash. Script: `curl -sSL -C - --speed-time 60 --speed-limit 100000 -o
-  /root/model.gguf URL` em loop até exit 0 → `sha256sum -c` (sha em
-  `model.gguf.sha256` no R2) → `nohup /app/llama-server -m /root/model.gguf ...
-  &`. Bônus: runtype ssh dá SSH pro pod (`ssh_host/ssh_port` na API).
+  via bash. **Throttle do r2.dev é POR CONEXÃO** (medido 2026-08-29: curl
+  1 conexão = 8 MB/s; aria2 8 conexões = 34 MiB/s no mesmo host). Script:
+  `apt-get install -y -qq aria2` → `aria2c -c -x8 -s8 -k1M --max-tries=0
+  --retry-wait=3 --timeout=60 --checksum=sha-256=<sha> -o model.gguf URL`
+  (resume por segmento + verifica sha ao fim; sha em `model.gguf.sha256` no
+  R2) → `nohup /app/llama-server -m /root/model.gguf ... &`. Bônus: runtype
+  ssh dá SSH pro pod (`ssh_host/ssh_port` na API) — dá pra ver progresso.
 - Campo `entrypoint` da API Vast com `runtype: args` é **IGNORADO** nesta
   imagem (testado 2026-08-29: llama-server recebeu o `-c` → `error while
   handling argument "-c": stoi`). O `lifecycle.go` do gateway usa
