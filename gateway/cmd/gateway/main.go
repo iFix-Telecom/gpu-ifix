@@ -133,6 +133,13 @@ type proxies struct {
 	adminTenantHandler *admin.TenantAdminHandler
 	adminKeysHandler   *admin.KeysAdminHandler
 
+	// quick 260830-o2j — dashboard "controle total": model-alias CRUD (+
+	// per-model OpenRouter provider_prefs), upstream enable/disable, and
+	// primary pod force-up/force-down. Same X-Admin-Key gate.
+	adminModelAliasHandler     *admin.ModelAliasAdminHandler
+	adminUpstreamHandler       *admin.UpstreamAdminHandler
+	adminPrimaryControlHandler *admin.PrimaryControlHandler
+
 	// Phase 5 — shed middleware collaborators. nil disables the shed
 	// middleware mount; production main always supplies all four
 	// pointers after the Phase 5 wiring block runs.
@@ -677,7 +684,7 @@ func main() {
 		// streaming usage chunks (Pitfall 5 — include_usage=true injected
 		// by the director) are captured for cost attribution.
 		orChatProxy, perr := buildOpenRouterChatProxy(u, cfg, log,
-			auditInterceptor, toolCallInterceptor, usageInterceptor, resolver)
+			auditInterceptor, toolCallInterceptor, usageInterceptor, resolver, tenantsLoader)
 		if perr != nil {
 			log.Warn("build openrouter-chat proxy", "err", perr)
 		} else {
@@ -1441,8 +1448,16 @@ func main() {
 	// slug dup → 409) + GET/POST /tenants/{slug}/keys (list operator-safe + mint
 	// raw once) + POST /keys/{id}/revoke (idempotent). Thin over existing sqlc
 	// queries + auth.GenerateAPIKey — no new migration.
-	adminTenantHandler := admin.NewTenantAdminHandler(gen.New(pool), log)
+	adminTenantHandler := admin.NewTenantAdminHandler(gen.New(pool), tenantsLoader, log)
 	adminKeysHandler := admin.NewKeysAdminHandler(gen.New(pool), log)
+
+	// quick 260830-o2j — model-alias CRUD (+provider_prefs, refreshes THIS
+	// replica's resolver on write), upstream enable/disable (NOTIFY trigger
+	// hot-reloads the roster), primary force-up/down (same PrimaryEvent
+	// contract as gatewayctl; rdb nil → 503).
+	adminModelAliasHandler := admin.NewModelAliasAdminHandler(gen.New(pool), resolver, log)
+	adminUpstreamHandler := admin.NewUpstreamAdminHandler(gen.New(pool), log)
+	adminPrimaryControlHandler := admin.NewPrimaryControlHandler(rdb, hostnameOrUnknown(), log)
 
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
@@ -1471,6 +1486,10 @@ func main() {
 
 		adminTenantHandler: adminTenantHandler,
 		adminKeysHandler:   adminKeysHandler,
+
+		adminModelAliasHandler:     adminModelAliasHandler,
+		adminUpstreamHandler:       adminUpstreamHandler,
+		adminPrimaryControlHandler: adminPrimaryControlHandler,
 
 		adminVerifier:     adminVerifier,
 		rdb:               rdb,
@@ -1725,11 +1744,28 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.adminTenantHandler != nil {
 			adminRouter.Method(http.MethodGet, "/tenants", http.HandlerFunc(px.adminTenantHandler.List))
 			adminRouter.Method(http.MethodPost, "/tenants", http.HandlerFunc(px.adminTenantHandler.Create))
+			// quick 260830-o2j — per-tenant OpenRouter provider routing.
+			adminRouter.Method(http.MethodPut, "/tenants/{slug}/provider-prefs", http.HandlerFunc(px.adminTenantHandler.SetProviderPrefs))
 		}
 		if px.adminKeysHandler != nil {
 			adminRouter.Method(http.MethodGet, "/tenants/{slug}/keys", http.HandlerFunc(px.adminKeysHandler.List))
 			adminRouter.Method(http.MethodPost, "/tenants/{slug}/keys", http.HandlerFunc(px.adminKeysHandler.Create))
 			adminRouter.Method(http.MethodPost, "/keys/{id}/revoke", http.HandlerFunc(px.adminKeysHandler.Revoke))
+		}
+		// quick 260830-o2j — dashboard control surface (model aliases +
+		// provider_prefs, upstreams enabled flag, primary pod force-up/down).
+		if px.adminModelAliasHandler != nil {
+			adminRouter.Method(http.MethodGet, "/model-aliases", http.HandlerFunc(px.adminModelAliasHandler.List))
+			adminRouter.Method(http.MethodPut, "/model-aliases", http.HandlerFunc(px.adminModelAliasHandler.Upsert))
+			adminRouter.Method(http.MethodDelete, "/model-aliases/{alias}/{upstream}", http.HandlerFunc(px.adminModelAliasHandler.Delete))
+		}
+		if px.adminUpstreamHandler != nil {
+			adminRouter.Method(http.MethodGet, "/upstreams", http.HandlerFunc(px.adminUpstreamHandler.List))
+			adminRouter.Method(http.MethodPost, "/upstreams/{name}/enabled", http.HandlerFunc(px.adminUpstreamHandler.SetEnabled))
+		}
+		if px.adminPrimaryControlHandler != nil {
+			adminRouter.Method(http.MethodPost, "/primary/force-up", http.HandlerFunc(px.adminPrimaryControlHandler.ForceUp))
+			adminRouter.Method(http.MethodPost, "/primary/force-down", http.HandlerFunc(px.adminPrimaryControlHandler.ForceDown))
 		}
 		// Phase 11 Plan 04 D-18.2 — operator-only synthetic panic emitter
 		// used by `gatewayctl debug emit-error` to prove the
@@ -1782,7 +1818,8 @@ func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log
 	auditInterceptor *audit.AuditInterceptor,
 	toolCallInterceptor *proxy.ToolCallInterceptor,
 	usageInterceptor *proxy.UsageInterceptor,
-	resolver *models.Resolver) (*httputil.ReverseProxy, error) {
+	resolver *models.Resolver,
+	tenantPrefs proxy.TenantPrefsLookup) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(u.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse openrouter url %q: %w", u.URL, err)
@@ -1796,7 +1833,7 @@ func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log
 		// per D-06 inherited transparently from Resolver.Resolve).
 		Director: proxy.BuildOpenRouterDirector(parsed, u.AuthBearer,
 			cfg.UpstreamOpenRouterProviderOrder, cfg.UpstreamOpenRouterAllowFallbacks,
-			resolver, "openrouter-chat", log),
+			resolver, "openrouter-chat", log, tenantPrefs),
 		FlushInterval: -1, // SSE streaming
 		Transport: &http.Transport{
 			MaxIdleConns:          50,

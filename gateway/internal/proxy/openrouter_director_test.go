@@ -67,7 +67,7 @@ func TestOpenRouterDirector_InjectsProvider(t *testing.T) {
 	resolver := models.NewResolverForTesting(map[[2]string]string{
 		{"qwen", "openrouter-chat"}: "qwen/qwen3.5-27b",
 	})
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[{"role":"user","content":"ping"}]}`)
 	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -99,7 +99,7 @@ func TestOpenRouterDirector_InjectsAuthBearer(t *testing.T) {
 	srv, _, _ := captureUpstream(t)
 	upstream, _ := url.Parse(srv.URL)
 	resolver := models.NewResolverForTesting(nil)
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-abc", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-abc", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[]}`)
 	req, _ := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -116,7 +116,7 @@ func TestOpenRouterDirector_StripsClientAuth(t *testing.T) {
 	srv, _, _ := captureUpstream(t)
 	upstream, _ := url.Parse(srv.URL)
 	resolver := models.NewResolverForTesting(nil)
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-bound", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-bound", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen"}`)
 	clientHdrs := http.Header{}
@@ -142,7 +142,7 @@ func TestOpenRouterDirector_OnlyRewritesChatCompletions(t *testing.T) {
 	resolver := models.NewResolverForTesting(map[[2]string]string{
 		{"qwen", "openrouter-chat"}: "qwen/qwen3.5-27b",
 	})
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"input":"hello","model":"text-embedding-3-small"}`)
 	_, out := applyDirector(t, director, http.MethodPost, "/v1/embeddings", "application/json", body, nil, nil)
@@ -161,7 +161,7 @@ func TestOpenRouterDirector_NoBearerSkipsHeader(t *testing.T) {
 	srv, _, _ := captureUpstream(t)
 	upstream, _ := url.Parse(srv.URL)
 	resolver := models.NewResolverForTesting(nil)
-	director := BuildOpenRouterDirector(upstream, "" /* empty bearer */, []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "" /* empty bearer */, []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[]}`)
 	req, _ := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -186,7 +186,7 @@ func TestOpenRouterDirector_RewritesModelFromResolver(t *testing.T) {
 	resolver := models.NewResolverForTesting(map[[2]string]string{
 		{"qwen", "openrouter-chat"}: "qwen/qwen3.5-27b",
 	})
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[{"role":"user","content":"hi"}]}`)
 	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -223,7 +223,7 @@ func TestOpenRouterDirector_RewriteThenProviderOrderPreservesBoth(t *testing.T) 
 	resolver := models.NewResolverForTesting(map[[2]string]string{
 		{"qwen", "openrouter-chat"}: "qwen/qwen3.5-27b",
 	})
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[{"role":"user","content":"x"}],"temperature":0.5}`)
 	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -260,7 +260,7 @@ func TestOpenRouterDirector_NoResolverMatchPassesAliasThrough(t *testing.T) {
 	srv, _, _ := captureUpstream(t)
 	upstream, _ := url.Parse(srv.URL)
 	resolver := models.NewResolverForTesting(nil) // empty
-	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger())
+	director := BuildOpenRouterDirector(upstream, "sk-or-v1-test", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
 
 	body := []byte(`{"model":"qwen","messages":[]}`)
 	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
@@ -275,5 +275,72 @@ func TestOpenRouterDirector_NoResolverMatchPassesAliasThrough(t *testing.T) {
 	// provider.order still injected on top — director is best-effort.
 	if _, ok := m["provider"].(map[string]any); !ok {
 		t.Errorf("provider missing; body=%s", string(patched))
+	}
+}
+
+// TestOpenRouterDirector_PerModelProviderPrefsWin (quick 260830-o2j): a
+// model_aliases row with provider_prefs REPLACES the legacy global env pin —
+// the whole `provider` object is injected verbatim, keyed on the ORIGINAL
+// alias (not the rewritten target), and the model rewrite still happens.
+func TestOpenRouterDirector_PerModelProviderPrefsWin(t *testing.T) {
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_MODEL", "")
+	srv, _, _ := captureUpstream(t)
+	upstream, _ := url.Parse(srv.URL)
+	resolver := models.NewResolverForTesting(map[[2]string]string{
+		{"qwen", "openrouter-chat"}: "deepseek/deepseek-v4-flash",
+	})
+	prefs := []byte(`{"only":["deepinfra","novita"],"allow_fallbacks":true,"quantizations":["bf16","fp16"],"max_price":{"prompt":0.14,"completion":0.5},"preferred_max_latency":{"p90":3},"data_collection":"deny","zdr":true}`)
+	resolver.SetProviderPrefsForTesting("qwen", "openrouter-chat", prefs)
+	director := BuildOpenRouterDirector(upstream, "sk", []string{"novita"}, false, resolver, "openrouter-chat", discardLogger(), nil)
+
+	body := []byte(`{"model":"qwen","messages":[{"role":"user","content":"ping"}],"provider":{"order":["client-wants"]}}`)
+	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json", body, nil, nil)
+
+	var m map[string]any
+	if err := json.Unmarshal(patched, &m); err != nil {
+		t.Fatalf("patched body not valid JSON: %v (%s)", err, patched)
+	}
+	if m["model"] != "deepseek/deepseek-v4-flash" {
+		t.Errorf("model = %v, want rewritten target", m["model"])
+	}
+	prov, _ := m["provider"].(map[string]any)
+	var want map[string]any
+	_ = json.Unmarshal(prefs, &want)
+	gotJSON, _ := json.Marshal(prov)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("provider = %s, want %s", gotJSON, wantJSON)
+	}
+	if _, ok := prov["order"]; ok {
+		t.Errorf("legacy/client order leaked into provider: %s", gotJSON)
+	}
+	if _, ok := m["messages"].([]any); !ok {
+		t.Errorf("messages lost: %s", patched)
+	}
+}
+
+// TestOpenRouterDirector_NoPrefsKeepsLegacyPin: an alias WITHOUT provider_prefs
+// still receives the global env order/allow_fallbacks.
+func TestOpenRouterDirector_NoPrefsKeepsLegacyPin(t *testing.T) {
+	t.Setenv("UPSTREAM_LLM_OPENROUTER_MODEL", "")
+	srv, _, _ := captureUpstream(t)
+	upstream, _ := url.Parse(srv.URL)
+	resolver := models.NewResolverForTesting(map[[2]string]string{
+		{"qwen", "openrouter-chat"}: "deepseek/deepseek-v4-flash",
+	})
+	resolver.SetProviderPrefsForTesting("other", "openrouter-chat", []byte(`{"zdr":true}`))
+	director := BuildOpenRouterDirector(upstream, "sk", []string{"novita"}, true, resolver, "openrouter-chat", discardLogger(), nil)
+
+	_, patched := applyDirector(t, director, http.MethodPost, "/v1/chat/completions", "application/json",
+		[]byte(`{"model":"qwen","messages":[]}`), nil, nil)
+	var m map[string]any
+	_ = json.Unmarshal(patched, &m)
+	prov, _ := m["provider"].(map[string]any)
+	order, _ := prov["order"].([]any)
+	if len(order) != 1 || order[0] != "novita" || prov["allow_fallbacks"] != true {
+		t.Errorf("legacy pin missing: %s", patched)
+	}
+	if _, ok := prov["zdr"]; ok {
+		t.Errorf("prefs of a DIFFERENT alias leaked: %s", patched)
 	}
 }

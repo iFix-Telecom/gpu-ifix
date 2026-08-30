@@ -7,7 +7,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier,
+       priority_tier, provider_prefs,
        created_at, updated_at
 FROM ai_gateway.tenants
 WHERE id = $1;
@@ -21,10 +21,19 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier
+       priority_tier, provider_prefs
 FROM ai_gateway.tenants
 WHERE status = 'active'
 ORDER BY slug;
+
+-- name: UpdateTenantProviderPrefs :execrows
+-- quick 260830-o2j: per-tenant OpenRouter provider routing (NULL clears).
+-- Fires the tenants_update_notify trigger (0037 adds provider_prefs to the
+-- WHEN list) so every replica's tenants.Loader hot-reloads.
+UPDATE ai_gateway.tenants
+SET provider_prefs = $2,
+    updated_at = now()
+WHERE slug = $1;
 
 -- name: UpdateTenantMode :exec
 -- Used by `gatewayctl tenant set-mode`. CHECK constraint chk_sensitive_no_peak

@@ -80,6 +80,7 @@ func TestIntegration_OpenRouterModelRewrite(t *testing.T) {
 		resolver,
 		"openrouter-chat", // upstream name — drives per-upstream resolver lookup
 		discardLogger(),
+		nil, // tenantPrefs (quick 260830-o2j)
 	)
 	tier1Proxy := &httputil.ReverseProxy{Director: director}
 

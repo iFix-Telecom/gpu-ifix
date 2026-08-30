@@ -108,6 +108,7 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			LocalInflightMaxSTT:   int(r.LocalInflightMaxStt),
 			LocalInflightMaxEmbed: int(r.LocalInflightMaxEmbed),
 			PriorityTier:          r.PriorityTier,
+			ProviderPrefs:         r.ProviderPrefs,
 		}
 		s.byID[r.ID] = cfg
 		s.bySlug[r.Slug] = cfg
@@ -203,4 +204,25 @@ func coerceDataClass(v interface{}) string {
 		return string(s)
 	}
 	return ""
+}
+
+// ProviderPrefsByTenantID returns the tenant's OpenRouter provider_prefs
+// (quick 260830-o2j) or nil when the id is unparseable / unknown / unset.
+// Lock-free snapshot read; the returned slice is a copy. Satisfies
+// proxy.TenantPrefsLookup.
+func (l *Loader) ProviderPrefsByTenantID(tenantID string) []byte {
+	if l == nil || tenantID == "" {
+		return nil
+	}
+	id, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil
+	}
+	cfg, err := l.Get(id)
+	if err != nil || len(cfg.ProviderPrefs) == 0 {
+		return nil
+	}
+	out := make([]byte, len(cfg.ProviderPrefs))
+	copy(out, cfg.ProviderPrefs)
+	return out
 }

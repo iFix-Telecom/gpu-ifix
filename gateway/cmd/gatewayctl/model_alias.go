@@ -60,6 +60,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
 
 // modelAliasMaxAliasLen / modelAliasMaxUpstreamLen / modelAliasMaxTargetLen
@@ -141,6 +142,15 @@ Subcommands:
   list                                         Tab-separated table of all rows.
   get    --alias X --upstream Y                Single-row JSON output.
   set    --alias X --upstream Y --target Z     Upsert row via composite PK.
+         [--provider-prefs JSON]               (openrouter-chat only) per-model
+                                               OpenRouter provider object —
+                                               only/order/ignore/allow_fallbacks/
+                                               quantizations/max_price/
+                                               preferred_min_throughput/
+                                               preferred_max_latency/
+                                               data_collection/zdr/sort.
+         [--clear-provider-prefs]              Drop the stored prefs (NULL).
+         (omitting both flags KEEPS the row's current prefs)
   delete --alias X --upstream Y                Delete row.
 
 D-06 — model-alias CLI vs UPSTREAM_<U>_MODEL env var:
@@ -242,9 +252,13 @@ func runModelAliasList(ctx context.Context, args []string, log *slog.Logger) int
 		return 1
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ALIAS\tUPSTREAM_NAME\tROLE\tTARGET")
+	fmt.Fprintln(tw, "ALIAS\tUPSTREAM_NAME\tROLE\tTARGET\tPROVIDER_PREFS")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Alias, r.UpstreamName, r.Upstream, r.Target)
+		prefs := "-"
+		if len(r.ProviderPrefs) > 0 {
+			prefs = string(r.ProviderPrefs)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Alias, r.UpstreamName, r.Upstream, r.Target, prefs)
 	}
 	if err := tw.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "flush table: %v\n", err)
@@ -281,7 +295,18 @@ func runModelAliasGet(ctx context.Context, args []string, log *slog.Logger) int 
 		fmt.Fprintf(os.Stderr, "get model_alias: %v\n", err)
 		return 1
 	}
-	out, err := json.MarshalIndent(row, "", "  ")
+	// []byte would marshal as base64 — surface provider_prefs as raw JSON.
+	view := struct {
+		Alias         string          `json:"alias"`
+		Upstream      string          `json:"upstream"`
+		Target        string          `json:"target"`
+		UpstreamName  string          `json:"upstream_name"`
+		ProviderPrefs json.RawMessage `json:"provider_prefs"`
+	}{row.Alias, row.Upstream, row.Target, row.UpstreamName, json.RawMessage("null")}
+	if len(row.ProviderPrefs) > 0 {
+		view.ProviderPrefs = json.RawMessage(row.ProviderPrefs)
+	}
+	out, err := json.MarshalIndent(view, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "marshal: %v\n", err)
 		return 1
@@ -296,12 +321,34 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 	alias := fs.String("alias", "", "alias (required)")
 	upstream := fs.String("upstream", "", "upstream name (required); must exist in ai_gateway.upstreams")
 	target := fs.String("target", "", "target slug to rewrite to (required)")
+	providerPrefs := fs.String("provider-prefs", "", "openrouter-chat only: JSON provider object (see usage)")
+	clearPrefs := fs.Bool("clear-provider-prefs", false, "drop the stored provider_prefs (NULL)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *alias == "" || *upstream == "" || *target == "" {
 		fmt.Fprintln(os.Stderr, "error: --alias, --upstream, and --target are all required")
 		return 2
+	}
+	if *providerPrefs != "" && *clearPrefs {
+		fmt.Fprintln(os.Stderr, "error: --provider-prefs and --clear-provider-prefs are mutually exclusive")
+		return 2
+	}
+	// quick 260830-o2j — validate prefs BEFORE touching the DB. Only the
+	// openrouter-chat director consumes them; refusing other upstreams
+	// prevents silently-inert rows.
+	var prefsBytes []byte
+	if *providerPrefs != "" {
+		if *upstream != "openrouter-chat" {
+			fmt.Fprintln(os.Stderr, "error: --provider-prefs only applies to --upstream openrouter-chat")
+			return 2
+		}
+		canon, err := models.ValidateProviderPrefs([]byte(*providerPrefs))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
+		prefsBytes = canon
 	}
 	// R10 input validation — rejected inputs return exit 2 (usage error)
 	// because the operator can fix the typed input + retry; this is NOT
@@ -338,16 +385,32 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 		return 1
 	}
 
+	// Neither flag → preserve whatever prefs the row already carries so a
+	// plain target change never silently wipes an operator's routing policy.
+	if prefsBytes == nil && !*clearPrefs {
+		if cur, err := q.GetModelAlias(ctx, gen.GetModelAliasParams{Alias: *alias, UpstreamName: *upstream}); err == nil {
+			prefsBytes = cur.ProviderPrefs
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			fmt.Fprintf(os.Stderr, "read current model_alias: %v\n", err)
+			return 1
+		}
+	}
+
 	if err := q.UpsertModelAlias(ctx, gen.UpsertModelAliasParams{
-		Alias:        *alias,
-		Upstream:     role,
-		Target:       *target,
-		UpstreamName: *upstream,
+		Alias:         *alias,
+		Upstream:      role,
+		Target:        *target,
+		UpstreamName:  *upstream,
+		ProviderPrefs: prefsBytes,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "upsert model_alias: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "model-alias set: alias=%s upstream=%s role=%s target=%s\n", *alias, *upstream, role, *target)
+	prefsOut := "-"
+	if len(prefsBytes) > 0 {
+		prefsOut = string(prefsBytes)
+	}
+	fmt.Fprintf(os.Stdout, "model-alias set: alias=%s upstream=%s role=%s target=%s provider_prefs=%s\n", *alias, *upstream, role, *target, prefsOut)
 	log.Info("model-alias set",
 		"alias", *alias,
 		"upstream", *upstream,

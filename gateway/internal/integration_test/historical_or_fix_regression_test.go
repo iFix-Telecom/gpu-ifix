@@ -95,6 +95,7 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 		resolver,
 		"openrouter-chat",
 		discardLogger(),
+		nil, // tenantPrefs (quick 260830-o2j)
 	)
 	tier1Proxy := &httputil.ReverseProxy{Director: director}
 
@@ -191,6 +192,7 @@ func TestIntegration_HistoricalORFixRegression(t *testing.T) {
 		resolver,
 		"openrouter-chat",
 		discardLogger(),
+		nil, // tenantPrefs (quick 260830-o2j)
 	)
 	rejectTier1Proxy := &httputil.ReverseProxy{Director: rejectDirector}
 

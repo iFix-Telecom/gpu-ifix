@@ -87,6 +87,7 @@ func TestIntegration_EnvOverrideWinsEndToEnd(t *testing.T) {
 		resolver,
 		"openrouter-chat",
 		discardLogger(),
+		nil, // tenantPrefs (quick 260830-o2j)
 	)
 	tier1Proxy := &httputil.ReverseProxy{Director: director}
 
@@ -173,6 +174,7 @@ func TestIntegration_EnvOverrideEmptyFallsBackToSchema(t *testing.T) {
 		resolver,
 		"openrouter-chat",
 		discardLogger(),
+		nil, // tenantPrefs (quick 260830-o2j)
 	)
 	tier1Proxy := &httputil.ReverseProxy{Director: director}
 

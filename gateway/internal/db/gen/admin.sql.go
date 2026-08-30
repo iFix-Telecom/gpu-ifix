@@ -124,15 +124,16 @@ func (q *Queries) InsertAPIKey(ctx context.Context, arg InsertAPIKeyParams) (Ins
 }
 
 const listTenants = `-- name: ListTenants :many
-SELECT id, slug, name, created_at, updated_at FROM ai_gateway.tenants ORDER BY created_at DESC
+SELECT id, slug, name, provider_prefs, created_at, updated_at FROM ai_gateway.tenants ORDER BY created_at DESC
 `
 
 type ListTenantsRow struct {
-	ID        uuid.UUID `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	Slug          string    `json:"slug"`
+	Name          string    `json:"name"`
+	ProviderPrefs []byte    `json:"provider_prefs"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListTenants(ctx context.Context) ([]ListTenantsRow, error) {
@@ -148,6 +149,7 @@ func (q *Queries) ListTenants(ctx context.Context) ([]ListTenantsRow, error) {
 			&i.ID,
 			&i.Slug,
 			&i.Name,
+			&i.ProviderPrefs,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

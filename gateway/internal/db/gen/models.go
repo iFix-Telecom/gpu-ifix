@@ -127,6 +127,8 @@ type AiGatewayModelAlias struct {
 	CreatedAt time.Time `json:"created_at"`
 	// Phase 06.9: upstream NAME (not role). Canonical values: local-llm, local-stt, local-embed (tier-0); openrouter-chat, openai-whisper, openai-embed (tier-1). New tier-1 providers add new values as schema rows.
 	UpstreamName string `json:"upstream_name"`
+	// quick 260830-o2j: optional OpenRouter `provider` routing object injected verbatim by the openrouter-chat director for this (alias, upstream_name) when the tenant has no provider_prefs. NULL = fall through. Only meaningful for upstream_name=openrouter-chat.
+	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
 // Single-row DB-backed primary-pod HOT config (Phase 17). 16 hot fields + 10 numeric bound pairs. Seeded from env at boot (Plan 17-03); owner-edited via PATCH /admin/primary/config (Plan 17-04). pod_config_changed NOTIFY drives the in-memory loader reload.
@@ -233,6 +235,8 @@ type AiGatewayTenant struct {
 	LocalInflightMaxStt      int32       `json:"local_inflight_max_stt"`
 	LocalInflightMaxEmbed    int32       `json:"local_inflight_max_embed"`
 	PriorityTier             string      `json:"priority_tier"`
+	// quick 260830-o2j: optional OpenRouter `provider` routing object applied to EVERY openrouter-chat call of this tenant (precedence over model_aliases.provider_prefs). NULL = fall through.
+	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
 // Runtime source-of-truth for multi-upstream dispatcher (Phase 3 D-D2). Hot-reloaded via LISTEN upstreams_changed.

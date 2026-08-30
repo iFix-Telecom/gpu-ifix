@@ -36,7 +36,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier,
+       priority_tier, provider_prefs,
        created_at, updated_at
 FROM ai_gateway.tenants
 WHERE id = $1
@@ -64,6 +64,7 @@ type GetTenantConfigRow struct {
 	LocalInflightMaxStt      int32       `json:"local_inflight_max_stt"`
 	LocalInflightMaxEmbed    int32       `json:"local_inflight_max_embed"`
 	PriorityTier             string      `json:"priority_tier"`
+	ProviderPrefs            []byte      `json:"provider_prefs"`
 	CreatedAt                time.Time   `json:"created_at"`
 	UpdatedAt                time.Time   `json:"updated_at"`
 }
@@ -94,6 +95,7 @@ func (q *Queries) GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantC
 		&i.LocalInflightMaxStt,
 		&i.LocalInflightMaxEmbed,
 		&i.PriorityTier,
+		&i.ProviderPrefs,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -108,7 +110,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier
+       priority_tier, provider_prefs
 FROM ai_gateway.tenants
 WHERE status = 'active'
 ORDER BY slug
@@ -136,6 +138,7 @@ type ListTenantsForLoaderRow struct {
 	LocalInflightMaxStt      int32       `json:"local_inflight_max_stt"`
 	LocalInflightMaxEmbed    int32       `json:"local_inflight_max_embed"`
 	PriorityTier             string      `json:"priority_tier"`
+	ProviderPrefs            []byte      `json:"provider_prefs"`
 }
 
 // Bulk load at boot + on NOTIFY tenants_changed. Same columns as GetTenantConfig.
@@ -170,6 +173,7 @@ func (q *Queries) ListTenantsForLoader(ctx context.Context) ([]ListTenantsForLoa
 			&i.LocalInflightMaxStt,
 			&i.LocalInflightMaxEmbed,
 			&i.PriorityTier,
+			&i.ProviderPrefs,
 		); err != nil {
 			return nil, err
 		}
@@ -211,6 +215,29 @@ func (q *Queries) UpdateTenantMode(ctx context.Context, arg UpdateTenantModePara
 		arg.ScheduleTimezone,
 	)
 	return err
+}
+
+const updateTenantProviderPrefs = `-- name: UpdateTenantProviderPrefs :execrows
+UPDATE ai_gateway.tenants
+SET provider_prefs = $2,
+    updated_at = now()
+WHERE slug = $1
+`
+
+type UpdateTenantProviderPrefsParams struct {
+	Slug          string `json:"slug"`
+	ProviderPrefs []byte `json:"provider_prefs"`
+}
+
+// quick 260830-o2j: per-tenant OpenRouter provider routing (NULL clears).
+// Fires the tenants_update_notify trigger (0037 adds provider_prefs to the
+// WHEN list) so every replica's tenants.Loader hot-reloads.
+func (q *Queries) UpdateTenantProviderPrefs(ctx context.Context, arg UpdateTenantProviderPrefsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantProviderPrefs, arg.Slug, arg.ProviderPrefs)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateTenantQuota = `-- name: UpdateTenantQuota :exec

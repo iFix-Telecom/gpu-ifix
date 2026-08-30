@@ -77,6 +77,11 @@ type Resolver struct {
 	// its candidate roster to this set instead of the plain tier cascade.
 	// Rebuilt atomically together with aliases on every Refresh.
 	pins map[string][]string
+	// prefs is the (alias, upstream_name) → provider_prefs projection (quick
+	// 260830-o2j). Only rows with a non-NULL column are present. Read by the
+	// openrouter-chat director via ProviderPrefs; rebuilt atomically with
+	// aliases/pins on every Refresh.
+	prefs map[aliasKey][]byte
 }
 
 // NewResolver wires the Postgres pool.
@@ -86,6 +91,7 @@ func NewResolver(pool *pgxpool.Pool, log *slog.Logger) *Resolver {
 		log:     log.With("module", "MODELS"),
 		aliases: map[aliasKey]string{},
 		pins:    map[string][]string{},
+		prefs:   map[aliasKey][]byte{},
 	}
 }
 
@@ -103,13 +109,19 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 	}
 	fresh := make(map[aliasKey]string, len(rows))
 	freshPins := make(map[string][]string, len(rows))
+	freshPrefs := make(map[aliasKey][]byte)
 	for _, row := range rows {
-		fresh[aliasKey{Alias: row.Alias, Upstream: row.UpstreamName}] = row.Target
+		k := aliasKey{Alias: row.Alias, Upstream: row.UpstreamName}
+		fresh[k] = row.Target
 		freshPins[row.Alias] = append(freshPins[row.Alias], row.UpstreamName)
+		if len(row.ProviderPrefs) > 0 {
+			freshPrefs[k] = row.ProviderPrefs
+		}
 	}
 	r.mu.Lock()
 	r.aliases = fresh
 	r.pins = freshPins
+	r.prefs = freshPrefs
 	r.mu.Unlock()
 	r.log.Info("model aliases refreshed", "count", len(fresh))
 

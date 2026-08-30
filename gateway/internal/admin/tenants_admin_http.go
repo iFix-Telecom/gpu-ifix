@@ -21,10 +21,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 )
 
@@ -36,15 +38,37 @@ const tenantsRoute = "/admin/tenants"
 type tenantAdminQueries interface {
 	ListTenants(ctx context.Context) ([]gen.ListTenantsRow, error)
 	CreateTenant(ctx context.Context, arg gen.CreateTenantParams) (gen.CreateTenantRow, error)
+	// quick 260830-o2j — per-tenant OpenRouter provider routing.
+	UpdateTenantProviderPrefs(ctx context.Context, arg gen.UpdateTenantProviderPrefsParams) (int64, error)
+}
+
+// tenantRefresher is the tenants.Loader seam so a provider_prefs write is
+// visible on THIS replica immediately (other replicas: NOTIFY tenants_changed).
+type tenantRefresher interface {
+	Refresh(ctx context.Context) error
 }
 
 // tenantResponse is the typed list/create item — never the raw gen row.
 type tenantResponse struct {
-	ID        string `json:"id"`
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
+	ID            string          `json:"id"`
+	Slug          string          `json:"slug"`
+	Name          string          `json:"name"`
+	ProviderPrefs json.RawMessage `json:"provider_prefs"` // null when unset (quick 260830-o2j)
+	CreatedAt     string          `json:"created_at,omitempty"`
+	UpdatedAt     string          `json:"updated_at,omitempty"`
+}
+
+// setTenantProviderPrefsRequest is the PUT /admin/tenants/{slug}/provider-prefs
+// body. `null` / absent clears the tenant preference.
+type setTenantProviderPrefsRequest struct {
+	ProviderPrefs json.RawMessage `json:"provider_prefs"`
+}
+
+func rawOrNull(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(b)
 }
 
 // createTenantRequest is the POST body.
@@ -56,17 +80,18 @@ type createTenantRequest struct {
 // TenantAdminHandler serves GET + POST /admin/tenants via its List and Create
 // methods (one struct, two routes — mounted separately in main.go).
 type TenantAdminHandler struct {
-	q   tenantAdminQueries
-	log *slog.Logger
+	q         tenantAdminQueries
+	refresher tenantRefresher // nil-safe
+	log       *slog.Logger
 }
 
-// NewTenantAdminHandler wires the production dependency (the concrete
-// *gen.Queries).
-func NewTenantAdminHandler(q *gen.Queries, log *slog.Logger) *TenantAdminHandler {
+// NewTenantAdminHandler wires the production dependencies (the concrete
+// *gen.Queries + the tenants loader used to refresh after a prefs write).
+func NewTenantAdminHandler(q *gen.Queries, refresher tenantRefresher, log *slog.Logger) *TenantAdminHandler {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &TenantAdminHandler{q: q, log: log.With("module", "ADMIN_TENANTS")}
+	return &TenantAdminHandler{q: q, refresher: refresher, log: log.With("module", "ADMIN_TENANTS")}
 }
 
 // newTenantAdminHandlerWithQueries is the test constructor.
@@ -89,11 +114,12 @@ func (h *TenantAdminHandler) List(w http.ResponseWriter, r *http.Request) {
 	out := make([]tenantResponse, 0, len(rows))
 	for _, t := range rows {
 		out = append(out, tenantResponse{
-			ID:        t.ID.String(),
-			Slug:      t.Slug,
-			Name:      t.Name,
-			CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
-			UpdatedAt: t.UpdatedAt.UTC().Format(time.RFC3339),
+			ID:            t.ID.String(),
+			Slug:          t.Slug,
+			Name:          t.Name,
+			ProviderPrefs: rawOrNull(t.ProviderPrefs),
+			CreatedAt:     t.CreatedAt.UTC().Format(time.RFC3339),
+			UpdatedAt:     t.UpdatedAt.UTC().Format(time.RFC3339),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -133,7 +159,57 @@ func (h *TenantAdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("tenant created", "tenant_id", t.ID.String(), "slug", t.Slug)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(tenantResponse{ID: t.ID.String(), Slug: t.Slug, Name: t.Name})
+	_ = json.NewEncoder(w).Encode(tenantResponse{ID: t.ID.String(), Slug: t.Slug, Name: t.Name, ProviderPrefs: json.RawMessage("null")})
+	obs.GatewayAdminRequests.WithLabelValues(tenantsRoute, "2xx").Inc()
+}
+
+// SetProviderPrefs serves PUT /admin/tenants/{slug}/provider-prefs
+// (quick 260830-o2j). Body {provider_prefs: <object>|null}. The object is
+// validated by models.ValidateProviderPrefs BEFORE any write; null clears.
+// 404 when the slug is unknown. Refreshes the tenants loader on success.
+func (h *TenantAdminHandler) SetProviderPrefs(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimSpace(chi.URLParam(r, "slug"))
+	if slug == "" {
+		h.badRequest(w, "invalid_slug", "slug is required")
+		return
+	}
+	var body setTenantProviderPrefsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		h.badRequest(w, "invalid_body", "request body is not valid JSON")
+		return
+	}
+	var prefs []byte
+	if len(body.ProviderPrefs) > 0 && string(body.ProviderPrefs) != "null" {
+		canon, err := models.ValidateProviderPrefs(body.ProviderPrefs)
+		if err != nil {
+			h.badRequest(w, "invalid_provider_prefs", err.Error())
+			return
+		}
+		prefs = canon
+	}
+	n, err := h.q.UpdateTenantProviderPrefs(r.Context(), gen.UpdateTenantProviderPrefsParams{Slug: slug, ProviderPrefs: prefs})
+	if err != nil {
+		h.log.Error("UpdateTenantProviderPrefs failed", "err", err)
+		httpx.WriteOpenAIError(w, http.StatusInternalServerError, "api_error", "tenant_prefs_update_failed", "")
+		obs.GatewayAdminRequests.WithLabelValues(tenantsRoute, "5xx").Inc()
+		return
+	}
+	if n == 0 {
+		httpx.WriteOpenAIError(w, http.StatusNotFound, "invalid_request_error", "tenant_not_found", "tenant não encontrado")
+		obs.GatewayAdminRequests.WithLabelValues(tenantsRoute, "4xx").Inc()
+		return
+	}
+	if h.refresher != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		if rerr := h.refresher.Refresh(ctx); rerr != nil {
+			h.log.Warn("tenants refresh after provider_prefs write failed", "err", rerr)
+		}
+		cancel()
+	}
+	h.log.Info("tenant provider_prefs set", "slug", slug, "has_provider_prefs", prefs != nil)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"slug": slug, "provider_prefs": rawOrNull(prefs)})
 	obs.GatewayAdminRequests.WithLabelValues(tenantsRoute, "2xx").Inc()
 }
 

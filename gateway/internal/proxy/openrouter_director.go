@@ -23,6 +23,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,8 +33,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
+
+// TenantPrefsLookup resolves a tenant's OpenRouter provider_prefs by tenant
+// id (quick 260830-o2j). Implemented by tenants.Loader. nil-safe at the
+// call site — a nil lookup means "no tenant layer".
+type TenantPrefsLookup interface {
+	ProviderPrefsByTenantID(tenantID string) []byte
+}
 
 // BuildOpenRouterDirector returns a Director for the openrouter-chat
 // upstream. Extends proxy.BuildDirector by:
@@ -71,6 +80,7 @@ func BuildOpenRouterDirector(
 	resolver *models.Resolver,
 	upstreamName string,
 	log *slog.Logger,
+	tenantPrefs TenantPrefsLookup,
 ) func(*http.Request) {
 	base := BuildDirector(upstream)
 	return func(r *http.Request) {
@@ -116,8 +126,18 @@ func BuildOpenRouterDirector(
 			rewritten = body
 		}
 
-		// PASS 2 — provider.order injection (D-C2).
-		patched, err2 := injectProviderOrder(rewritten, providerOrder, allowFallbacks)
+		// PASS 2 — provider injection. quick 260830-o2j precedence (Pedro,
+		// 2026-08-30): TENANT provider_prefs > (alias, openrouter-chat) row
+		// prefs > legacy global env pin (D-C2 order + allow_fallbacks). A
+		// resolved prefs object is injected VERBATIM as the whole `provider`
+		// field; the client-supplied `provider` never wins.
+		var patched []byte
+		var err2 error
+		if prefs := resolveProviderPrefs(r.Context(), tenantPrefs, resolver, modelAliasFromBody(body), upstreamName); prefs != nil {
+			patched, err2 = injectProviderPrefs(rewritten, prefs)
+		} else {
+			patched, err2 = injectProviderOrder(rewritten, providerOrder, allowFallbacks)
+		}
 		if err2 != nil {
 			// R12: WARN log — provider.order injection is the load-bearing
 			// pin; failing means the request goes to OpenRouter without
@@ -168,4 +188,47 @@ func injectProviderOrder(body []byte, order []string, allowFallbacks bool) ([]by
 	}
 	m["provider"] = providerBytes
 	return json.Marshal(m)
+}
+
+// injectProviderPrefs replaces the request's `provider` object with the
+// stored per-model prefs (already validated at write time by
+// models.ValidateProviderPrefs). Client-supplied `provider` is overwritten —
+// gateway policy always wins, same as injectProviderOrder.
+func injectProviderPrefs(body []byte, prefs []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	m["provider"] = json.RawMessage(prefs)
+	return json.Marshal(m)
+}
+
+// modelAliasFromBody extracts the ORIGINAL (pre-rewrite) `model` string so
+// the per-model prefs lookup keys on the alias the client sent, not on the
+// rewritten target. Returns "" on any parse miss (→ no prefs → legacy path).
+func modelAliasFromBody(body []byte) string {
+	var m struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return ""
+	}
+	return m.Model
+}
+
+// resolveProviderPrefs applies the tenant > alias precedence. The tenant id
+// comes from the auth context stamped by auth.Middleware; an unauthenticated
+// request (tests, internal probes) simply skips the tenant layer.
+func resolveProviderPrefs(ctx context.Context, tenantPrefs TenantPrefsLookup, resolver *models.Resolver, alias, upstreamName string) []byte {
+	if tenantPrefs != nil {
+		if ac, ok := auth.FromContext(ctx); ok {
+			if p := tenantPrefs.ProviderPrefsByTenantID(ac.TenantID); p != nil {
+				return p
+			}
+		}
+	}
+	if resolver == nil || alias == "" {
+		return nil
+	}
+	return resolver.ProviderPrefs(alias, upstreamName)
 }

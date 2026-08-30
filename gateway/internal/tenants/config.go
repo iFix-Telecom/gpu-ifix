@@ -45,6 +45,11 @@ type TenantConfig struct {
 	RPSLimit int
 	RPMLimit int
 
+	// ProviderPrefs (quick 260830-o2j) — optional OpenRouter `provider`
+	// routing object applied to EVERY openrouter-chat call of this tenant.
+	// Validated at write time (models.ValidateProviderPrefs); nil = unset.
+	ProviderPrefs []byte
+
 	// Phase 5 — fairness per-tenant hard caps (D-B1 / D-B2). Zero value
 	// means "no cap configured"; the shed middleware treats that as
 	// default-cap-for-role (see shed.middleware.defaultCapForRole).

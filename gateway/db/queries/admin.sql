@@ -6,7 +6,7 @@ RETURNING id, slug, name, created_at, updated_at;
 SELECT id, slug, name, created_at, updated_at FROM ai_gateway.tenants WHERE slug = $1;
 
 -- name: ListTenants :many
-SELECT id, slug, name, created_at, updated_at FROM ai_gateway.tenants ORDER BY created_at DESC;
+SELECT id, slug, name, provider_prefs, created_at, updated_at FROM ai_gateway.tenants ORDER BY created_at DESC;
 
 -- name: InsertAPIKey :one
 -- key_lookup_hash is the SHA-256 (raw bytes) of the full raw key. Computed by

@@ -354,6 +354,10 @@ type Querier interface {
 	// rejects sensitive+peak at the DB layer (D-C1 path 2). The CLI also rejects
 	// pre-DB (path 1) for a clearer error message.
 	UpdateTenantMode(ctx context.Context, arg UpdateTenantModeParams) error
+	// quick 260830-o2j: per-tenant OpenRouter provider routing (NULL clears).
+	// Fires the tenants_update_notify trigger (0037 adds provider_prefs to the
+	// WHEN list) so every replica's tenants.Loader hot-reloads.
+	UpdateTenantProviderPrefs(ctx context.Context, arg UpdateTenantProviderPrefsParams) (int64, error)
 	// Partial UPDATE -- fields passed as NULL via sqlc.narg are left unchanged.
 	UpdateTenantQuota(ctx context.Context, arg UpdateTenantQuotaParams) error
 	// Phase 5 — partial UPDATE for per-tenant shed limits (D-B1 / D-B2). Fields
@@ -378,6 +382,8 @@ type Querier interface {
 	// Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
 	// Keeping the data-access via sqlc (rather than ad-hoc SQL in the CLI) keeps
 	// a single source of truth on the composite PK semantic + UPSERT shape.
+	// quick 260830-o2j: provider_prefs ($5, nullable jsonb) travels with the row —
+	// NULL clears any previous per-model provider preference.
 	UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error
 }
 

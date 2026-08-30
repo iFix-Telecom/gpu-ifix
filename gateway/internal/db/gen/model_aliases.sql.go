@@ -26,7 +26,7 @@ func (q *Queries) DeleteModelAlias(ctx context.Context, arg DeleteModelAliasPara
 }
 
 const getModelAlias = `-- name: GetModelAlias :one
-SELECT alias, upstream, target, upstream_name FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
+SELECT alias, upstream, target, upstream_name, provider_prefs FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
 `
 
 type GetModelAliasParams struct {
@@ -35,10 +35,11 @@ type GetModelAliasParams struct {
 }
 
 type GetModelAliasRow struct {
-	Alias        string `json:"alias"`
-	Upstream     string `json:"upstream"`
-	Target       string `json:"target"`
-	UpstreamName string `json:"upstream_name"`
+	Alias         string `json:"alias"`
+	Upstream      string `json:"upstream"`
+	Target        string `json:"target"`
+	UpstreamName  string `json:"upstream_name"`
+	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
 func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (GetModelAliasRow, error) {
@@ -49,19 +50,21 @@ func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (G
 		&i.Upstream,
 		&i.Target,
 		&i.UpstreamName,
+		&i.ProviderPrefs,
 	)
 	return i, err
 }
 
 const listModelAliases = `-- name: ListModelAliases :many
-SELECT alias, upstream, target, upstream_name FROM ai_gateway.model_aliases ORDER BY alias, upstream_name
+SELECT alias, upstream, target, upstream_name, provider_prefs FROM ai_gateway.model_aliases ORDER BY alias, upstream_name
 `
 
 type ListModelAliasesRow struct {
-	Alias        string `json:"alias"`
-	Upstream     string `json:"upstream"`
-	Target       string `json:"target"`
-	UpstreamName string `json:"upstream_name"`
+	Alias         string `json:"alias"`
+	Upstream      string `json:"upstream"`
+	Target        string `json:"target"`
+	UpstreamName  string `json:"upstream_name"`
+	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
 func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error) {
@@ -78,6 +81,7 @@ func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, 
 			&i.Upstream,
 			&i.Target,
 			&i.UpstreamName,
+			&i.ProviderPrefs,
 		); err != nil {
 			return nil, err
 		}
@@ -90,27 +94,33 @@ func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, 
 }
 
 const upsertModelAlias = `-- name: UpsertModelAlias :exec
-INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (alias, upstream_name) DO UPDATE SET target = EXCLUDED.target
+INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name, provider_prefs)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (alias, upstream_name) DO UPDATE
+    SET target = EXCLUDED.target,
+        provider_prefs = EXCLUDED.provider_prefs
 `
 
 type UpsertModelAliasParams struct {
-	Alias        string `json:"alias"`
-	Upstream     string `json:"upstream"`
-	Target       string `json:"target"`
-	UpstreamName string `json:"upstream_name"`
+	Alias         string `json:"alias"`
+	Upstream      string `json:"upstream"`
+	Target        string `json:"target"`
+	UpstreamName  string `json:"upstream_name"`
+	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
 // Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
 // Keeping the data-access via sqlc (rather than ad-hoc SQL in the CLI) keeps
 // a single source of truth on the composite PK semantic + UPSERT shape.
+// quick 260830-o2j: provider_prefs ($5, nullable jsonb) travels with the row —
+// NULL clears any previous per-model provider preference.
 func (q *Queries) UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error {
 	_, err := q.db.Exec(ctx, upsertModelAlias,
 		arg.Alias,
 		arg.Upstream,
 		arg.Target,
 		arg.UpstreamName,
+		arg.ProviderPrefs,
 	)
 	return err
 }

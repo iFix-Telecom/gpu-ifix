@@ -28,3 +28,14 @@ func NewResolverForTesting(fixture map[[2]string]string) *Resolver {
 		aliases: aliases,
 	}
 }
+
+// SetProviderPrefsForTesting stores a provider_prefs blob for (alias,
+// upstream) on a test Resolver (quick 260830-o2j). TESTS ONLY.
+func (r *Resolver) SetProviderPrefsForTesting(alias, upstream string, raw []byte) {
+	r.mu.Lock()
+	if r.prefs == nil {
+		r.prefs = map[aliasKey][]byte{}
+	}
+	r.prefs[aliasKey{Alias: alias, Upstream: upstream}] = raw
+	r.mu.Unlock()
+}
