@@ -60,7 +60,7 @@ Thumbs.db
 # Local agent + scratch (added 2026-05-26 for Phase 10 cut-release porcelain gate)
 .claude/
 ConverseAI_GPU_Stack_Guide.*
-gatewayctl
+/gatewayctl
 pod/health-bridge/health-bridge
 
 # Playwright MCP snapshots — capture form input (passwords); never commit
