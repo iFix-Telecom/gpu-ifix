@@ -14,6 +14,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import {
   Activity,
+  Boxes,
   LogOut,
   Receipt,
   ScrollText,
@@ -47,6 +48,7 @@ const NAV_ITEMS = [
   { href: "/consumo", label: "Consumo", icon: Receipt },
   { href: "/operacao", label: "Operação", icon: ServerCog },
   { href: "/operacao/config", label: "Config do pod", icon: SlidersHorizontal },
+  { href: "/modelos", label: "Modelos & upstreams", icon: Boxes },
   { href: "/economia", label: "Economia", icon: TrendingUp },
   { href: "/incidents", label: "Histórico de incidentes", icon: ScrollText },
 ] as const;

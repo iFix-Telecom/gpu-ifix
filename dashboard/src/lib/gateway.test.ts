@@ -477,6 +477,7 @@ describe("fetchTenants", () => {
         id: "8f1c0d2e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
         slug: "converseai",
         name: "ConverseAI",
+        provider_prefs: null,
         created_at: "2026-05-26T20:53:00Z",
         updated_at: "2026-05-26T20:53:00Z",
       },

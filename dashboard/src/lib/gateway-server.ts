@@ -18,7 +18,12 @@ import "server-only";
  */
 
 import { gatewayAdminGet } from "@/lib/gateway-admin";
-import type { PodConfigResponse, TenantRow } from "@/lib/gateway";
+import type {
+  ModelAliasRow,
+  PodConfigResponse,
+  TenantRow,
+  UpstreamRow,
+} from "@/lib/gateway";
 
 /**
  * GET /admin/primary/config from a SERVER context — the `/operacao/config` RSC
@@ -34,4 +39,14 @@ export function fetchPodConfigServer(): Promise<PodConfigResponse> {
  */
 export function fetchTenantsServer(): Promise<TenantRow[]> {
   return gatewayAdminGet<TenantRow[]>("tenants");
+}
+
+/** GET /admin/model-aliases from a SERVER context (quick 260830-o2j, /modelos RSC). */
+export function fetchModelAliasesServer(): Promise<ModelAliasRow[]> {
+  return gatewayAdminGet<ModelAliasRow[]>("model-aliases");
+}
+
+/** GET /admin/upstreams from a SERVER context (quick 260830-o2j, /modelos RSC). */
+export function fetchUpstreamsServer(): Promise<UpstreamRow[]> {
+  return gatewayAdminGet<UpstreamRow[]>("upstreams");
 }

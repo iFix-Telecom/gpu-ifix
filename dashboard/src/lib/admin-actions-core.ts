@@ -48,9 +48,15 @@ import { getDb, schema } from "@/lib/db";
 import { sendMail } from "@/lib/email";
 import type { PodConfigResponse } from "@/lib/gateway";
 import {
+  gatewayAdminDelete as realGatewayAdminDelete,
   gatewayAdminPatch as realGatewayAdminPatch,
   gatewayAdminPost as realGatewayAdminPost,
+  gatewayAdminPut as realGatewayAdminPut,
 } from "@/lib/gateway-admin";
+import {
+  type ProviderPrefs,
+  validateProviderPrefs,
+} from "@/lib/provider-prefs";
 // The owner write actions run ONLY in a server (server-action) context, so the
 // refetch-for-validation must use the server-safe reader: `fetchPodConfig`
 // (gateway.ts) hits the RELATIVE proxy path `/api/gateway/*`, which throws
@@ -899,4 +905,233 @@ async function deleteUser(
     model: "user",
     where: [{ field: "id", value: userId }],
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// quick 260830-o2j — "controle total" owner mutations: model-alias CRUD (+
+// OpenRouter provider_prefs), per-tenant provider_prefs, upstream enabled
+// flag, primary pod force-up/force-down. Same shape as the tenant actions:
+// requireOwner FIRST → server-side validation → gateway call (server-only
+// helper) → EXACTLY one audit row → revalidate.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Injectable gateway seams for the control mutations (unit tests). */
+export interface ControlMutationDeps {
+  put?: typeof realGatewayAdminPut;
+  del?: typeof realGatewayAdminDelete;
+  post?: typeof realGatewayAdminPost;
+}
+
+/** Mirrors gatewayctl R10: non-empty, no whitespace/control chars, length cap. */
+const ALIAS_FIELD_RE = /^[^\s\x00-\x1f\x7f]+$/;
+function assertAliasField(name: string, val: string, max: number): string {
+  const v = (val ?? "").trim();
+  if (v === "" || v.length > max || !ALIAS_FIELD_RE.test(v)) {
+    throw new Error(
+      `${name} inválido — sem espaços/controle, máx ${max} caracteres.`,
+    );
+  }
+  return v;
+}
+
+/** The only upstream whose director consumes provider_prefs. */
+const PROVIDER_PREFS_UPSTREAM = "openrouter-chat";
+
+/**
+ * Create or update a model_aliases row (alias, upstream_name) with target and
+ * optional OpenRouter provider_prefs (openrouter-chat only). Owner-gated;
+ * validated server-side; PUT /admin/model-aliases; one `model_alias.upsert`
+ * audit row `{alias, upstream_name, target, has_provider_prefs}`.
+ */
+export async function upsertModelAliasCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  alias: string;
+  upstreamName: string;
+  target: string;
+  providerPrefs?: unknown;
+  deps?: ControlMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+
+  const alias = assertAliasField("alias", args.alias, 64);
+  const upstreamName = assertAliasField("upstream_name", args.upstreamName, 64);
+  const target = assertAliasField("target", args.target, 128);
+  let prefs: ProviderPrefs | null = null;
+  if (args.providerPrefs !== undefined && args.providerPrefs !== null) {
+    if (upstreamName !== PROVIDER_PREFS_UPSTREAM) {
+      throw new Error(
+        `provider_prefs só se aplica ao upstream ${PROVIDER_PREFS_UPSTREAM}.`,
+      );
+    }
+    prefs = validateProviderPrefs(args.providerPrefs);
+  }
+
+  const put = args.deps?.put ?? realGatewayAdminPut;
+  await put("model-aliases", {
+    alias,
+    upstream_name: upstreamName,
+    target,
+    provider_prefs: prefs,
+  });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "model_alias.upsert",
+    metadata: {
+      alias,
+      upstream_name: upstreamName,
+      target,
+      has_provider_prefs: prefs !== null,
+    },
+  });
+  safeRevalidateModelos();
+}
+
+/** Delete a model_aliases row. One `model_alias.delete` audit row. */
+export async function deleteModelAliasCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  alias: string;
+  upstreamName: string;
+  deps?: ControlMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+  const alias = assertAliasField("alias", args.alias, 64);
+  const upstreamName = assertAliasField("upstream_name", args.upstreamName, 64);
+
+  const del = args.deps?.del ?? realGatewayAdminDelete;
+  await del(
+    `model-aliases/${encodeURIComponent(alias)}/${encodeURIComponent(upstreamName)}`,
+  );
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "model_alias.delete",
+    metadata: { alias, upstream_name: upstreamName },
+  });
+  safeRevalidateModelos();
+}
+
+/**
+ * Set (or clear with null) a tenant's OpenRouter provider_prefs — the HIGHEST
+ * precedence layer. PUT /admin/tenants/{slug}/provider-prefs; one
+ * `tenant.provider_prefs` audit row `{slug, has_provider_prefs}`.
+ */
+export async function setTenantProviderPrefsCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  slug: string;
+  providerPrefs: unknown;
+  deps?: ControlMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+  const slug = (args.slug ?? "").trim();
+  if (!TENANT_SLUG_RE.test(slug)) {
+    throw new Error("Slug inválido.");
+  }
+  const prefs = validateProviderPrefs(args.providerPrefs);
+
+  const put = args.deps?.put ?? realGatewayAdminPut;
+  await put(`tenants/${encodeURIComponent(slug)}/provider-prefs`, {
+    provider_prefs: prefs,
+  });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "tenant.provider_prefs",
+    metadata: { slug, has_provider_prefs: prefs !== null },
+  });
+  safeRevalidateTenants();
+}
+
+/**
+ * Enable/disable an upstream. POST /admin/upstreams/{name}/enabled — the
+ * gateway refuses to disable the last enabled upstream of a role (409). One
+ * `upstream.set_enabled` audit row `{name, enabled}`.
+ */
+export async function setUpstreamEnabledCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  name: string;
+  enabled: boolean;
+  deps?: ControlMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+  const name = assertAliasField("upstream", args.name, 64);
+  if (typeof args.enabled !== "boolean") {
+    throw new Error("enabled deve ser true/false.");
+  }
+
+  const post = args.deps?.post ?? realGatewayAdminPost;
+  await post(`upstreams/${encodeURIComponent(name)}/enabled`, {
+    enabled: args.enabled,
+  });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: "upstream.set_enabled",
+    metadata: { name, enabled: args.enabled },
+  });
+  safeRevalidateModelos();
+}
+
+/**
+ * Publish a primary-pod force-up / force-down request (same Redis event
+ * gatewayctl publishes; the reconciler leader applies it on its next tick).
+ * One `primary.force_up` / `primary.force_down` audit row `{reason}`.
+ */
+export async function primaryControlCore(args: {
+  actor?: Actor;
+  auth?: AuthLike;
+  db?: unknown;
+  action: "force-up" | "force-down";
+  reason?: string;
+  deps?: ControlMutationDeps;
+}): Promise<void> {
+  const authInstance = args.auth ?? (realAuth as unknown as AuthLike);
+  const { actor } = await requireOwner(args.actor, authInstance);
+  if (args.action !== "force-up" && args.action !== "force-down") {
+    throw new Error("Ação inválida.");
+  }
+  const reason = (args.reason ?? "").replace(/[\r\n\x00]/g, " ").trim().slice(0, 200);
+
+  const post = args.deps?.post ?? realGatewayAdminPost;
+  await post(`primary/${args.action}`, { reason: reason || "manual" });
+
+  await writeAuditLog({
+    db: args.db,
+    actor: { id: actor.id, email: actor.email },
+    action: args.action === "force-up" ? "primary.force_up" : "primary.force_down",
+    metadata: { reason: reason || "manual" },
+  });
+  safeRevalidateOperacao();
+}
+
+function safeRevalidateModelos(): void {
+  try {
+    revalidatePath("/modelos");
+  } catch {
+    // Not inside a Next.js request scope (unit test) — nothing to revalidate.
+  }
+}
+
+function safeRevalidateOperacao(): void {
+  try {
+    revalidatePath("/operacao");
+  } catch {
+    // Not inside a Next.js request scope (unit test) — nothing to revalidate.
+  }
 }

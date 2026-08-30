@@ -42,12 +42,19 @@ vi.mock("@/lib/email", () => ({
 // server-only PATCH helper. The owner write actions (Plan 17-05) refetch the
 // config via fetchPodConfig server-side, validate, then PATCH via
 // gatewayAdminPatch — both are mocked so no proxy/network/admin-key is touched.
-const { fetchPodConfigMock, gatewayAdminPatchMock, gatewayAdminPostMock } =
-  vi.hoisted(() => ({
-    fetchPodConfigMock: vi.fn(),
-    gatewayAdminPatchMock: vi.fn(),
-    gatewayAdminPostMock: vi.fn(),
-  }));
+const {
+  fetchPodConfigMock,
+  gatewayAdminPatchMock,
+  gatewayAdminPostMock,
+  gatewayAdminPutMock,
+  gatewayAdminDeleteMock,
+} = vi.hoisted(() => ({
+  fetchPodConfigMock: vi.fn(),
+  gatewayAdminPatchMock: vi.fn(),
+  gatewayAdminPostMock: vi.fn(),
+  gatewayAdminPutMock: vi.fn(),
+  gatewayAdminDeleteMock: vi.fn(),
+}));
 // The owner write actions refetch live config via `fetchPodConfigServer`
 // (gateway-server.ts) — the server-safe reader. Mock THAT, and leave
 // `@/lib/gateway` real so `GatewayError` (imported by gateway-server) resolves.
@@ -60,6 +67,8 @@ vi.mock("@/lib/gateway-server", () => ({
 vi.mock("@/lib/gateway-admin", () => ({
   gatewayAdminPatch: gatewayAdminPatchMock,
   gatewayAdminPost: gatewayAdminPostMock,
+  gatewayAdminPut: gatewayAdminPutMock,
+  gatewayAdminDelete: gatewayAdminDeleteMock,
 }));
 
 // `requireOwner`'s session path calls `next/headers` `headers()`, which throws
@@ -821,5 +830,151 @@ describe("admin-actions — TEN-UI-08/09 tenant management (Plan 18-03)", () => 
     const row = db.adminAuditLog[0];
     expect(row.action).toBe("key.revoke");
     expect(row.metadata).toEqual({ key_id: "key-123" });
+  });
+});
+
+describe("admin-actions — quick 260830-o2j controle total (aliases / prefs / upstreams / pod)", () => {
+  beforeEach(() => {
+    gatewayAdminPostMock.mockReset();
+    gatewayAdminPutMock.mockReset();
+    gatewayAdminDeleteMock.mockReset();
+  });
+
+  type Core = (args: unknown) => Promise<unknown>;
+  const owner = { id: "ow-1", email: "ow@ifixtelecom.com.br", role: "owner" };
+
+  it("upsertModelAlias: operator rejected — NO gateway call, NO audit row", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.upsertModelAliasCore as Core;
+    const db = freshDb();
+    await expect(
+      fn({ actor: { role: "operator" }, db, alias: "a", upstreamName: "openrouter-chat", target: "x" }),
+    ).rejects.toThrow();
+    expect(gatewayAdminPutMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("upsertModelAlias: owner success — PUT model-aliases with CANONICAL prefs + one audit row (no raw prefs in audit)", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.upsertModelAliasCore as Core;
+    const db = freshDb();
+    gatewayAdminPutMock.mockResolvedValue({});
+    await fn({
+      actor: owner,
+      db,
+      alias: "gpt-4o",
+      upstreamName: "openrouter-chat",
+      target: "deepseek/deepseek-v4-flash",
+      providerPrefs: {
+        only: ["novita", "deepinfra"],
+        allow_fallbacks: true,
+        quantizations: ["bf16", "fp16"],
+        max_price: { prompt: 0.14, completion: 0.5 },
+        preferred_max_latency: { p90: 3 },
+        data_collection: "deny",
+        zdr: true,
+      },
+    });
+    expect(gatewayAdminPutMock).toHaveBeenCalledTimes(1);
+    const [path, body] = gatewayAdminPutMock.mock.calls[0];
+    expect(path).toBe("model-aliases");
+    expect(body).toMatchObject({
+      alias: "gpt-4o",
+      upstream_name: "openrouter-chat",
+      target: "deepseek/deepseek-v4-flash",
+      provider_prefs: { only: ["novita", "deepinfra"], zdr: true, data_collection: "deny" },
+    });
+    expect(db.adminAuditLog.length).toBe(1);
+    expect(db.adminAuditLog[0].action).toBe("model_alias.upsert");
+    expect(db.adminAuditLog[0].metadata).toEqual({
+      alias: "gpt-4o",
+      upstream_name: "openrouter-chat",
+      target: "deepseek/deepseek-v4-flash",
+      has_provider_prefs: true,
+    });
+  });
+
+  it("upsertModelAlias: invalid prefs / prefs on non-openrouter / whitespace alias throw BEFORE any gateway call", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.upsertModelAliasCore as Core;
+    const db = freshDb();
+    const bad = [
+      { alias: "a", upstreamName: "openrouter-chat", target: "x", providerPrefs: { nope: 1 } },
+      { alias: "a", upstreamName: "openrouter-chat", target: "x", providerPrefs: { data_collection: "maybe" } },
+      { alias: "a", upstreamName: "openrouter-chat", target: "x", providerPrefs: { quantizations: ["q4"] } },
+      { alias: "a", upstreamName: "openrouter-chat", target: "x", providerPrefs: { max_price: { prompt: -1 } } },
+      { alias: "a", upstreamName: "local-llm", target: "x", providerPrefs: { zdr: true } },
+      { alias: "my alias", upstreamName: "openrouter-chat", target: "x" },
+      { alias: "a", upstreamName: "openrouter-chat", target: "" },
+    ];
+    for (const args of bad) {
+      await expect(fn({ actor: owner, db, ...args })).rejects.toThrow();
+    }
+    expect(gatewayAdminPutMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("deleteModelAlias: owner success — DELETE model-aliases/{alias}/{upstream} + one audit row", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.deleteModelAliasCore as Core;
+    const db = freshDb();
+    gatewayAdminDeleteMock.mockResolvedValue(undefined);
+    await fn({ actor: owner, db, alias: "gpt-4o", upstreamName: "openrouter-chat" });
+    expect(gatewayAdminDeleteMock).toHaveBeenCalledWith("model-aliases/gpt-4o/openrouter-chat");
+    expect(db.adminAuditLog.length).toBe(1);
+    expect(db.adminAuditLog[0].action).toBe("model_alias.delete");
+  });
+
+  it("setTenantProviderPrefs: owner sets + clears (null) — PUT tenants/{slug}/provider-prefs; operator rejected", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.setTenantProviderPrefsCore as Core;
+    const db = freshDb();
+    gatewayAdminPutMock.mockResolvedValue({});
+    await fn({ actor: owner, db, slug: "chat-ifix", providerPrefs: { order: ["novita"], allow_fallbacks: false } });
+    await fn({ actor: owner, db, slug: "chat-ifix", providerPrefs: null });
+    expect(gatewayAdminPutMock).toHaveBeenCalledTimes(2);
+    expect(gatewayAdminPutMock.mock.calls[0][0]).toBe("tenants/chat-ifix/provider-prefs");
+    expect(gatewayAdminPutMock.mock.calls[0][1]).toEqual({ provider_prefs: { order: ["novita"], allow_fallbacks: false } });
+    expect(gatewayAdminPutMock.mock.calls[1][1]).toEqual({ provider_prefs: null });
+    expect(db.adminAuditLog.map((r: { action: string }) => r.action)).toEqual([
+      "tenant.provider_prefs",
+      "tenant.provider_prefs",
+    ]);
+    expect(db.adminAuditLog[1].metadata).toEqual({ slug: "chat-ifix", has_provider_prefs: false });
+
+    await expect(
+      fn({ actor: { role: "operator" }, db, slug: "chat-ifix", providerPrefs: { zdr: true } }),
+    ).rejects.toThrow();
+    expect(gatewayAdminPutMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("setUpstreamEnabled: owner → POST upstreams/{name}/enabled + audit; operator rejected", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.setUpstreamEnabledCore as Core;
+    const db = freshDb();
+    gatewayAdminPostMock.mockResolvedValue(undefined);
+    await fn({ actor: owner, db, name: "local-tts", enabled: true });
+    expect(gatewayAdminPostMock).toHaveBeenCalledWith("upstreams/local-tts/enabled", { enabled: true });
+    expect(db.adminAuditLog[0].action).toBe("upstream.set_enabled");
+    expect(db.adminAuditLog[0].metadata).toEqual({ name: "local-tts", enabled: true });
+    await expect(fn({ actor: { role: "operator" }, db, name: "local-tts", enabled: false })).rejects.toThrow();
+    expect(gatewayAdminPostMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("primaryControl: owner → POST primary/force-up|force-down with sanitized reason + audit; bad action rejected", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.primaryControlCore as Core;
+    const db = freshDb();
+    gatewayAdminPostMock.mockResolvedValue({ queued: true });
+    await fn({ actor: owner, db, action: "force-up", reason: "teste\nlinha" });
+    await fn({ actor: owner, db, action: "force-down" });
+    expect(gatewayAdminPostMock.mock.calls[0]).toEqual(["primary/force-up", { reason: "teste linha" }]);
+    expect(gatewayAdminPostMock.mock.calls[1]).toEqual(["primary/force-down", { reason: "manual" }]);
+    expect(db.adminAuditLog.map((r: { action: string }) => r.action)).toEqual([
+      "primary.force_up",
+      "primary.force_down",
+    ]);
+    await expect(fn({ actor: owner, db, action: "destroy" })).rejects.toThrow();
+    expect(gatewayAdminPostMock).toHaveBeenCalledTimes(2);
   });
 });

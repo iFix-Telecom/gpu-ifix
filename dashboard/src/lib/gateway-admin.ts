@@ -33,7 +33,7 @@ import { GatewayError } from "@/lib/gateway";
  * empty). The admin key is read from `process.env` here and NEVER returned.
  */
 async function gatewayAdminMutate<T = void>(
-  method: "POST" | "PATCH",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
   body: unknown,
 ): Promise<T> {
@@ -165,4 +165,23 @@ export async function gatewayAdminPost<T = void>(
   body: unknown,
 ): Promise<T> {
   return gatewayAdminMutate<T>("POST", path, body);
+}
+
+/**
+ * PUT the gateway admin API (quick 260830-o2j: /admin/model-aliases,
+ * /admin/tenants/{slug}/provider-prefs). Returns the gateway JSON verbatim.
+ */
+export async function gatewayAdminPut<T = void>(
+  path: string,
+  body: unknown,
+): Promise<T> {
+  return gatewayAdminMutate<T>("PUT", path, body);
+}
+
+/**
+ * DELETE on the gateway admin API (quick 260830-o2j:
+ * /admin/model-aliases/{alias}/{upstream}). 204 → resolves void.
+ */
+export async function gatewayAdminDelete(path: string): Promise<void> {
+  await gatewayAdminMutate<void>("DELETE", path, undefined);
 }

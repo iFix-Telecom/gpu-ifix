@@ -12,6 +12,8 @@
  * against these types.
  */
 
+import type { ProviderPrefs } from "@/lib/provider-prefs";
+
 /** Base path of the server-side proxy. All wrappers go through here. */
 const GATEWAY_PROXY_BASE = "/api/gateway";
 
@@ -583,6 +585,8 @@ export interface TenantRow {
   id: string;
   slug: string;
   name: string;
+  /** quick 260830-o2j — per-tenant OpenRouter provider routing (null = unset). */
+  provider_prefs: ProviderPrefs | null;
   created_at: string;
   updated_at: string;
 }
@@ -606,4 +610,45 @@ export function fetchTenants(): Promise<TenantRow[]> {
 /** GET /admin/tenants/{slug}/keys — every API key for one tenant. */
 export function fetchTenantKeys(slug: string): Promise<TenantKeyRow[]> {
   return proxyGet<TenantKeyRow[]>(`tenants/${encodeURIComponent(slug)}/keys`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// quick 260830-o2j — model aliases + upstreams (dashboard "controle total").
+// Mirrors admin.ModelAliasRow / admin.UpstreamRow FIELD-FOR-FIELD. Reads go
+// through the GET-only proxy; mutations live in admin-actions (server-only).
+// ──────────────────────────────────────────────────────────────────────────
+
+/** One model_aliases row. `provider_prefs` only meaningful for openrouter-chat. */
+export interface ModelAliasRow {
+  alias: string;
+  upstream_name: string;
+  role: string;
+  target: string;
+  provider_prefs: ProviderPrefs | null;
+}
+
+/** One upstreams row (env var NAMES only — never resolved values). */
+export interface UpstreamRow {
+  name: string;
+  role: string;
+  tier: number;
+  tier_priority: number;
+  enabled: boolean;
+  url_env: string;
+  has_auth: boolean;
+  last_probe_at: string | null;
+  last_probe_ms: number | null;
+  last_probe_status: string | null;
+  last_probe_error: string | null;
+  updated_at: string;
+}
+
+/** GET /admin/model-aliases — every alias row, ordered (alias, upstream_name). */
+export function fetchModelAliases(): Promise<ModelAliasRow[]> {
+  return proxyGet<ModelAliasRow[]>("model-aliases");
+}
+
+/** GET /admin/upstreams — every upstream (enabled or not) with probe state. */
+export function fetchUpstreams(): Promise<UpstreamRow[]> {
+  return proxyGet<UpstreamRow[]>("upstreams");
 }

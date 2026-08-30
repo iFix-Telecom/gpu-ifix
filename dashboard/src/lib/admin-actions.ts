@@ -34,14 +34,19 @@ import {
   type CreatedKey,
   createTenantCore,
   createTenantKeyCore,
+  deleteModelAliasCore,
   inviteOperatorCore,
+  primaryControlCore,
   removeOperatorCore,
   requireOwner,
   resetOperator2FACore,
   resetOperatorPasswordCore,
   revokeKeyCore,
+  setTenantProviderPrefsCore,
+  setUpstreamEnabledCore,
   updatePodConfigBoundCore,
   updatePodConfigCore,
+  upsertModelAliasCore,
 } from "@/lib/admin-actions-core";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -174,4 +179,51 @@ export async function createTenantKey(args: {
 export async function revokeKey(args: { keyId: string }): Promise<void> {
   const { actor } = await requireOwner();
   await revokeKeyCore({ actor, keyId: args.keyId });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// quick 260830-o2j — controle total: aliases / provider prefs / upstreams /
+// pod. Identity from session ONLY (requireOwner() without args).
+// ──────────────────────────────────────────────────────────────────────────
+
+export async function upsertModelAlias(args: {
+  alias: string;
+  upstreamName: string;
+  target: string;
+  providerPrefs?: unknown;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await upsertModelAliasCore({ actor, ...args });
+}
+
+export async function deleteModelAlias(args: {
+  alias: string;
+  upstreamName: string;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await deleteModelAliasCore({ actor, ...args });
+}
+
+export async function setTenantProviderPrefs(args: {
+  slug: string;
+  providerPrefs: unknown;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await setTenantProviderPrefsCore({ actor, ...args });
+}
+
+export async function setUpstreamEnabled(args: {
+  name: string;
+  enabled: boolean;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await setUpstreamEnabledCore({ actor, ...args });
+}
+
+export async function primaryControl(args: {
+  action: "force-up" | "force-down";
+  reason?: string;
+}): Promise<void> {
+  const { actor } = await requireOwner();
+  await primaryControlCore({ actor, ...args });
 }

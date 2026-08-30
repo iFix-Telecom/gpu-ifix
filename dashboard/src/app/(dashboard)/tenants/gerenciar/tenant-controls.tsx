@@ -64,11 +64,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ProviderPrefsEditor } from "@/components/provider-prefs-editor";
 import {
   createTenant,
   createTenantKey,
   revokeKey,
+  setTenantProviderPrefs,
 } from "@/lib/admin-actions";
+import {
+  type ProviderPrefs,
+  summarizeProviderPrefs,
+  validateProviderPrefs,
+} from "@/lib/provider-prefs";
 import {
   fetchTenantKeys,
   fetchTenants,
@@ -120,6 +127,8 @@ export function TenantControls({
     keyPrefix: string;
     slug: string;
   } | null>(null);
+  // quick 260830-o2j — per-tenant OpenRouter provider routing editor.
+  const [prefsForTenant, setPrefsForTenant] = useState<TenantRow | null>(null);
 
   async function loadKeys(slug: string) {
     setLoadingSlug(slug);
@@ -211,6 +220,8 @@ export function TenantControls({
                             isOwner={isOwner}
                             loading={loadingSlug === t.slug}
                             keys={keysBySlug[t.slug]}
+                            providerPrefs={t.provider_prefs}
+                            onEditPrefs={() => setPrefsForTenant(t)}
                             onGenerate={() => setGenForSlug(t.slug)}
                             onRevoke={(k) =>
                               setRevokeTarget({
@@ -248,6 +259,15 @@ export function TenantControls({
           onRevoked={(slug) => loadKeys(slug)}
         />
       )}
+
+      {/* (5) ROTEAMENTO OPENROUTER por tenant — owner only (quick 260830-o2j). */}
+      {isOwner && prefsForTenant && (
+        <TenantPrefsDialog
+          tenant={prefsForTenant}
+          onClose={() => setPrefsForTenant(null)}
+          onSaved={refreshTenants}
+        />
+      )}
     </div>
   );
 }
@@ -261,6 +281,8 @@ function KeyPanel({
   isOwner,
   loading,
   keys,
+  providerPrefs,
+  onEditPrefs,
   onGenerate,
   onRevoke,
 }: {
@@ -268,6 +290,8 @@ function KeyPanel({
   isOwner: boolean;
   loading: boolean;
   keys: TenantKeyRow[] | undefined;
+  providerPrefs: ProviderPrefs | null;
+  onEditPrefs: () => void;
   onGenerate: () => void;
   onRevoke: (k: TenantKeyRow) => void;
 }) {
@@ -276,6 +300,29 @@ function KeyPanel({
       className="flex flex-col gap-3 px-4 py-3"
       onClick={(e) => e.stopPropagation()}
     >
+      {/* quick 260830-o2j — per-tenant OpenRouter provider routing (highest precedence). */}
+      <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Roteamento OpenRouter (tenant)
+          </span>
+          <span
+            className="truncate text-[13px]"
+            data-testid={`tenant-prefs-${slug}`}
+            title={providerPrefs ? JSON.stringify(providerPrefs) : undefined}
+          >
+            {providerPrefs
+              ? summarizeProviderPrefs(providerPrefs)
+              : "— (herda do alias / pin global)"}
+          </span>
+        </div>
+        {isOwner && (
+          <Button type="button" size="sm" variant="outline" onClick={onEditPrefs}>
+            Editar roteamento
+          </Button>
+        )}
+      </div>
+
       <div className="flex items-center justify-between">
         <span className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
           API keys — {slug}
@@ -684,5 +731,81 @@ function RevokeKeyDialog({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// (5) Roteamento OpenRouter por tenant (quick 260830-o2j) — dialog com o
+// ProviderPrefsEditor compartilhado; "Remover" grava null (volta a herdar).
+// ──────────────────────────────────────────────────────────────────────────
+
+function TenantPrefsDialog({
+  tenant,
+  onClose,
+  onSaved,
+}: {
+  tenant: TenantRow;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [prefs, setPrefs] = useState<ProviderPrefs>(tenant.provider_prefs ?? {});
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(clear: boolean) {
+    setError(null);
+    let providerPrefs: ProviderPrefs | null = null;
+    if (!clear) {
+      try {
+        providerPrefs = validateProviderPrefs(prefs);
+      } catch (e) {
+        setError((e as Error).message);
+        return;
+      }
+    }
+    setPending(true);
+    try {
+      await setTenantProviderPrefs({ slug: tenant.slug, providerPrefs });
+      toast.success(clear ? "Roteamento removido — tenant volta a herdar." : "Roteamento do tenant salvo.");
+      await onSaved();
+      onClose();
+    } catch (e) {
+      setError((e as Error)?.message ?? GENERIC_ERROR);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto" style={{ maxWidth: 920 }}>
+        <DialogHeader>
+          <DialogTitle>Roteamento OpenRouter — {tenant.slug}</DialogTitle>
+          <DialogDescription>
+            Vale para TODOS os modelos deste tenant que caírem no OpenRouter e tem
+            precedência sobre as prefs do alias e o pin global.
+          </DialogDescription>
+        </DialogHeader>
+        <ProviderPrefsEditor value={prefs} onChange={setPrefs} />
+        {error && (
+          <p className="text-[13px] text-destructive" role="alert">
+            {error}
+          </p>
+        )}
+        <DialogFooter className="gap-2">
+          {tenant.provider_prefs && (
+            <Button type="button" variant="destructive" disabled={pending} onClick={() => void submit(true)}>
+              Remover roteamento
+            </Button>
+          )}
+          <Button type="button" variant="outline" disabled={pending} onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="button" disabled={pending} onClick={() => void submit(false)}>
+            {pending ? "Salvando…" : "Salvar"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
