@@ -2,10 +2,16 @@
 """Scheduler do pod 3060 UNIFICADO (STT+TTS+rerank+embed, instance fixa).
 
 Substitui o vast3060.py (up->destroy, speaches-only) para a era unificada
-(2026-08-26): a instancia 48611358 e' PRESERVADA — stop de noite, start de
-manha. No start, se o Vast remapear IP/portas, flipa as 4 envs do stack 38
-e valida via edge. Sem provision de maquina nova (pod tem Infinity dual-model
-instalado no disco; recriar do zero exige o onstart dual + pip install).
+(2026-08-26): a instancia e' PRESERVADA — stop de noite, start de manha. No
+start, se o Vast remapear IP/portas, flipa as 4 envs do stack 38 e valida via
+edge. Sem provision de maquina nova (pod tem Infinity dual-model instalado no
+disco; recriar do zero exige o onstart dual + pip PINADO de
+infinity-freeze.txt com --no-deps --extra-index-url cu121 — o pip solto do
+onstart quebrou em 2026-09-02: colpali-engine novo conflita com o
+transformers pinado -> ResolutionImpossible).
+
+2026-09-02: instancia 49644867 (KR, machine 148305, disco 40G) substituiu a
+48611358 (PL, 25G cronicamente a 90% — o stack instalado ocupa ~23G).
 
 Uso: unified3060.py {start|stop|status|disk}
 Secrets: /etc/onboard/secrets/vast-3060.env (VAST_API_KEY, PORTAINER_API_KEY,
@@ -13,7 +19,7 @@ DINASTIA_BASE_URL, DINASTIA_TOKEN, NOTIFY_PHONE).
 """
 import json, os, sys, time, urllib.request
 
-INSTANCE = 48611358
+INSTANCE = 49644867
 STACK = 38  # ai-gateway-prod
 PORTAINER = "https://portainer3.ifixtelecom.com.br/api"
 VAST = "https://console.vast.ai/api/v0"
