@@ -40,3 +40,22 @@ Pod POC 50176646 (3060 KR, $0,0289/h, ~1h de vida) DESTRUÍDO após download.
 - Pedro ouvir e escolher. Se Chatterbox/XTTS: produtizar = server
   OpenAI-compatible no pod unificado + upstream tts no gateway + voz clonada
   iFix (5-10s de referência). XTTS tem trava de licença comercial.
+
+
+## Rodada 2 (2026-09-07, feedback Pedro: XTTS lento / Chatterbox sotaque / Kokoro erra R)
+
+Mesmo artifact atualizado (label rodada-2): 57 clips —
+- XTTS: 4 vozes (Ana, Alma, Luis, Marcos) × 1,15/1,35× (`speed` nativo).
+- Chatterbox: **finetune oficial pt-BR** (ResembleAI/Chatterbox-Multilingual-pt-br)
+  default + clone, vs base multilingual (default/expressivo/clone).
+- Kokoro: 3 vozes (dora/alex/santa) × 1,0/1,25× (`speed` no speaches).
+- Frase nova carregada de R ("roteador... Ricardo retorna... regularizar").
+
+Gotchas novos:
+- Finetune pt-br via `from_local` exige OVERLAY: repo pt-br só tem
+  `t3_pt_br.safetensors`+grapheme; symlink base (ve.pt/s3gen.pt/conds.pt) +
+  t3_pt_br renomeado p/ `t3_mtl23ls_v2.safetensors`. Funciona (shapes batem).
+- `int(1.15*100)==114` — nome de arquivo com speed float: usar round().
+- pip PyPI ReadTimeout transiente no pod KR: `--retries 10 --timeout 60`.
+- Latência finetune ~6-9s/frase na 3060 (mais lento que base ~5-7s).
+- POC2 pod 50181552 destruído pós-download.
