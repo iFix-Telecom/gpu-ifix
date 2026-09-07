@@ -68,6 +68,9 @@ OFFER_QUERY = {
     "rentable": {"eq": True},
     "type": "on-demand",
     "gpu_ram": {"gte": 8000},
+    # maquina de 7GB RAM matou o speaches em prod (2026-09-07, provavel OOM
+    # transcrevendo call real) — exigir folga de RAM do container
+    "cpu_ram": {"gte": 12000},
     "reliability2": {"gte": 0.97},
     "inet_down": {"gte": 100},
 }

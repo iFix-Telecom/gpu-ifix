@@ -20,12 +20,22 @@ if [ -f /root/disk-guard.sh ]; then
     setsid /root/disk-guard.sh </dev/null >/dev/null 2>&1 &
 fi
 
-# ---- speaches (STT/TTS) ----
+# ---- speaches (STT/TTS) — loop supervisor: processo morreu em prod
+# (2026-09-07, provavel OOM em maquina de 7GB RAM) e nada religava ----
 export WHISPER_MODEL="${WHISPER_MODEL:-Systran/faster-whisper-large-v3}"
 cd /home/ubuntu/speaches || cd /
 UVICORN_BIN=$(command -v uvicorn || echo /home/ubuntu/speaches/.venv/bin/uvicorn)
-nohup "$UVICORN_BIN" --factory speaches.main:create_app --host 0.0.0.0 --port 8000 \
-  > /root/unified-speaches.log 2>&1 &
+if ! pgrep -f 'speaches-supervisor' >/dev/null; then
+  nohup bash -c "exec -a speaches-supervisor bash -c 'while true; do
+    if ! curl -sm3 -o /dev/null localhost:8000/health; then
+      echo \"\$(date -Is) speaches down — subindo\" >> /root/unified-speaches.log
+      \"$UVICORN_BIN\" --factory speaches.main:create_app --host 0.0.0.0 --port 8000 \
+        >> /root/unified-speaches.log 2>&1
+      echo \"\$(date -Is) speaches saiu rc=\$?\" >> /root/unified-speaches.log
+    fi
+    sleep 30
+  done'" > /dev/null 2>&1 &
+fi
 
 # ---- Infinity rerank+embed (dual-model, MESMO processo) ----
 if [ ! -x /opt/infinity/bin/infinity_emb ]; then
@@ -39,13 +49,22 @@ if [ ! -x /opt/infinity/bin/infinity_emb ]; then
   fi
 fi
 export HF_HOME=/root/.cache/huggingface
-[ -x /opt/infinity/bin/infinity_emb ] && nohup /opt/infinity/bin/infinity_emb v2 \
-  --model-id BAAI/bge-reranker-v2-m3 \
-  --served-model-name bge-reranker-v2-m3 \
-  --model-id BAAI/bge-m3 \
-  --served-model-name bge-m3 \
-  --engine torch --device cuda --dtype float16 \
-  --url-prefix /v1 --host 0.0.0.0 --port 7998 \
-  > /root/unified-infinity.log 2>&1 &
+if [ -x /opt/infinity/bin/infinity_emb ] && ! pgrep -f 'infinity-supervisor' >/dev/null; then
+  nohup bash -c "exec -a infinity-supervisor bash -c 'while true; do
+    if ! curl -sm3 -o /dev/null localhost:7998/health; then
+      echo \"\$(date -Is) infinity down — subindo\" >> /root/unified-infinity.log
+      /opt/infinity/bin/infinity_emb v2 \
+        --model-id BAAI/bge-reranker-v2-m3 \
+        --served-model-name bge-reranker-v2-m3 \
+        --model-id BAAI/bge-m3 \
+        --served-model-name bge-m3 \
+        --engine torch --device cuda --dtype float16 \
+        --url-prefix /v1 --host 0.0.0.0 --port 7998 \
+        >> /root/unified-infinity.log 2>&1
+      echo \"\$(date -Is) infinity saiu rc=\$?\" >> /root/unified-infinity.log
+    fi
+    sleep 30
+  done'" > /dev/null 2>&1 &
+fi
 
 echo "onstart concluido $(date)"
