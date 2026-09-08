@@ -360,8 +360,15 @@ def cmd_start(env, resume_id=None):
             break
         time.sleep(30)
     if gpu_temp <= 0:
-        return fail(f"GPU invisivel (gpu_temp={gpu_temp} apos 10min)", inst)
-    log(f"gpu gate ok ({gpu_temp})")
+        # telemetria gpu_temp e' NAO-CONFIAVEL em varias maquinas (2026-09-08:
+        # 0 persistente por 10min+ com XTTS gerando audio em CUDA — 2 pods
+        # bons queimados). O XTTS ja passou em health+speech acima e
+        # .to("cuda") aborta sem GPU — isso E' o gate real. Segue com WARN.
+        log(f"WARN: gpu_temp={gpu_temp} mas XTTS/CUDA validado — prosseguindo")
+        v.notify(env, "pod 3060: telemetria gpu_temp zerada mas XTTS em CUDA ok; "
+                      "prosseguindo (verificar tok/s se desconfiar)")
+    else:
+        log(f"gpu gate ok ({gpu_temp})")
 
     ok, why = v.validate_pod_direct(ip, ports["8000/tcp"])
     if not ok:
