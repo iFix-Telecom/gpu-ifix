@@ -67,4 +67,28 @@ if [ -x /opt/infinity/bin/infinity_emb ] && ! pgrep -f 'infinity-supervisor' >/d
   done'" > /dev/null 2>&1 &
 fi
 
+# ---- XTTS-v2 (TTS pt-BR :8021, decisao Pedro 2026-09-07) ----
+# venv PROPRIO: coqui-tts exige transformers >=4.54 <5, conflita com o pin
+# git do Infinity. Server /root/xtts-server.py vem do prologo (build_onstart).
+if [ ! -f /opt/xtts/.ok ]; then
+  python3 -m venv /opt/xtts
+  /opt/xtts/bin/pip install --no-cache-dir --retries 10 --timeout 60 \
+    "coqui-tts==0.27.5" "transformers==4.57.1" \
+    "torch==2.5.1" "torchaudio==2.5.1" \
+    --extra-index-url https://download.pytorch.org/whl/cu121 \
+    >> /root/unified-pip-xtts.log 2>&1 && touch /opt/xtts/.ok
+fi
+if [ -f /opt/xtts/.ok ] && [ -f /root/xtts-server.py ] && \
+   ! pgrep -f 'xtts-superviso[r]' >/dev/null; then
+  nohup bash -c "exec -a xtts-supervisor bash -c 'while true; do
+    if ! curl -sm3 -o /dev/null localhost:8021/health; then
+      echo \"\$(date -Is) xtts down — subindo\" >> /root/unified-xtts.log
+      COQUI_TOS_AGREED=1 /opt/xtts/bin/python /root/xtts-server.py \
+        >> /root/unified-xtts.log 2>&1
+      echo \"\$(date -Is) xtts saiu rc=\$?\" >> /root/unified-xtts.log
+    fi
+    sleep 30
+  done'" > /dev/null 2>&1 &
+fi
+
 echo "onstart concluido $(date)"

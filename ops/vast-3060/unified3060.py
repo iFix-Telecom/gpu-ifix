@@ -37,9 +37,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DISK_GB = 40  # stack instalado ~19-23G; 25G vivia a 90% (incidente multipart 400)
 SSH_KEY = "/home/pedro/.ssh/id_ed25519"
 # envs do stack 38 -> porta INTERNA do pod
+# TTS: 8021 = wrapper XTTS-v2 (decisao Pedro 2026-09-07; Kokoro segue vivo
+# na 8000 do speaches, piper CPU segue tier-1)
 ENVMAP = {
     "UPSTREAM_STT_URL": "8000/tcp",
-    "UPSTREAM_TTS_KOKORO_URL": "8000/tcp",
+    "UPSTREAM_TTS_KOKORO_URL": "8021/tcp",
     "UPSTREAM_RERANK_URL": "7998/tcp",
     "UPSTREAM_EMBED_GPU_URL": "7998/tcp",
 }
@@ -155,12 +157,15 @@ def build_onstart():
     via heredoc, depois roda o corpo do onstart-unified.sh. Zero ssh/scp no
     caminho feliz (key ssh nao injeta em instancia nova sem reboot)."""
     freeze = open(os.path.join(HERE, "infinity-freeze.txt")).read()
+    xtts = open(os.path.join(HERE, "xtts-server.py")).read()
     body = open(os.path.join(HERE, "onstart-unified.sh")).read()
     prolog = ("#!/bin/bash\n"
               "cat > /root/infinity-freeze.txt <<'FREEZEEOF'\n" + freeze +
               "FREEZEEOF\n"
               "cat > /root/disk-guard.sh <<'DGEOF'\n" + GUARD_SCRIPT +
-              "DGEOF\n")
+              "DGEOF\n"
+              "cat > /root/xtts-server.py <<'XTTSEOF'\n" + xtts +
+              "XTTSEOF\n")
     raw = (prolog + body).encode()
     b64 = base64.b64encode(raw).decode()
     return (f"echo {b64} | base64 -d > /root/onstart-unified.sh && "
@@ -262,6 +267,7 @@ def cmd_start(env, resume_id=None):
              "label": "stt-tts-rerank-unified",
              "onstart": build_onstart(),
              "env": {"-p 8000:8000": "1", "-p 7998:7998": "1",
+                     "-p 8021:8021": "1",
                      "WHISPER_MODEL": v.MODELS[0],
                      "HF_HOME": "/root/.cache/huggingface"},
              "runtype": "ssh"}, timeout=60)
@@ -321,10 +327,35 @@ def cmd_start(env, resume_id=None):
         return fail("infinity health timeout 30min", inst)
     log("infinity healthy")
 
-    fresh = vast_get(env, new_id) or inst
-    gpu_temp = fresh.get("gpu_temp") or 0
+    # XTTS (:8021): pip ~6G + download do modelo ~2G — ate 40min
+    for _ in range(160):
+        if health(ip, ports["8021/tcp"]): break
+        time.sleep(15)
+    else:
+        return fail("xtts health timeout 40min", inst)
+    log("xtts healthy")
+    c, _ = v.http_json("POST", f"http://{ip}:{ports['8021/tcp']}/v1/audio/speech",
+                       None, {"input": "validação de provisão", "voice": "luis"},
+                       timeout=120)
+    if c != 200:
+        return fail(f"xtts speech HTTP {c}", inst)
+    log("xtts speech ok")
+
+    # gate GPU com RETRY: gpu_temp da API Vast atrasa em instancia nova
+    # (2026-09-07: falso negativo derrubou provision com XTTS ja rodando em
+    # CUDA — telemetria populou minutos depois). XTTS healthy ja exige CUDA
+    # (.to("cuda") aborta sem GPU), entao 0 persistente + servicos ok e' quase
+    # certamente lag; ainda assim falha apos 10min sem leitura.
+    fresh = inst
+    gpu_temp = 0
+    for _ in range(20):  # ate 10min
+        fresh = vast_get(env, new_id) or inst
+        gpu_temp = fresh.get("gpu_temp") or 0
+        if gpu_temp > 0:
+            break
+        time.sleep(30)
     if gpu_temp <= 0:
-        return fail(f"GPU invisivel (gpu_temp={gpu_temp})", inst)
+        return fail(f"GPU invisivel (gpu_temp={gpu_temp} apos 10min)", inst)
     log(f"gpu gate ok ({gpu_temp})")
 
     ok, why = v.validate_pod_direct(ip, ports["8000/tcp"])
