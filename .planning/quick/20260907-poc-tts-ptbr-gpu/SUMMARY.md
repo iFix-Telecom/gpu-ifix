@@ -77,3 +77,5 @@ Fix: gate com retry 10min. Timer das 20h destruiu o pod velho no meio; órfã
 
 **Primeira subida XTTS 100% autônoma: timer 2026-09-08 07:00.** Kokoro segue
 na 8000 (fallback manual), piper CPU tier-1. Latência esperada XTTS ~3s/frase.
+
+**Validação E2E 2026-09-08 07:56 (primeira manhã XTTS):** pod 50255728 (machine 145838 KR); 4 vozes + alias pm_alex → 200 via edge (3,3-4,5s); upstream "kokoro-tts" agora serve XTTS (:8021). Retry de manhã funcionou (07:00 boot-timeout na 146149 → re-disparo pegou 145838).
