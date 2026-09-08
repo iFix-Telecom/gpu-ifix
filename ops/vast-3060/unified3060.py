@@ -167,8 +167,13 @@ def build_onstart():
               "cat > /root/xtts-server.py <<'XTTSEOF'\n" + xtts +
               "XTTSEOF\n")
     raw = (prolog + body).encode()
-    b64 = base64.b64encode(raw).decode()
-    return (f"echo {b64} | base64 -d > /root/onstart-unified.sh && "
+    # gzip: a API Vast limita onstart a 16384 chars (erro 400/3471 em
+    # 2026-09-08 quando o xtts-server engordou o b64 puro pra >16KB)
+    import gzip
+    b64 = base64.b64encode(gzip.compress(raw, 9)).decode()
+    if len(b64) > 15000:
+        raise RuntimeError(f"onstart b64 {len(b64)} perto do limite 16384")
+    return (f"echo {b64} | base64 -d | gunzip > /root/onstart-unified.sh && "
             "chmod +x /root/onstart-unified.sh && /root/onstart-unified.sh")
 
 
