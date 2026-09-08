@@ -59,3 +59,21 @@ Gotchas novos:
 - pip PyPI ReadTimeout transiente no pod KR: `--retries 10 --timeout 60`.
 - Latência finetune ~6-9s/frase na 3060 (mais lento que base ~5-7s).
 - POC2 pod 50181552 destruído pós-download.
+
+
+## Produtização (2026-09-07, decisão Pedro: XTTS com as 4 vozes)
+
+Commit b03bf4c: `xtts-server.py` (wrapper OpenAI-compatible stdlib, :8021,
+vozes ana/alma/luis/marcos + aliases pm_alex→Luis/pf_dora→Ana/pm_santa→Marcos,
+speed default 1.15, pt fixo, wav fixo) embarcado no onstart; venv `/opt/xtts`
+pinado (coqui-tts 0.27.5 + transformers 4.57.1 + torch 2.5.1 cu121);
+ENVMAP TTS→8021; provisioner espera health (40min) + valida speech.
+
+Validação no provision noturno: chegou até `xtts speech ok` e caiu num FALSO
+NEGATIVO do gate de GPU (gpu_temp=0 = telemetria atrasada da API Vast em
+instância nova; GPU real — XTTS rodou em CUDA e a API populou 59°C depois).
+Fix: gate com retry 10min. Timer das 20h destruiu o pod velho no meio; órfã
+50193014 destruída manualmente 21:04, machine 146050 desbanida.
+
+**Primeira subida XTTS 100% autônoma: timer 2026-09-08 07:00.** Kokoro segue
+na 8000 (fallback manual), piper CPU tier-1. Latência esperada XTTS ~3s/frase.
