@@ -31,15 +31,27 @@ DEFAULT_SPEED = 1.2  # 1.15 ainda lento (feedback Pedro 2026-09-08)
 
 
 def limpa_markdown(t):
-    """Clientes mandam texto com markdown e o XTTS le 'asterisco asterisco'."""
-    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    """Clientes mandam texto com markdown e o XTTS le 'asterisco asterisco'.
+    NADA e' descartado em silencio (2026-09-08: tabela deletada = 'audio
+    cortado' pro ouvinte): tabela vira fala (celulas por virgula, linha por
+    ponto) e bloco de codigo vira aviso explicito."""
+    t = re.sub(r"```.*?```", " Trecho de código omitido. ", t, flags=re.S)
     t = re.sub(r"`([^`]*)`", r"\1", t)
     t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)
     t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
     t = re.sub(r"^\s{0,3}#{1,6}\s+", "", t, flags=re.M)
-    t = re.sub(r"(\*\*|__|~~|\*|_)", "", t)
+    t = re.sub(r"(\*\*|~~|\*)", "", t)
+    t = re.sub(r"_", " ", t)
     t = re.sub(r"^\s*[-*•>]\s+", "", t, flags=re.M)
-    t = re.sub(r"^\s*\|.*\|\s*$", " ", t, flags=re.M)
+
+    def linha_tabela(m):
+        cells = [c.strip() for c in m.group(0).strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            return " "  # linha separadora |---|---|
+        falavel = [c for c in cells if c]
+        return (", ".join(falavel) + ". ") if falavel else " "
+    t = re.sub(r"^\s*\|.*\|\s*$", linha_tabela, t, flags=re.M)
+    t = t.replace("→", ", ").replace("←", ", ")
     return re.sub(r"\s+", " ", t).strip()
 
 
