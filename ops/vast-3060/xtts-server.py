@@ -43,6 +43,47 @@ def limpa_markdown(t):
     return re.sub(r"\s+", " ", t).strip()
 
 
+MESES = {1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio",
+         6: "junho", 7: "julho", 8: "agosto", 9: "setembro", 10: "outubro",
+         11: "novembro", 12: "dezembro"}
+
+
+def normaliza_ptbr(t):
+    """Termos que o XTTS fala errado (validado 2026-09-08, nota Maestro):
+    '#135'->'Cardinal 135', '08/09'->'8-9', '11:00'->'11-0', 'Av'->'Ave',
+    '...'->'ponto ponto', '<x>' engolido."""
+    t = re.sub(r"<[^>\n]{0,60}>", " ", t)          # placeholders <vacina>
+    t = re.sub(r"[.]{2,}|…", ".", t)                # reticencias
+    t = re.sub(r"#\s?(?=\d)", "número ", t)         # protocolo/card
+    t = t.replace("#", " ")
+
+    def data(m):
+        d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        if not 1 <= mo <= 12 or not 1 <= d <= 31:
+            return m.group(0)
+        s = f"{d} de {MESES[mo]}"
+        if y:
+            yy = int(y)
+            s += f" de {yy + 2000 if yy < 100 else yy}"
+        return s
+    t = re.sub(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", data, t)
+
+    def hora(m):
+        h, mi = int(m.group(1)), int(m.group(2))
+        if h > 23 or mi > 59:
+            return m.group(0)
+        return f"{h} horas" if mi == 0 else f"{h} e {mi:02d}"
+    t = re.sub(r"\b(\d{1,2})[:h](\d{2})\b", hora, t)
+
+    abrev = [(r"\bAv\.?(?=\s)", "Avenida"), (r"\bR\.(?=\s)", "Rua"),
+             (r"\bDra\.?(?=\s)", "Doutora"), (r"\bDr\.?(?=\s)", "Doutor"),
+             (r"\bSra\.?(?=\s)", "Senhora"), (r"\bSr\.?(?=\s)", "Senhor"),
+             (r"\bn[º°](?=\s?\d)", "número "), (r"\bhrs?\b", "horas")]
+    for pat, rep in abrev:
+        t = re.sub(pat, rep, t)
+    return re.sub(r"\s+", " ", t)
+
+
 def agrupa_numeros(t):
     """Numero grande (id/protocolo) lido em grupos de 3 digitos com pausa —
     '50.255.728' vira '502, 557, 28' em vez de 'cinquenta milhoes...'.
@@ -133,7 +174,7 @@ class H(BaseHTTPRequestHandler):
             voice = VOICES.get(raw_voice.lower()) or \
                 (raw_voice if raw_voice in KNOWN else "Ana Florence")
             speed = float(body.get("speed") or DEFAULT_SPEED)
-            text = agrupa_numeros(limpa_markdown(text))
+            text = agrupa_numeros(normaliza_ptbr(limpa_markdown(text)))
             pedacos = em_chunks(text) or [text]
             paths = []
             with lock:
