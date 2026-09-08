@@ -451,6 +451,21 @@ if __name__ == "__main__":
     e = v.load_env()
     cmd = sys.argv[1]
     if cmd == "start":
-        cmd_start(e, int(sys.argv[2]) if len(sys.argv) > 2 else None)
-    else:
-        {"stop": cmd_stop, "status": cmd_status, "disk": cmd_disk}[cmd](e)
+        resume = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        if resume:
+            cmd_start(e, resume)
+        else:
+            # ate 3 tentativas por manha: maquina ruim entra no avoid dentro
+            # do fail() e a proxima tentativa pega outra (2026-09-08: boot
+            # timeout unico deixou o dia inteiro sem pod)
+            for tent in range(1, 4):
+                log(f"tentativa {tent}/3")
+                try:
+                    cmd_start(e)
+                    break
+                except SystemExit as ex:
+                    # exit 2 = flip ja feito com edge duvidoso — decisao
+                    # humana, NAO re-provisionar por cima
+                    if tent == 3 or ex.code != 1:
+                        raise
+                    log(f"tentativa {tent} falhou (exit {ex.code}); re-tentando")
