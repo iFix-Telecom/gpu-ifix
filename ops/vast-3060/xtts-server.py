@@ -125,8 +125,13 @@ def agrupa_numeros(t):
 def em_chunks(t, cap=180):
     """XTTS trunca texto longo numa geracao so — dividir por sentencas e
     concatenar os wavs (feedback 2026-09-08: 'ultimo texto nao foi lido
-    completamente')."""
-    partes = re.split(r"(?<=[.!?;:\n])\s+", t)
+    completamente').
+
+    Borda de chunk PRECISA terminar em pontuacao forte: terminando em ':',
+    ',' ou palavra cortada o XTTS alucina silabas/'ponto'/palavras no fim
+    (ouvido em prod 2026-09-08: 'conversa.i', 'analisados.oi', 'ponto' falado).
+    Por isso NAO se quebra em ;/: e todo chunk e' fechado com '.'."""
+    partes = re.split(r"(?<=[.!?\n])\s+", t)
     out, cur = [], ""
     for p in partes:
         while len(p) > cap:
@@ -148,7 +153,17 @@ def em_chunks(t, cap=180):
             cur = p
     if cur:
         out.append(cur)
-    return [c for c in out if c.strip()]
+    fechados = []
+    for c in out:
+        c = c.strip()
+        if not c:
+            continue
+        if c[-1] in ",;:—-":
+            c = c[:-1].rstrip() + "."
+        elif c[-1] not in ".!?":
+            c += "."
+        fechados.append(c)
+    return fechados
 
 print("carregando XTTS-v2...", flush=True)
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
