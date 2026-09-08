@@ -79,3 +79,5 @@ Fix: gate com retry 10min. Timer das 20h destruiu o pod velho no meio; órfã
 na 8000 (fallback manual), piper CPU tier-1. Latência esperada XTTS ~3s/frase.
 
 **Validação E2E 2026-09-08 07:56 (primeira manhã XTTS):** pod 50255728 (machine 145838 KR); 4 vozes + alias pm_alex → 200 via edge (3,3-4,5s); upstream "kokoro-tts" agora serve XTTS (:8021). Retry de manhã funcionou (07:00 boot-timeout na 146149 → re-disparo pegou 145838).
+
+**Fixes de texto validados E2E 2026-09-08 (~10h):** pod 50258805; texto 430 chars com markdown+protocolo → 35s de áudio SEM truncar (transcrição do próprio gateway prova o final); sem asteriscos falados; "50.255.728"→"502, 557, 28"; R$ preservado; speed 1.2. Gotchas: onstart >16384 chars = 400/3471 (fix gzip); gpu_temp=0 persistente em várias máquinas KR = telemetria, gate agora aceita XTTS-em-CUDA como prova; 50254940 é o POD PRIMÁRIO 3090 do LLM — checar label antes de destruir qualquer instância.
