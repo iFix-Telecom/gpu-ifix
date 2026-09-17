@@ -542,9 +542,17 @@ def cmd_status(env):
                       "ports": inst.get("ports")}, indent=1))
 
 
+USAGE = "uso: unified3060.py {start [instance_id]|stop|status|disk}"
+
 if __name__ == "__main__":
-    e = v.load_env()
+    if len(sys.argv) < 2:
+        print(USAGE, file=sys.stderr)
+        sys.exit(64)
     cmd = sys.argv[1]
+    if cmd not in ("start", "stop", "status", "disk"):
+        print(f"comando desconhecido '{cmd}'. {USAGE}", file=sys.stderr)
+        sys.exit(64)
+    e = v.load_env()
     if cmd == "start":
         resume = int(sys.argv[2]) if len(sys.argv) > 2 else None
         if resume:
@@ -564,3 +572,9 @@ if __name__ == "__main__":
                     if tent == 3 or ex.code != 1:
                         raise
                     log(f"tentativa {tent} falhou (exit {ex.code}); re-tentando")
+    elif cmd == "stop":
+        cmd_stop(e)
+    elif cmd == "status":
+        cmd_status(e)
+    elif cmd == "disk":
+        cmd_disk(e)
