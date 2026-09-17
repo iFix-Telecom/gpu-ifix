@@ -17,6 +17,9 @@ Uso: unified3060.py {start|stop|status|disk}
            flipa 4 envs do stack 38, valida via edge, destroi instancia
            anterior, persiste instance_id no state.
   stop   — DESTROI a instancia do state.
+  Desde 2026-09-17: start e stop RECONCILIAM por label (sweep de orfas) —
+  provision falho destroi a nova sempre e o sweep varre o que tenha sobrado
+  do label "stt-tts-rerank-unified" (leak: 4 orfas / $13,01).
 State:   /var/lib/vast-3060/state.json (compartilhado com o legado vast3060:
          instance_id, machine_id, machine_avoid[])
 Secrets: /etc/onboard/secrets/vast-3060.env (VAST_API_KEY, PORTAINER_API_KEY,
@@ -35,6 +38,10 @@ VAST = "https://console.vast.ai/api/v0"
 STATE_PATH = "/var/lib/vast-3060/state.json"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DISK_GB = 40  # stack instalado ~19-23G; 25G vivia a 90% (incidente multipart 400)
+# label do pod unificado. Usado tanto no create quanto no sweep de orfas —
+# o sweep casa por IGUALDADE (nunca substring/prefixo), senao varreria o pod
+# primary do gateway (label "ifix-primary-lifecycle-*", 3090).
+LABEL = "stt-tts-rerank-unified"
 SSH_KEY = "/home/pedro/.ssh/id_ed25519"
 # envs do stack 38 -> porta INTERNA do pod
 # TTS: 8021 = wrapper XTTS-v2 (decisao Pedro 2026-09-07; Kokoro segue vivo
@@ -71,6 +78,71 @@ def vast_destroy(env, iid):
     c, _ = v.http("DELETE", f"{VAST}/instances/{iid}/",
                   {"Authorization": f"Bearer {env['VAST_API_KEY']}"}, timeout=40)
     return c
+
+
+def vast_list(env):
+    """Todas as instancias da conta. None = "nao sei" (HTTP != 200) — o sweep
+    trata None como "nao mexe em nada"."""
+    c, data = v.http_json("GET", f"{VAST}/instances/",
+                          {"Authorization": f"Bearer {env['VAST_API_KEY']}"},
+                          timeout=30)
+    if c != 200:
+        return None
+    return data.get("instances") or []
+
+
+def select_orphans(instances, label=LABEL, keep_id=None):
+    """PURA (sem I/O): instancias do label que NAO sao a corrente.
+
+    Filtro por IGUALDADE de label — e isso que protege o pod primary do
+    gateway ("ifix-primary-lifecycle-*", 3090) e labels legados
+    ("stt-tts-3060-auto"). NUNCA usar `in`/startswith/substring aqui.
+    """
+    out = []
+    for i in instances or []:
+        if (i.get("label") or "") != label:
+            continue
+        iid = i.get("id")
+        if iid is None:
+            continue
+        if keep_id is not None and int(iid) == int(keep_id):
+            continue
+        out.append(i)
+    return out
+
+
+def sweep_orphans(env, keep_id=None, context=""):
+    """Reconciliacao por label: destroi instancias orfas do pod unificado.
+
+    BEST-EFFORT integral — qualquer falha (listagem HTTP != 200, excecao de
+    rede, destroy que explode) apenas loga e devolve []; nunca derruba
+    provision nem stop. Notifica SO quando achou orfa (blip de API nao vira
+    spam). Fecha o leak de 2026-09-17 (orfa nunca entrava no state, entao
+    sobrevivia a todo stop das 20:00).
+    """
+    try:
+        instances = vast_list(env)
+        if instances is None:
+            log(f"sweep({context}): listagem HTTP != 200, sweep pulado")
+            return []
+        orphans = select_orphans(instances, keep_id=keep_id)
+        if not orphans:
+            log(f"sweep({context}): nenhuma orfa")
+            return []
+        killed, freed = [], 0.0
+        for o in orphans:
+            iid = int(o["id"])
+            c = vast_destroy(env, iid)
+            freed += float(o.get("dph_total") or 0)
+            killed.append(iid)
+            log(f"sweep({context}): orfa {iid} machine {o.get('machine_id')} "
+                f"${float(o.get('dph_total') or 0):.4f}/h destruida -> HTTP {c}")
+        v.notify(env, f"pod 3060 sweep ({context}): {len(killed)} orfa(s) "
+                      f"destruida(s) ids={killed} — liberado ${freed:.4f}/h")
+        return killed
+    except Exception as e:
+        log(f"sweep({context}): excecao {e} — best-effort")
+        return []
 
 def health(ip, port, timeout=8):
     c, _ = v.http("GET", f"http://{ip}:{port}/health", timeout=timeout)
@@ -269,7 +341,7 @@ def cmd_start(env, resume_id=None):
             "PUT", f"{VAST}/asks/{offer['id']}/",
             {"Authorization": f"Bearer {env['VAST_API_KEY']}"},
             {"client_id": "me", "image": v.IMAGE, "disk": DISK_GB,
-             "label": "stt-tts-rerank-unified",
+             "label": LABEL,
              "onstart": build_onstart(),
              "env": {"-p 8000:8000": "1", "-p 7998:7998": "1",
                      "-p 8021:8021": "1",
@@ -282,23 +354,25 @@ def cmd_start(env, resume_id=None):
             log(f"create falhou {c}: {resp}"); sys.exit(1)
         log(f"criada {new_id}")
 
-    def fail(step, inst=None, destroy_new=False):
-        """Falha de provision: diagnostica; destroi a nova SO em falha de
-        infra clara (boot), senao preserva pra analise. Machine -> avoid."""
+    def fail(step, inst=None):
+        """Falha de provision: diagnostica via journal e SEMPRE destroi a nova
+        (leak de GPU paga era o bug 2026-09-17: 4 orfas / $13,01 queimados —
+        os caminhos health/install/validacao/flip chamavam fail() sem pedir o
+        destroy e a instancia viva nunca voltava pra ninguem).
+        Ordem importa: diag() ANTES do destroy, senao a evidencia morre com a
+        instancia. Machine -> avoid."""
         log(f"FALHA em '{step}'")
         if inst:
             diag(env, inst)
-        if destroy_new:
-            vast_destroy(env, new_id)
-            log(f"nova {new_id} destruida")
+        c = vast_destroy(env, new_id)
+        log(f"nova {new_id} destruida -> HTTP {c}")
         bad = offer.get("machine_id")
         if bad and bad not in st.get("machine_avoid", []):
             st.setdefault("machine_avoid", []).append(bad)
             save_state(st)
         v.notify(env, f"pod 3060: provision falhou em '{step}' "
-                      f"(machine {bad} -> avoid; nova "
-                      f"{'destruida' if destroy_new else f'{new_id} preservada p/ diagnostico'}); "
-                      "anterior intacta se existia")
+                      f"(machine {bad} -> avoid; nova {new_id} DESTRUIDA, "
+                      "diagnostico no journal/log); anterior intacta se existia")
         sys.exit(1)
 
     inst = None
@@ -308,7 +382,7 @@ def cmd_start(env, resume_id=None):
         if inst and inst.get("actual_status") == "running" and inst.get("ports"):
             break
     else:
-        return fail("boot timeout 15min", inst, destroy_new=True)
+        return fail("boot timeout 15min", inst)
     ip = inst["public_ipaddr"]
     ports = {k: int(p[0]["HostPort"]) for k, p in inst["ports"].items()}
     log(f"running ip={ip} ports={ports}")
@@ -416,19 +490,28 @@ def cmd_start(env, resume_id=None):
                   f"({offer.get('geolocation')}, ${offer.get('dph_total', 0):.4f}/h, "
                   f"disco {DISK_GB}G) {ip} "
                   f"8000->{ports['8000/tcp']} 7998->{ports['7998/tcp']}")
+    # id bom JA persistido no state -> seguro varrer o resto do label
+    sweep_orphans(env, keep_id=new_id, context="start")
     log("PROVISION completo")
 
 
 def cmd_stop(env):
-    """20:00 — DESTROI (custo noturno zero; manha nasce fresco no mercado)."""
+    """20:00 — DESTROI (custo noturno zero; manha nasce fresco no mercado).
+
+    State vazio NAO e' mais early-return: e' justamente o caso em que a orfa
+    sobrevivia (nunca entrou no state) — segue pro sweep.
+    """
     st = load_state()
     iid = st.get("instance_id")
     if not iid:
-        log("stop: sem instancia no state"); return
-    c = vast_destroy(env, iid)
-    log(f"destroy noturno {iid} -> HTTP {c}")
-    st.update(instance_id=None)
-    save_state(st)
+        log("stop: sem instancia no state — seguindo pro sweep por label")
+    else:
+        c = vast_destroy(env, iid)
+        log(f"destroy noturno {iid} -> HTTP {c}")
+        st.update(instance_id=None)
+        save_state(st)
+    # no stop o alvo e' destruir TUDO do label, sem excecao
+    sweep_orphans(env, keep_id=None, context="stop")
 
 
 def disk_pct(inst):
