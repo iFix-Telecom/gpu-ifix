@@ -282,23 +282,25 @@ def cmd_start(env, resume_id=None):
             log(f"create falhou {c}: {resp}"); sys.exit(1)
         log(f"criada {new_id}")
 
-    def fail(step, inst=None, destroy_new=False):
-        """Falha de provision: diagnostica; destroi a nova SO em falha de
-        infra clara (boot), senao preserva pra analise. Machine -> avoid."""
+    def fail(step, inst=None):
+        """Falha de provision: diagnostica via journal e SEMPRE destroi a nova
+        (leak de GPU paga era o bug 2026-09-17: 4 orfas / $13,01 queimados —
+        os caminhos health/install/validacao/flip chamavam fail() sem pedir o
+        destroy e a instancia viva nunca voltava pra ninguem).
+        Ordem importa: diag() ANTES do destroy, senao a evidencia morre com a
+        instancia. Machine -> avoid."""
         log(f"FALHA em '{step}'")
         if inst:
             diag(env, inst)
-        if destroy_new:
-            vast_destroy(env, new_id)
-            log(f"nova {new_id} destruida")
+        c = vast_destroy(env, new_id)
+        log(f"nova {new_id} destruida -> HTTP {c}")
         bad = offer.get("machine_id")
         if bad and bad not in st.get("machine_avoid", []):
             st.setdefault("machine_avoid", []).append(bad)
             save_state(st)
         v.notify(env, f"pod 3060: provision falhou em '{step}' "
-                      f"(machine {bad} -> avoid; nova "
-                      f"{'destruida' if destroy_new else f'{new_id} preservada p/ diagnostico'}); "
-                      "anterior intacta se existia")
+                      f"(machine {bad} -> avoid; nova {new_id} DESTRUIDA, "
+                      "diagnostico no journal/log); anterior intacta se existia")
         sys.exit(1)
 
     inst = None
@@ -308,7 +310,7 @@ def cmd_start(env, resume_id=None):
         if inst and inst.get("actual_status") == "running" and inst.get("ports"):
             break
     else:
-        return fail("boot timeout 15min", inst, destroy_new=True)
+        return fail("boot timeout 15min", inst)
     ip = inst["public_ipaddr"]
     ports = {k: int(p[0]["HostPort"]) for k, p in inst["ports"].items()}
     log(f"running ip={ip} ports={ports}")
