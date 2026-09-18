@@ -19,9 +19,11 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 )
 
@@ -31,12 +33,39 @@ import (
 // passes through unchanged.
 type fallthroughRoundTripper struct {
 	base http.RoundTripper
+
+	// preByteTimeout widens the classification to include a response-header
+	// timeout. It is opt-in and MUST only be enabled for non-streaming roles
+	// (STT today). See NewSTTFallthroughTransport for why that is pre-byte-safe.
+	preByteTimeout bool
+}
+
+// NewSTTFallthroughTransport wraps base for the STT role, where a
+// response-header timeout ALSO falls through to the next candidate.
+//
+// Why STT may widen what transport.go's package doc calls strictly dial-phase:
+// RoundTrip only returns an error BEFORE any response header was received, and
+// STT is never streamed (audio.go omits FlushInterval; the upstream answers with
+// one buffered JSON body). So at the moment RoundTrip fails, httputil.ReverseProxy
+// has not written a single byte to the client and re-dispatching stays within D-07.
+// D-06's "timeouts do not fall through" still holds for chat, where the SSE tee
+// may already have flushed.
+//
+// Real incident (OPERACOES-26927, 2026-09-17): local-stt failed retryable, the
+// cascade advanced to gemini-stt, gemini hung and the transport reported
+// "http2: timeout awaiting response headers" after 25s. That error was not
+// connection-class, so the cascade stopped there and the client got a terminal
+// 502 — groq-whisper and openai-whisper were never tried despite being enabled
+// and probing ok. Three n8n retries burned 213s on a recording that the same
+// Gemini model transcribed in 21s.
+func NewSTTFallthroughTransport(base http.RoundTripper) http.RoundTripper {
+	return fallthroughRoundTripper{base: base, preByteTimeout: true}
 }
 
 // RoundTrip implements http.RoundTripper.
 func (f fallthroughRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := f.base.RoundTrip(r)
-	if err != nil && isConnectionClass(err) {
+	if err != nil && (isConnectionClass(err) || (f.preByteTimeout && isPreByteTimeout(r.Context(), err))) {
 		// Pre-byte dial failure: substitute the typed sentinel so the
 		// ErrorHandler suppresses the 502 write and the dispatcher re-routes.
 		return nil, errDialFailedFallthrough
@@ -77,6 +106,35 @@ func isConnectionClass(err error) bool {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		return opErr.Op == "dial"
+	}
+	return false
+}
+
+// isPreByteTimeout reports whether err is an upstream timeout that happened
+// before any response header arrived — the transport waited and gave up, so
+// nothing reached the client and the next candidate may still serve the request.
+//
+// A caller-side cancellation is explicitly NOT one of these: if the client hung
+// up or its own deadline fired, retrying against another upstream only burns
+// budget for a response nobody will read.
+func isPreByteTimeout(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	// net/http and x/net/http2 both report the header wait with this phrase and
+	// neither exports the error value, so the string is the only stable handle.
+	if strings.Contains(err.Error(), "timeout awaiting response headers") {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
 	}
 	return false
 }

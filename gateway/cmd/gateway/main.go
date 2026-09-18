@@ -1915,7 +1915,13 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 			}
 			return usageInterceptor.Intercept(resp)
 		},
-		Transport: &http.Transport{
+		// OPERACOES-26927: the 25s budget below only buys the next hop if the
+		// timeout actually cascades. Unwrapped, a hung gemini-stt surfaced
+		// "http2: timeout awaiting response headers", which is not
+		// connection-class, and the client got a terminal 502 with
+		// groq-whisper/openai-whisper never tried. STT is non-streaming, so the
+		// wrapper is pre-byte-safe.
+		Transport: proxy.NewSTTFallthroughTransport(&http.Transport{
 			MaxIdleConns:        20,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     90 * time.Second,
@@ -1923,7 +1929,7 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 			// hung gemini-stt leaves budget for the openai-whisper fallback
 			// hop instead of consuming the whole 60s and starving it.
 			ResponseHeaderTimeout: 25 * time.Second,
-		},
+		}),
 		ErrorHandler: proxy.ErrorHandler("gemini-stt", log),
 	}
 	return rp, nil
@@ -1945,12 +1951,14 @@ func buildGroqWhisperProxy(u upstreams.UpstreamConfig, log *slog.Logger, resolve
 	}
 	rp := &httputil.ReverseProxy{
 		Director: proxy.BuildOpenAIWhisperDirector(parsed, u.AuthBearer, resolver, "groq-whisper", log),
-		Transport: &http.Transport{
+		// OPERACOES-26927: same reasoning as gemini-stt — a hung groq must
+		// cascade to openai-whisper, not commit a 502.
+		Transport: proxy.NewSTTFallthroughTransport(&http.Transport{
 			MaxIdleConns:          20,
 			MaxIdleConnsPerHost:   4,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
-		},
+		}),
 		ErrorHandler: proxy.ErrorHandler("groq-whisper", log),
 		// Plan 16-02 usage metering + stt-400-disco-cheio (2026-08-27): the
 		// retryable-status interceptor comes FIRST so a groq error (4xx/5xx —

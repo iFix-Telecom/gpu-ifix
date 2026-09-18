@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -117,5 +118,76 @@ func TestFallthroughRoundTripper_SignalsOnDial(t *testing.T) {
 	}
 	if !errors.Is(toErr, readTimeout) {
 		t.Fatalf("post-dial read timeout should pass through unchanged, got %v", toErr)
+	}
+}
+
+// TestIsPreByteTimeout classifies the timeouts that may cascade to the next
+// STT candidate, and the cancellations that may not.
+func TestIsPreByteTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"http2 header timeout", context.Background(), errors.New("http2: timeout awaiting response headers"), true},
+		{"net/http header timeout", context.Background(), errors.New("net/http: timeout awaiting response headers"), true},
+		{"bare net.Error timeout", context.Background(), timeoutErr{}, true},
+		{"read timeout OpError", context.Background(), &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}, true},
+		{"nil error", context.Background(), nil, false},
+		{"non-timeout error", context.Background(), errors.New("upstream said no"), false},
+		{"context deadline", context.Background(), context.DeadlineExceeded, false},
+		{"context canceled", context.Background(), context.Canceled, false},
+		{"caller already gone", canceledCtx(), errors.New("http2: timeout awaiting response headers"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPreByteTimeout(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("isPreByteTimeout(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func canceledCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// TestSTTFallthroughTransport_HeaderTimeoutCascades is the OPERACOES-26927
+// regression: a hung gemini-stt reported a header timeout and the cascade
+// stopped, returning a terminal 502 while groq/openai were never tried.
+func TestSTTFallthroughTransport_HeaderTimeoutCascades(t *testing.T) {
+	hung := errors.New("http2: timeout awaiting response headers")
+	req := (&http.Request{}).WithContext(context.Background())
+
+	sttRT := NewSTTFallthroughTransport(errRoundTripper{err: hung})
+	resp, err := sttRT.RoundTrip(req)
+	if !errors.Is(err, errDialFailedFallthrough) {
+		t.Fatalf("STT header timeout should cascade, got %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("cascading RoundTrip should return nil response, got %v", resp)
+	}
+
+	// D-06 unchanged for every other role: the default wrapper still lets a
+	// header timeout through as-is, because chat may already have flushed SSE.
+	chatRT := fallthroughRoundTripper{base: errRoundTripper{err: hung}}
+	if _, chatErr := chatRT.RoundTrip(req); errors.Is(chatErr, errDialFailedFallthrough) {
+		t.Fatalf("non-STT transport must NOT cascade on a header timeout")
+	}
+
+	// A dial failure still cascades on the STT wrapper too.
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	if _, dErr := NewSTTFallthroughTransport(errRoundTripper{err: dialErr}).RoundTrip(req); !errors.Is(dErr, errDialFailedFallthrough) {
+		t.Fatalf("dial failure should still cascade on the STT wrapper, got %v", dErr)
+	}
+
+	// Success passes through untouched.
+	okResp := &http.Response{StatusCode: 200}
+	gotResp, gotErr := NewSTTFallthroughTransport(errRoundTripper{resp: okResp}).RoundTrip(req)
+	if gotErr != nil || gotResp != okResp {
+		t.Fatalf("successful RoundTrip should pass through, got resp=%v err=%v", gotResp, gotErr)
 	}
 }
