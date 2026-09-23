@@ -92,6 +92,7 @@ Cada etapa lista: o que é feito, onde, quem. Toda ação externa ou em produç�
 - **Onde:** documentação oficial + leitura do repo voip-api.
 - **Quem:** executor (Claude), sem nenhuma ação externa.
 - **Saída:** adendo a este plano com os valores confirmados e a lista de mudanças no Asterisk.
+- **Status:** ✅ concluída 2026-09-23 — ver *Adendo — Etapa 0* no fim do documento.
 
 ### Etapa 1 — Criar projeto OpenAI, limite de gasto e chave
 
@@ -259,3 +260,67 @@ Resultado entre sucesso e falha = zona cinzenta: decisão do Pedro na etapa 10, 
 1. **Etapa 2 do SEED-009 — Gemini Live:** ponte ARI `externalMedia` → WebSocket (Gemini Live não tem SIP), com as **mesmas métricas e o mesmo roteiro** desta PoC, para comparação direta de latência, barge-in, custo real e qualidade PT-BR.
 2. **ElevenLabs Agents:** só se nem OpenAI nem Gemini passarem no teste de ouvido.
 3. **Se aprovada:** integração no ai-gateway conforme SEED-009 — endpoint realtime, upstream com role `realtime`, bilhetagem por minuto, audit log de sessões e fallback entre providers. Uso com cliente real exige nova decisão de LGPD.
+
+---
+
+## Adendo — Etapa 0 (pré-voo) executada em 2026-09-23
+
+Só leitura: guia oficial `developers.openai.com/api/docs/guides/realtime-sip` + repo `voip-api` (commit `b5c2924c`, `voip-api/docker/asterisk/`). Nenhuma ação externa.
+
+### FATOS — OpenAI SIP (fonte: guia oficial, lido 2026-09-23)
+
+| Item | Valor confirmado |
+|---|---|
+| URI | `sip:$PROJECT_ID@sip.api.openai.com;transport=tls` (UE: `sip-eu.api.openai.com`) |
+| Sinalização | TLS sobre TCP, porta **5061**; liberar saída TCP 5061 para os IPs que o DNS devolver |
+| Mídia | **SRTP obrigatório** ("requires SRTP for call audio"), UDP bidirecional com `13.79.45.80/28`, `23.98.140.64/28`, `40.67.149.176/28`, `40.83.204.240/28`; IP/porta de mídia vêm no SDP |
+| Codecs | G.711 μ-law e A-law, 8 kHz. Omitir `audio.format` no accept (SIP negocia) |
+| Auth do INVITE | Nenhum digest documentado — roteamento pelo `PROJECT_ID` no URI |
+| Webhook | evento `realtime.call.incoming`, `data.call_id` + `data.sip_headers` (tratar como não-confiável); headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (v1); verificar com `client.webhooks.unwrap(body, headers)` do SDK oficial |
+| Aceitar | `POST /v1/realtime/calls/{call_id}/accept` body `{type:"realtime", model, instructions, audio:{output:{voice}}, ...}` com `Authorization: Bearer` |
+| Recusar | `POST .../reject` `{status_code:486}` (default 603) |
+| Transferir | `POST .../refer` `{target_uri:"sip:..."\|"tel:..."}` |
+| Desligar | `POST .../hangup` |
+| Monitorar | WebSocket `wss://api.openai.com/v1/realtime?call_id={call_id}` (eventos Realtime padrão, ex. `response.create`) |
+
+### FATOS — Asterisk do voip-api (fonte: repo, só leitura)
+
+- Asterisk 22 (`andrius/asterisk:22`, pinado por digest), `modules.conf` `autoload = yes`.
+- `transport-tls` (5071) e `transport-tls-5061` (5061) existem, `method = tlsv1_2`, **`verify_server = no`** (Asterisk não valida o certificado do servidor remoto).
+- `rtp.conf`: RTP 30000–30100, `icesupport = yes` global.
+- **Endpoints/AORs/identify 100% realtime** (`sorcery.conf` → `ps_endpoints`, `ps_aors`, `ps_identify` via ODBC; sem fallback de arquivo). ⇒ endpoint da PoC = **linhas no Postgres do voip-api**, sem rebuild nem restart.
+- **Dialplan é estático** (`extensions.conf` embutido na imagem; `extconfig.conf` não tem extensions realtime). ⇒ contexto novo `[poc-openai-realtime]` exigiria rebuild da imagem + redeploy do stack 36 (restart do Asterisk de produção).
+
+### Decisão proposta (substitui o "contexto novo" da Etapa 4) — sem tocar dialplan
+
+Disparar a ligação por **originate**, sem contexto novo:
+
+```
+asterisk -rx "channel originate PJSIP/<ramal-teste> application Dial PJSIP/openai-realtime"
+```
+
+Toca o softphone de teste; ao atender, o Asterisk disca a OpenAI. Zero mudança em `extensions.conf`, zero rebuild, zero restart.
+
+Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
+
+1. `ps_aors` id `openai-realtime`: `contact = sip:<PROJECT_ID>@sip.api.openai.com:5061;transport=tls`, `max_contacts = 1`.
+2. `ps_endpoints` id `openai-realtime`: `transport = transport-tls`, `aors = openai-realtime`, `context = poc-openai-sink` (contexto **inexistente** → qualquer INVITE/REFER vindo da OpenAI morre sem cair em produção), `disallow = all`, `allow = ulaw,alaw`, `media_encryption = sdes`, `direct_media = no`, `ice_support = no`, `rtp_symmetric = yes`, `force_rport = yes`, `rewrite_contact = yes`, sem `auth`/`outbound_auth`.
+3. Ramal de teste: reutilizar ramal de teste existente OU nova linha em `ps_endpoints`/`ps_auths`/`ps_aors` só para a PoC (decidir na Etapa 4).
+
+**NÃO muda:** `[from-external]`, `[from-extensions]`, demais contextos, trunk 8880, transports, `rtp.conf`, imagem, stack 36.
+
+**Rollback:** `DELETE` das 2–5 linhas + `asterisk -rx "pjsip reload"` (ou nada, realtime relê por consulta).
+
+### HIPÓTESES (resolvem na Etapa 4/5)
+
+- HIPÓTESE: a OpenAI aceita **SDES-SRTP** (`media_encryption=sdes`) — o guia diz "SRTP" sem dizer SDES vs DTLS; SDES é o usual em tronco SIP/TLS. Resolve: 1ª chamada; se 488, trocar para `dtls`.
+- HIPÓTESE: `res_srtp` está carregado no container em produção (o webphone usa DTLS-SRTP, que depende dele). Resolve: `asterisk -rx "module show like srtp"` no container (leitura).
+- HIPÓTESE: `gpt-realtime-2.1-mini` é aceito no `accept` via SIP (o exemplo do guia usa `gpt-realtime-2.1`; não há restrição escrita). Resolve: 1ª chamada.
+- HIPÓTESE: originate com `application Dial` funciona sem interferir no Stasis `voip-api` (billing/ARI). Resolve: conferir no log do voip-api que a chamada não gera CDR/cobrança de cliente.
+
+### NÃO SEI (dado insuficiente — checar antes da Etapa 5, leitura apenas)
+
+- Egress do Worker-Oracle: saída TCP 5061 e UDP para os 4 blocos de mídia liberados na security list da OCI?
+- Ingress UDP 30000–30100 aberto para os blocos de mídia da OpenAI (hoje o RTP do trunk vem de outra origem)?
+- Risco `verify_server = no`: sinalização TLS sem validar certificado (MITM possível). Aceitável para PoC; para produção exigiria transport dedicado com `verify_server = yes` + `ca_list_file` — mudança de config estática (rebuild).
+- Timeout do webhook: o guia não documenta; o serviço deve responder rápido e aceitar a chamada de forma assíncrona.
