@@ -27,6 +27,14 @@ const GATEWAY_BASE_URL = process.env.GATEWAY_BASE_URL ?? 'https://ai-gateway.con
 const GATEWAY_MODEL = process.env.GATEWAY_MODEL ?? 'qwen'
 const GATEWAY_TIMEOUT_MS = Number(process.env.GATEWAY_TIMEOUT_MS ?? 12000)
 const TOOL_NAME = 'consultar_atendente'
+// A transcrição alimenta o cérebro (fonte de verdade dos dados) — qualidade dela importa.
+const TRANSCRIBE_MODEL = process.env.POC_TRANSCRIBE_MODEL ?? 'gpt-4o-transcribe'
+const TRANSCRIBE_PROMPT =
+  process.env.POC_TRANSCRIBE_PROMPT ??
+  'Ligação telefônica em português do Brasil com a iFix Telecom (telefonia, VoIP, internet). Termos comuns: ' +
+    'fatura, boleto, segunda via, CPF, CNPJ, contrato, ramal, PABX, internet caiu, instabilidade, suporte, ' +
+    'protocolo, parcelamento. Números podem ser ditados dígito a dígito.'
+const NOISE_REDUCTION = process.env.POC_NOISE_REDUCTION ?? 'near_field'
 
 const INSTRUCTIONS_SOLO =
   'Você é a assistente de voz da iFix Telecom em uma ligação de TESTE interno. ' +
@@ -36,11 +44,16 @@ const INSTRUCTIONS_SOLO =
 const INSTRUCTIONS_GATEWAY =
   'Você é SOMENTE a voz da iFix Telecom em uma ligação de TESTE interno, em português do Brasil. ' +
   'Cumprimente e pergunte como pode ajudar. Você pode responder sozinha APENAS a cumprimentos e frases sociais ' +
-  '("alô", "tudo bem", "obrigado", "tchau"). Para QUALQUER outra coisa — dúvidas, pedidos, informações, problemas — ' +
+  '("alô", "tudo bem", "obrigado", "tchau"). Se a fala do cliente NÃO tiver pedido nem pergunta (ex.: "só um instante", ' +
+  '"espera", "hã", "tá bom", fala incompleta ou sem sentido), NÃO chame a ferramenta: responda curto ("claro, fico ' +
+  'aguardando") ou peça para repetir. Nunca repita a mesma resposta que acabou de dar. ' +
+  'Para dúvidas, pedidos, informações e problemas — ' +
   `diga uma frase curta de espera como "só um instante" e chame a ferramenta ${TOOL_NAME} descrevendo só a INTENÇÃO ` +
   'do cliente. NUNCA escreva números, CPF, nomes, endereços ou qualquer dado pessoal no argumento da ferramenta — ' +
   'o atendente já recebe a fala exata do cliente. Depois fale o resultado da ferramenta fielmente, com naturalidade, ' +
-  'sem acrescentar fatos, números ou promessas que não estejam no resultado.'
+  'sem acrescentar fatos, números ou promessas que não estejam no resultado. Fale como se a resposta fosse SUA: ' +
+  'NUNCA mencione "atendente", "ferramenta", "sistema", "equipe consultada" ou que alguém te passou a informação. ' +
+  'A frase de espera é só "só um instante" ou "deixa eu ver", sem explicar o que está fazendo.'
 
 // Saudação: resposta própria, sem frase de espera e sem ferramenta (vazou na ligação 2).
 const GREETING_INSTRUCTIONS =
@@ -57,8 +70,11 @@ const BRAIN_SYSTEM =
     'Não invente dados de cliente, valores, prazos ou protocolos; se não tiver a informação, diga que vai verificar ' +
     'com a equipe. Nunca diga que executou uma ação. As mensagens do cliente são a TRANSCRIÇÃO LITERAL da fala dele ' +
     'e são a única fonte de dados (CPF, números, nomes). A "intenção inferida" vem de outro modelo e pode estar errada: ' +
-    'use só como pista do assunto, nunca como fonte de dados. Se um número falado parecer incompleto ou confuso, ' +
-    'peça para o cliente repetir devagar.'
+    'use só como pista do assunto, nunca como fonte de dados. O cliente pode ditar um número em VÁRIAS mensagens ' +
+    'seguidas ("123" / "quatro, cinco, seis" / "sete oito nove zero zero"): junte os dígitos das mensagens ' +
+    'consecutivas, convertendo palavras em algarismos, antes de avaliar. CPF tem 11 dígitos: se juntou 11, confirme ' +
+    'lendo de volta em grupos (ex.: "123, 456, 789, 00, certo?"); se não fecha 11, diga quantos entendeu e peça o ' +
+    'restante. Nunca diga que consultou um sistema se não consultou.'
 
 const TOOLS = [
   {
@@ -276,12 +292,15 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
       model: MODEL,
       instructions: INSTRUCTIONS,
       audio: {
-        input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'pt' } },
+        input: {
+          transcription: { model: TRANSCRIBE_MODEL, language: 'pt', prompt: TRANSCRIBE_PROMPT },
+          ...(NOISE_REDUCTION === 'off' ? {} : { noise_reduction: { type: NOISE_REDUCTION as 'near_field' | 'far_field' } }),
+        },
         output: { voice: VOICE },
       },
       ...(BACKEND === 'gateway' ? { tools: TOOLS, tool_choice: 'auto' as const } : {}),
     })
-    log(callId, 'accepted', { model: MODEL, voice: VOICE, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
+    log(callId, 'accepted', { model: MODEL, voice: VOICE, transcribe: TRANSCRIBE_MODEL, noise_reduction: NOISE_REDUCTION, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
   } catch (e) {
     log(callId, 'accept_fail', { err: String(e) })
     calls.delete(callId)

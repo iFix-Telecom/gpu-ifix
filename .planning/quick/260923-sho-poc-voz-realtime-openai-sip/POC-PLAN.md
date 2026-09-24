@@ -441,3 +441,10 @@ FATOS (log):
 - input_tokens por resposta cresce até ~1.600 no fim de 3 min.
 
 Próximas correções candidatas: proibir meta-fala ("atendente", "ferramenta"); instruir cérebro a juntar dígitos de turnos consecutivos e contar 11 p/ CPF; não chamar tool quando a fala não contém pedido; testar `gpt-live-transcribe`/prompt de transcrição com vocabulário iFix.
+
+### Correções pós-ligação 3 (2026-09-24, aprovadas pelo Pedro)
+- Voz: proibida meta-fala ("atendente", "ferramenta", "sistema"); não chama tool em fala sem pedido; não repete resposta.
+- Cérebro: junta dígitos ditados em mensagens consecutivas; CPF = 11 → confirma lendo em grupos; senão diz quantos entendeu.
+  FATO (teste isolado 2×, deepseek): "123" / "quatro, cinco, seis" / "sete oito nove zero zero" → "Entendi: 123, 456, 789, 00, certo?" (2,6–2,9 s, stop).
+- Transcrição: `gpt-4o-mini-transcribe` → **`gpt-4o-transcribe`** + `prompt` com vocabulário iFix + `noise_reduction: near_field` (tudo por env: `POC_TRANSCRIBE_MODEL`, `POC_TRANSCRIBE_PROMPT`, `POC_NOISE_REDUCTION=off`). HIPÓTESE: aceito no `accept` via SIP; resolve na próxima ligação (`accept_fail` se não).
+- FATO (doc oficial `models/gpt-live-transcribe`): `gpt-live-transcribe` ($0,017/min, keywords/latência ajustável) só roda em `v1/realtime/transcription_sessions`; **não suportado** como transcrição dentro de sessão Realtime ⇒ não aplicável direto nesta arquitetura.
