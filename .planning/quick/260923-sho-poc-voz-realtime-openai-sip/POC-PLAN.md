@@ -417,3 +417,9 @@ Correções propostas (não aplicadas):
 2. Logar `finish_reason`; se `length`, subir `max_tokens` ou desligar raciocínio no alias.
 3. Saudação com `response.create` + instrução própria (sem frase de espera).
 4. Repetir de dia com o pod Qwen no ar para medir o cérebro local.
+
+### Correções 1–3 aplicadas (2026-09-24, aprovadas pelo Pedro)
+1. Tool `consultar_atendente` agora recebe só `intencao` (proibido dado pessoal/número); cérebro recebe as **transcrições literais** como fonte de verdade + intenção como `system` "pode estar errada". Tool call **espera a transcrição pendente** (até 2 s) antes de consultar o cérebro (corrige a corrida de 70 ms).
+2. `finish_reason` + `usage` do gateway no log; `max_tokens` 400→800; se `length`, corta na última frase completa.
+3. Saudação com `response.create` próprio (`instructions` de cumprimento, `tool_choice: none`).
+- FATO (teste isolado do cérebro, cenário exato da ligação 2, 2×): com transcrição "sete dois, quatro, sete meia, dois, sete, oito, zero, oito" + intenção falsa "CPF 1234567890" → deepseek respondeu "Pode repetir o CPF devagar, por favor?" (finish=stop, 2,0–2,9 s). Não usou o CPF inventado. (Transcrição tem 10 dígitos; CPF tem 11.)

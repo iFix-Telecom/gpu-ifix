@@ -37,9 +37,15 @@ const INSTRUCTIONS_GATEWAY =
   'Você é SOMENTE a voz da iFix Telecom em uma ligação de TESTE interno, em português do Brasil. ' +
   'Cumprimente e pergunte como pode ajudar. Você pode responder sozinha APENAS a cumprimentos e frases sociais ' +
   '("alô", "tudo bem", "obrigado", "tchau"). Para QUALQUER outra coisa — dúvidas, pedidos, informações, problemas — ' +
-  `diga uma frase curta de espera como "só um instante" e chame a ferramenta ${TOOL_NAME} com a pergunta do cliente ` +
-  'reescrita de forma completa. Depois fale o resultado da ferramenta fielmente, com naturalidade, sem acrescentar ' +
-  'fatos, números ou promessas que não estejam no resultado.'
+  `diga uma frase curta de espera como "só um instante" e chame a ferramenta ${TOOL_NAME} descrevendo só a INTENÇÃO ` +
+  'do cliente. NUNCA escreva números, CPF, nomes, endereços ou qualquer dado pessoal no argumento da ferramenta — ' +
+  'o atendente já recebe a fala exata do cliente. Depois fale o resultado da ferramenta fielmente, com naturalidade, ' +
+  'sem acrescentar fatos, números ou promessas que não estejam no resultado.'
+
+// Saudação: resposta própria, sem frase de espera e sem ferramenta (vazou na ligação 2).
+const GREETING_INSTRUCTIONS =
+  'Cumprimente o cliente em uma frase curta, como atendente da iFix Telecom, e pergunte como pode ajudar. ' +
+  'Não diga "só um instante" nem frases de espera.'
 
 const INSTRUCTIONS = process.env.POC_INSTRUCTIONS ?? (BACKEND === 'gateway' ? INSTRUCTIONS_GATEWAY : INSTRUCTIONS_SOLO)
 
@@ -49,17 +55,27 @@ const BRAIN_SYSTEM =
   'Você é o atendente da iFix Telecom (telefonia/VoIP) numa ligação de TESTE. Sua resposta será FALADA por um ' +
     'sintetizador de voz: responda em no máximo 2 frases curtas, português do Brasil, sem markdown, listas ou emojis. ' +
     'Não invente dados de cliente, valores, prazos ou protocolos; se não tiver a informação, diga que vai verificar ' +
-    'com a equipe. Nunca diga que executou uma ação.'
+    'com a equipe. Nunca diga que executou uma ação. As mensagens do cliente são a TRANSCRIÇÃO LITERAL da fala dele ' +
+    'e são a única fonte de dados (CPF, números, nomes). A "intenção inferida" vem de outro modelo e pode estar errada: ' +
+    'use só como pista do assunto, nunca como fonte de dados. Se um número falado parecer incompleto ou confuso, ' +
+    'peça para o cliente repetir devagar.'
 
 const TOOLS = [
   {
     type: 'function' as const,
     name: TOOL_NAME,
-    description: 'Consulta o atendente da iFix Telecom para responder a qualquer dúvida ou pedido do cliente.',
+    description:
+      'Consulta o atendente da iFix Telecom para responder a qualquer dúvida ou pedido do cliente. ' +
+      'O atendente já recebe a fala exata do cliente.',
     parameters: {
       type: 'object',
-      properties: { pergunta: { type: 'string', description: 'Pergunta ou pedido do cliente, completo e autocontido.' } },
-      required: ['pergunta'],
+      properties: {
+        intencao: {
+          type: 'string',
+          description: 'Resumo curto do que o cliente quer, SEM números, CPF ou dados pessoais. Ex.: "consultar valor da fatura".',
+        },
+      },
+      required: ['intencao'],
     },
   },
 ]
@@ -76,7 +92,12 @@ type CallState = {
   ws?: WebSocket
   timer?: Timer
   history: Turn[]
+  /** Transcrição da fala atual ainda pendente (speech_stopped visto, transcrição não). */
+  transcriptPending?: Promise<void>
+  resolveTranscript?: () => void
 }
+
+const TRANSCRIPT_WAIT_MS = Number(process.env.POC_TRANSCRIPT_WAIT_MS ?? 2000)
 const calls = new Map<string, CallState>()
 
 function log(callId: string | null, event: string, extra: Record<string, unknown> = {}) {
@@ -93,24 +114,42 @@ function fromUser(headers: Array<{ name: string; value: string }>): string | nul
 }
 
 /** Pergunta à nossa LLM (ai-gateway) com o histórico da ligação; devolve texto para a voz falar. */
-async function askBrain(callId: string, state: CallState, pergunta: string): Promise<string> {
+async function askBrain(callId: string, state: CallState, intencao: string): Promise<string> {
   const t0 = Date.now()
+  // Histórico = transcrições literais (fonte de verdade). A intenção do modelo de voz entra só como pista.
   const messages = [
     { role: 'system', content: BRAIN_SYSTEM },
     ...state.history.slice(-12),
-    { role: 'user', content: pergunta },
+    { role: 'system', content: `Intenção inferida pelo modelo de voz (pode estar errada, não use como dado): ${intencao}` },
   ]
   try {
     const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: GATEWAY_MODEL, messages, max_tokens: Number(process.env.GATEWAY_MAX_TOKENS ?? 400), temperature: 0.3 }),
+      body: JSON.stringify({ model: GATEWAY_MODEL, messages, max_tokens: Number(process.env.GATEWAY_MAX_TOKENS ?? 800), temperature: 0.3 }),
       signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
     })
-    const data = (await res.json()) as { model?: string; choices?: Array<{ message?: { content?: string } }> }
-    const text = data.choices?.[0]?.message?.content?.trim()
-    log(callId, 'brain_done', { ms: Date.now() - t0, http: res.status, upstream_model: data.model, text })
-    if (!res.ok || !text) throw new Error(`gateway http ${res.status}`)
+    const data = (await res.json()) as {
+      model?: string
+      usage?: unknown
+      choices?: Array<{ finish_reason?: string; message?: { content?: string } }>
+    }
+    const choice = data.choices?.[0]
+    let text = choice?.message?.content?.trim()
+    // Resposta cortada por limite vira fala pela metade ("Enquanto isso,"): fica só até a última frase completa.
+    if (text && choice?.finish_reason === 'length') {
+      const end = Math.max(text.lastIndexOf('.'), text.lastIndexOf('!'), text.lastIndexOf('?'))
+      text = end > 0 ? text.slice(0, end + 1) : undefined
+    }
+    log(callId, 'brain_done', {
+      ms: Date.now() - t0,
+      http: res.status,
+      upstream_model: data.model,
+      finish_reason: choice?.finish_reason,
+      usage: data.usage,
+      text,
+    })
+    if (!res.ok || !text) throw new Error(`gateway http ${res.status} finish=${choice?.finish_reason}`)
     return text
   } catch (e) {
     log(callId, 'brain_fail', { ms: Date.now() - t0, err: String(e) })
@@ -119,14 +158,23 @@ async function askBrain(callId: string, state: CallState, pergunta: string): Pro
 }
 
 async function handleToolCall(callId: string, state: CallState, ws: WebSocket, ev: { call_id: string; name: string; arguments: string }) {
-  let pergunta = ''
+  let intencao = ''
   try {
-    pergunta = (JSON.parse(ev.arguments) as { pergunta?: string }).pergunta ?? ''
+    intencao = (JSON.parse(ev.arguments) as { intencao?: string }).intencao ?? ''
   } catch {
-    pergunta = ev.arguments
+    intencao = ev.arguments
   }
-  log(callId, 'tool_call', { name: ev.name, pergunta })
-  const output = ev.name === TOOL_NAME ? await askBrain(callId, state, pergunta) : 'Ferramenta desconhecida.'
+  log(callId, 'tool_call', { name: ev.name, intencao, transcript_pending: Boolean(state.transcriptPending) })
+  // Garante que a fala literal do cliente já está no histórico antes de consultar o cérebro.
+  if (state.transcriptPending) {
+    const t0 = Date.now()
+    const got = await Promise.race([
+      state.transcriptPending.then(() => true),
+      Bun.sleep(TRANSCRIPT_WAIT_MS).then(() => false),
+    ])
+    log(callId, 'transcript_wait', { ms: Date.now() - t0, got })
+  }
+  const output = ev.name === TOOL_NAME ? await askBrain(callId, state, intencao) : 'Ferramenta desconhecida.'
   if (ws.readyState !== WebSocket.OPEN) return log(callId, 'tool_output_dropped', { reason: 'ws_closed' })
   ws.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: ev.call_id, output } }))
   ws.send(JSON.stringify({ type: 'response.create' }))
@@ -140,7 +188,12 @@ function monitor(callId: string, state: CallState) {
   state.ws = ws
   ws.onopen = () => {
     log(callId, 'ws_open')
-    ws.send(JSON.stringify({ type: 'response.create' }))
+    ws.send(
+      JSON.stringify({
+        type: 'response.create',
+        response: BACKEND === 'gateway' ? { instructions: GREETING_INSTRUCTIONS, tool_choice: 'none' } : {},
+      }),
+    )
   }
   ws.onmessage = (msg) => {
     const ev = JSON.parse(String(msg.data)) as { type: string; [k: string]: unknown }
@@ -152,6 +205,9 @@ function monitor(callId: string, state: CallState) {
       case 'input_audio_buffer.speech_stopped':
         state.lastSpeechStop = now
         state.awaitingFirstAudio = true
+        state.transcriptPending = new Promise<void>((r) => {
+          state.resolveTranscript = r
+        })
         log(callId, 'speech_stopped')
         break
       case 'response.output_audio.delta':
@@ -166,6 +222,9 @@ function monitor(callId: string, state: CallState) {
       case 'conversation.item.input_audio_transcription.completed':
         log(callId, 'user_transcript', { text: ev.transcript })
         if (ev.transcript) state.history.push({ role: 'user', content: String(ev.transcript) })
+        state.resolveTranscript?.()
+        state.transcriptPending = undefined
+        state.resolveTranscript = undefined
         break
       case 'response.output_audio_transcript.done':
         log(callId, 'ai_transcript', { text: ev.transcript })
