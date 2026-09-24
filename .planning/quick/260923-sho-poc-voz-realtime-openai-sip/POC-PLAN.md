@@ -395,3 +395,25 @@ Custo — HIPÓTESE (preço de texto do mini não levantado; usar painel p/ conf
 - NÃO SEI: se a sessão OpenAI seguiu após o 1006 (entre 00:46:34 e o hangup). Resolve: Usage do projeto no painel.
 
 Próximo: ligações de medição de 3 e 10 min (Etapa 7) com a métrica corrigida + teste de barge-in; conferir custo no painel.
+
+## Adendo — Ligação 2: voz OpenAI + cérebro ai-gateway (2026-09-24 01:24 UTC)
+
+Setup: tenant gateway `voz-realtime-poc` (id `3abf488a-7de6-4216-85ae-0125e48b377e`, key normal, prefix `…rxzw`); tool `consultar_atendente` no accept; alias `qwen` → à noite fallback `deepseek/deepseek-v4-flash-0731` (pod primário fora do horário). call_id `rtc_u0_ERSU1p3oMpIh47QCR5NkVr5tUmOTqYKM`, 114 s.
+
+FATOS (log):
+- **1º som da IA após fim da fala: 219–396 ms** (8 turnos; `turn_latency` via 1º transcript delta) — é o "só um instante"/resposta social do realtime.
+- 4 tool calls; **cérebro: 3.442 / 5.898 / 6.938 / 7.125 ms** (deepseek fallback) ⇒ 3,4–7,1 s de silêncio após o "só um instante".
+- Voz falou a resposta do cérebro **praticamente literal** (brain_done.text ≈ ai_transcript).
+- Cérebro não inventou valor de conta: pediu CPF e disse que vai verificar. ✅
+- ❌ **Realtime ALUCINOU o CPF no argumento da tool:** usuário falou "sete dois, quatro, sete meia, dois, sete, oito, zero, oito" e a tool recebeu `"CPF 1234567890"`.
+- ❌ Reescrita errada: usuário "Como faz para ver a minha fatura?" → tool `"Como faço para pagar minha fatura?"` (tool_call às 34.428 saiu ANTES da transcrição do usuário 34.499).
+- ❌ Resposta do cérebro truncada: `"…instabilidade na sua região. Enquanto isso,"` foi falada cortada. HIPÓTESE: deepseek gasta tokens de raciocínio e estoura `max_tokens` 400. Resolve: logar `finish_reason`.
+- Na saudação a voz disse "Só um instante enquanto vejo como responder ao seu pedido." antes do "Olá" (instrução de espera vazou pra saudação).
+- Transcrição ruim em 2 falas ("Você está me apontando.", "onu").
+- `ws_close 1006` aos 114 s coincidiu com o hangup do Pedro; `POST /hangup` → 404 "No session found" ⇒ HIPÓTESE: 1006 é o fechamento normal do sideband no fim da chamada SIP (não falha). Canais Asterisk: 0 após.
+
+Correções propostas (não aplicadas):
+1. Tool passa ao cérebro a **transcrição literal** das últimas falas do usuário (fonte de verdade), e o argumento da tool vira só "intenção"; dados (CPF, números) NUNCA saem do argumento gerado pelo modelo de voz.
+2. Logar `finish_reason`; se `length`, subir `max_tokens` ou desligar raciocínio no alias.
+3. Saudação com `response.create` + instrução própria (sem frase de espera).
+4. Repetir de dia com o pod Qwen no ar para medir o cérebro local.
