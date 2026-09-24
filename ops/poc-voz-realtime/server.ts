@@ -21,17 +21,62 @@ const VOICE = process.env.POC_VOICE ?? 'marin'
 const MAX_CONCURRENT = Number(process.env.POC_MAX_CONCURRENT ?? 1)
 const MAX_CALL_SECONDS = Number(process.env.POC_MAX_CALL_SECONDS ?? 720)
 const LOG_DIR = process.env.POC_LOG_DIR ?? '/data/calls'
-const INSTRUCTIONS =
-  process.env.POC_INSTRUCTIONS ??
+// Backend de conteúdo: 'gateway' = voz OpenAI consulta nossa LLM via tool; 'none' = modelo de voz responde sozinho.
+const BACKEND = process.env.POC_BACKEND ?? 'gateway'
+const GATEWAY_BASE_URL = process.env.GATEWAY_BASE_URL ?? 'https://ai-gateway.converse-ai.app/v1'
+const GATEWAY_MODEL = process.env.GATEWAY_MODEL ?? 'qwen'
+const GATEWAY_TIMEOUT_MS = Number(process.env.GATEWAY_TIMEOUT_MS ?? 12000)
+const TOOL_NAME = 'consultar_atendente'
+
+const INSTRUCTIONS_SOLO =
   'Você é a assistente de voz da iFix Telecom em uma ligação de TESTE interno. ' +
-    'Fale português do Brasil, frases curtas e naturais. Cumprimente e pergunte como pode ajudar. ' +
-    'Nunca diga que executou uma ação que não executou. Se não souber, diga que não sabe.'
+  'Fale português do Brasil, frases curtas e naturais. Cumprimente e pergunte como pode ajudar. ' +
+  'Nunca diga que executou uma ação que não executou. Se não souber, diga que não sabe.'
+
+const INSTRUCTIONS_GATEWAY =
+  'Você é SOMENTE a voz da iFix Telecom em uma ligação de TESTE interno, em português do Brasil. ' +
+  'Cumprimente e pergunte como pode ajudar. Você pode responder sozinha APENAS a cumprimentos e frases sociais ' +
+  '("alô", "tudo bem", "obrigado", "tchau"). Para QUALQUER outra coisa — dúvidas, pedidos, informações, problemas — ' +
+  `diga uma frase curta de espera como "só um instante" e chame a ferramenta ${TOOL_NAME} com a pergunta do cliente ` +
+  'reescrita de forma completa. Depois fale o resultado da ferramenta fielmente, com naturalidade, sem acrescentar ' +
+  'fatos, números ou promessas que não estejam no resultado.'
+
+const INSTRUCTIONS = process.env.POC_INSTRUCTIONS ?? (BACKEND === 'gateway' ? INSTRUCTIONS_GATEWAY : INSTRUCTIONS_SOLO)
+
+// Prompt do "cérebro" (nossa LLM). O resultado vira fala, então: curto e sem formatação.
+const BRAIN_SYSTEM =
+  process.env.POC_BRAIN_SYSTEM ??
+  'Você é o atendente da iFix Telecom (telefonia/VoIP) numa ligação de TESTE. Sua resposta será FALADA por um ' +
+    'sintetizador de voz: responda em no máximo 2 frases curtas, português do Brasil, sem markdown, listas ou emojis. ' +
+    'Não invente dados de cliente, valores, prazos ou protocolos; se não tiver a informação, diga que vai verificar ' +
+    'com a equipe. Nunca diga que executou uma ação.'
+
+const TOOLS = [
+  {
+    type: 'function' as const,
+    name: TOOL_NAME,
+    description: 'Consulta o atendente da iFix Telecom para responder a qualquer dúvida ou pedido do cliente.',
+    parameters: {
+      type: 'object',
+      properties: { pergunta: { type: 'string', description: 'Pergunta ou pedido do cliente, completo e autocontido.' } },
+      required: ['pergunta'],
+    },
+  },
+]
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, project: process.env.OPENAI_PROJECT_ID })
 
 mkdirSync(LOG_DIR, { recursive: true })
 
-type CallState = { startedAt: number; lastSpeechStop?: number; awaitingFirstAudio: boolean; ws?: WebSocket; timer?: Timer }
+type Turn = { role: 'user' | 'assistant'; content: string }
+type CallState = {
+  startedAt: number
+  lastSpeechStop?: number
+  awaitingFirstAudio: boolean
+  ws?: WebSocket
+  timer?: Timer
+  history: Turn[]
+}
 const calls = new Map<string, CallState>()
 
 function log(callId: string | null, event: string, extra: Record<string, unknown> = {}) {
@@ -45,6 +90,47 @@ function fromUser(headers: Array<{ name: string; value: string }>): string | nul
   const from = headers.find((h) => h.name.toLowerCase() === 'from')?.value ?? ''
   const m = from.match(/sips?:([^@;>]+)@/i)
   return m ? m[1] : null
+}
+
+/** Pergunta à nossa LLM (ai-gateway) com o histórico da ligação; devolve texto para a voz falar. */
+async function askBrain(callId: string, state: CallState, pergunta: string): Promise<string> {
+  const t0 = Date.now()
+  const messages = [
+    { role: 'system', content: BRAIN_SYSTEM },
+    ...state.history.slice(-12),
+    { role: 'user', content: pergunta },
+  ]
+  try {
+    const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: GATEWAY_MODEL, messages, max_tokens: Number(process.env.GATEWAY_MAX_TOKENS ?? 400), temperature: 0.3 }),
+      signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
+    })
+    const data = (await res.json()) as { model?: string; choices?: Array<{ message?: { content?: string } }> }
+    const text = data.choices?.[0]?.message?.content?.trim()
+    log(callId, 'brain_done', { ms: Date.now() - t0, http: res.status, upstream_model: data.model, text })
+    if (!res.ok || !text) throw new Error(`gateway http ${res.status}`)
+    return text
+  } catch (e) {
+    log(callId, 'brain_fail', { ms: Date.now() - t0, err: String(e) })
+    return 'No momento não consegui consultar essa informação. Vou pedir para a equipe retornar.'
+  }
+}
+
+async function handleToolCall(callId: string, state: CallState, ws: WebSocket, ev: { call_id: string; name: string; arguments: string }) {
+  let pergunta = ''
+  try {
+    pergunta = (JSON.parse(ev.arguments) as { pergunta?: string }).pergunta ?? ''
+  } catch {
+    pergunta = ev.arguments
+  }
+  log(callId, 'tool_call', { name: ev.name, pergunta })
+  const output = ev.name === TOOL_NAME ? await askBrain(callId, state, pergunta) : 'Ferramenta desconhecida.'
+  if (ws.readyState !== WebSocket.OPEN) return log(callId, 'tool_output_dropped', { reason: 'ws_closed' })
+  ws.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: ev.call_id, output } }))
+  ws.send(JSON.stringify({ type: 'response.create' }))
+  log(callId, 'tool_output_sent')
 }
 
 function monitor(callId: string, state: CallState) {
@@ -79,9 +165,14 @@ function monitor(callId: string, state: CallState) {
         break
       case 'conversation.item.input_audio_transcription.completed':
         log(callId, 'user_transcript', { text: ev.transcript })
+        if (ev.transcript) state.history.push({ role: 'user', content: String(ev.transcript) })
         break
       case 'response.output_audio_transcript.done':
         log(callId, 'ai_transcript', { text: ev.transcript })
+        if (ev.transcript) state.history.push({ role: 'assistant', content: String(ev.transcript) })
+        break
+      case 'response.function_call_arguments.done':
+        void handleToolCall(callId, state, ws, ev as unknown as { call_id: string; name: string; arguments: string })
         break
       case 'response.done': {
         const r = ev.response as { status?: string; usage?: unknown } | undefined
@@ -118,7 +209,7 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
     await client.realtime.calls.reject(callId, { status_code: 486 }).catch((e) => log(callId, 'reject_fail', { err: String(e) }))
     return
   }
-  const state: CallState = { startedAt: Date.now(), awaitingFirstAudio: false }
+  const state: CallState = { startedAt: Date.now(), awaitingFirstAudio: false, history: [] }
   calls.set(callId, state)
   try {
     await client.realtime.calls.accept(callId, {
@@ -129,8 +220,9 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
         input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'pt' } },
         output: { voice: VOICE },
       },
+      ...(BACKEND === 'gateway' ? { tools: TOOLS, tool_choice: 'auto' as const } : {}),
     })
-    log(callId, 'accepted', { model: MODEL, voice: VOICE })
+    log(callId, 'accepted', { model: MODEL, voice: VOICE, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
   } catch (e) {
     log(callId, 'accept_fail', { err: String(e) })
     calls.delete(callId)
@@ -148,7 +240,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url)
     if (req.method === 'GET' && url.pathname === '/health') {
-      return Response.json({ ok: true, secret_configured: Boolean(WEBHOOK_SECRET), caller_token_configured: Boolean(CALLER_TOKEN), active_calls: calls.size, model: MODEL })
+      return Response.json({ ok: true, secret_configured: Boolean(WEBHOOK_SECRET), caller_token_configured: Boolean(CALLER_TOKEN), active_calls: calls.size, model: MODEL, backend: BACKEND, brain_model: GATEWAY_MODEL })
     }
     if (req.method !== 'POST' || url.pathname !== '/webhook') return new Response('not found', { status: 404 })
     // Fail-closed: sem secret nenhuma chamada é aceita.
