@@ -329,5 +329,5 @@ Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
 
 - Chave de projeto (`sk-proj-…`) recebida do Pedro e guardada em `/etc/onboard/secrets/openai-poc-voz.env` (root:root 600). Fora do repo.
 - FATO: `GET /v1/models` → HTTP 200 (x-request-id `133c9dfa-76cc-4e71-9ffc-97d2fe50043d`); 136 modelos visíveis, incluindo `gpt-realtime-2.1-mini` e `gpt-realtime-2.1`.
-- PENDENTE: **Project ID** (`proj_…`) — a API não devolve em header para chave de projeto; pegar no painel (Settings → Project → General).
+- ✅ Project ID recebido e gravado no mesmo arquivo (`OPENAI_PROJECT_ID`). FATO: chave + header `OpenAI-Project: <id>` → HTTP 200; controle com id inválido → HTTP 401 ⇒ chave pertence a esse projeto. URI SIP: `sip:<OPENAI_PROJECT_ID>@sip.api.openai.com;transport=tls`.
 - PENDENTE / NÃO SEI: se o projeto tem limite de gasto configurado — chave de projeto não lê billing; confirmar no painel.
