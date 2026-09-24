@@ -352,3 +352,22 @@ Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
 - PENDENTE (Pedro): criar webhook no painel OpenAI → URL `https://poc-voz.ifixtelecom.com.br/webhook`, evento `realtime.call.incoming` → passar o signing secret.
 - ✅ Webhook criado pelo Pedro no painel OpenAI; signing secret aplicado em `/opt/poc-voz-realtime/secrets.env` (worker-vm) e em `ops-claude:/etc/onboard/secrets/openai-poc-voz.env`. Container recriado.
 - FATOS (2026-09-24 00:28Z): `/health` → `secret_configured:true`; POST público assinado com o secret real → 200 (`ignored_event`); POST público sem assinatura → 400 (`bad_signature`). **Etapa 3 fechada.**
+
+## Adendo — Etapa 4 (Asterisk) executada (2026-09-24, aprovada pelo Pedro: "cria ramal novo só pra PoC")
+
+Pré-checks (leitura, container `voip-asterisk` no worker-oracle — atenção: no mesmo host roda `voice-api-asterisk-1`, sempre mirar pelo nome):
+- FATO: Asterisk 22.8.2; `res_srtp.so` **Running**; transports `transport-tls` 5071 / `transport-tls-5061` 5061 / udp 5070 / wss 5060; `net=host`, `external_media_address = 137.131.194.252`.
+- FATO: egress TLS do Oracle → `sip.api.openai.com:5061` OK (cert `CN=api.openai.com`, Verify return code 0).
+- FATO: iptables do host — `OUTPUT` policy ACCEPT; `INPUT -p udp -j ACCEPT` (RTP entrante aceito no host).
+- NÃO SEI: security list da OCI para UDP 30000–30100 vindo dos blocos de mídia da OpenAI. HIPÓTESE: security list stateful + Asterisk manda RTP primeiro (rtp_symmetric) ⇒ retorno passa. Resolve: 1ª chamada (áudio mudo = bloqueio).
+- FATO (código voip-api): rotinas que apagam `ps_*` usam id exato de entidades do app (`inArray`/`eq`, "never LIKE/prefix"); ids `poc_*` não são tocados.
+
+Linhas criadas no Postgres `voip_api` (realtime):
+- `ps_aors.poc_openai_realtime` — contact `sip:<OPENAI_PROJECT_ID>@sip.api.openai.com:5061^3Btransport=tls`, qualify 0.
+- `ps_endpoints.poc_openai_realtime` — `transport-tls-5061`, `!all,ulaw,alaw`, `media_encryption=sdes` (optimistic no), `direct_media=no`, `rtp_symmetric/force_rport/rewrite_contact=yes`, `ice_support=no`, `from_user=POC_CALLER_TOKEN`, context `poc-openai-sink` (inexistente).
+- `ps_auths.poc_voz_ramal_auth` (user `poc_voz_ramal`, senha em `ops-claude:/etc/onboard/secrets/openai-poc-voz.env` → `POC_RAMAL_PASSWORD`), `ps_aors.poc_voz_ramal`, `ps_endpoints.poc_voz_ramal` (context `poc-openai-sink` ⇒ softphone não disca pra lugar nenhum).
+- **GOTCHA medido:** realtime corta valor no `;` → contact virou `transport=tls` (`Error parsing contact`). Fix: gravar `;` como `^3B`. Pós-fix: `pjsip show aor` mostra contact correto, status `NonQual` (esperado, qualify 0), sem novos erros.
+- Rollback: `ops/poc-voz-realtime/asterisk-rollback.sql` (DELETE por id exato).
+
+Softphone da PoC: servidor `137.131.194.252:5070` UDP, usuário `poc_voz_ramal`, codecs G.711.
+Disparo da chamada (Etapa 5): `docker exec voip-asterisk asterisk -rx "channel originate PJSIP/poc_voz_ramal application Dial PJSIP/poc_openai_realtime"`.
