@@ -350,3 +350,5 @@ Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
 - FATOS: `POST /webhook` público → 503 (fail-closed, sem secret); `GET /health` → 404; `GET /webhook` → 404; cert Let's Encrypt `CN=poc-voz.ifixtelecom.com.br`, expira 2026-12-22.
 - Rollback: `rm poc-voz.yml` no edge + DELETE do record DNS pelo id acima.
 - PENDENTE (Pedro): criar webhook no painel OpenAI → URL `https://poc-voz.ifixtelecom.com.br/webhook`, evento `realtime.call.incoming` → passar o signing secret.
+- ✅ Webhook criado pelo Pedro no painel OpenAI; signing secret aplicado em `/opt/poc-voz-realtime/secrets.env` (worker-vm) e em `ops-claude:/etc/onboard/secrets/openai-poc-voz.env`. Container recriado.
+- FATOS (2026-09-24 00:28Z): `/health` → `secret_configured:true`; POST público assinado com o secret real → 200 (`ignored_event`); POST público sem assinatura → 400 (`bad_signature`). **Etapa 3 fechada.**
