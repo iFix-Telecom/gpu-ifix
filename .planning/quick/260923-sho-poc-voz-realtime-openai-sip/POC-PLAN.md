@@ -448,3 +448,21 @@ Próximas correções candidatas: proibir meta-fala ("atendente", "ferramenta");
   FATO (teste isolado 2×, deepseek): "123" / "quatro, cinco, seis" / "sete oito nove zero zero" → "Entendi: 123, 456, 789, 00, certo?" (2,6–2,9 s, stop).
 - Transcrição: `gpt-4o-mini-transcribe` → **`gpt-4o-transcribe`** + `prompt` com vocabulário iFix + `noise_reduction: near_field` (tudo por env: `POC_TRANSCRIBE_MODEL`, `POC_TRANSCRIBE_PROMPT`, `POC_NOISE_REDUCTION=off`). HIPÓTESE: aceito no `accept` via SIP; resolve na próxima ligação (`accept_fail` se não).
 - FATO (doc oficial `models/gpt-live-transcribe`): `gpt-live-transcribe` ($0,017/min, keywords/latência ajustável) só roda em `v1/realtime/transcription_sessions`; **não suportado** como transcrição dentro de sessão Realtime ⇒ não aplicável direto nesta arquitetura.
+
+## Adendo — Ligação 4: `gpt-realtime-2.1` (full) + gpt-4o-transcribe + cérebro Qwen LOCAL (2026-09-24 11:34–11:36 UTC)
+
+Troca só por env (`POC_MODEL=gpt-realtime-2.1` no secrets.env). Cérebro respondeu com `upstream_model: model.gguf` ⇒ **pod primário Qwen no ar** (não deepseek).
+
+FATOS (log):
+- ✅ `accept` aceitou `gpt-4o-transcribe` + prompt + `noise_reduction near_field` (hipótese resolvida).
+- ✅ Transcrições todas coerentes (0 vazias, 0 frases sem sentido) vs 2 erros graves na ligação 3 com mini-transcribe.
+- ✅ CPF ditado em 2 turnos ("um dois três quatro cinco seis" / "sete oito nove zero zero") → cérebro: "123, 456, 789, 00, certo?".
+- ✅ Sem meta-fala ("atendente"); intenções sem dado pessoal.
+- ✅ **Cérebro Qwen local: 1.537–2.111 ms** (6 chamadas) vs 3.062–7.125 ms com deepseek.
+- ✅ 1º som após fim da fala: 222–389 ms (1 caso 940 ms). Barge-in: 2 `cancelled`.
+- ❌ Cérebro **finge ação**: "Estou verificando sua fatura com o CPF informado" (3×) e "Vou verificar o status da sua conexão agora" — não há integração de dados; nunca entrega resposta. Viola "nunca diga que executou uma ação".
+- ❌ "Não entendi, pode repetir?" foi pra tool (deveria repetir sozinha).
+- ⚠️ Frases de espera longas/estranhas: "deixa eu ver como isso fica registrado para seguir com você".
+- Tokens por resposta equivalentes ao mini (in até ~1.650); full tem `reasoning_tokens` 8–52 por resposta. Preço/token do full = 3,2× o mini.
+
+Correções candidatas: cérebro sem acesso a dados deve dizer isso e encaminhar (proibir "estou verificando"); pedido de repetição = voz repete a última resposta sem tool; frase de espera fixa curta.
