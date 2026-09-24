@@ -423,3 +423,21 @@ Correções propostas (não aplicadas):
 2. `finish_reason` + `usage` do gateway no log; `max_tokens` 400→800; se `length`, corta na última frase completa.
 3. Saudação com `response.create` próprio (`instructions` de cumprimento, `tool_choice: none`).
 - FATO (teste isolado do cérebro, cenário exato da ligação 2, 2×): com transcrição "sete dois, quatro, sete meia, dois, sete, oito, zero, oito" + intenção falsa "CPF 1234567890" → deepseek respondeu "Pode repetir o CPF devagar, por favor?" (finish=stop, 2,0–2,9 s). Não usou o CPF inventado. (Transcrição tem 10 dígitos; CPF tem 11.)
+
+## Adendo — Ligação 3 (pós-correções 1–3), 2026-09-24 10:13–10:16 UTC, cérebro = deepseek (pod fora do horário)
+
+FATOS (log):
+- ✅ Saudação limpa, sem frase de espera.
+- ✅ 5 tool calls; `intencao` **sem nenhum dado pessoal/número** (correção 1 obedecida pelo modelo de voz).
+- ✅ CPF de teste falado em 3 pedaços ("123" / "quatro, cinco, seis" / "sete oito nove zero zero" = 11 dígitos) chegou literal ao cérebro via histórico; cérebro NÃO inventou dado — pediu confirmação se estava completo (conservador demais: eram 11 dígitos).
+- ✅ Barge-in: 2 respostas `cancelled` ao Pedro falar por cima ("Pare, pare, pare").
+- ✅ Todos `finish_reason=stop`; nenhuma fala cortada.
+- `transcript_pending` sempre false (transcrição chegou antes da tool nesta ligação — espera não precisou agir).
+- 1º som após fim da fala: 179–624 ms (1 caso 1.473 ms, após CPF fatiado); cérebro 3.062–5.627 ms.
+- ❌ Voz faz meta-fala: "vou ver o que o atendente da iFix Telecom disse", "o atendente disse que você precisa…".
+- ❌ Tool chamada à toa em fala sem pedido ("Era isso só me enchinge, por favor." — STT de "só um instantinho"?).
+- ❌ Resposta duplicada (16:02) após transcrição vazia.
+- ❌ STT 8 kHz erra: "Olá Luiz", "fósforos equivalvalos da minha".
+- input_tokens por resposta cresce até ~1.600 no fim de 3 min.
+
+Próximas correções candidatas: proibir meta-fala ("atendente", "ferramenta"); instruir cérebro a juntar dígitos de turnos consecutivos e contar 11 p/ CPF; não chamar tool quando a fala não contém pedido; testar `gpt-live-transcribe`/prompt de transcrição com vocabulário iFix.
