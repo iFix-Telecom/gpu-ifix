@@ -331,3 +331,14 @@ Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
 - FATO: `GET /v1/models` → HTTP 200 (x-request-id `133c9dfa-76cc-4e71-9ffc-97d2fe50043d`); 136 modelos visíveis, incluindo `gpt-realtime-2.1-mini` e `gpt-realtime-2.1`.
 - ✅ Project ID recebido e gravado no mesmo arquivo (`OPENAI_PROJECT_ID`). FATO: chave + header `OpenAI-Project: <id>` → HTTP 200; controle com id inválido → HTTP 401 ⇒ chave pertence a esse projeto. URI SIP: `sip:<OPENAI_PROJECT_ID>@sip.api.openai.com;transport=tls`.
 - PENDENTE / NÃO SEI: se o projeto tem limite de gasto configurado — chave de projeto não lê billing; confirmar no painel.
+
+## Adendo — Etapa 1 fechada + Etapa 2 executada (2026-09-23)
+
+- Etapa 1: limite de gasto **US$ 20** configurado no projeto pelo Pedro (confirmado por ele; chave de projeto não lê billing).
+- Etapa 2 (aprovada pelo Pedro): serviço `ops/poc-voz-realtime/` (Bun + SDK `openai` 7.23.0) na **worker-vm** `/opt/poc-voz-realtime`, container `poc-voz-realtime`, bind **só interno** `10.10.10.50:8099`. Fora de qualquer stack de produção.
+  - Travas: fail-closed sem `OPENAI_WEBHOOK_SECRET` (503); só aceita From user = `POC_CALLER_TOKEN` (resto → 603); 1 chamada simultânea (486); hangup automático em 720 s.
+  - Log NDJSON por chamada: `turn_latency` (speech_stopped → 1º `response.output_audio.delta`), transcrições user/IA, `usage` por `response.done`.
+  - Secrets em `/opt/poc-voz-realtime/secrets.env` (600); `POC_CALLER_TOKEN` gerado e guardado também em `ops-claude:/etc/onboard/secrets/openai-poc-voz.env`.
+- FATOS (testes): local — assinatura válida 200, inválida 400, timestamp de 1 h atrás 400, sem secret 503; typecheck ok. Deploy — container Up, `/health` 200 alcançado a partir da vps-ifix-vm (edge), `POST /webhook` sem secret → 503.
+- HIPÓTESE: `audio.input.transcription` (gpt-4o-mini-transcribe) é aceito no `accept` via SIP e soma custo pequeno à ligação. Resolve: 1ª chamada (`accept_fail` no log se não).
+- PENDENTE p/ Etapa 3: DNS + rota Traefik (path `/webhook` só) → criar webhook no painel OpenAI → colar `OPENAI_WEBHOOK_SECRET` no secrets.env + `docker compose up -d`.

@@ -1,0 +1,13 @@
+# PoC SEED-009 — webhook OpenAI Realtime SIP (worker-vm, /opt/poc-voz-realtime).
+# Só na rede interna: edge Traefik (vps-ifix-vm) alcança 10.10.10.50:8099.
+services:
+  webhook:
+    build: .
+    image: poc-voz-realtime:local
+    container_name: poc-voz-realtime
+    restart: unless-stopped
+    env_file: /opt/poc-voz-realtime/secrets.env
+    ports:
+      - "10.10.10.50:8099:8099"
+    volumes:
+      - ./data:/data
