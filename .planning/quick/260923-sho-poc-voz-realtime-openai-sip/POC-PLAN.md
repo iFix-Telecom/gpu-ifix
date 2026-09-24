@@ -342,3 +342,11 @@ Mudanças no Asterisk (todas no Postgres realtime, reversíveis com `DELETE`):
 - FATOS (testes): local — assinatura válida 200, inválida 400, timestamp de 1 h atrás 400, sem secret 503; typecheck ok. Deploy — container Up, `/health` 200 alcançado a partir da vps-ifix-vm (edge), `POST /webhook` sem secret → 503.
 - HIPÓTESE: `audio.input.transcription` (gpt-4o-mini-transcribe) é aceito no `accept` via SIP e soma custo pequeno à ligação. Resolve: 1ª chamada (`accept_fail` no log se não).
 - PENDENTE p/ Etapa 3: DNS + rota Traefik (path `/webhook` só) → criar webhook no painel OpenAI → colar `OPENAI_WEBHOOK_SECRET` no secrets.env + `docker compose up -d`.
+
+## Adendo — Etapa 3 (DNS + Traefik) executada (2026-09-23, aprovada pelo Pedro)
+
+- DNS Cloudflare: A `poc-voz.ifixtelecom.com.br` → `162.55.92.154`, proxied=false, TTL 120, record id `2b0493574865203d00436dd5d5540754`. Propagação confirmada (1.1.1.1, 8.8.8.8, NS autoritativo, resolver da vps-ifix-vm) ANTES de criar a rota.
+- Traefik edge (vps-ifix-vm): `/home/pedro/projetos/pedro/infra/traefik-dynamic/poc-voz.yml`, router `Host && Path(/webhook) && Method(POST)` → `http://10.10.10.50:8099`, certResolver letsencrypt.
+- FATOS: `POST /webhook` público → 503 (fail-closed, sem secret); `GET /health` → 404; `GET /webhook` → 404; cert Let's Encrypt `CN=poc-voz.ifixtelecom.com.br`, expira 2026-12-22.
+- Rollback: `rm poc-voz.yml` no edge + DELETE do record DNS pelo id acima.
+- PENDENTE (Pedro): criar webhook no painel OpenAI → URL `https://poc-voz.ifixtelecom.com.br/webhook`, evento `realtime.call.incoming` → passar o signing secret.
