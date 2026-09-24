@@ -466,3 +466,4 @@ FATOS (log):
 - Tokens por resposta equivalentes ao mini (in até ~1.650); full tem `reasoning_tokens` 8–52 por resposta. Preço/token do full = 3,2× o mini.
 
 Correções candidatas: cérebro sem acesso a dados deve dizer isso e encaminhar (proibir "estou verificando"); pedido de repetição = voz repete a última resposta sem tool; frase de espera fixa curta.
+- **Decisão Pedro (2026-09-24):** "não percebi valor real na mudança de voz" ⇒ segue **`gpt-realtime-2.1-mini`** (full = 3,2× preço/token sem ganho percebido). Env revertida. Mantidos do teste: `gpt-4o-transcribe` + prompt + near_field (ganho medido na transcrição).
