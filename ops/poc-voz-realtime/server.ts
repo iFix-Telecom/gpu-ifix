@@ -69,8 +69,11 @@ function monitor(callId: string, state: CallState) {
         log(callId, 'speech_stopped')
         break
       case 'response.output_audio.delta':
+      case 'response.output_audio_transcript.delta':
+        // O WebSocket de monitoramento (?call_id=) não recebe o áudio em si; o 1º delta
+        // da transcrição do áudio da IA é o proxy mais cedo de "IA começou a falar".
         if (state.awaitingFirstAudio && state.lastSpeechStop) {
-          log(callId, 'turn_latency', { ms: now - state.lastSpeechStop })
+          log(callId, 'turn_latency', { ms: now - state.lastSpeechStop, via: ev.type })
           state.awaitingFirstAudio = false
         }
         break
@@ -91,8 +94,14 @@ function monitor(callId: string, state: CallState) {
     }
   }
   ws.onclose = (e) => {
-    log(callId, 'ws_close', { code: e.code, duration_s: Math.round((Date.now() - state.startedAt) / 1000) })
-    clearTimeout(state.timer)
+    const elapsed = Math.round((Date.now() - state.startedAt) / 1000)
+    log(callId, 'ws_close', { code: e.code, duration_s: elapsed })
+    // Queda do monitoramento NÃO encerra a chamada SIP (medido na 1ª ligação: 1006 aos 92 s
+    // com os canais ainda Up). Mantém a trava de duração e manda hangup explícito.
+    if (e.code !== 1000) {
+      log(callId, 'ws_abnormal_close_hangup')
+      client.realtime.calls.hangup(callId).catch((err) => log(callId, 'hangup_fail', { err: String(err) }))
+    }
     calls.delete(callId)
   }
 }

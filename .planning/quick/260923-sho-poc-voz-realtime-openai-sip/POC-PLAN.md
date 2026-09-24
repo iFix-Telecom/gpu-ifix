@@ -371,3 +371,27 @@ Linhas criadas no Postgres `voip_api` (realtime):
 
 Softphone da PoC: servidor `137.131.194.252:5070` UDP, usuário `poc_voz_ramal`, codecs G.711.
 Disparo da chamada (Etapa 5): `docker exec voip-asterisk asterisk -rx "channel originate PJSIP/poc_voz_ramal application Dial PJSIP/poc_openai_realtime"`.
+
+## Adendo — Etapa 5: 1ª ligação (2026-09-24 00:44–00:5x UTC) — ✅ SUCESSO
+
+Ramal PoC registrado via **TLS 5061** (`poc-voz.sip.ifixtelecom.com.br`, cert `*.sip` wildcard + DNS wildcard; UDP 5070 de fora não chegou no host — só IPs de tronco aparecem na captura). Ramal ajustado p/ `media_encryption=sdes` + optimistic.
+Snapshot pré-chamada: 0 canais, 15 endpoints livres, 3 contatos Avail. Disparo: `channel originate PJSIP/poc_voz_ramal application Dial PJSIP/poc_openai_realtime`.
+
+FATOS (logs Asterisk + webhook, call_id `rtc_u1_ERRs5p3oNFJVuJV5u5NHCV6uDzTt0DAJ`):
+- OpenAI atendeu, bridge montado; **sem 488** ⇒ SDES-SRTP aceito; `res_srtp` ok; áudio nos 2 sentidos (fala do Pedro transcrita). Hipóteses SDES / res_srtp / firewall de mídia **resolvidas**.
+- `accept` com `gpt-realtime-2.1-mini`, voz `marin`, transcrição `gpt-4o-mini-transcribe` — aceito.
+- Pedro: "sucesso".
+- 6 respostas; tokens somados: input audio 540 (64 cached), input text 962 (320 cached), output audio 913, output text 457 (reasoning 177).
+- Latência fim-da-fala → transcrição completa da IA: 937 / 949 / 1084 / 1176 / 2685 ms (p50 1084). É **proxy tardio** (não 1º áudio).
+- 1 transcrição do usuário vazia (1º turno).
+- TLS Asterisk→OpenAI: NOTICE "certificate is untrusted" / "server identity does not match" — passa só porque `verify_server=no`.
+
+Bugs do serviço achados e corrigidos (mesmo dia):
+1. `response.output_audio.delta` **não chega** no WebSocket de monitoramento ⇒ `turn_latency` nunca logou. Fix: medir no 1º `response.output_audio_transcript.delta`.
+2. WS de monitoramento caiu com **1006 aos 92 s** e o serviço apagou o estado **cancelando a trava de 12 min**, enquanto os 2 canais seguiam Up no Asterisk. Fix: timer não é mais cancelado; fechamento anormal ⇒ `hangup` explícito. Canais `poc_*` derrubados manualmente; `POST /hangup` → 404 (chamada já não existia na OpenAI).
+
+Custo — HIPÓTESE (preço de texto do mini não levantado; usar painel p/ confirmar):
+- áudio: 476×$10/1M + 64×$0,30/1M + 913×$20/1M ≈ **$0,023**; texto (se ~$0,60 in / $2,40 out por 1M) ≈ $0,0015; total ≈ **$0,025** na janela de ~92 s monitorada ⇒ ~**$0,016/min**, abaixo da estimativa de $0,018.
+- NÃO SEI: se a sessão OpenAI seguiu após o 1006 (entre 00:46:34 e o hangup). Resolve: Usage do projeto no painel.
+
+Próximo: ligações de medição de 3 e 10 min (Etapa 7) com a métrica corrigida + teste de barge-in; conferir custo no painel.
