@@ -35,6 +35,7 @@ const TRANSCRIBE_PROMPT =
     'fatura, boleto, segunda via, CPF, CNPJ, contrato, ramal, PABX, internet caiu, instabilidade, suporte, ' +
     'protocolo, parcelamento. Números podem ser ditados dígito a dígito.'
 const NOISE_REDUCTION = process.env.POC_NOISE_REDUCTION ?? 'near_field'
+const GREETING = process.env.POC_GREETING ?? 'on'
 
 const INSTRUCTIONS_SOLO =
   'Você é a assistente de voz da iFix Telecom em uma ligação de TESTE interno. ' +
@@ -212,6 +213,9 @@ function monitor(callId: string, state: CallState) {
   state.ws = ws
   ws.onopen = () => {
     log(callId, 'ws_open')
+    // Chamada de saída (IA disca o cliente): a IA atende antes do cliente — sem saudação,
+    // espera o "alô" dele. POC_GREETING=off.
+    if (GREETING === 'off') return log(callId, 'greeting_skipped')
     ws.send(
       JSON.stringify({
         type: 'response.create',

@@ -490,3 +490,22 @@ FATOS (log, 68 s):
 - ⚠️ Saudação "sou o atendente" (masculino) com voz feminina `marin`.
 
 Pendência: ou implementar registro real (tool `registrar_pedido` → ClickUp/CRM/Chatwoot) ou o cérebro dizer só "vou anotar para a equipe" enquanto não houver integração.
+
+## Adendo — Ligação externa real via operadora (2026-09-25) — ✅ SUCESSO às 23:54 UTC
+
+Caminho final: ramal **9990 "IA PoC SEED-009" no workspace 3:16 PUBLICIDADE** (`ext_01501455_9990`, criado pela API oficial, endpoint apontado p/ OpenAI) → `[from-extensions]` (cos-check `allow:trunk_2b137c12:0983489#`, B2BUA com CDR/billing do voip-api) → tronco NextBilling IP (Master) → celular. Serviço com `POC_GREETING=off` (IA espera o "alô").
+
+Tentativas e causa:
+- `originate` CLI direto no tronco (21:50–22:26): mudo; eco puro também mudo. INVITE ao NextBilling saía `From: "Anonymous"`.
+- Ramal 9990 no iFix Master: cos-check `allow` sem tronco → fallback inexistente `trunk_nextbilling_74177ddd` → exhausted (workspace sem rota de saída).
+- `/dialer` oficial: preflight exige ramal `online` no ARI; ramal com contato estático p/ OpenAI fica `offline` (sem REGISTER) → não usado.
+- Ramal 9990 no 3:16 via `channel originate PJSIP/ext_01501455_9990 extension <num>@from-extensions` (CLI): 11 97359-2249 ANSWER mudo; 11 96581-7764 → CHANUNAVAIL ("não receber recados", Claro) e 2× NOANSWER/caixa postal. IA ouviu e respondeu às gravações da operadora (early media).
+- **FATO decisivo:** mesmo ramal, mesmo número (11 96581-7764), mesmo caminho; única mudança = **ARI originate com `callerId=IA PoC <9990>`** → `Status:ANSWER, Answered:49`, conversa completa. Canal de `channel originate` (CLI) nasce SEM caller ID ⇒ chamada anônima ⇒ operadora desvia/bloqueia/mute. HIPÓTESE: o 11 97359-2249 mudo também era rejeição de anônimo (não retestado com callerId).
+- Controle: ligação normal do webphone do ramal 2001 (mesmo tronco) completou e tocou.
+
+Ligação de sucesso (call_id do webhook no log de 23:54:50): transcrições corretas ("Oi, me chamo Pedro. Qual o seu nome?", "Valeu, tchau, tchau."), 1º som 471–948 ms, sem tool (conversa só social).
+
+Pendências:
+- IA reage a early media (toque/caixa postal/anúncio de operadora) ⇒ só ouvir/responder após o atendimento (200 OK do destino).
+- Limpeza: ramal 9990 do **iFix Master** (id 2163, ocioso) + revogar token iFix Master (exposto em claro na sessão). Tokens expiram 2026-10-02.
+- Disparo de saída hoje é manual (ARI com callerId). Produto: `/dialer` precisaria aceitar ramal-IA sem REGISTER.
