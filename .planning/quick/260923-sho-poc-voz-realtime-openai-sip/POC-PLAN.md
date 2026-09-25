@@ -467,3 +467,10 @@ FATOS (log):
 
 Correções candidatas: cérebro sem acesso a dados deve dizer isso e encaminhar (proibir "estou verificando"); pedido de repetição = voz repete a última resposta sem tool; frase de espera fixa curta.
 - **Decisão Pedro (2026-09-24):** "não percebi valor real na mudança de voz" ⇒ segue **`gpt-realtime-2.1-mini`** (full = 3,2× preço/token sem ganho percebido). Env revertida. Mantidos do teste: `gpt-4o-transcribe` + prompt + near_field (ganho medido na transcrição).
+
+### Correções pós-ligação 4 (2026-09-25)
+- Cérebro honesto: sem acesso a sistemas ⇒ proibido "estou verificando/vou consultar"; diz que não vê o dado e oferece registrar; problema técnico ⇒ 1–2 orientações básicas + chamado.
+  FATO (teste isolado, Qwen local `model.gguf`): "Quanto tá o valor da minha fatura?" → "Não consigo ver o valor da sua fatura por aqui. Posso registrar seu pedido…" (1.512 ms, stop); "Minha internet caiu…" → "Verifique se os cabos estão conectados e as luzes do roteador…" (749 ms, stop).
+- Voz: "pode repetir?" ⇒ repete sozinha sem tool; frase de espera fixa "Só um instante.".
+- Transcrição: `POC_TRANSCRIBE_MODEL=gpt-transcribe` ($0,0045/min vs $0,006 do gpt-4o-transcribe) — qualidade a comparar na próxima ligação.
+- FATO (pricing oficial): realtime-2.1-mini texto $0,60 in / $2,40 out por 1M (confirma a hipótese de custo da ligação 1). Transcrição da fala do cliente é cobrança à parte; fala da IA NÃO passa pelo transcribe.
