@@ -474,3 +474,19 @@ Correções candidatas: cérebro sem acesso a dados deve dizer isso e encaminhar
 - Voz: "pode repetir?" ⇒ repete sozinha sem tool; frase de espera fixa "Só um instante.".
 - Transcrição: `POC_TRANSCRIBE_MODEL=gpt-transcribe` ($0,0045/min vs $0,006 do gpt-4o-transcribe) — qualidade a comparar na próxima ligação.
 - FATO (pricing oficial): realtime-2.1-mini texto $0,60 in / $2,40 out por 1M (confirma a hipótese de custo da ligação 1). Transcrição da fala do cliente é cobrança à parte; fala da IA NÃO passa pelo transcribe.
+
+## Adendo — Ligação 5 (2026-09-25 21:03–21:05 UTC): mini + gpt-transcribe + Qwen local + correções pós-ligação 4
+
+Snapshot antes/depois idêntico (8 canais ativos, 4 In use, 20 Not in use — tráfego real de clientes; PoC não interferiu). Cérebro = `model.gguf` (pod primário no ar às 18h BRT).
+
+FATOS (log, 68 s):
+- ✅ Frase de espera sempre "Só um instante." (4/4).
+- ✅ "Não entendi, pode repetir?" → voz repetiu sozinha, **sem tool** (correção 2 ok).
+- ✅ Fatura: "Não consigo visualizar sua fatura por aqui. Posso registrar seu pedido…" — **sem "estou verificando"** (correção 1 ok).
+- ✅ Internet caiu: orientação básica (cabos, luzes, reiniciar).
+- ✅ `gpt-transcribe`: 6/6 transcrições corretas ("Onde está a minha fatura?", "Ok, pode registrar." etc.).
+- ✅ Cérebro Qwen local: 1.079 / 1.431 / 1.950 ms. 1º som: 317–792 ms (RTT do softphone ~227 ms nesta ligação).
+- ❌ **Nova ação fingida:** após "pode registrar" o cérebro disse "Seu pedido foi registrado. A equipe entrará em contato…" — não existe registro real (só o log da PoC).
+- ⚠️ Saudação "sou o atendente" (masculino) com voz feminina `marin`.
+
+Pendência: ou implementar registro real (tool `registrar_pedido` → ClickUp/CRM/Chatwoot) ou o cérebro dizer só "vou anotar para a equipe" enquanto não houver integração.
