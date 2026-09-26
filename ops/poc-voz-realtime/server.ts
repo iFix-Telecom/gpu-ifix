@@ -134,6 +134,8 @@ type CallState = {
   history: Turn[]
   /** Saída: 'pre_answer' até ouvir gente; depois 'live'. Entrada: sempre 'live'. */
   phase: 'pre_answer' | 'live'
+  /** Chamada que caiu do Gemini (ponte no Oracle): header SIP X-Poc-Fallback: 1. */
+  fallback: boolean
   /** Transcrição da fala atual ainda pendente (speech_stopped visto, transcrição não). */
   transcriptPending?: Promise<void>
   resolveTranscript?: () => void
@@ -159,10 +161,12 @@ function fromUser(headers: Array<{ name: string; value: string }>): string | nul
 async function askBrain(callId: string, state: CallState, intencao: string): Promise<string> {
   const t0 = Date.now()
   // Histórico = transcrições literais (fonte de verdade). A intenção do modelo de voz entra só como pista.
+  // Google recusa histórico terminando em fala da IA ("Requests ending with a model turn are not supported").
+  const hist = state.history.filter((t) => !(t.role === 'assistant' && /^s[óo] um instante\.?$/i.test(t.content.trim())))
+  while (hist.length && hist[hist.length - 1].role === 'assistant') hist.pop()
   const messages = [
-    { role: 'system', content: BRAIN_SYSTEM },
-    ...state.history.slice(-12),
-    { role: 'system', content: `Intenção inferida pelo modelo de voz (pode estar errada, não use como dado): ${intencao}` },
+    { role: 'system', content: `${BRAIN_SYSTEM}\n\nIntenção inferida pelo modelo de voz (pode estar errada, não use como dado): ${intencao}` },
+    ...hist.slice(-12),
   ]
   try {
     const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
@@ -232,6 +236,19 @@ function monitor(callId: string, state: CallState) {
     log(callId, 'ws_open')
     // Chamada de saída (IA disca o cliente): a IA atende antes do cliente — sem saudação,
     // espera o "alô" dele. POC_GREETING=off.
+    if (state.fallback) {
+      ws.send(
+        JSON.stringify({
+          type: 'response.create',
+          response: {
+            instructions:
+              'Diga em uma frase curta, em português do Brasil: "Desculpe, tive uma instabilidade na ligação. Pode repetir, por favor?"',
+            tool_choice: 'none',
+          },
+        }),
+      )
+      return log(callId, 'fallback_greeting')
+    }
     if (GREETING === 'off') return log(callId, 'greeting_skipped')
     ws.send(
       JSON.stringify({
@@ -332,7 +349,14 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
     await client.realtime.calls.reject(callId, { status_code: 486 }).catch((e) => log(callId, 'reject_fail', { err: String(e) }))
     return
   }
-  const state: CallState = { startedAt: Date.now(), awaitingFirstAudio: false, history: [], phase: OUTBOUND ? 'pre_answer' : 'live' }
+  const isFallback = sipHeaders.some((h) => h.name.toLowerCase() === 'x-poc-fallback' && h.value.trim() === '1')
+  const state: CallState = {
+    startedAt: Date.now(),
+    awaitingFirstAudio: false,
+    history: [],
+    phase: OUTBOUND && !isFallback ? 'pre_answer' : 'live',
+    fallback: isFallback,
+  }
   calls.set(callId, state)
   try {
     await client.realtime.calls.accept(callId, {
@@ -342,14 +366,14 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
       audio: {
         input: {
           transcription: { model: TRANSCRIBE_MODEL, language: 'pt', prompt: TRANSCRIBE_PROMPT },
-          turn_detection: turnDetection(!OUTBOUND),
+          turn_detection: turnDetection(!OUTBOUND || isFallback),
           ...(NOISE_REDUCTION === 'off' ? {} : { noise_reduction: { type: NOISE_REDUCTION as 'near_field' | 'far_field' } }),
         },
         output: { voice: VOICE },
       },
       ...(BACKEND === 'gateway' ? { tools: TOOLS, tool_choice: 'auto' as const } : {}),
     })
-    log(callId, 'accepted', { model: MODEL, voice: VOICE, transcribe: TRANSCRIBE_MODEL, noise_reduction: NOISE_REDUCTION, turn: TURN_MODE, vad_silence_ms: VAD_SILENCE_MS, outbound: OUTBOUND, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
+    log(callId, 'accepted', { fallback: isFallback, model: MODEL, voice: VOICE, transcribe: TRANSCRIBE_MODEL, noise_reduction: NOISE_REDUCTION, turn: TURN_MODE, vad_silence_ms: VAD_SILENCE_MS, outbound: OUTBOUND, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
   } catch (e) {
     log(callId, 'accept_fail', { err: String(e) })
     calls.delete(callId)

@@ -48,6 +48,11 @@ const GATEWAY_BASE_URL = env('GATEWAY_BASE_URL', 'https://ai-gateway.converse-ai
 const GATEWAY_MODEL = env('GATEWAY_MODEL', 'qwen')
 const GATEWAY_API_KEY = env('GATEWAY_API_KEY', '')
 const BACKEND = env('POC_BACKEND', GATEWAY_API_KEY ? 'gateway' : 'none')
+// Fallback: se o Gemini falhar (abertura ou no meio), a perna do cliente fica no bridge e entra a
+// OpenAI Realtime via SIP (endpoint PJSIP da PoC, webhook no worker-vm). '' desliga.
+const FALLBACK_ENDPOINT = env('POC_FALLBACK_ENDPOINT', 'PJSIP/poc_openai_realtime')
+// Teste do fallback sem derrubar o Gemini de verdade: 1 = pula o Gemini e vai direto p/ OpenAI.
+const FORCE_FALLBACK = env('POC_FORCE_FALLBACK', '0') === '1'
 
 const GEMINI_WS =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent'
@@ -143,6 +148,8 @@ type Call = {
   maxTimer?: Timer
   // turnos
   history: Turn[]
+  fallback: boolean
+  fallbackChannelId?: string
   userText: string
   aiText: string
   lastUserTextAt: number
@@ -162,7 +169,7 @@ async function hangup(call: Call, reason: string) {
     call.gemini?.close()
   } catch {}
   call.sock?.close()
-  for (const ch of [call.mediaChannelId, call.id]) {
+  for (const ch of [call.mediaChannelId, call.fallbackChannelId, call.id]) {
     if (ch) await ari('DELETE', `/channels/${ch}`).catch(() => {})
   }
   if (call.bridgeId) await ari('DELETE', `/bridges/${call.bridgeId}`).catch(() => {})
@@ -227,7 +234,36 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
   }
 }
 
+async function fallbackToOpenAI(call: Call, reason: string) {
+  if (call.ended || call.fallback) return
+  if (!FALLBACK_ENDPOINT) return void hangup(call, `gemini_failed_no_fallback:${reason}`)
+  call.fallback = true
+  log(call.id, 'fallback_start', { reason, endpoint: FALLBACK_ENDPOINT })
+  clearInterval(call.drainTimer)
+  try {
+    call.gemini?.close()
+  } catch {}
+  call.sock?.close()
+  const media = call.mediaChannelId
+  call.mediaChannelId = undefined // o ChannelDestroyed da mídia não derruba a chamada
+  if (media) await ari('DELETE', `/channels/${media}`).catch(() => {})
+  try {
+    const id = `${call.id}-oai`
+    call.fallbackChannelId = id
+    await ari('POST', '/channels/create', { endpoint: FALLBACK_ENDPOINT, app: ARI_APP, appArgs: 'fallback', channelId: id })
+    // Sinaliza ao webhook da OpenAI que é fallback (ela abre pedindo desculpas em vez de esperar calada).
+    await ari('POST', `/channels/${id}/variable`, { variable: 'PJSIP_HEADER(add,X-Poc-Fallback)', value: '1' })
+    await ari('POST', `/bridges/${call.bridgeId}/addChannel`, { channel: id })
+    await ari('POST', `/channels/${id}/dial`, { timeout: '20' })
+    log(call.id, 'fallback_dialing')
+  } catch (e) {
+    log(call.id, 'fallback_fail', { err: String(e) })
+    await hangup(call, 'fallback_fail')
+  }
+}
+
 function openGemini(call: Call) {
+  if (FORCE_FALLBACK) return void fallbackToOpenAI(call, 'forced')
   const ws = new WebSocket(`${GEMINI_WS}?key=${GOOGLE_API_KEY}`)
   call.gemini = ws
   ws.onopen = () => {
@@ -330,7 +366,8 @@ function openGemini(call: Call) {
   }
   ws.onclose = (e) => {
     log(call.id, 'gemini_close', { code: e.code, reason: String(e.reason).slice(0, 200) })
-    void hangup(call, 'gemini_closed')
+    if (call.ended || call.fallback) return
+    void fallbackToOpenAI(call, `gemini_close_${e.code}`)
   }
   ws.onerror = () => log(call.id, 'gemini_error')
 }
@@ -487,7 +524,12 @@ function connectAriEvents() {
       log(active.id, 'dial_status', { status: ev.dialstatus })
       if (!['', 'ANSWER', 'PROGRESS', 'RINGING'].includes(ev.dialstatus)) await hangup(active, `dial_${ev.dialstatus}`)
     }
-    if ((ev.type === 'StasisEnd' || ev.type === 'ChannelDestroyed') && active && (chId === active.id || chId === active.mediaChannelId)) {
+    if (ev.type === 'ChannelStateChange' && active && chId === active.fallbackChannelId && ev.channel?.state === 'Up') {
+      log(active.id, 'fallback_answered', { channel: ev.channel?.name })
+      return
+    }
+    if (ev.type === 'StasisStart' && active && chId === active.fallbackChannelId) return
+    if ((ev.type === 'StasisEnd' || ev.type === 'ChannelDestroyed') && active && (chId === active.id || chId === active.mediaChannelId || (chId && chId === active.fallbackChannelId))) {
       await hangup(active, `${ev.type}${ev.cause_txt ? `:${ev.cause_txt}` : ''}`)
     }
   }
@@ -528,6 +570,7 @@ Bun.serve({
         txQueue: [],
         txRemainder: Buffer.alloc(0),
         history: [],
+        fallback: false,
         userText: '',
         aiText: '',
         lastUserTextAt: 0,

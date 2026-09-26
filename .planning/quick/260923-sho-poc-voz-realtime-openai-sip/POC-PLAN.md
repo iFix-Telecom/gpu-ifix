@@ -558,3 +558,8 @@ Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
 - Tokens da ligação (9 respostas): prompt TEXT 35.852, prompt AUDIO 6.710, resp AUDIO 772, thoughts 2.232 — vs 3.8-live 76 s: TEXT 7.591, AUDIO 7.329, resp 811 ⇒ texto ~4,7× maior ⇒ mais caro/min (HIPÓTESE de cobrança por token acumulado).
 - Qualidade: transcrição pior ("9" p/ "boa tarde", "y ahí"), reinício de saudação, ação fingida "vou registrar agora mesmo". Latência 1º áudio 0,5–1,7 s (≥ 3.8-live).
 - Extended thinking **medium** (2026-09-26 21:05 UTC, 84 s, softphone; 1ª tentativa 21:03 falhou "Allocation failed" = softphone Unreachable no qualify): fluxo completo sem erro do cérebro (fix do histórico ok; flash-lite 1,1–2,0 s); transcrição boa; 1º áudio 587–1.006 ms (mediana ~0,94 s). Tokens: prompt TEXT 45.265, AUDIO 8.647, resp AUDIO 777, TEXT 151, thoughts 3.674 (10 respostas). Estimativa soma-de-tokens ≈ US$ 0,087/ligação ≈ US$ 0,062/min (~2× o 3.8-live). Ainda: "Anotei o número" (ação fingida), uma resposta "..." vazia.
+
+## Decisão Pedro (2026-09-26): principal = gemini-3.8-live-extended-thinking (thinking medium); OpenAI realtime-2.1-mini = fallback
+- Ponte: `fallbackToOpenAI` — Gemini fecha (abertura ou no meio) ⇒ derruba externalMedia, cria `PJSIP/poc_openai_realtime` no mesmo bridge (perna do cliente intacta) com header `X-Poc-Fallback: 1`. Contexto da conversa NÃO é transferido. `POC_FORCE_FALLBACK=1` p/ testar; `POC_FALLBACK_ENDPOINT=''` desliga.
+- Serviço OpenAI (worker-vm): header de fallback ⇒ abre com "Desculpe, tive uma instabilidade… pode repetir?" e responde direto (sem gate pré-atendimento); histórico do cérebro termina em fala do cliente; cérebro `google/gemini-3.5-flash-lite`.
+- Pendente: ligação de teste do fallback forçado.
