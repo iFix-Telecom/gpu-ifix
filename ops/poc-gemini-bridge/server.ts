@@ -47,6 +47,10 @@ const LOG_DIR = env('POC_LOG_DIR', '/data/calls')
 const GATEWAY_BASE_URL = env('GATEWAY_BASE_URL', 'https://ai-gateway.converse-ai.app/v1')
 const GATEWAY_MODEL = env('GATEWAY_MODEL', 'qwen')
 const GATEWAY_API_KEY = env('GATEWAY_API_KEY', '')
+// Cérebro reserva: tentado na hora se o principal der 429/5xx/timeout (ligação 26/09 21:32: 3× 429
+// "gpt-oss-safeguard-20b is temporarily rate-limited upstream"). Lista separada por vírgula.
+const BRAIN_FALLBACK_MODELS = env('BRAIN_FALLBACK_MODELS', 'google/gemini-3.5-flash-lite').split(',').map((m) => m.trim()).filter(Boolean)
+const BRAIN_ATTEMPT_TIMEOUT_MS = Number(env('BRAIN_ATTEMPT_TIMEOUT_MS', '4000'))
 const BACKEND = env('POC_BACKEND', GATEWAY_API_KEY ? 'gateway' : 'none')
 // Fallback: se o Gemini falhar (abertura ou no meio), a perna do cliente fica no bridge e entra a
 // OpenAI Realtime via SIP (endpoint PJSIP da PoC, webhook no worker-vm). '' desliga.
@@ -94,7 +98,8 @@ const SYSTEM_INSTRUCTION =
   `informação ou problema, diga exatamente "Só um instante." e chame a ferramenta ${TOOL_NAME} com a INTENÇÃO do ` +
   'cliente, sem números, CPF ou dados pessoais. Depois fale o resultado da ferramenta fielmente, como resposta ' +
   'sua — inclusive quando ela pedir um dado. Nunca mencione "atendente", "ferramenta", "sistema" ou "foi ' +
-  'informado". Se o cliente pedir para repetir, repita você mesma sem chamar a ferramenta.'
+  'informado". Depois de "Só um instante.", fique em silêncio até receber o resultado — nunca invente o que está ' +
+  'fazendo (ex.: "estou verificando"). Se o cliente pedir para repetir, repita você mesma sem chamar a ferramenta.'
 
 const BRAIN_SYSTEM =
   'Você é o atendimento da iFix Telecom numa ligação telefônica. Sua resposta será FALADA: no máximo 2 frases ' +
@@ -228,35 +233,45 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
     },
     ...hist.slice(-12),
   ]
-  try {
-    const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: GATEWAY_MODEL,
-        messages,
-        max_tokens: 800,
-        temperature: 0.3,
-        // Direto no OpenRouter: roteia p/ o provedor de menor latência (medido: gateway somava ~350 ms).
-        ...(GATEWAY_BASE_URL.includes('openrouter.ai') ? { provider: { sort: 'latency' } } : {}),
-      }),
-      signal: AbortSignal.timeout(12000),
-    })
-    const data = (await res.json()) as {
-      error?: unknown; model?: string; choices?: Array<{ finish_reason?: string; message?: { content?: string } }> }
-    const c = data.choices?.[0]
-    let text = c?.message?.content?.trim()
-    if (text && c?.finish_reason === 'length') {
-      const end = Math.max(text.lastIndexOf('.'), text.lastIndexOf('!'), text.lastIndexOf('?'))
-      text = end > 0 ? text.slice(0, end + 1) : undefined
+  for (const model of [GATEWAY_MODEL, ...BRAIN_FALLBACK_MODELS]) {
+    const ta = Date.now()
+    try {
+      const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages,
+          max_tokens: 800,
+          temperature: 0.3,
+          // Direto no OpenRouter: roteia p/ o provedor de menor latência (medido: gateway somava ~350 ms).
+          ...(GATEWAY_BASE_URL.includes('openrouter.ai') ? { provider: { sort: 'latency' } } : {}),
+        }),
+        signal: AbortSignal.timeout(BRAIN_ATTEMPT_TIMEOUT_MS),
+      })
+      const data = (await res.json()) as {
+        error?: unknown
+        model?: string
+        choices?: Array<{ finish_reason?: string; message?: { content?: string } }>
+      }
+      const c = data.choices?.[0]
+      let text = c?.message?.content?.trim()
+      if (text && c?.finish_reason === 'length') {
+        const end = Math.max(text.lastIndexOf('.'), text.lastIndexOf('!'), text.lastIndexOf('?'))
+        text = end > 0 ? text.slice(0, end + 1) : undefined
+      }
+      if (res.ok && text) {
+        text = text.replace(/^s[óo] um instante[.!]?\s*/i, '') || text
+        log(call.id, 'brain_done', { ms: Date.now() - t0, attempt_ms: Date.now() - ta, http: res.status, model, upstream_model: data.model, finish_reason: c?.finish_reason, text })
+        return text
+      }
+      log(call.id, 'brain_attempt_fail', { model, ms: Date.now() - ta, http: res.status, err: JSON.stringify(data.error ?? '').slice(0, 200) })
+    } catch (e) {
+      log(call.id, 'brain_attempt_fail', { model, ms: Date.now() - ta, err: String(e).slice(0, 200) })
     }
-    log(call.id, 'brain_done', { ms: Date.now() - t0, http: res.status, upstream_model: data.model, finish_reason: c?.finish_reason, text })
-    if (!res.ok || !text) throw new Error(`gateway ${res.status} ${JSON.stringify(data.error ?? '').slice(0, 300)}`)
-    return text
-  } catch (e) {
-    log(call.id, 'brain_fail', { ms: Date.now() - t0, err: String(e) })
-    return 'No momento não consegui essa informação. Posso anotar seu pedido para a equipe retornar.'
   }
+  log(call.id, 'brain_fail', { ms: Date.now() - t0 })
+  return 'Tive uma instabilidade para consultar essa informação agora. Posso encaminhar seu pedido para a equipe retornar.'
 }
 
 async function fallbackToOpenAI(call: Call, reason: string) {
