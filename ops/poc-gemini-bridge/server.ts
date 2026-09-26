@@ -50,6 +50,19 @@ const GATEWAY_API_KEY = env('GATEWAY_API_KEY', '')
 // Cérebro reserva: tentado na hora se o principal der 429/5xx/timeout (ligação 26/09 21:32: 3× 429
 // "gpt-oss-safeguard-20b is temporarily rate-limited upstream"). Lista separada por vírgula.
 const BRAIN_FALLBACK_MODELS = env('BRAIN_FALLBACK_MODELS', 'google/gemini-3.5-flash-lite').split(',').map((m) => m.trim()).filter(Boolean)
+// Cadeia do cérebro por tokens/s (medido 26/09 do Oracle, streaming ~300 tokens): gpt-oss-120b@Cerebras 1.013 tok/s,
+// gpt-oss-safeguard-20b@Groq 967 tok/s, gemini-3.1-flash-lite 246 tok/s. Formato: modelo[@Provedor],...
+// Provedor fixado com allow_fallbacks=false: se falhar, pula p/ o próximo da cadeia (não p/ provedor lento).
+const BRAIN_CHAIN = (process.env.BRAIN_CHAIN ?? '')
+  .split(',')
+  .map((x) => x.trim())
+  .filter(Boolean)
+  .map((x) => {
+    const [model, provider] = x.split('@')
+    return { model, provider }
+  })
+// Esforço de raciocínio dos gpt-oss (tokens de raciocínio também custam tempo). low | medium | high.
+const BRAIN_REASONING_EFFORT = process.env.BRAIN_REASONING_EFFORT ?? 'low'
 const BRAIN_ATTEMPT_TIMEOUT_MS = Number(env('BRAIN_ATTEMPT_TIMEOUT_MS', '4000'))
 const BACKEND = env('POC_BACKEND', GATEWAY_API_KEY ? 'gateway' : 'none')
 // Fallback: se o Gemini falhar (abertura ou no meio), a perna do cliente fica no bridge e entra a
@@ -233,7 +246,10 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
     },
     ...hist.slice(-12),
   ]
-  for (const model of [GATEWAY_MODEL, ...BRAIN_FALLBACK_MODELS]) {
+  const chain = BRAIN_CHAIN.length
+    ? BRAIN_CHAIN
+    : [GATEWAY_MODEL, ...BRAIN_FALLBACK_MODELS].map((model) => ({ model, provider: undefined as string | undefined }))
+  for (const { model, provider } of chain) {
     const ta = Date.now()
     try {
       const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
@@ -244,12 +260,16 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
           messages,
           max_tokens: 800,
           temperature: 0.3,
-          // Direto no OpenRouter: roteia p/ o provedor de menor latência (medido: gateway somava ~350 ms).
-          ...(GATEWAY_BASE_URL.includes('openrouter.ai') ? { provider: { sort: 'latency' } } : {}),
+          // Direto no OpenRouter: provedor fixado (cadeia) ou o de menor latência.
+          ...(GATEWAY_BASE_URL.includes('openrouter.ai')
+            ? { provider: provider ? { order: [provider], allow_fallbacks: false } : { sort: 'latency' } }
+            : {}),
+          ...(model.startsWith('openai/gpt-oss') ? { reasoning: { effort: BRAIN_REASONING_EFFORT } } : {}),
         }),
         signal: AbortSignal.timeout(BRAIN_ATTEMPT_TIMEOUT_MS),
       })
       const data = (await res.json()) as {
+        provider?: string
         error?: unknown
         model?: string
         choices?: Array<{ finish_reason?: string; message?: { content?: string } }>
@@ -262,12 +282,12 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
       }
       if (res.ok && text) {
         text = text.replace(/^s[óo] um instante[.!]?\s*/i, '') || text
-        log(call.id, 'brain_done', { ms: Date.now() - t0, attempt_ms: Date.now() - ta, http: res.status, model, upstream_model: data.model, finish_reason: c?.finish_reason, text })
+        log(call.id, 'brain_done', { ms: Date.now() - t0, attempt_ms: Date.now() - ta, http: res.status, model, provider: data.provider, upstream_model: data.model, finish_reason: c?.finish_reason, text })
         return text
       }
-      log(call.id, 'brain_attempt_fail', { model, ms: Date.now() - ta, http: res.status, err: JSON.stringify(data.error ?? '').slice(0, 200) })
+      log(call.id, 'brain_attempt_fail', { model, provider, ms: Date.now() - ta, http: res.status, err: JSON.stringify(data.error ?? '').slice(0, 200) })
     } catch (e) {
-      log(call.id, 'brain_attempt_fail', { model, ms: Date.now() - ta, err: String(e).slice(0, 200) })
+      log(call.id, 'brain_attempt_fail', { model, provider, ms: Date.now() - ta, err: String(e).slice(0, 200) })
     }
   }
   log(call.id, 'brain_fail', { ms: Date.now() - t0 })
@@ -583,6 +603,14 @@ Bun.serve({
     const url = new URL(req.url)
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ ok: true, key_configured: Boolean(GOOGLE_API_KEY), model: GEMINI_MODEL, active: active?.id ?? null, backend: BACKEND })
+    }
+    if (req.method === 'POST' && url.pathname === '/brain-test') {
+      // Teste do cérebro com o código real (só 127.0.0.1). Body: { history: Turn[], intencao }
+      const { history, intencao } = (await req.json()) as { history: Turn[]; intencao?: string }
+      const fake = { id: `brain-test-${crypto.randomUUID().slice(0, 8)}`, history: [...history], userText: '' } as unknown as Call
+      const t0 = Date.now()
+      const text = await askBrain(fake, intencao ?? '')
+      return Response.json({ ms: Date.now() - t0, text, call_id: fake.id })
     }
     if (req.method === 'POST' && url.pathname === '/call') {
       if (!GOOGLE_API_KEY) return Response.json({ error: 'GOOGLE_API_KEY ausente' }, { status: 503 })
