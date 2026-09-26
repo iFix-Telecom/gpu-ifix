@@ -379,6 +379,18 @@ async function startMedia(call: Call) {
     direction: 'both',
   })
   call.mediaChannelId = media.id
+  // Endereço de retorno direto do Asterisk: começa a mandar silêncio JÁ (sem esperar o 1º pacote).
+  // Sem isso a ponte, o Asterisk e o NextBilling ficam esperando um o áudio do outro (latching).
+  try {
+    const addr = await ari('GET', `/channels/${media.id}/variable`, { variable: 'UNICASTRTP_LOCAL_ADDRESS' })
+    const port = await ari('GET', `/channels/${media.id}/variable`, { variable: 'UNICASTRTP_LOCAL_PORT' })
+    if (addr?.value && port?.value) {
+      call.returnAddr = { address: addr.value, port: Number(port.value) }
+      log(call.id, 'rtp_return_addr', { from: 'channel_vars', ...call.returnAddr })
+    }
+  } catch (e) {
+    log(call.id, 'rtp_return_addr_fail', { err: String(e) })
+  }
   const inStasis = await Promise.race([call.mediaInStasis.then(() => true), Bun.sleep(3000).then(() => false)])
   if (!inStasis) log(call.id, 'media_stasis_wait_timeout')
   await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: media.id })
