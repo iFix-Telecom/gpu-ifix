@@ -36,6 +36,21 @@ const TRANSCRIBE_PROMPT =
     'protocolo, parcelamento. Números podem ser ditados dígito a dígito.'
 const NOISE_REDUCTION = process.env.POC_NOISE_REDUCTION ?? 'near_field'
 const GREETING = process.env.POC_GREETING ?? 'on'
+// Detecção de fim de turno. server_vad: silêncio (ms) antes de considerar que o cliente terminou.
+const TURN_MODE = process.env.POC_TURN_MODE ?? 'server_vad'
+const VAD_SILENCE_MS = Number(process.env.POC_VAD_SILENCE_MS ?? 300)
+const VAD_EAGERNESS = (process.env.POC_VAD_EAGERNESS ?? 'high') as 'low' | 'medium' | 'high' | 'auto'
+// Chamada de saída: a IA ouve o early media do tronco (toque, caixa postal, anúncio da operadora).
+// Até ouvir gente, não responde sozinha; anúncio de operadora => desliga.
+const OUTBOUND = GREETING === 'off'
+const CARRIER_ANNOUNCEMENT =
+  /caixa postal|ap[oó]s o sinal|sujeit[ao] [àa] cobran[çc]a|n[ãa]o receber recados|deixe (sua|seu) (mensagem|recado)|n[úu]mero (chamado|discado|que voc[êe] ligou)|fora da [áa]rea|desligado|n[ãa]o (pode|est[áa]) (atender|dispon[íi]vel)|est[áa] ocupado|tente (mais tarde|novamente)|obrigad[ao] por ligar|inexistente|n[ãa]o existe/i
+
+function turnDetection(createResponse: boolean) {
+  return TURN_MODE === 'semantic_vad'
+    ? { type: 'semantic_vad' as const, eagerness: VAD_EAGERNESS, create_response: createResponse, interrupt_response: true }
+    : { type: 'server_vad' as const, silence_duration_ms: VAD_SILENCE_MS, create_response: createResponse, interrupt_response: true }
+}
 
 const INSTRUCTIONS_SOLO =
   'Você é a assistente de voz da iFix Telecom em uma ligação de TESTE interno. ' +
@@ -117,6 +132,8 @@ type CallState = {
   ws?: WebSocket
   timer?: Timer
   history: Turn[]
+  /** Saída: 'pre_answer' até ouvir gente; depois 'live'. Entrada: sempre 'live'. */
+  phase: 'pre_answer' | 'live'
   /** Transcrição da fala atual ainda pendente (speech_stopped visto, transcrição não). */
   transcriptPending?: Promise<void>
   resolveTranscript?: () => void
@@ -248,7 +265,26 @@ function monitor(callId: string, state: CallState) {
         }
         break
       case 'conversation.item.input_audio_transcription.completed':
-        log(callId, 'user_transcript', { text: ev.transcript })
+        log(callId, 'user_transcript', { text: ev.transcript, phase: state.phase })
+        if (state.phase === 'pre_answer') {
+          const text = String(ev.transcript ?? '').trim()
+          if (text && CARRIER_ANNOUNCEMENT.test(text)) {
+            // Caixa postal / número ocupado / anúncio: não conversa com gravação — encerra.
+            log(callId, 'carrier_announcement_hangup', { text })
+            client.realtime.calls.hangup(callId).catch((err) => log(callId, 'hangup_fail', { err: String(err) }))
+          } else if (text) {
+            // Primeira fala humana: liga resposta automática e responde a ela.
+            state.phase = 'live'
+            state.history.push({ role: 'user', content: text })
+            ws.send(JSON.stringify({ type: 'session.update', session: { type: 'realtime', audio: { input: { turn_detection: turnDetection(true) } } } }))
+            ws.send(JSON.stringify({ type: 'response.create' }))
+            log(callId, 'human_detected')
+          }
+          state.resolveTranscript?.()
+          state.transcriptPending = undefined
+          state.resolveTranscript = undefined
+          break
+        }
         if (ev.transcript) state.history.push({ role: 'user', content: String(ev.transcript) })
         state.resolveTranscript?.()
         state.transcriptPending = undefined
@@ -296,7 +332,7 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
     await client.realtime.calls.reject(callId, { status_code: 486 }).catch((e) => log(callId, 'reject_fail', { err: String(e) }))
     return
   }
-  const state: CallState = { startedAt: Date.now(), awaitingFirstAudio: false, history: [] }
+  const state: CallState = { startedAt: Date.now(), awaitingFirstAudio: false, history: [], phase: OUTBOUND ? 'pre_answer' : 'live' }
   calls.set(callId, state)
   try {
     await client.realtime.calls.accept(callId, {
@@ -306,13 +342,14 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
       audio: {
         input: {
           transcription: { model: TRANSCRIBE_MODEL, language: 'pt', prompt: TRANSCRIBE_PROMPT },
+          turn_detection: turnDetection(!OUTBOUND),
           ...(NOISE_REDUCTION === 'off' ? {} : { noise_reduction: { type: NOISE_REDUCTION as 'near_field' | 'far_field' } }),
         },
         output: { voice: VOICE },
       },
       ...(BACKEND === 'gateway' ? { tools: TOOLS, tool_choice: 'auto' as const } : {}),
     })
-    log(callId, 'accepted', { model: MODEL, voice: VOICE, transcribe: TRANSCRIBE_MODEL, noise_reduction: NOISE_REDUCTION, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
+    log(callId, 'accepted', { model: MODEL, voice: VOICE, transcribe: TRANSCRIBE_MODEL, noise_reduction: NOISE_REDUCTION, turn: TURN_MODE, vad_silence_ms: VAD_SILENCE_MS, outbound: OUTBOUND, backend: BACKEND, brain_model: BACKEND === 'gateway' ? GATEWAY_MODEL : null })
   } catch (e) {
     log(callId, 'accept_fail', { err: String(e) })
     calls.delete(callId)

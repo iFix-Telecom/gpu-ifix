@@ -509,3 +509,9 @@ Pendências:
 - IA reage a early media (toque/caixa postal/anúncio de operadora) ⇒ só ouvir/responder após o atendimento (200 OK do destino).
 - Limpeza: ramal 9990 do **iFix Master** (id 2163, ocioso) + revogar token iFix Master (exposto em claro na sessão). Tokens expiram 2026-10-02.
 - Disparo de saída hoje é manual (ARI com callerId). Produto: `/dialer` precisaria aceitar ramal-IA sem REGISTER.
+
+### Avaliação Pedro da ligação real + ajustes (2026-09-25)
+- Pedro: "Qualidade da ligação foi relativamente boa, senti certo delay, mas nada grave."
+- Limpeza: ramal 9990 do iFix Master apagado via API (`DELETE /extensions/2163` → 204; 0 linhas `ps_*` restantes); token iFix Master (last4 pM68, exposto na sessão) **revogado** via `DELETE /admin/workspaces/:id/api-tokens/:tokenId` → 200; reuso → 401. Removido do cofre.
+- Ajuste pré-atendimento (saída): sessão inicia com `create_response:false`; transcrição casando regex de anúncio de operadora (caixa postal, após o sinal, não receber recados, ocupado, fora da área…) ⇒ `hangup`; primeira fala humana ⇒ `session.update` liga `create_response` + `response.create`. Regex validada contra as 3 gravações reais das ligações anteriores (3/3) e 5 falas humanas (0 falso positivo). HIPÓTESE: 1º turno humano ganha +~0,3–0,5 s (espera a transcrição).
+- Ajuste latência: `turn_detection` explícito, `server_vad` `silence_duration_ms=300` (env `POC_VAD_SILENCE_MS`; `POC_TURN_MODE=semantic_vad` + `POC_VAD_EAGERNESS` como alternativa). HIPÓTESE: default da OpenAI ~500 ms; risco de cortar quem pausa no meio da frase.
