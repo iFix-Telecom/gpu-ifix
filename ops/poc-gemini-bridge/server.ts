@@ -18,7 +18,7 @@
  */
 import { createSocket, type Socket } from 'node:dgram'
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { Resampler, swap16 } from './audio'
+import { Lowpass, Resampler, swap16 } from './audio'
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d
@@ -82,7 +82,8 @@ const BRAIN_SYSTEM =
   'juntou 11, confirme lendo em grupos; senão diga quantos entendeu. Você NÃO tem acesso a nenhum sistema: é ' +
   'PROIBIDO dizer "estou verificando" ou "vou consultar"; se pedirem um dado que você não tem, diga que não ' +
   'consegue ver por aqui e ofereça anotar o pedido para a equipe retornar. Problema técnico: 1–2 orientações ' +
-  'básicas e ofereça abrir um chamado.'
+  'básicas e ofereça abrir um chamado. Não comece com "Só um instante" (a voz já disse) e não diga que já anotou ou ' +
+  'registrou algo — só ofereça anotar.'
 
 mkdirSync(LOG_DIR, { recursive: true })
 
@@ -133,6 +134,7 @@ type Call = {
   txQueue: Buffer[]
   txRemainder: Buffer
   resampler?: Resampler
+  txLowpass?: Lowpass
   rxUpsampler?: Resampler
   drainTimer?: Timer
   maxTimer?: Timer
@@ -286,7 +288,9 @@ function openGemini(call: Call) {
         }
         const rate = Number(/rate=(\d+)/.exec(d.mimeType)?.[1] ?? 24000)
         call.resampler ??= new Resampler(rate / MEDIA_RATE)
-        enqueueTx(call, call.resampler.push(Buffer.from(d.data, 'base64')))
+        // Anti-aliasing antes de reduzir 24k → 8k (corte ~3,6 kHz, faixa telefônica).
+        call.txLowpass ??= new Lowpass(rate, Math.min(3600, MEDIA_RATE * 0.45))
+        enqueueTx(call, call.resampler.push(call.txLowpass.push(Buffer.from(d.data, 'base64'))))
       }
       if (sc.interrupted) {
         log(call.id, 'barge_in', { dropped_frames: call.txQueue.length })

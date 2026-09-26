@@ -27,3 +27,14 @@ test('Resampler 8k→16k (entrada do Gemini) dobra as amostras', () => {
   const out = Buffer.concat([r.push(buf.subarray(0, 3001 * 2)), r.push(buf.subarray(3001 * 2))])
   expect(Math.abs(out.length / 2 - 16000)).toBeLessThanOrEqual(2)
 })
+
+test('Lowpass antes de 24k→8k remove aliasing de 6 kHz e preserva 1 kHz', async () => {
+  const { Lowpass } = await import('./audio')
+  const rms = (b: Buffer) => { let s = 0; const n = b.length / 2; for (let i = 0; i < n; i++) s += b.readInt16LE(i * 2) ** 2; return Math.sqrt(s / n) }
+  const tone = (f: number) => { const b = Buffer.alloc(24000 * 2); for (let i = 0; i < 24000; i++) b.writeInt16LE(Math.round(10000 * Math.sin((2 * Math.PI * f * i) / 24000)), i * 2); return b }
+  const down = (b: Buffer, lp: boolean) => { const f = new Lowpass(24000, 3600); const r = new Resampler(3); return r.push(lp ? f.push(b) : b).subarray(200) }
+  const alias6k = rms(down(tone(6000), true)), alias6kSemFiltro = rms(down(tone(6000), false)), voz1k = rms(down(tone(1000), true))
+  expect(alias6kSemFiltro).toBeGreaterThan(5000) // sem filtro 6 kHz vira ~2 kHz audível
+  expect(alias6k).toBeLessThan(300)
+  expect(voz1k).toBeGreaterThan(6500)
+})

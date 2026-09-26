@@ -545,3 +545,9 @@ Pendências:
 FATOS (log `poc-gemini-bridge`): transcrições PT-BR limpas ("Meu nome é Pedro…", "Como faço para encontrar minha fatura?", "de 1 2 3 4 5 6 7 8 9 0 0"); 1º áudio da IA ~430–640 ms após a última transcrição do usuário (proxy); 3 tool calls, cérebro deepseek 1,7–3,4 s; CPF ditado confirmado pelo cérebro "123.456.789-00"; sem reinício de atendimento; despedida normal.
 Problemas: Gemini pôs o CPF no argumento da tool ("informar o CPF 12345678900", violando a instrução — cérebro usou a transcrição, sem dano); cérebro repetiu "Só um instante." no início da resposta (fala duplicada).
 Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
+
+### Cérebro mais rápido + qualidade de áudio (2026-09-26)
+- Pedro: "utilize outro cérebro mais rápido. o mais rápido da open router" / "qualidade do áudio não foi das melhores".
+- FATO: gateway aceita id OpenRouter direto (passthrough, billing no tenant). Benchmark 3× prompt real (CPF ditado): gemini-2.5-flash-lite 617 ms ❌ inventou número; **gemini-3.5-flash-lite 812 ms ✅**; gemini-3.1-flash-lite 815 ✅; claude-haiku-4.5 1.391 ✅; qwen 1.504 ✅; gpt-4.1-nano 1.551 ❌ ("12 dígitos"); gpt-oss-120b 4,7 s; qwen3-32b 7,8 s; mistral-small-2603 429. Escolhido `google/gemini-3.5-flash-lite` (GATEWAY_MODEL no secrets do Oracle).
+- Áudio: redução 24k→8k sem filtro ⇒ aliasing. Fix: FIR passa-baixa (Blackman, 63 taps, corte 3,6 kHz) antes do resampler. Teste: 6 kHz sem filtro ⇒ RMS >5000 (alias ~2 kHz); com filtro <300; 1 kHz preservado >6500. Testes 4/4.
+- Cérebro: proibido começar com "Só um instante" e dizer que já anotou.
