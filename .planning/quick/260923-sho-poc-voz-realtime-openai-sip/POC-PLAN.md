@@ -569,3 +569,9 @@ Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
 - Ponte: `GATEWAY_BASE_URL=https://openrouter.ai/api/v1`, `GATEWAY_MODEL=openai/gpt-oss-safeguard-20b`, chave OpenRouter da iFix, `provider.sort=latency`. Backup do env anterior em `secrets.env.bak-gateway` (Oracle). Custo do cérebro sai do billing do gateway (tenant voz-realtime-poc) e vai direto p/ conta OpenRouter.
 - "Gemini chamar o cérebro direto": FATO (API Live) function call é executada pelo cliente (toolCall→toolResponse); sem chamada nativa a URL externa. A ponte (mesmo host do Asterisk) já é o executor, sem intermediário além do HTTP ao OpenRouter.
 - Fallback OpenAI (worker-vm) segue com cérebro via gateway (flash-lite).
+
+### Prompts realistas (pedido Pedro 2026-09-26)
+- Fatos da empresa SÓ do site público (app.ifixtelecom.com.br): produtos (PABX/VoIP em nuvem, 0800 empresarial, discador, CRM, IA), suporte 24/7, teste 3 dias, (11) 4063-7988, contato@, Rua Turmalina 240 São Roque-SP, 15+ anos. Sem preços/prazos/procedimentos (sem fonte).
+- Cliente FICTÍCIO marcado no prompt (Empresa Teste Ltda, CPF 123.456.789-00, 5 ramais, fatura set R$ 249,90 venc. dia 10). Outro CPF ⇒ "não encontrei cadastro".
+- Voz: "assistente virtual de atendimento da iFix Telecom", saudação única "iFix Telecom, boa tarde! Em que posso ajudar?".
+- FATO (teste isolado gpt-oss-safeguard-20b direto, 4 cenários, 392–628 ms): fatura correta após CPF ditado em 2 partes; CPF errado ⇒ não encontrado; ramal ⇒ pede CPF+ramal; preço ⇒ não inventa, oferece orçamento.
