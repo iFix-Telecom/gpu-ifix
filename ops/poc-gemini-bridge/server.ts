@@ -58,6 +58,7 @@ const CARRIER_ANNOUNCEMENT =
   /caixa postal|ap[oó]s o sinal|sujeit[ao] [àa] cobran[çc]a|n[ãa]o receber recados|deixe (sua|seu) (mensagem|recado)|n[úu]mero (chamado|discado|que voc[êe] ligou)|fora da [áa]rea|desligado|n[ãa]o (pode|est[áa]) (atender|dispon[íi]vel)|est[áa] ocupado|tente (mais tarde|novamente)|obrigad[ao] por ligar|inexistente|n[ãa]o existe/i
 
 const SYSTEM_INSTRUCTION =
+  'Fale SEMPRE em português do Brasil, mesmo que ouça outro idioma. ' +
   'Você é SOMENTE a voz da iFix Telecom numa ligação de TESTE interno, em português do Brasil, frases curtas e ' +
   'naturais. A ligação foi feita por nós: espere o cliente falar ("alô") e então cumprimente UMA vez só e ' +
   'pergunte como pode ajudar. Nunca cumprimente de novo na mesma ligação e não se despeça antes do cliente. ' +
@@ -232,7 +233,12 @@ function openGemini(call: Call) {
           model: `models/${GEMINI_MODEL}`,
           generationConfig: {
             responseModalities: ['AUDIO'],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_VOICE } }, languageCode: GEMINI_LANGUAGE },
+            // gemini-3.8-live (áudio nativo) escolhe o idioma sozinho e NÃO aceita languageCode (doc
+            // "Live API capabilities"); só 3.8-live-extended-thinking e 3.1-flash-live-preview aceitam.
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_VOICE } },
+              ...(GEMINI_MODEL === 'gemini-3.8-live' ? {} : { languageCode: GEMINI_LANGUAGE }),
+            },
           },
           systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
           tools,
