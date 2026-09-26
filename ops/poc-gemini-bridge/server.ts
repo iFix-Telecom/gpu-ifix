@@ -52,7 +52,8 @@ const TOOL_NAME = 'consultar_atendente'
 const PTIME_MS = 20
 const FRAME_BYTES = 640 // 20 ms @ 16 kHz × 2 bytes
 const TX_QUEUE_MAX = 1500
-const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES) // 30 s de áudio bufferizado (Gemini manda rajadas mais rápido que tempo real)
+const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES)
+const TX_PT = Number(process.env.POC_TX_PT ?? 11) // 30 s de áudio bufferizado (Gemini manda rajadas mais rápido que tempo real)
 
 const CARRIER_ANNOUNCEMENT =
   /caixa postal|ap[oó]s o sinal|sujeit[ao] [àa] cobran[çc]a|n[ãa]o receber recados|deixe (sua|seu) (mensagem|recado)|n[úu]mero (chamado|discado|que voc[êe] ligou)|fora da [áa]rea|desligado|n[ãa]o (pode|est[áa]) (atender|dispon[íi]vel)|est[áa] ocupado|tente (mais tarde|novamente)|obrigad[ao] por ligar|inexistente|n[ãa]o existe/i
@@ -357,7 +358,9 @@ async function startMedia(call: Call) {
     call.lastTxAt = now
     const pkt = Buffer.alloc(12 + FRAME_BYTES)
     pkt[0] = 0x80
-    pkt[1] = ((call.payloadType ?? 118) & 0x7f) | (marker ? 0x80 : 0)
+    // PT de ENVIO ≠ PT que o Asterisk usa para mandar slin16 (118): medido em bancada (26/09),
+    // o externalMedia slin16 só aceita de volta PT 10/11; com 118 o quadro é descartado (mudo).
+    pkt[1] = (TX_PT & 0x7f) | (marker ? 0x80 : 0)
     pkt.writeUInt16BE(call.txSeq, 2)
     call.txSeq = (call.txSeq + 1) & 0xffff
     pkt.writeUInt32BE(ts, 4)

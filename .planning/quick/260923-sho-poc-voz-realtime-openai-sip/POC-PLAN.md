@@ -532,3 +532,9 @@ Pendências:
 - B (ponte Gemini): 0 pacotes nos dois sentidos — `addChannel → 422 "Channel not in Stasis application"` (corrida: externalMedia adicionado antes do StasisStart dele) ⇒ ponte derrubou a chamada (media_fail, 23 s). NextBilling também não mandou NADA em 23 s atendido.
 - HIPÓTESE: NextBilling só envia RTP após receber RTP nosso (latching) — explicaria os mudos dos originates diretos.
 - Fix: tronco entra no bridge no atendimento; mídia só após o StasisStart dela; drenador manda silêncio contínuo até o Gemini falar.
+
+### Causa raiz do mudo da ponte Gemini (2026-09-26 ~20:25 UTC) — RESOLVIDA em bancada
+- Teste interno (softphone TLS, sem tronco): softphone→ponte OK (~50 pkt/s, Gemini transcreveu "Oi, alô." e respondeu), ponte→softphone MUDO ⇒ tronco/NextBilling inocentes.
+- Bancada (2 externalMedia slin16 no mesmo bridge, debug RTP só 127.0.0.1): Asterisk RECEBE PT 118 ("Got RTP … type 118") mas não repassa; varredura de PT: **só 10 e 11 passam** (saída sai com PT 118). A ponte copiava o PT aprendido (118) ⇒ tudo descartado.
+- Fix: TX com PT fixo 11 (`POC_TX_PT`). Commit abaixo. Pendente: ligação de validação.
+- HIPÓTESE (não verificada): a ponte WhatsApp do voip-api usa o PT aprendido no TX — mesmo risco; checar se lá o PT de RX é outro.
