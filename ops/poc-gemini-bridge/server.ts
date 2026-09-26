@@ -113,6 +113,7 @@ type Call = {
   rtpPort?: number
   gemini?: WebSocket
   ready: boolean
+  rxFrames: number
   // RTP
   returnAddr?: { address: string; port: number }
   payloadType?: number
@@ -336,6 +337,7 @@ async function startMedia(call: Call) {
     call.returnAddr ??= { address: rinfo.address, port: rinfo.port }
     call.payloadType ??= pt
     rxFrames++
+    call.rxFrames++
     if (!call.ready || call.gemini?.readyState !== WebSocket.OPEN) return
     const pcmLE = swap16(msg.subarray(12)) // slin16 no fio = s16be
     call.gemini.send(JSON.stringify({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: pcmLE.toString('base64') } } }))
@@ -365,7 +367,6 @@ async function startMedia(call: Call) {
 
   const bridge = await ari('POST', '/bridges', { type: 'mixing', name: `poc-gemini-${call.id}` })
   call.bridgeId = bridge.id
-  await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: call.id })
   call.mediaInStasis = new Promise<void>((r) => {
     call.resolveMediaInStasis = r
   })
@@ -382,6 +383,29 @@ async function startMedia(call: Call) {
   if (!inStasis) log(call.id, 'media_stasis_wait_timeout')
   await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: media.id })
   log(call.id, 'media_bridged', { bridge: bridge.id, media_channel: media.id, rtp_port: call.rtpPort })
+}
+
+/**
+ * Perna do tronco como no Dial() do dialplan: create + dial com o canal de mídia como chamador.
+ * Os originates diretos no tronco ficaram mudos (NextBilling quase não manda RTP); a única chamada
+ * com áudio teve a perna do tronco discada pelo Dial() de outro canal, com early media passando.
+ */
+async function dialTrunk(call: Call) {
+  await ari('POST', '/channels/create', {
+    endpoint: `PJSIP/${TRUNK_PREFIX}${call.number}@${TRUNK_ENDPOINT}`,
+    app: ARI_APP,
+    appArgs: 'outbound',
+    channelId: call.id,
+    originator: call.mediaChannelId ?? '',
+  })
+  const m = /^(.*?)\s*<(\d+)>$/.exec(CALLER_ID)
+  if (m) {
+    await ari('POST', `/channels/${call.id}/variable`, { variable: 'CALLERID(name)', value: m[1] })
+    await ari('POST', `/channels/${call.id}/variable`, { variable: 'CALLERID(num)', value: m[2] })
+  }
+  await ari('POST', `/bridges/${call.bridgeId}/addChannel`, { channel: call.id })
+  await ari('POST', `/channels/${call.id}/dial`, { caller: call.mediaChannelId ?? '', timeout: '45' })
+  log(call.id, 'dialing', { number_masked: `${call.number.slice(0, 6)}*****`, trunk: TRUNK_ENDPOINT })
 }
 
 // ---------------------------------------------------------------- eventos ARI
@@ -405,15 +429,21 @@ function connectAriEvents() {
       active.resolveMediaInStasis?.()
       return
     }
-    if (ev.type === 'StasisStart' && active && chId === active.id) {
-      log(active.id, 'answered', { channel: ev.channel?.name })
-      try {
-        openGemini(active)
-        await startMedia(active)
-      } catch (e) {
-        log(active.id, 'media_fail', { err: String(e) })
-        await hangup(active, 'media_fail')
-      }
+    if (ev.type === 'StasisStart' && active && chId === active.id) return // create: entra no Stasis antes de discar
+    if (ev.type === 'ChannelStateChange' && active && chId === active.id && ev.channel?.state === 'Up' && !active.gemini) {
+      const call = active
+      log(call.id, 'answered', { channel: ev.channel?.name })
+      let rx0 = 0
+      const probe = setInterval(() => {
+        log(call.id, 'rtp_rx_after_answer', { frames: call.rxFrames - rx0 })
+        rx0 = call.rxFrames
+      }, 2000)
+      setTimeout(() => clearInterval(probe), 10_000)
+      openGemini(call)
+    }
+    if (ev.type === 'Dial' && active && ev.peer?.id === active.id && ev.dialstatus) {
+      log(active.id, 'dial_status', { status: ev.dialstatus })
+      if (!['', 'ANSWER', 'PROGRESS', 'RINGING'].includes(ev.dialstatus)) await hangup(active, `dial_${ev.dialstatus}`)
     }
     if ((ev.type === 'StasisEnd' || ev.type === 'ChannelDestroyed') && active && (chId === active.id || chId === active.mediaChannelId)) {
       await hangup(active, `${ev.type}${ev.cause_txt ? `:${ev.cause_txt}` : ''}`)
@@ -444,6 +474,7 @@ Bun.serve({
         number: digits,
         startedAt: Date.now(),
         ready: false,
+        rxFrames: 0,
         txSeq: Math.floor(Math.random() * 0x10000),
         txTsBase: Math.floor(Math.random() * 0xffffffff) >>> 0,
         txSsrc: Math.floor(Math.random() * 0xffffffff) >>> 0,
@@ -461,23 +492,15 @@ Bun.serve({
       call.maxTimer = setTimeout(() => void hangup(call, 'max_duration'), MAX_CALL_SECONDS * 1000)
       // Não atendeu: o canal pode morrer sem entrar no Stasis (sem evento p/ este app) — libera a trava.
       setTimeout(() => {
-        if (active === call && !call.bridgeId) void hangup(call, 'no_answer_timeout')
+        if (active === call && !call.gemini) void hangup(call, 'no_answer_timeout')
       }, 60_000)
       try {
-        await ari('POST', '/channels', {
-          endpoint: `PJSIP/${TRUNK_PREFIX}${digits}@${TRUNK_ENDPOINT}`,
-          app: ARI_APP,
-          appArgs: 'outbound',
-          channelId: id,
-          callerId: CALLER_ID,
-          timeout: '45',
-        })
-        log(id, 'originate', { number_masked: `${digits.slice(0, 6)}*****`, trunk: TRUNK_ENDPOINT })
+        await startMedia(call)
+        await dialTrunk(call)
         return Response.json({ call_id: id }, { status: 202 })
       } catch (e) {
         log(id, 'originate_fail', { err: String(e) })
-        clearTimeout(call.maxTimer)
-        active = null
+        await hangup(call, 'originate_fail')
         return Response.json({ error: String(e) }, { status: 502 })
       }
     }
