@@ -525,3 +525,10 @@ Pendências:
 - Testes: `audio.test.ts` 2/2 (resampler 24k→16k em chunks irregulares: 16000±2 amostras, erro máx < 200/10000; swap16).
 - Deploy: worker-oracle `/opt/poc-gemini-bridge` (container `poc-gemini-bridge`, network host, secrets 600). FATO: `ari_connected app=poc-gemini`; `/health` `key_configured:false`.
 - Limitação: disparo direto no tronco ⇒ fora do cos-check/CDR do voip-api (NextBilling cobra normal).
+
+### Diagnóstico A×B (2026-09-26 01:44–01:45 UTC, logger SIP NextBilling + pcap)
+- SIP das duas idêntico (INVITE/SDP/200 OK), só muda display name do From ⇒ sinalização não é a causa.
+- A (ramal 9990 → from-extensions → OpenAI): AST→NB 1.578 / NB→AST 1.518 pacotes; AST mandou 1º pacote 144 ms antes do NB.
+- B (ponte Gemini): 0 pacotes nos dois sentidos — `addChannel → 422 "Channel not in Stasis application"` (corrida: externalMedia adicionado antes do StasisStart dele) ⇒ ponte derrubou a chamada (media_fail, 23 s). NextBilling também não mandou NADA em 23 s atendido.
+- HIPÓTESE: NextBilling só envia RTP após receber RTP nosso (latching) — explicaria os mudos dos originates diretos.
+- Fix: tronco entra no bridge no atendimento; mídia só após o StasisStart dela; drenador manda silêncio contínuo até o Gemini falar.

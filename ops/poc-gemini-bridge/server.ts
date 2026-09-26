@@ -51,7 +51,8 @@ const GEMINI_WS =
 const TOOL_NAME = 'consultar_atendente'
 const PTIME_MS = 20
 const FRAME_BYTES = 640 // 20 ms @ 16 kHz × 2 bytes
-const TX_QUEUE_MAX = 1500 // 30 s de áudio bufferizado (Gemini manda rajadas mais rápido que tempo real)
+const TX_QUEUE_MAX = 1500
+const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES) // 30 s de áudio bufferizado (Gemini manda rajadas mais rápido que tempo real)
 
 const CARRIER_ANNOUNCEMENT =
   /caixa postal|ap[oó]s o sinal|sujeit[ao] [àa] cobran[çc]a|n[ãa]o receber recados|deixe (sua|seu) (mensagem|recado)|n[úu]mero (chamado|discado|que voc[êe] ligou)|fora da [áa]rea|desligado|n[ãa]o (pode|est[áa]) (atender|dispon[íi]vel)|est[áa] ocupado|tente (mais tarde|novamente)|obrigad[ao] por ligar|inexistente|n[ãa]o existe/i
@@ -104,6 +105,9 @@ type Call = {
   startedAt: number
   bridgeId?: string
   mediaChannelId?: string
+  /** Resolvida no StasisStart do canal externalMedia (addChannel antes disso = 422 "Channel not in Stasis"). */
+  mediaInStasis?: Promise<void>
+  resolveMediaInStasis?: () => void
   sock?: Socket
   rtpPort?: number
   gemini?: WebSocket
@@ -332,8 +336,10 @@ async function startMedia(call: Call) {
   })
   // Drenador: 1 frame por tick de 20 ms; timestamp ancorado no relógio.
   call.drainTimer = setInterval(() => {
-    if (!call.returnAddr || call.txQueue.length === 0) return
-    const chunk = call.txQueue.shift() as Buffer
+    if (!call.returnAddr) return
+    // Sem áudio do Gemini, manda silêncio: mantém RTP saindo para o tronco desde o atendimento
+    // (HIPÓTESE medida em 26/09: NextBilling só manda áudio depois de receber o nosso).
+    const chunk = call.txQueue.length > 0 ? (call.txQueue.shift() as Buffer) : SILENCE_FRAME
     const now = Date.now()
     call.txAnchor ??= now
     const ts = (call.txTsBase + Math.round((now - call.txAnchor) * 16)) >>> 0
@@ -353,6 +359,10 @@ async function startMedia(call: Call) {
 
   const bridge = await ari('POST', '/bridges', { type: 'mixing', name: `poc-gemini-${call.id}` })
   call.bridgeId = bridge.id
+  await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: call.id })
+  call.mediaInStasis = new Promise<void>((r) => {
+    call.resolveMediaInStasis = r
+  })
   const media = await ari('POST', '/channels/externalMedia', {
     app: ARI_APP,
     external_host: `${RTP_BIND}:${call.rtpPort}`,
@@ -362,7 +372,9 @@ async function startMedia(call: Call) {
     direction: 'both',
   })
   call.mediaChannelId = media.id
-  await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: `${call.id},${media.id}` })
+  const inStasis = await Promise.race([call.mediaInStasis.then(() => true), Bun.sleep(3000).then(() => false)])
+  if (!inStasis) log(call.id, 'media_stasis_wait_timeout')
+  await ari('POST', `/bridges/${bridge.id}/addChannel`, { channel: media.id })
   log(call.id, 'media_bridged', { bridge: bridge.id, media_channel: media.id, rtp_port: call.rtpPort })
 }
 
@@ -378,6 +390,15 @@ function connectAriEvents() {
   ws.onmessage = async (msg) => {
     const ev = JSON.parse(String(msg.data)) as Record<string, any>
     const chId: string | undefined = ev.channel?.id
+    if (ev.type === 'StasisStart' && active && chId && chId === active.mediaChannelId) {
+      active.resolveMediaInStasis?.()
+      return
+    }
+    if (ev.type === 'StasisStart' && active && active.mediaChannelId === undefined && String(ev.channel?.name ?? '').startsWith('UnicastRTP/')) {
+      // StasisStart da mídia pode chegar antes da resposta HTTP do externalMedia devolver o id.
+      active.resolveMediaInStasis?.()
+      return
+    }
     if (ev.type === 'StasisStart' && active && chId === active.id) {
       log(active.id, 'answered', { channel: ev.channel?.name })
       try {
@@ -408,7 +429,9 @@ Bun.serve({
       if (active) return Response.json({ error: 'já existe chamada ativa', active: active.id }, { status: 409 })
       const { number } = (await req.json()) as { number?: string }
       if (!number || !/^\d{10,13}$/.test(number)) return Response.json({ error: 'number inválido' }, { status: 400 })
-      const digits = number.startsWith('55') ? number : `55${number}`
+      // Igual ao [from-extensions] do voip-api: disca o número como veio (DIAL_DIGITS = DIALED), SEM prefixar 55.
+      // As chamadas diretas com 55 ficaram mudas; a que passou pelo dialplan (sem 55) teve áudio.
+      const digits = number
       const id = crypto.randomUUID()
       const call: Call = {
         id,
