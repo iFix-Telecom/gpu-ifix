@@ -42,6 +42,9 @@ const TRUNK_PREFIX = env('POC_TRUNK_PREFIX', '0983489#')
 const CALLER_ID = env('POC_CALLER_ID', 'IA PoC <9990>')
 const RTP_BIND = env('POC_RTP_BIND', '127.0.0.1')
 const CONTROL_PORT = Number(env('POC_CONTROL_PORT', '8110'))
+// Token obrigatório nos endpoints de controle (/call, /brain-test): o container usa a rede do host, então
+// qualquer processo local chegaria no 127.0.0.1:8110 — sem token, não dispara ligação nem gasta crédito.
+const CONTROL_TOKEN = env('POC_CONTROL_TOKEN', '')
 const MAX_CALL_SECONDS = Number(env('POC_MAX_CALL_SECONDS', '720'))
 const LOG_DIR = env('POC_LOG_DIR', '/data/calls')
 const GATEWAY_BASE_URL = env('GATEWAY_BASE_URL', 'https://ai-gateway.converse-ai.app/v1')
@@ -596,11 +599,22 @@ function connectAriEvents() {
 }
 
 // ---------------------------------------------------------------- controle
+function controlAuthorized(req: Request, ip: string | undefined): boolean {
+  if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return false
+  if (!CONTROL_TOKEN) return false
+  const got = Buffer.from(req.headers.get('x-poc-token') ?? '')
+  const want = Buffer.from(CONTROL_TOKEN)
+  return got.length === want.length && require('node:crypto').timingSafeEqual(got, want)
+}
+
 Bun.serve({
   hostname: '127.0.0.1',
   port: CONTROL_PORT,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url)
+    if (req.method === 'POST' && !controlAuthorized(req, server.requestIP(req)?.address)) {
+      return new Response('forbidden', { status: 403 })
+    }
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ ok: true, key_configured: Boolean(GOOGLE_API_KEY), model: GEMINI_MODEL, active: active?.id ?? null, backend: BACKEND })
     }
