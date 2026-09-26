@@ -33,6 +33,9 @@ const GOOGLE_API_KEY = env('GOOGLE_API_KEY', '')
 const GEMINI_MODEL = env('GEMINI_MODEL', 'gemini-3.8-live')
 const GEMINI_VOICE = env('GEMINI_VOICE', 'Kore')
 const GEMINI_LANGUAGE = env('GEMINI_LANGUAGE', 'pt-BR')
+// Só p/ gemini-3.8-live-extended-thinking (obrigatório: sem ele a sessão fecha 1007 "Thinking level must be
+// specified"). Valores: low | medium | high. O 3.8-live normal NÃO aceita o campo.
+const GEMINI_THINKING_LEVEL = env('GEMINI_THINKING_LEVEL', 'low')
 const VAD_SILENCE_MS = Number(env('POC_VAD_SILENCE_MS', '300'))
 const TRUNK_ENDPOINT = env('POC_TRUNK_ENDPOINT', 'trunk_2b137c12')
 const TRUNK_PREFIX = env('POC_TRUNK_PREFIX', '0983489#')
@@ -245,6 +248,7 @@ function openGemini(call: Call) {
           model: `models/${GEMINI_MODEL}`,
           generationConfig: {
             responseModalities: ['AUDIO'],
+            ...(GEMINI_MODEL.includes('extended-thinking') ? { thinkingConfig: { thinkingLevel: GEMINI_THINKING_LEVEL } } : {}),
             // gemini-3.8-live (áudio nativo) escolhe o idioma sozinho e NÃO aceita languageCode (doc
             // "Live API capabilities"); só 3.8-live-extended-thinking e 3.1-flash-live-preview aceitam.
             speechConfig: {
@@ -260,7 +264,7 @@ function openGemini(call: Call) {
         },
       }),
     )
-    log(call.id, 'gemini_open', { model: GEMINI_MODEL, voice: GEMINI_VOICE, language: GEMINI_LANGUAGE, vad_silence_ms: VAD_SILENCE_MS, backend: BACKEND })
+    log(call.id, 'gemini_open', { thinking_level: GEMINI_MODEL.includes('extended-thinking') ? GEMINI_THINKING_LEVEL : null, model: GEMINI_MODEL, voice: GEMINI_VOICE, language: GEMINI_LANGUAGE, vad_silence_ms: VAD_SILENCE_MS, backend: BACKEND })
   }
   ws.onmessage = async (msg) => {
     const raw = typeof msg.data === 'string' ? msg.data : new TextDecoder().decode(msg.data as ArrayBuffer)
