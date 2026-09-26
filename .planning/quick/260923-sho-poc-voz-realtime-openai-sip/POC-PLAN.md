@@ -538,3 +538,5 @@ Pendências:
 - Bancada (2 externalMedia slin16 no mesmo bridge, debug RTP só 127.0.0.1): Asterisk RECEBE PT 118 ("Got RTP … type 118") mas não repassa; varredura de PT: **só 10 e 11 passam** (saída sai com PT 118). A ponte copiava o PT aprendido (118) ⇒ tudo descartado.
 - Fix: TX com PT fixo 11 (`POC_TX_PT`). Commit abaixo. Pendente: ligação de validação.
 - HIPÓTESE (não verificada): a ponte WhatsApp do voip-api usa o PT aprendido no TX — mesmo risco; checar se lá o PT de RX é outro.
+- Ligação softphone pós-PT 11 (20:25 UTC): áudio nos 2 sentidos, mas Pedro: "voz robótica, muito lenta". Causa: PT 10/11 = L16 estático que o Asterisk trata como PCM 8 kHz; ponte mandava 16 kHz ⇒ reprodução a meia velocidade.
+- Fix: canal externalMedia `slin` (8 kHz; `POC_MEDIA_RATE`); RX 8k→16k p/ Gemini, TX 24k→8k, frames 320 B/20 ms. FATO bancada: 50 pkts/16.000 B de payload entrando com PT 11 ⇒ 50 pkts/16.000 B saindo (PT 10) — 1:1, sem esticar. Testes 3/3.

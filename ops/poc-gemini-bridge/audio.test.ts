@@ -19,3 +19,11 @@ test('swap16 inverte bytes sem alterar a entrada', () => {
   expect([...swap16(b)]).toEqual([0x02, 0x01, 0x04, 0x03])
   expect([...b]).toEqual([0x01, 0x02, 0x03, 0x04])
 })
+
+test('Resampler 8k→16k (entrada do Gemini) dobra as amostras', () => {
+  const buf = Buffer.alloc(8000 * 2)
+  for (let i = 0; i < 8000; i++) buf.writeInt16LE(Math.round(8000 * Math.sin((2 * Math.PI * 300 * i) / 8000)), i * 2)
+  const r = new Resampler(0.5)
+  const out = Buffer.concat([r.push(buf.subarray(0, 3001 * 2)), r.push(buf.subarray(3001 * 2))])
+  expect(Math.abs(out.length / 2 - 16000)).toBeLessThanOrEqual(2)
+})

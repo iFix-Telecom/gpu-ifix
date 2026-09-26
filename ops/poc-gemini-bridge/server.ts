@@ -50,7 +50,12 @@ const GEMINI_WS =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent'
 const TOOL_NAME = 'consultar_atendente'
 const PTIME_MS = 20
-const FRAME_BYTES = 640 // 20 ms @ 16 kHz × 2 bytes
+// Taxa do canal externalMedia. 8000 = `slin`: o Asterisk só aceita de volta PT 10/11 (L16 estático),
+// que ele trata como PCM 8 kHz — mandar 16 kHz com PT 11 tocava a voz na metade da velocidade
+// ("robótica e lenta", ligação 26/09 20:25). O telefone é G.711 8 kHz: sem perda de qualidade.
+const MEDIA_RATE = Number(process.env.POC_MEDIA_RATE ?? 8000)
+const MEDIA_FORMAT = MEDIA_RATE === 16000 ? 'slin16' : 'slin'
+const FRAME_BYTES = (MEDIA_RATE / 1000) * 20 * 2 // 20 ms × 2 bytes
 const TX_QUEUE_MAX = 1500
 const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES)
 const TX_PT = Number(process.env.POC_TX_PT ?? 11) // 30 s de áudio bufferizado (Gemini manda rajadas mais rápido que tempo real)
@@ -128,6 +133,7 @@ type Call = {
   txQueue: Buffer[]
   txRemainder: Buffer
   resampler?: Resampler
+  rxUpsampler?: Resampler
   drainTimer?: Timer
   maxTimer?: Timer
   // turnos
@@ -279,7 +285,7 @@ function openGemini(call: Call) {
           flushUser(call)
         }
         const rate = Number(/rate=(\d+)/.exec(d.mimeType)?.[1] ?? 24000)
-        call.resampler ??= new Resampler(rate / 16000)
+        call.resampler ??= new Resampler(rate / MEDIA_RATE)
         enqueueTx(call, call.resampler.push(Buffer.from(d.data, 'base64')))
       }
       if (sc.interrupted) {
@@ -342,7 +348,11 @@ async function startMedia(call: Call) {
     rxFrames++
     call.rxFrames++
     if (!call.ready || call.gemini?.readyState !== WebSocket.OPEN) return
-    const pcmLE = swap16(msg.subarray(12)) // slin16 no fio = s16be
+    let pcmLE = swap16(msg.subarray(12)) // slin no fio = s16be
+    if (MEDIA_RATE !== 16000) {
+      call.rxUpsampler ??= new Resampler(MEDIA_RATE / 16000)
+      pcmLE = call.rxUpsampler.push(pcmLE)
+    }
     call.gemini.send(JSON.stringify({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: pcmLE.toString('base64') } } }))
   })
   // Drenador: 1 frame por tick de 20 ms; timestamp ancorado no relógio.
@@ -353,7 +363,7 @@ async function startMedia(call: Call) {
     const chunk = call.txQueue.length > 0 ? (call.txQueue.shift() as Buffer) : SILENCE_FRAME
     const now = Date.now()
     call.txAnchor ??= now
-    const ts = (call.txTsBase + Math.round((now - call.txAnchor) * 16)) >>> 0
+    const ts = (call.txTsBase + Math.round((now - call.txAnchor) * (MEDIA_RATE / 1000))) >>> 0
     const marker = call.lastTxAt !== 0 && now - call.lastTxAt > PTIME_MS * 5
     call.lastTxAt = now
     const pkt = Buffer.alloc(12 + FRAME_BYTES)
@@ -378,7 +388,7 @@ async function startMedia(call: Call) {
   const media = await ari('POST', '/channels/externalMedia', {
     app: ARI_APP,
     external_host: `${RTP_BIND}:${call.rtpPort}`,
-    format: 'slin16',
+    format: MEDIA_FORMAT,
     encapsulation: 'rtp',
     transport: 'udp',
     direction: 'both',
