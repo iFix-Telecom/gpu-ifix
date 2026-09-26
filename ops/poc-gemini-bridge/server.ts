@@ -214,7 +214,14 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
     const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: GATEWAY_MODEL, messages, max_tokens: 800, temperature: 0.3 }),
+      body: JSON.stringify({
+        model: GATEWAY_MODEL,
+        messages,
+        max_tokens: 800,
+        temperature: 0.3,
+        // Direto no OpenRouter: roteia p/ o provedor de menor latência (medido: gateway somava ~350 ms).
+        ...(GATEWAY_BASE_URL.includes('openrouter.ai') ? { provider: { sort: 'latency' } } : {}),
+      }),
       signal: AbortSignal.timeout(12000),
     })
     const data = (await res.json()) as {

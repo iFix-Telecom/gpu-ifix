@@ -563,3 +563,9 @@ Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
 - Ponte: `fallbackToOpenAI` — Gemini fecha (abertura ou no meio) ⇒ derruba externalMedia, cria `PJSIP/poc_openai_realtime` no mesmo bridge (perna do cliente intacta) com header `X-Poc-Fallback: 1`. Contexto da conversa NÃO é transferido. `POC_FORCE_FALLBACK=1` p/ testar; `POC_FALLBACK_ENDPOINT=''` desliga.
 - Serviço OpenAI (worker-vm): header de fallback ⇒ abre com "Desculpe, tive uma instabilidade… pode repetir?" e responde direto (sem gate pré-atendimento); histórico do cérebro termina em fala do cliente; cérebro `google/gemini-3.5-flash-lite`.
 - Pendente: ligação de teste do fallback forçado.
+
+### Cérebro direto no OpenRouter (decisão Pedro 2026-09-26)
+- Benchmark a partir do Oracle (4×): gpt-oss-safeguard-20b direto 570 ms / via gateway 923 ms; gemini-3.5-flash-lite direto 1.321 / gateway 1.030 (variação de provedor). Respostas corretas (CPF confirmado).
+- Ponte: `GATEWAY_BASE_URL=https://openrouter.ai/api/v1`, `GATEWAY_MODEL=openai/gpt-oss-safeguard-20b`, chave OpenRouter da iFix, `provider.sort=latency`. Backup do env anterior em `secrets.env.bak-gateway` (Oracle). Custo do cérebro sai do billing do gateway (tenant voz-realtime-poc) e vai direto p/ conta OpenRouter.
+- "Gemini chamar o cérebro direto": FATO (API Live) function call é executada pelo cliente (toolCall→toolResponse); sem chamada nativa a URL externa. A ponte (mesmo host do Asterisk) já é o executor, sem intermediário além do HTTP ao OpenRouter.
+- Fallback OpenAI (worker-vm) segue com cérebro via gateway (flash-lite).
