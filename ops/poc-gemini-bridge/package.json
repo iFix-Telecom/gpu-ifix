@@ -1,0 +1,7 @@
+{
+  "name": "poc-gemini-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "bun run server.ts", "typecheck": "tsc --noEmit" },
+  "devDependencies": { "typescript": "^5.7.0", "@types/bun": "latest" }
+}

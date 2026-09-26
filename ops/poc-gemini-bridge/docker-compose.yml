@@ -1,0 +1,13 @@
+# PoC SEED-009 — ponte Asterisk ARI externalMedia ↔ Gemini Live (worker-oracle, /opt/poc-gemini-bridge).
+# network_mode host: RTP em 127.0.0.1 com o Asterisk (net=host) e ARI em 10.0.0.82:8089.
+# Controle HTTP só em 127.0.0.1:8110. Não entra no app Stasis do voip-api.
+services:
+  bridge:
+    build: .
+    image: poc-gemini-bridge:local
+    container_name: poc-gemini-bridge
+    restart: unless-stopped
+    network_mode: host
+    env_file: /opt/poc-gemini-bridge/secrets.env
+    volumes:
+      - ./data:/data

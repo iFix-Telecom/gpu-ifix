@@ -515,3 +515,13 @@ Pendências:
 - Limpeza: ramal 9990 do iFix Master apagado via API (`DELETE /extensions/2163` → 204; 0 linhas `ps_*` restantes); token iFix Master (last4 pM68, exposto na sessão) **revogado** via `DELETE /admin/workspaces/:id/api-tokens/:tokenId` → 200; reuso → 401. Removido do cofre.
 - Ajuste pré-atendimento (saída): sessão inicia com `create_response:false`; transcrição casando regex de anúncio de operadora (caixa postal, após o sinal, não receber recados, ocupado, fora da área…) ⇒ `hangup`; primeira fala humana ⇒ `session.update` liga `create_response` + `response.create`. Regex validada contra as 3 gravações reais das ligações anteriores (3/3) e 5 falas humanas (0 falso positivo). HIPÓTESE: 1º turno humano ganha +~0,3–0,5 s (espera a transcrição).
 - Ajuste latência: `turn_detection` explícito, `server_vad` `silence_duration_ms=300` (env `POC_VAD_SILENCE_MS`; `POC_TURN_MODE=semantic_vad` + `POC_VAD_EAGERNESS` como alternativa). HIPÓTESE: default da OpenAI ~500 ms; risco de cortar quem pausa no meio da frase.
+
+## Etapa Gemini Live como voz (2026-09-25/26) — decisão Pedro: "Gemini Live como voz"; container no Oracle aprovado
+
+- OpenRouter NÃO serve: não expõe Live API (só HTTP chat); gateway não tem chave Google. Precisa chave Google AI Studio (pendente, Pedro).
+- Proxy SIP LiveTok descartado: sem licença, só `gemini-live-2.5-flash-preview`, sem function calling, sem SRTP.
+- Reuso do padrão do voip-api (sugestão Pedro): tronco WhatsApp usa ARI `externalMedia format=slin16` (Asterisk converte G.711→PCM 16 kHz; s16be no fio) + `media-bridge.ts` (RTP/UDP ↔ WebSocket). Gemini Live aceita PCM 16 kHz ⇒ só a volta (24k→16k) precisa reamostrar.
+- `ops/poc-gemini-bridge/` (Bun, sem deps): app ARI próprio `poc-gemini` (não toca app `voip-api` nem dialplan); `POST 127.0.0.1:8110/call {number}` ⇒ ARI originate no tronco COM callerId; canal entra no Stasis só quando ATENDE (sem early media); bridge mixing + externalMedia slin16 → RTP 127.0.0.1 ↔ Gemini Live WS (`setup` com voz, pt-BR, VAD 300 ms, transcrições, tool `consultar_atendente` → ai-gateway); fila de TX 20 ms com timestamp ancorado no relógio; `interrupted` ⇒ limpa fila (barge-in); anúncio de operadora ⇒ hangup; 1 chamada por vez; timeout sem atendimento 60 s; hangup em 720 s.
+- Testes: `audio.test.ts` 2/2 (resampler 24k→16k em chunks irregulares: 16000±2 amostras, erro máx < 200/10000; swap16).
+- Deploy: worker-oracle `/opt/poc-gemini-bridge` (container `poc-gemini-bridge`, network host, secrets 600). FATO: `ari_connected app=poc-gemini`; `/health` `key_configured:false`.
+- Limitação: disparo direto no tronco ⇒ fora do cos-check/CDR do voip-api (NextBilling cobra normal).
