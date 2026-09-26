@@ -101,8 +101,10 @@ async function ari(method: string, path: string, query: Record<string, string> =
 // ---------------------------------------------------------------- chamada
 type Turn = { role: 'user' | 'assistant'; content: string }
 type Call = {
-  id: string // id do canal do tronco
+  id: string // id do canal discado (tronco ou endpoint interno)
   number: string
+  /** Ex.: PJSIP/poc_voz_ramal — teste interno sem tronco (softphone). */
+  endpoint?: string
   startedAt: number
   bridgeId?: string
   mediaChannelId?: string
@@ -404,7 +406,7 @@ async function startMedia(call: Call) {
  */
 async function dialTrunk(call: Call) {
   await ari('POST', '/channels/create', {
-    endpoint: `PJSIP/${TRUNK_PREFIX}${call.number}@${TRUNK_ENDPOINT}`,
+    endpoint: call.endpoint ?? `PJSIP/${TRUNK_PREFIX}${call.number}@${TRUNK_ENDPOINT}`,
     app: ARI_APP,
     appArgs: 'outbound',
     channelId: call.id,
@@ -417,7 +419,7 @@ async function dialTrunk(call: Call) {
   }
   await ari('POST', `/bridges/${call.bridgeId}/addChannel`, { channel: call.id })
   await ari('POST', `/channels/${call.id}/dial`, { caller: call.mediaChannelId ?? '', timeout: '45' })
-  log(call.id, 'dialing', { number_masked: `${call.number.slice(0, 6)}*****`, trunk: TRUNK_ENDPOINT })
+  log(call.id, 'dialing', call.endpoint ? { endpoint: call.endpoint } : { number_masked: `${call.number.slice(0, 6)}*****`, trunk: TRUNK_ENDPOINT })
 }
 
 // ---------------------------------------------------------------- eventos ARI
@@ -475,15 +477,19 @@ Bun.serve({
     if (req.method === 'POST' && url.pathname === '/call') {
       if (!GOOGLE_API_KEY) return Response.json({ error: 'GOOGLE_API_KEY ausente' }, { status: 503 })
       if (active) return Response.json({ error: 'já existe chamada ativa', active: active.id }, { status: 409 })
-      const { number } = (await req.json()) as { number?: string }
-      if (!number || !/^\d{10,13}$/.test(number)) return Response.json({ error: 'number inválido' }, { status: 400 })
+      const { number, endpoint } = (await req.json()) as { number?: string; endpoint?: string }
+      if (endpoint !== undefined && !/^PJSIP\/poc_[a-z0-9_]+$/.test(endpoint))
+        return Response.json({ error: 'endpoint inválido (só PJSIP/poc_*)' }, { status: 400 })
+      if (endpoint === undefined && (!number || !/^\d{10,13}$/.test(number)))
+        return Response.json({ error: 'number inválido' }, { status: 400 })
       // Igual ao [from-extensions] do voip-api: disca o número como veio (DIAL_DIGITS = DIALED), SEM prefixar 55.
       // As chamadas diretas com 55 ficaram mudas; a que passou pelo dialplan (sem 55) teve áudio.
-      const digits = number
+      const digits = number ?? ''
       const id = crypto.randomUUID()
       const call: Call = {
         id,
         number: digits,
+        endpoint,
         startedAt: Date.now(),
         ready: false,
         rxFrames: 0,
