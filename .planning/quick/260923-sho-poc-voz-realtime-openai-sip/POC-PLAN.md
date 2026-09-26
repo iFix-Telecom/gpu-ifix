@@ -551,3 +551,9 @@ Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
 - FATO: gateway aceita id OpenRouter direto (passthrough, billing no tenant). Benchmark 3× prompt real (CPF ditado): gemini-2.5-flash-lite 617 ms ❌ inventou número; **gemini-3.5-flash-lite 812 ms ✅**; gemini-3.1-flash-lite 815 ✅; claude-haiku-4.5 1.391 ✅; qwen 1.504 ✅; gpt-4.1-nano 1.551 ❌ ("12 dígitos"); gpt-oss-120b 4,7 s; qwen3-32b 7,8 s; mistral-small-2603 429. Escolhido `google/gemini-3.5-flash-lite` (GATEWAY_MODEL no secrets do Oracle).
 - Áudio: redução 24k→8k sem filtro ⇒ aliasing. Fix: FIR passa-baixa (Blackman, 63 taps, corte 3,6 kHz) antes do resampler. Teste: 6 kHz sem filtro ⇒ RMS >5000 (alias ~2 kHz); com filtro <300; 1 kHz preservado >6500. Testes 4/4.
 - Cérebro: proibido começar com "Só um instante" e dizer que já anotou.
+
+### Teste gemini-3.8-live-extended-thinking (2026-09-26 20:52–20:55 UTC)
+- 1ª tentativa: sessão fechou `1007 "Thinking level must be specified for this model."` ⇒ fix `generationConfig.thinkingConfig.thinkingLevel` (low; só p/ extended-thinking; 3.8-live normal não aceita).
+- 2ª (91 s, thinking low): cérebro 2× HTTP 400 — Google via OpenRouter: "Requests ending with a model turn are not supported" (histórico terminou em "Só um instante." transcrito antes da tool). Fix: filtra frases de espera, último turno = cliente, intenção no system. Reproduzido: termina em assistant ⇒ 400; termina em user ⇒ 200.
+- Tokens da ligação (9 respostas): prompt TEXT 35.852, prompt AUDIO 6.710, resp AUDIO 772, thoughts 2.232 — vs 3.8-live 76 s: TEXT 7.591, AUDIO 7.329, resp 811 ⇒ texto ~4,7× maior ⇒ mais caro/min (HIPÓTESE de cobrança por token acumulado).
+- Qualidade: transcrição pior ("9" p/ "boa tarde", "y ahí"), reinício de saudação, ação fingida "vou registrar agora mesmo". Latência 1º áudio 0,5–1,7 s (≥ 3.8-live).

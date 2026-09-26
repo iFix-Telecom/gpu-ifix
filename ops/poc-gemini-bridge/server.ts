@@ -192,10 +192,16 @@ function flushAi(call: Call) {
 async function askBrain(call: Call, intencao: string): Promise<string> {
   const t0 = Date.now()
   flushUser(call)
+  // Google (via OpenRouter) recusa histórico terminando em fala da IA: "Requests ending with a model
+  // turn are not supported" (400, ligação 26/09 20:54). Tira frases de espera e garante último = cliente.
+  const hist = call.history.filter((t) => !(t.role === 'assistant' && /^s[óo] um instante\.?$/i.test(t.content.trim())))
+  while (hist.length && hist[hist.length - 1].role === 'assistant') hist.pop()
   const messages = [
-    { role: 'system', content: BRAIN_SYSTEM },
-    ...call.history.slice(-12),
-    { role: 'system', content: `Intenção inferida pelo modelo de voz (pode estar errada, não use como dado): ${intencao}` },
+    {
+      role: 'system',
+      content: `${BRAIN_SYSTEM}\n\nIntenção inferida pelo modelo de voz (pode estar errada, não use como dado): ${intencao}`,
+    },
+    ...hist.slice(-12),
   ]
   try {
     const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
@@ -204,7 +210,8 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
       body: JSON.stringify({ model: GATEWAY_MODEL, messages, max_tokens: 800, temperature: 0.3 }),
       signal: AbortSignal.timeout(12000),
     })
-    const data = (await res.json()) as { model?: string; choices?: Array<{ finish_reason?: string; message?: { content?: string } }> }
+    const data = (await res.json()) as {
+      error?: unknown; model?: string; choices?: Array<{ finish_reason?: string; message?: { content?: string } }> }
     const c = data.choices?.[0]
     let text = c?.message?.content?.trim()
     if (text && c?.finish_reason === 'length') {
@@ -212,7 +219,7 @@ async function askBrain(call: Call, intencao: string): Promise<string> {
       text = end > 0 ? text.slice(0, end + 1) : undefined
     }
     log(call.id, 'brain_done', { ms: Date.now() - t0, http: res.status, upstream_model: data.model, finish_reason: c?.finish_reason, text })
-    if (!res.ok || !text) throw new Error(`gateway ${res.status}`)
+    if (!res.ok || !text) throw new Error(`gateway ${res.status} ${JSON.stringify(data.error ?? '').slice(0, 300)}`)
     return text
   } catch (e) {
     log(call.id, 'brain_fail', { ms: Date.now() - t0, err: String(e) })
