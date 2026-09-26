@@ -540,3 +540,8 @@ Pendências:
 - HIPÓTESE (não verificada): a ponte WhatsApp do voip-api usa o PT aprendido no TX — mesmo risco; checar se lá o PT de RX é outro.
 - Ligação softphone pós-PT 11 (20:25 UTC): áudio nos 2 sentidos, mas Pedro: "voz robótica, muito lenta". Causa: PT 10/11 = L16 estático que o Asterisk trata como PCM 8 kHz; ponte mandava 16 kHz ⇒ reprodução a meia velocidade.
 - Fix: canal externalMedia `slin` (8 kHz; `POC_MEDIA_RATE`); RX 8k→16k p/ Gemini, TX 24k→8k, frames 320 B/20 ms. FATO bancada: 50 pkts/16.000 B de payload entrando com PT 11 ⇒ 50 pkts/16.000 B saindo (PT 10) — 1:1, sem esticar. Testes 3/3.
+
+## Ligação Gemini Live via ponte (softphone, sem tronco) — 2026-09-26 20:29 UTC — ✅ FUNCIONOU (84 s)
+FATOS (log `poc-gemini-bridge`): transcrições PT-BR limpas ("Meu nome é Pedro…", "Como faço para encontrar minha fatura?", "de 1 2 3 4 5 6 7 8 9 0 0"); 1º áudio da IA ~430–640 ms após a última transcrição do usuário (proxy); 3 tool calls, cérebro deepseek 1,7–3,4 s; CPF ditado confirmado pelo cérebro "123.456.789-00"; sem reinício de atendimento; despedida normal.
+Problemas: Gemini pôs o CPF no argumento da tool ("informar o CPF 12345678900", violando a instrução — cérebro usou a transcrição, sem dano); cérebro repetiu "Só um instante." no início da resposta (fala duplicada).
+Próximo: mesma ponte pelo tronco (celular) com a correção de PT/8 kHz.
