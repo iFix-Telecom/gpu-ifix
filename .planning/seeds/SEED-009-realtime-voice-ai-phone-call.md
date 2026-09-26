@@ -1,7 +1,7 @@
 ---
 seed: SEED-009
 title: Real-time voice AI for live phone calls
-status: poc-open
+status: poc-done
 priority: future
 phase_target: 12+
 captured_at: 2026-06-04
@@ -125,3 +125,11 @@ Atualização 2026-09-23:
 - Workflow atual `PROCESSADOR-IA-GRAVACOES-V3` (batch pós-call) continua útil pra análise/CRM
 - Whisper batch tier-1 (OpenAI whisper-1) é suficiente para esse caso
 - Gemini multimodal pode substituir cadeia STT+chat batch para reduzir custo + diarização nativa
+
+
+## Resultado da PoC (2026-09-26)
+
+Laboratório concluído — relatório consolidado: `.planning/quick/260923-sho-poc-voz-realtime-openai-sip/LAB-REPORT.md`.
+Decisão Pedro: voz principal `gemini-3.8-live-extended-thinking` (thinking medium) via ponte ARI externalMedia,
+fallback OpenAI `gpt-realtime-2.1-mini` via SIP; cérebro `gpt-oss-120b@Cerebras` (cadeia por tokens/s, OpenRouter direto).
+Próximo: implementar no DiscLight (voip-api).
