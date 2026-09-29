@@ -164,3 +164,35 @@ onde o ramal 9990 da PoC já vive. Pontos de decisão/implementação:
 
 ## Commits da PoC (repo gpu-ifix, branch develop, sem push)
 `6e9b283` … `d26702f` (ver `git log --oneline -- ops/poc-voz-realtime ops/poc-gemini-bridge .planning/quick/260923-sho-poc-voz-realtime-openai-sip`).
+
+---
+
+## 8. Contexto e alternativas avaliadas (antes/durante o lab)
+
+- **GPU própria (pergunta inicial):** a 3090 do pod primário roda o Qwen3-30B-A3B em ~21 GB com ~190–202 tok/s, sobra
+  ~3,8 GB — não cabe STT+TTS em streaming junto. XTTS no pod 3060 = ~3,3 s/frase sem streaming e licença não-comercial.
+  Opções levantadas: 2×3090 (~US$ 0,26/h) ou 5090 (~US$ 0,32/h). Não seguido: optou-se por APIs speech-to-speech.
+  Open source (Moshi, PersonaPlex, Qwen-Omni): sem PT-BR confirmado; review 2026 diz que ainda não substituem pipeline
+  STT+LLM+TTS em produção. Vantagem única da cascata local: LGPD (áudio não sai de casa).
+- **Preços oficiais levantados (2026-09-23/26):** OpenAI `gpt-realtime-2.1` $32/$64 e `-mini` $10/$20 por 1M tokens de
+  áudio (texto mini $0,60/$2,40); `gpt-live-1` $0,05/min + backend; transcrição `gpt-4o-transcribe` $0,006/min,
+  `gpt-transcribe` $0,0045/min, `gpt-4o-mini-transcribe` $0,003/min, `gpt-live-transcribe` $0,017/min (só em sessão de
+  transcrição, não dentro do Realtime). Gemini `3.8-live`, `3.8-live-extended-thinking` e `3.1-flash-live-preview`:
+  mesmas tarifas (áudio $3 in / $12 out por 1M = $0,005/$0,018 por min; texto $0,75/$4,50). ElevenLabs Agents
+  $0,08/min + LLM à parte (descartado: ~6× o Gemini por minuto de voz).
+- **GPT-Live (OpenAI full-duplex):** voz com delegação `client` p/ cérebro próprio; mesmo SIP; não testado.
+  Realtime não permite trocar o cérebro — só via tools (o que foi feito).
+- **Gemini Live e SIP:** Gemini não tem SIP; OpenRouter não expõe Live API; proxy SIP LiveTok descartado (sem licença,
+  sem tools, sem SRTP). A ponte seguiu o padrão da ponte de WhatsApp do voip-api (sugestão do Pedro).
+- **AI Studio:** `/live` abriu com modelo de transcrição; Pedro conseguiu conversar depois. `gemini-3.8-live` só fala
+  PT-BR de forma estável com instrução explícita (escolhe idioma sozinho).
+- **Transcrição (OpenAI):** `gpt-4o-mini-transcribe` errou feio em 8 kHz; `gpt-4o-transcribe` e `gpt-transcribe`
+  zeraram os erros nas amostras (ficou `gpt-transcribe`, 25% mais barato).
+- **Cérebros descartados:** `morph/morph-v3-fast` (edição de código), `gemini-2.5-flash-lite` (inventou CPF),
+  `gpt-4.1-nano`, `qwen3-32b` (9 s), `llama-3.3-70b` via Novita (48 tok/s).
+- **Segurança:** endpoints de controle da ponte exigem token + loopback (achado de revisão automática, commit `d26702f`).
+  Chaves OpenAI/Google/token iFix Master passaram pelo chat (iFix Master já revogado).
+
+## 9. Estado do repositório
+
+Todos os commits da PoC estão **só locais** em `gpu-ifix` branch `develop` (ops-claude), **sem push**.
