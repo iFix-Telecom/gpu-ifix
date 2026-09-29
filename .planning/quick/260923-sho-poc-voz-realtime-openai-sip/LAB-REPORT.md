@@ -210,3 +210,15 @@ Todos os commits da PoC estão **só locais** em `gpu-ifix` branch `develop` (op
 **Risco aberto:** a ponte Gemini NÃO trata `GoAway`/resumption ⇒ ligação > ~10 min derruba a sessão (HIPÓTESE: cai no fallback OpenAI sem contexto). Obrigatório no DiscLight.
 "Só um instante" + silêncio/narração inventada é consequência do tool síncrono do Gemini, não bug da ponte.
 Decisão Pedro: montar teste GPT-Live 1 com o mesmo cérebro para comparar.
+
+## 11. Próxima sessão — teste GPT-Live 1 (pausado, sem código ainda)
+
+Decisão Pedro (2026-09-29): montar teste GPT-Live 1 com o MESMO cérebro (gpt-oss-120b@Cerebras) p/ comparar com Gemini.
+Protocolo levantado (docs OpenAI `realtime-sip` + `live-delegation`, 2026-09-29):
+- Webhook de entrada: **`live.transport.incoming`** (`data.type:"sip"`, `data.session_id`); legado `live.call.incoming`. Mesmo URI SIP do projeto. HIPÓTESE: precisa inscrever esse evento no webhook do painel (hoje só `realtime.call.incoming`); NÃO SEI como a OpenAI escolhe entre Realtime e Live p/ o mesmo INVITE — logar qual evento chega.
+- Aceitar: `POST /v1/live/sessions/{session_id}/accept` body `{"session":{"type":"live","model":"gpt-live-1","instructions":"…","audio":{"output":{"voice":"marin"}},"delegation":{"type":"client"}}}`. Reject/hangup: `/v1/live/sessions/{id}/reject|hangup`.
+- Sideband: `wss://api.openai.com/v1/live/sessions/{session_id}/attach` (NÃO mandar `session.start`).
+- Delegação: servidor `session.delegation.created` `{delegation:{id,type:"delegation",target:"client"},offset_ms}` (sem texto da tarefa → montar contexto com `session.input_transcript.delta` / `session.output_transcript.delta`). Cliente: `session.commentary.append` (falado, parafraseado), `session.thinking.append` (progresso), `session.instructions.append` (`delegation_id:null`), ≤500 tokens por append; acks `session.*.appended`. Sem evento de "done".
+- Custo: $0,05/min por segundo + cérebro. Sem cobrança extra de SIP (pricing).
+Implementação planejada: modo `POC_VOICE_MODE=live` no `ops/poc-voz-realtime/server.ts` (worker-vm), verificar assinatura com `client.webhooks.verifySignature` + JSON.parse (unwrap pode não conhecer o tipo live), cérebro direto no OpenRouter (cadeia com provedor fixo + reasoning low, igual à ponte Gemini). Teste pelo softphone: `channel originate PJSIP/poc_voz_ramal application Dial PJSIP/poc_openai_realtime`.
+ClickUp: tarefa de registro na lista "O - DEV's - Tarefas".
