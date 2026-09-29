@@ -196,3 +196,17 @@ onde o ramal 9990 da PoC já vive. Pontos de decisão/implementação:
 ## 9. Estado do repositório
 
 Todos os commits da PoC estão **só locais** em `gpu-ifix` branch `develop` (ops-claude), **sem push**.
+
+## 10. Gemini Live × GPT-Live 1 — controle do harness (docs oficiais, 2026-09-29)
+
+| Controle | Gemini Live | GPT-Live 1 (delegação `client`) |
+|---|---|---|
+| Executor do cérebro | nós (`toolCall`→`toolResponse`) | nós (`session.delegation.created`→appends) |
+| Fala enquanto o cérebro trabalha | ❌ "The model will not start responding until you've sent the tool response"; `NON_BLOCKING` só Gemini 2.5 Flash ("not yet supported in Gemini 3.1 Flash Live"); 3.8: NÃO SEI | ✅ full-duplex; backend continua em interrupção |
+| Progresso/instrução no meio | ❌ sem canal (clientContent existe; troca de system instruction não documentada) | ✅ `thinking.append` / `commentary.append` / `instructions.append` |
+| Tools nativas | só Google Search | backend livre |
+| Duração | ⚠️ conexão ~10 min; áudio 15 min sem compressão; `GoAway` + resumption handle (2 h) + `contextWindowCompression` | resume histórico ao passar de 90% do contexto |
+
+**Risco aberto:** a ponte Gemini NÃO trata `GoAway`/resumption ⇒ ligação > ~10 min derruba a sessão (HIPÓTESE: cai no fallback OpenAI sem contexto). Obrigatório no DiscLight.
+"Só um instante" + silêncio/narração inventada é consequência do tool síncrono do Gemini, não bug da ponte.
+Decisão Pedro: montar teste GPT-Live 1 com o mesmo cérebro para comparar.
