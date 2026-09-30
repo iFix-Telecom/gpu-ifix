@@ -21,7 +21,10 @@ Uso: unified3060.py {start|stop|status|disk}
   provision falho destroi a nova sempre e o sweep varre o que tenha sobrado
   do label "stt-tts-rerank-unified" (leak: 4 orfas / $13,01).
 State:   /var/lib/vast-3060/state.json (compartilhado com o legado vast3060:
-         instance_id, machine_id, machine_avoid[])
+         instance_id, machine_id, machine_avoid[], host_avoid[], pending_id)
+         host_avoid = host_id fisico (varias machine_id no mesmo host);
+         pending_id = instancia criada mas ainda nao validada (sobrevive a
+         kill do systemd; retomada/destruida no proximo start).
 Secrets: /etc/onboard/secrets/vast-3060.env (VAST_API_KEY, PORTAINER_API_KEY,
          DINASTIA_BASE_URL, DINASTIA_TOKEN, NOTIFY_PHONE, GW_STT_KEY, GW_TTS_KEY)
 Arquivos irmaos (deployados em /opt/vast-3060/): onstart-unified.sh,
@@ -59,7 +62,8 @@ def load_state():
     try:
         return json.load(open(STATE_PATH))
     except Exception:
-        return {"instance_id": None, "machine_avoid": []}
+        return {"instance_id": None, "machine_avoid": [], "host_avoid": [],
+                "pending_id": None}
 
 def save_state(st):
     tmp = STATE_PATH + ".tmp"
@@ -201,19 +205,34 @@ def ensure_guard(inst):
         log(f"ensure_guard: excecao {e}"); return False
 
 
-def pick_offer(env, avoid):
-    """Oferta 3060 mais barata, excluindo machine_avoid e CN (portas publicas
-    de maquinas CN inacessiveis — 38103/146752, 2026-09-02)."""
+def filter_offers(offers, machine_avoid=(), host_avoid=()):
+    """PURA (sem I/O): remove ofertas de machine_avoid, host_avoid e CN (portas
+    publicas de maquinas CN inacessiveis — 38103/146752, 2026-09-02); devolve
+    ordenado por dph_total.
+
+    host_avoid existe porque machine_avoid sozinho re-escolhia o MESMO host
+    fisico: machines 19775/20570/20571 = um host so (IP 91.150.160.38,
+    2026-09-30). Oferta sem host_id nao e' barrada pelo host_avoid.
+    """
+    machine_avoid, host_avoid = set(machine_avoid or ()), set(host_avoid or ())
+    out = [o for o in offers or []
+           if o.get("machine_id") not in machine_avoid
+           and not (o.get("host_id") is not None and o.get("host_id") in host_avoid)
+           and "CN" not in (o.get("geolocation") or "")]
+    out.sort(key=lambda o: o.get("dph_total", 9))
+    return out
+
+
+def pick_offer(env, avoid, host_avoid=()):
+    """Oferta 3060 mais barata elegivel (ver filter_offers) dentro dos degraus
+    de teto v.CAP_STEPS."""
     q = urllib.parse.quote(json.dumps(v.OFFER_QUERY))
     c, data = v.http_json("GET", f"{VAST}/bundles/?q={q}",
                           {"Authorization": f"Bearer {env['VAST_API_KEY']}"},
                           timeout=40)
     if c != 200:
         return None
-    offers = [o for o in data.get("offers", [])
-              if o.get("machine_id") not in avoid
-              and "CN" not in (o.get("geolocation") or "")]
-    offers.sort(key=lambda o: o.get("dph_total", 9))
+    offers = filter_offers(data.get("offers", []), avoid, host_avoid)
     for mult in v.CAP_STEPS:
         cap = v.PRICE_CAP * mult
         hit = [o for o in offers if o.get("dph_total", 9) <= cap]
@@ -320,22 +339,47 @@ def cmd_start(env, resume_id=None):
     st = load_state()
     old_id = st.get("instance_id")
     avoid = list(st.get("machine_avoid", []))
-    log(f"PROVISION start; old={old_id} resume={resume_id} avoid={avoid}")
+    host_avoid = list(st.get("host_avoid", []))
+    log(f"PROVISION start; old={old_id} resume={resume_id} avoid={avoid} "
+        f"host_avoid={host_avoid}")
+
+    # pending_id de execucao anterior (systemd matou o start no meio, 2026-09-30:
+    # pod vivo ficou fora do state e o dia inteiro rodou em fallback).
+    pending = st.get("pending_id")
+    if not resume_id and pending and pending != old_id:
+        pinst = vast_get(env, pending)
+        pstatus = (pinst or {}).get("actual_status")
+        if pinst is None:
+            log(f"pending {pending} nao existe mais (ou GET falhou) — limpando")
+            st["pending_id"] = None
+            save_state(st)
+        elif pstatus in ("running", "loading"):
+            log(f"pending {pending} vivo de execucao anterior — resumindo")
+            resume_id = pending
+        else:
+            c = vast_destroy(env, pending)
+            log(f"pending {pending} status={pstatus} -> destruida HTTP {c}")
+            st["pending_id"] = None
+            save_state(st)
 
     if resume_id:
         new_id = resume_id
         if old_id == new_id:
             old_id = None  # nao destruir a si mesma no final
-        offer = {"machine_id": (vast_get(env, new_id) or {}).get("machine_id"),
+        rinst = vast_get(env, new_id) or {}
+        offer = {"machine_id": rinst.get("machine_id"),
+                 "host_id": rinst.get("host_id"),
                  "dph_total": 0.0, "geolocation": "resume"}
+        st["pending_id"] = new_id
+        save_state(st)
     else:
-        offer = pick_offer(env, avoid)
+        offer = pick_offer(env, avoid, host_avoid)
         if offer is None:
             v.notify(env, "pod 3060: SEM oferta elegivel (nem teto 2x) — tier-0 fora, "
                           "gateway nos fallbacks")
             log("sem oferta"); sys.exit(1)
-        log(f"oferta: machine {offer['machine_id']} ${offer.get('dph_total', 0):.4f}/h "
-            f"{offer.get('geolocation')}")
+        log(f"oferta: machine {offer['machine_id']} host {offer.get('host_id')} "
+            f"${offer.get('dph_total', 0):.4f}/h {offer.get('geolocation')}")
 
         c, resp = v.http_json(
             "PUT", f"{VAST}/asks/{offer['id']}/",
@@ -353,6 +397,10 @@ def cmd_start(env, resume_id=None):
             v.notify(env, f"pod 3060: create falhou HTTP {c}")
             log(f"create falhou {c}: {resp}"); sys.exit(1)
         log(f"criada {new_id}")
+        # persiste JA: se o systemd matar este run, o proximo start acha a
+        # instancia (resume/destroy) em vez de deixa-la paga fora do state
+        st["pending_id"] = new_id
+        save_state(st)
 
     def fail(step, inst=None):
         """Falha de provision: diagnostica via journal e SEMPRE destroi a nova
@@ -360,18 +408,22 @@ def cmd_start(env, resume_id=None):
         os caminhos health/install/validacao/flip chamavam fail() sem pedir o
         destroy e a instancia viva nunca voltava pra ninguem).
         Ordem importa: diag() ANTES do destroy, senao a evidencia morre com a
-        instancia. Machine -> avoid."""
+        instancia. Machine + host fisico -> avoid; pending_id limpo."""
         log(f"FALHA em '{step}'")
         if inst:
             diag(env, inst)
         c = vast_destroy(env, new_id)
         log(f"nova {new_id} destruida -> HTTP {c}")
         bad = offer.get("machine_id")
+        bad_host = offer.get("host_id")
         if bad and bad not in st.get("machine_avoid", []):
             st.setdefault("machine_avoid", []).append(bad)
-            save_state(st)
+        if bad_host and bad_host not in st.get("host_avoid", []):
+            st.setdefault("host_avoid", []).append(bad_host)
+        st["pending_id"] = None
+        save_state(st)
         v.notify(env, f"pod 3060: provision falhou em '{step}' "
-                      f"(machine {bad} -> avoid; nova {new_id} DESTRUIDA, "
+                      f"(machine {bad} host {bad_host} -> avoid; nova {new_id} DESTRUIDA, "
                       "diagnostico no journal/log); anterior intacta se existia")
         sys.exit(1)
 
@@ -474,7 +526,8 @@ def cmd_start(env, resume_id=None):
         log(f"edge ainda nao ok ({why})")
     if not edge_ok:
         # flip ja feito — NAO reverter as cegas; anterior mantida p/ rollback
-        st.update(instance_id=new_id, machine_id=offer.get("machine_id"))
+        st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
+                  pending_id=None)
         save_state(st)
         v.notify(env, f"pod 3060: novo {new_id} flipado mas edge falhou ({why}); "
                       f"anterior {old_id} MANTIDA p/ rollback manual")
@@ -484,7 +537,8 @@ def cmd_start(env, resume_id=None):
     if old_id:
         c = vast_destroy(env, old_id)
         log(f"anterior {old_id} destruida -> HTTP {c}")
-    st.update(instance_id=new_id, machine_id=offer.get("machine_id"))
+    st.update(instance_id=new_id, machine_id=offer.get("machine_id"),
+              pending_id=None)
     save_state(st)
     v.notify(env, f"pod 3060 UP (fresco): {new_id} machine {offer.get('machine_id')} "
                   f"({offer.get('geolocation')}, ${offer.get('dph_total', 0):.4f}/h, "
@@ -512,6 +566,12 @@ def cmd_stop(env):
         save_state(st)
     # no stop o alvo e' destruir TUDO do label, sem excecao
     sweep_orphans(env, keep_id=None, context="stop")
+    # pending (se havia) e' do mesmo label -> ja varrido acima
+    st = load_state()
+    if st.get("pending_id"):
+        log(f"stop: limpando pending_id {st.get('pending_id')}")
+        st["pending_id"] = None
+        save_state(st)
 
 
 def disk_pct(inst):
