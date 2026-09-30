@@ -95,6 +95,10 @@ type VastAPI interface {
 	CreateInstance(ctx context.Context, offerID int64, req vast.CreateRequest) (vast.Instance, error)
 	GetInstance(ctx context.Context, instanceID int64) (vast.Instance, error)
 	DestroyInstance(ctx context.Context, instanceID int64) error
+	// ListInstances lists every instance on the Vast account. Used only by
+	// the leader label sweep (sweep.go) to find ifix-emerg-lifecycle-<id>
+	// instances whose lifecycle is no longer live (ClickUp 86akr57nj).
+	ListInstances(ctx context.Context) ([]vast.Instance, error)
 }
 
 // HealthChecker is the pod /health probe interface. Stubbed in unit tests

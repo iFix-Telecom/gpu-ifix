@@ -3,4 +3,9 @@ Description=Start pod 3060 unificado (STT+TTS+rerank+embed) + flip envs se remap
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /opt/vast-3060/unified3060.py start
-TimeoutStartSec=2400
+# 3 tentativas x ate ~115min cada (boot 15 + speaches 20 + infinity 30 +
+# xtts 40 + modelos/validacao/flip/edge ~10) ~= 345min -> 21600s (6h).
+# O antigo 5400 (deployado) / 2400 (repo) matou a tentativa 3 em 2026-09-30,
+# deixando pod vivo fora do state e o dia inteiro em fallback
+# (ClickUp 86akr57nj). pending_id no state cobre um kill residual.
+TimeoutStartSec=21600

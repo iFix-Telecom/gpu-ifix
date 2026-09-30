@@ -9,7 +9,7 @@
 // Sentry breadcrumb helper, and best-effort destroy. Duplicating these
 // inside `internal/primary/` would create two slowly-diverging copies
 // of the Pitfall 5 epsilon (cap+0.0001), the W7 events JSONB shape,
-// and the 30s background destroy budget — exactly the anti-pattern
+// and the background destroy retry policy — exactly the anti-pattern
 // RESEARCH.md §"Decisions Resolved" item 4 calls out.
 //
 // Everything here is a free function (no receiver) and depends only
@@ -22,8 +22,10 @@
 //   - Pitfall 5 epsilon `cap + 0.0001` — `FilterBelowCap`
 //   - D-A2 host_id exclude — `ExcludeHost`
 //   - W7 events-JSONB-first invariant — `MustEventJSON`
-//   - Pitfall 8 fresh background ctx + 30s destroy budget —
-//     `BestEffortDestroy`
+//   - Pitfall 8 fresh background ctx (per attempt, 15s each, 75s total,
+//     retry on 429/5xx/transport) — `BestEffortDestroy`
+//   - Strict lifecycle-label parser + orphan selector for the leader
+//     label sweep — `ParseLifecycleLabel`, `SelectLabelOrphans` (sweep.go)
 //   - D-E4 Sentry breadcrumb + caller-supplied category prefix —
 //     `CaptureBreadcrumb`
 package vastutil
@@ -32,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
@@ -42,20 +45,24 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/emerg/vast"
 )
 
-// destroyShutdownBudget mirrors the value in emerg/lifecycle.go:82.
-// Owned here so consumers of BestEffortDestroy do not need to import
-// `emerg` (which would create a primary→emerg import cycle once Wave
-// 2 plans land).
-const destroyShutdownBudget = 30 * time.Second
-
-// destroyMaxAttempts caps how many times BestEffortDestroy retries the
-// Vast.ai DELETE on HTTP 429. Phase 6.6 UAT 2026-05-18 caught an orphan
-// pod (instance 37028480) that ran ~3h30 burning ~$2.17 because the
-// FIRST 429 aborted destroy with no retry. Backoff schedule 1s+2s+4s+8s
-// totals 15s of sleep across 5 attempts — fits within the 30s shutdown
-// budget with margin for the actual HTTP RTT.
+// Destroy retry policy (ClickUp 86akr57nj, 2026-09-30).
+//
+// History: Phase 6.6 UAT 2026-05-18 caught an orphan pod (instance
+// 37028480, ~3h30, ~$2.17) because the first 429 aborted destroy. The
+// fix then retried ONLY 429 inside a single shared 30s ctx. On
+// 2026-09-30 primary lifecycle 494 / instance 53345260 was found running
+// ~29h; the diagnosis attributed it to a DELETE that failed with a
+// timeout, which the old policy classified as non-retryable (1 attempt).
+//
+// Now every attempt gets its OWN fresh ctx bounded by
+// destroyAttemptTimeout (the Vast http.Client additionally caps each
+// request at 30s), transport errors and 5xx are retried like 429, and
+// destroyTotalBudget bounds the whole call. Package vars (not consts) so
+// tests can shrink them.
 var (
-	destroyMaxAttempts    = 5
+	destroyAttemptTimeout = 15 * time.Second
+	destroyTotalBudget    = 75 * time.Second
+	destroyMaxAttempts    = 6
 	destroyInitialBackoff = 1 * time.Second
 	destroyMaxBackoff     = 8 * time.Second
 )
@@ -170,90 +177,124 @@ func CaptureBreadcrumb(category string, data map[string]any) {
 	})
 }
 
-// BestEffortDestroy issues DestroyInstance with a fresh background context
-// + 30s budget. Non-rate-limit errors are logged and swallowed — caller is
-// already on a failure path and the orphan cleanup goroutine (Plan 07)
-// will reconcile any leaks.
+// destroyRetryable classifies a DestroyInstance error.
 //
-// HTTP 429 (ErrRateLimited) is retried with exponential backoff up to
-// destroyMaxAttempts inside the 30s shutdown budget. Phase 6.6 UAT
-// 2026-05-18 attempt 9 caught the no-retry bug: lifecycle 37028480 hit a
-// transient 429, BestEffortDestroy gave up on the first try, the pod ran
-// orphan ~3h30 burning ~$2.17 until manual operator cleanup via Vast UI.
-// Retry contract: 1s → 2s → 4s → 8s sleeps between attempts, capped at
-// destroyMaxBackoff; budget exhaustion or final-attempt 429 emits an
-// Error-level log + Sentry breadcrumb so the operator gets paged before
-// the orphan accumulates real cost.
+//   - ErrRateLimited (429) → retry
+//   - *vast.VastError with Status >= 500 → retry
+//   - *vast.VastError with Status 400-499 → permanent
+//   - ErrUnauthorized (401/403), ErrOfferGone → permanent
+//   - anything else (transport errors, context.DeadlineExceeded,
+//     *url.Error, net errors) → retry
 //
-// `instanceID == 0` and `vastClient == nil` are tolerated as no-ops so
-// callers can invoke this from a deferred / early-failure branch without
-// pre-checking. The `log` argument matches emerg/lifecycle.go's
-// `r.deps.Log` (*slog.Logger); pass slog.Default() if no scoped logger
-// is available.
-func BestEffortDestroy(ctx context.Context, vastClient VastDestroyer, log *slog.Logger, instanceID int64) {
-	if instanceID == 0 || vastClient == nil {
-		return
+// ErrInstanceNotFound is handled by the caller as success before this
+// classifier is consulted (listed as permanent here defensively).
+func destroyRetryable(err error) bool {
+	if errors.Is(err, vast.ErrRateLimited) {
+		return true
 	}
-	// `ctx` arg currently unused — the destroy uses a fresh background
-	// ctx by design (Pitfall 8: parent ctx is already cancelled on the
-	// shutdown path). Accepted as a parameter for signature stability
-	// (future ctx-aware tracing / cancellation hooks).
-	_ = ctx
-	destroyCtx, cancel := context.WithTimeout(context.Background(), destroyShutdownBudget)
-	defer cancel()
+	if errors.Is(err, vast.ErrUnauthorized) || errors.Is(err, vast.ErrOfferGone) ||
+		errors.Is(err, vast.ErrInstanceNotFound) {
+		return false
+	}
+	var ve *vast.VastError
+	if errors.As(err, &ve) {
+		return ve.Status >= 500
+	}
+	return true
+}
 
+// BestEffortDestroy issues DestroyInstance with retries and returns nil
+// once the instance is confirmed gone (200, or 404 no_such_instance).
+//
+// Context contract (Pitfall 8): the caller ctx is deliberately NOT used
+// for cancellation. Shutdown/drain paths call this with an already
+// cancelled ctx and the destroy must still go out. Each attempt runs on
+// a fresh context.Background()-derived ctx bounded by
+// destroyAttemptTimeout; the whole call is bounded by destroyTotalBudget.
+//
+// Retry policy: 429, 5xx and transport/timeout errors are retried with
+// exponential backoff (1s doubling, capped at destroyMaxBackoff) up to
+// destroyMaxAttempts or destroyTotalBudget, whichever comes first.
+// 401/403 and other 4xx are permanent and returned after 1 attempt.
+//
+// On failure an Error-level log + Sentry breadcrumb is emitted and a
+// wrapped error returned. The instance may then be orphaned: the real
+// reconciler is the leader label sweep (primary/sweep.go,
+// emerg/sweep.go), which destroys any exactly-labelled instance whose
+// lifecycle is not live in the DB.
+//
+// `instanceID == 0` and `vastClient == nil` are tolerated as no-ops
+// returning nil so callers can invoke this from a deferred /
+// early-failure branch without pre-checking. Callers that ignore the
+// returned error remain valid (statement form).
+func BestEffortDestroy(ctx context.Context, vastClient VastDestroyer, log *slog.Logger, instanceID int64) error {
+	if instanceID == 0 || vastClient == nil {
+		return nil
+	}
+	_ = ctx // intentionally unused for cancellation — see Pitfall 8 above.
+
+	deadline := time.Now().Add(destroyTotalBudget)
 	backoff := destroyInitialBackoff
 	var lastErr error
-	for attempt := 1; attempt <= destroyMaxAttempts; attempt++ {
-		err := vastClient.DestroyInstance(destroyCtx, instanceID)
-		if err == nil {
-			if attempt > 1 && log != nil {
-				log.Info("BestEffortDestroy succeeded after 429 retry",
-					"instance_id", instanceID, "attempt", attempt)
-			}
-			return
-		}
-		lastErr = err
-		if !errors.Is(err, vast.ErrRateLimited) {
-			if log != nil {
-				log.Warn("BestEffortDestroy failed; orphan recovery will reconcile",
-					"instance_id", instanceID, "err", err, "attempt", attempt)
-			}
-			return
-		}
-		if attempt == destroyMaxAttempts {
+	attempt := 0
+	for attempt < destroyMaxAttempts {
+		if attempt > 0 && !time.Now().Before(deadline) {
 			break
 		}
-		if log != nil {
-			log.Warn("BestEffortDestroy got HTTP 429; backing off",
-				"instance_id", instanceID, "attempt", attempt, "backoff", backoff)
+		attempt++
+		attemptCtx, cancel := context.WithTimeout(context.Background(), destroyAttemptTimeout)
+		err := vastClient.DestroyInstance(attemptCtx, instanceID)
+		cancel()
+		if err == nil || errors.Is(err, vast.ErrInstanceNotFound) {
+			if attempt > 1 && log != nil {
+				log.Info("BestEffortDestroy succeeded after retry",
+					"instance_id", instanceID, "attempt", attempt)
+			}
+			return nil
 		}
-		select {
-		case <-time.After(backoff):
-		case <-destroyCtx.Done():
+		lastErr = err
+		if !destroyRetryable(err) {
 			if log != nil {
-				log.Error("BestEffortDestroy budget exhausted during 429 backoff; pod is orphan",
-					"instance_id", instanceID, "attempt", attempt, "err", destroyCtx.Err())
+				log.Error("BestEffortDestroy: non-retryable error; instance may be orphaned — leader label sweep will retry",
+					"instance_id", instanceID, "attempt", attempt, "err", err)
 			}
 			CaptureBreadcrumb("vastutil.destroy.orphan", map[string]any{
 				"instance_id": instanceID,
-				"reason":      "budget_exhausted_during_429_backoff",
+				"reason":      "non_retryable",
 				"attempts":    attempt,
 			})
-			return
+			return fmt.Errorf("vastutil: destroy instance %d: non-retryable: %w", instanceID, err)
 		}
+		if attempt >= destroyMaxAttempts {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		sleep := backoff
+		if sleep > remaining {
+			sleep = remaining
+		}
+		if log != nil {
+			log.Warn("BestEffortDestroy retryable error; backing off",
+				"instance_id", instanceID, "attempt", attempt, "backoff", sleep, "err", err)
+		}
+		time.Sleep(sleep)
 		backoff *= 2
 		if backoff > destroyMaxBackoff {
 			backoff = destroyMaxBackoff
 		}
 	}
 	if log != nil {
-		log.Error("BestEffortDestroy exhausted 429 retries; pod is orphan",
-			"instance_id", instanceID, "attempts", destroyMaxAttempts, "err", lastErr)
+		log.Error("BestEffortDestroy exhausted retries; instance may be orphaned — leader label sweep will retry",
+			"instance_id", instanceID, "attempts", attempt, "err", lastErr)
 	}
 	CaptureBreadcrumb("vastutil.destroy.orphan", map[string]any{
 		"instance_id": instanceID,
-		"reason":      "rate_limit_exhausted",
-		"attempts":    destroyMaxAttempts,
+		"reason":      "retries_exhausted",
+		"attempts":    attempt,
 	})
+	return fmt.Errorf("vastutil: destroy instance %d: retries exhausted after %d attempts: %w",
+		instanceID, attempt, lastErr)
 }

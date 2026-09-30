@@ -473,6 +473,16 @@ var GatewayVastAPIRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Vast.ai REST requests by operation and HTTP status (or 'transport_error', 'started').",
 }, []string{"op", "status"})
 
+// GatewayVastOrphanSweptTotal counts Vast instances destroyed by the
+// leader label sweep (ClickUp 86akr57nj): instances labelled exactly
+// ifix-{primary,emerg}-lifecycle-<id> whose lifecycle is not live in the
+// DB. subsystem ∈ {primary, emerg}. Any increment means a destroy path
+// leaked a paid pod that the sweep caught — alert-worthy.
+var GatewayVastOrphanSweptTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "gateway_vast_orphan_swept_total",
+	Help: "Vast instances destroyed by the leader label sweep (orphaned lifecycle label), by subsystem.",
+}, []string{"subsystem"})
+
 // ============================================================================
 // Phase 7 — Observability dashboard latency histograms + alerting drop counter.
 // Cardinality budget (well under the OBS-02 10k-series ceiling):

@@ -17,8 +17,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"testing"
 	"time"
 
@@ -146,11 +148,20 @@ type fakeVastDestroyer struct {
 	calls       int
 	err         error
 	errSequence []error
+	// deadlines records ctx.Deadline() of every call (zero Time when the
+	// ctx had no deadline) so tests can assert per-attempt budgets.
+	deadlines []time.Time
+	// ctxErrs records ctx.Err() at call time (a cancelled caller ctx must
+	// NOT leak into the destroy ctx — Pitfall 8).
+	ctxErrs []error
 }
 
-func (f *fakeVastDestroyer) DestroyInstance(_ context.Context, id int64) error {
+func (f *fakeVastDestroyer) DestroyInstance(ctx context.Context, id int64) error {
 	f.calledID = id
 	f.calls++
+	dl, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, dl)
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	if len(f.errSequence) > 0 {
 		e := f.errSequence[0]
 		f.errSequence = f.errSequence[1:]
@@ -165,11 +176,16 @@ func (f *fakeVastDestroyer) DestroyInstance(_ context.Context, id int64) error {
 func shrinkBackoff(t *testing.T) {
 	t.Helper()
 	origInit, origMax := destroyInitialBackoff, destroyMaxBackoff
+	origAttempt, origTotal := destroyAttemptTimeout, destroyTotalBudget
 	destroyInitialBackoff = 1 * time.Microsecond
 	destroyMaxBackoff = 1 * time.Microsecond
+	destroyAttemptTimeout = 2 * time.Second
+	destroyTotalBudget = 10 * time.Second
 	t.Cleanup(func() {
 		destroyInitialBackoff = origInit
 		destroyMaxBackoff = origMax
+		destroyAttemptTimeout = origAttempt
+		destroyTotalBudget = origTotal
 	})
 }
 
@@ -180,23 +196,27 @@ func TestBestEffortDestroy_CallsDestroyInstance(t *testing.T) {
 	fake := &fakeVastDestroyer{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	BestEffortDestroy(context.Background(), fake, log, 42)
+	require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 42))
 	require.Equal(t, int64(42), fake.calledID, "fake VastDestroyer must observe instanceID=42")
 	require.Equal(t, 1, fake.calls)
 }
 
-// TestBestEffortDestroy_ErrorSwallowed — Pitfall 8 swallow contract:
-// even when DestroyInstance returns a non-nil error, the helper does
-// NOT panic and does NOT propagate. Orphan recovery (Plan 07) reconciles
-// the leak later.
-func TestBestEffortDestroy_ErrorSwallowed(t *testing.T) {
-	fake := &fakeVastDestroyer{err: errors.New("vast 500 boom")}
+// TestBestEffortDestroy_NonRetryableReturnsError — the helper never
+// panics, and a non-retryable failure is surfaced to the caller as an
+// error (it used to be swallowed with a misleading "orphan recovery will
+// reconcile" log; the real reconciler is now the leader label sweep).
+func TestBestEffortDestroy_NonRetryableReturnsError(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{err: &vast.VastError{Status: 400, Code: "bad_request", Msg: "boom"}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	var err error
 	require.NotPanics(t, func() {
-		BestEffortDestroy(context.Background(), fake, log, 99)
-	}, "BestEffortDestroy MUST swallow DestroyInstance errors")
+		err = BestEffortDestroy(context.Background(), fake, log, 99)
+	})
+	require.Error(t, err)
 	require.Equal(t, int64(99), fake.calledID)
+	require.Equal(t, 1, fake.calls, "4xx (non-429) must NOT retry")
 }
 
 // TestBestEffortDestroy_NoOpOnZeroID — instanceID==0 is the "no row was
@@ -205,7 +225,7 @@ func TestBestEffortDestroy_ErrorSwallowed(t *testing.T) {
 func TestBestEffortDestroy_NoOpOnZeroID(t *testing.T) {
 	fake := &fakeVastDestroyer{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	BestEffortDestroy(context.Background(), fake, log, 0)
+	require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 0))
 	require.Equal(t, 0, fake.calls, "instanceID=0 must short-circuit")
 }
 
@@ -215,7 +235,7 @@ func TestBestEffortDestroy_NoOpOnZeroID(t *testing.T) {
 func TestBestEffortDestroy_NoOpOnNilClient(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	require.NotPanics(t, func() {
-		BestEffortDestroy(context.Background(), nil, log, 42)
+		require.NoError(t, BestEffortDestroy(context.Background(), nil, log, 42))
 	})
 }
 
@@ -230,7 +250,7 @@ func TestBestEffortDestroy_Retries429_ThenSucceeds(t *testing.T) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	BestEffortDestroy(context.Background(), fake, log, 7777)
+	require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 7777))
 	require.Equal(t, int64(7777), fake.calledID)
 	require.Equal(t, 3, fake.calls, "expected 2 retries after initial 429s")
 }
@@ -244,21 +264,103 @@ func TestBestEffortDestroy_Retries429_AllExhausted(t *testing.T) {
 	fake := &fakeVastDestroyer{err: vast.ErrRateLimited}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	BestEffortDestroy(context.Background(), fake, log, 8888)
+	require.Error(t, BestEffortDestroy(context.Background(), fake, log, 8888))
 	require.Equal(t, destroyMaxAttempts, fake.calls,
 		"expected exactly destroyMaxAttempts before giving up")
 }
 
-// TestBestEffortDestroy_Non429_NoRetry — non-rate-limit errors (5xx,
-// transport, unauthorized) must short-circuit on the FIRST attempt;
-// retrying them wastes the shutdown budget and offers no upside.
-func TestBestEffortDestroy_Non429_NoRetry(t *testing.T) {
+// TestBestEffortDestroy_RetriesTransportTimeout — 2026-09-30 leak root
+// cause (ClickUp 86akr57nj): a DELETE that timed out (context deadline /
+// *url.Error) was treated as non-retryable and the pod kept running for
+// 29h. A timeout must now be retried with a fresh ctx.
+func TestBestEffortDestroy_RetriesTransportTimeout(t *testing.T) {
 	shrinkBackoff(t)
-	fake := &fakeVastDestroyer{err: errors.New("vast 500 boom")}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cases := map[string]error{
+		"deadline": context.DeadlineExceeded,
+		"url_error": &url.Error{Op: "Delete", URL: "https://console.vast.ai/api/v0/instances/1/",
+			Err: context.DeadlineExceeded},
+	}
+	for name, first := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeVastDestroyer{errSequence: []error{first, nil}}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 53345260))
+			require.Equal(t, 2, fake.calls)
+		})
+	}
+}
 
-	BestEffortDestroy(context.Background(), fake, log, 9999)
-	require.Equal(t, 1, fake.calls, "non-429 must NOT retry")
+// TestBestEffortDestroy_Retries5xx — Vast 503 twice then success.
+func TestBestEffortDestroy_Retries5xx(t *testing.T) {
+	shrinkBackoff(t)
+	e503 := &vast.VastError{Status: 503, Code: "server_error", Msg: "unavailable"}
+	fake := &fakeVastDestroyer{errSequence: []error{e503, e503, nil}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 1))
+	require.Equal(t, 3, fake.calls)
+}
+
+// TestBestEffortDestroy_NotFoundIsSuccess — 404 no_such_instance means the
+// instance is already gone: success after exactly 1 call.
+func TestBestEffortDestroy_NotFoundIsSuccess(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{err: vast.ErrInstanceNotFound}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	require.NoError(t, BestEffortDestroy(context.Background(), fake, log, 1))
+	require.Equal(t, 1, fake.calls)
+}
+
+// TestBestEffortDestroy_UnauthorizedNoRetry — 401/403 and other non-429
+// 4xx are permanent: exactly 1 call, error returned.
+func TestBestEffortDestroy_UnauthorizedNoRetry(t *testing.T) {
+	shrinkBackoff(t)
+	for name, e := range map[string]error{
+		"unauthorized": vast.ErrUnauthorized,
+		"offer_gone":   vast.ErrOfferGone,
+		"http_400":     &vast.VastError{Status: 400, Code: "bad", Msg: "bad"},
+		"wrapped_401":  fmt.Errorf("destroy: %w", vast.ErrUnauthorized),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeVastDestroyer{err: e}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			require.Error(t, BestEffortDestroy(context.Background(), fake, log, 1))
+			require.Equal(t, 1, fake.calls)
+		})
+	}
+}
+
+// TestBestEffortDestroy_PerAttemptCtx — every attempt gets its own fresh
+// deadline <= destroyAttemptTimeout, and a cancelled caller ctx does NOT
+// abort the destroy (Pitfall 8: shutdown paths pass a cancelled ctx).
+func TestBestEffortDestroy_PerAttemptCtx(t *testing.T) {
+	shrinkBackoff(t)
+	fake := &fakeVastDestroyer{errSequence: []error{context.DeadlineExceeded, vast.ErrRateLimited, nil}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	caller, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	require.NoError(t, BestEffortDestroy(caller, fake, log, 1))
+	require.Equal(t, 3, fake.calls)
+	for i, dl := range fake.deadlines {
+		require.False(t, dl.IsZero(), "attempt %d ctx must carry a deadline", i+1)
+		require.LessOrEqual(t, dl.Sub(start), destroyAttemptTimeout+50*time.Millisecond,
+			"attempt %d deadline must be bounded by destroyAttemptTimeout", i+1)
+		require.NoError(t, fake.ctxErrs[i], "attempt %d ctx must not be cancelled", i+1)
+	}
+}
+
+// TestDestroyRetryable — classifier table.
+func TestDestroyRetryable(t *testing.T) {
+	require.True(t, destroyRetryable(vast.ErrRateLimited))
+	require.True(t, destroyRetryable(&vast.VastError{Status: 500}))
+	require.True(t, destroyRetryable(&vast.VastError{Status: 504}))
+	require.True(t, destroyRetryable(context.DeadlineExceeded))
+	require.True(t, destroyRetryable(errors.New("connection reset by peer")))
+	require.False(t, destroyRetryable(&vast.VastError{Status: 404}))
+	require.False(t, destroyRetryable(&vast.VastError{Status: 400}))
+	require.False(t, destroyRetryable(vast.ErrUnauthorized))
+	require.False(t, destroyRetryable(vast.ErrOfferGone))
 }
 
 // TestCaptureBreadcrumb_NoOp_WhenNoSentryHub — Sentry is not initialized

@@ -13,6 +13,55 @@
 set -x
 exec > /root/onstart.log 2>&1
 
+# ---- cuda compat guard (ANTES de qualquer consumidor de libcuda) ----
+# Evidencia 2026-09-30 (ClickUp 86akr57nj): a imagem base CUDA 12.6 traz
+# /etc/ld.so.conf.d/00-compat-*.conf -> libcuda.so.1 resolve pra
+# /usr/local/cuda-12.6/compat (libcuda 560) em hosts GeForce com driver 535
+# -> torch.cuda.is_available() False (erro 804, forward-compat nao suportado
+# em GeForce) -> Infinity morre ("infinity health timeout 30min"). Mover o conf
+# + ldconfig foi provado como fix. So remove quando driver do host < major da
+# compat. Nunca falha o onstart (sem set -e, todo comando guardado). Sem probe
+# de torch aqui: no 1o boot os venvs ainda nao existem neste ponto.
+cuda_compat_guard() {
+  local host_major conf dir lib ver compat_major changed=0
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "cuda-compat: nvidia-smi unavailable, skipping"; return 0
+  fi
+  host_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1 | tr -dc 0-9)
+  if [ -z "$host_major" ]; then
+    echo "cuda-compat: host driver version unreadable, skipping"; return 0
+  fi
+  for conf in /etc/ld.so.conf.d/*compat*.conf; do
+    [ -f "$conf" ] || continue
+    compat_major=""
+    while IFS= read -r dir; do
+      dir=$(echo "$dir" | sed 's/#.*//' | tr -d '[:space:]')
+      [ -n "$dir" ] && [ -d "$dir" ] || continue
+      for lib in "$dir"/libcuda.so.*; do
+        [ -e "$lib" ] || continue
+        ver=${lib##*/libcuda.so.}
+        case "$ver" in [0-9]*.*) compat_major=${ver%%.*}; break ;; esac
+      done
+      [ -n "$compat_major" ] && break
+    done < "$conf"
+    if [ -z "$compat_major" ]; then
+      echo "cuda-compat: keeping $conf (no versioned libcuda found)"
+      continue
+    fi
+    if [ "$host_major" -lt "$compat_major" ] 2>/dev/null; then
+      echo "cuda-compat: host driver $host_major < compat $compat_major -> removing $conf"
+      mkdir -p /root/ldbak && mv -f "$conf" /root/ldbak/ && changed=1
+    else
+      echo "cuda-compat: keeping $conf (host driver $host_major >= compat $compat_major)"
+    fi
+  done
+  if [ "$changed" = 1 ]; then
+    ldconfig || echo "cuda-compat: ldconfig failed (rc=$?)"
+  fi
+  return 0
+}
+cuda_compat_guard || true
+
 # ---- disk-guard (escrito pelo prologo do provisioner) ----
 if [ -f /root/disk-guard.sh ]; then
   chmod +x /root/disk-guard.sh
