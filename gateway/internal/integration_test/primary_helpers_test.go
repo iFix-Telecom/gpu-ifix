@@ -125,6 +125,13 @@ func (f *fakeVastPrimary) GetInstance(ctx context.Context, id int64) (vast.Insta
 	return fn(ctx, id)
 }
 
+// ListInstances satisfies primary.VastAPI (leader label sweep, ClickUp
+// 86akr57nj). Returns an empty account so the sweep never destroys
+// anything in integration scenarios.
+func (f *fakeVastPrimary) ListInstances(_ context.Context) ([]vast.Instance, error) {
+	return nil, nil
+}
+
 func (f *fakeVastPrimary) DestroyInstance(ctx context.Context, id int64) error {
 	f.DestroyCalls.Add(1)
 	f.Destroyed.Store(id, struct{}{})

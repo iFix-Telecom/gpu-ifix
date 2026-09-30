@@ -40,6 +40,10 @@ type VastAPI interface {
 	// paths BEFORE BestEffortDestroy — Vast 403s reports once the account
 	// has no active instance on the machine.
 	ReportMachine(ctx context.Context, machineID int64, body vast.ReportMachineRequest) error
+	// ListInstances lists every instance on the Vast account. Used only by
+	// the leader label sweep (sweep.go) to find ifix-primary-lifecycle-<id>
+	// instances whose lifecycle is no longer open (ClickUp 86akr57nj).
+	ListInstances(ctx context.Context) ([]vast.Instance, error)
 }
 
 // LoaderAdapter is the surface the primary reconciler consumes from the
@@ -322,6 +326,16 @@ type Reconciler struct {
 	// *gen.Queries via SetQueriesForTest so the reconciler can exercise
 	// the SQL paths without standing up a real *pgxpool.Pool.
 	queriesOverride atomic.Pointer[gen.Queries]
+
+	// sweepRunning is the in-flight guard for the async leader label sweep
+	// (sweep.go, ClickUp 86akr57nj): at most one sweep goroutine at a time
+	// so a slow Vast listing never piles up behind the 1Hz tick.
+	sweepRunning atomic.Bool
+
+	// sweepQuerierOverride is the test-only seam for the sweep's DB read
+	// (GetOpenPrimaryLifecycle). nil in production — sweepQuerier() falls
+	// back to queries().
+	sweepQuerierOverride primarySweepQuerier
 
 	// Phase 12 Plan 02 (RES-11): Ready-tick death-poll strike counters. The
 	// reconciler polls Vast for the tracked instance on EVERY Ready tick

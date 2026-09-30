@@ -390,7 +390,10 @@ func (r *Reconciler) runHealthcheckResumeLoop(ctx context.Context, lifecycleID i
 				// perspective; we do NOT trust it as serving traffic.
 				lc := r.activeLifecycle.Load()
 				if lc != nil && lc.VastInstanceID != 0 {
-					vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID)
+					if derr := vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID); derr != nil {
+						r.deps.Log.Error("leader recovery: resume destroy failed; instance left for leader label sweep",
+							"lifecycle_id", lifecycleID, "vast_instance_id", lc.VastInstanceID, "err", derr)
+					}
 				}
 				closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				_ = r.closeLifecycle(closeCtx, lifecycleID, "resume_health_failed", 0)

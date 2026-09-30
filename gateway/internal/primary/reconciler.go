@@ -215,6 +215,9 @@ func (r *Reconciler) runScheduleLoop(ctx context.Context, log *slog.Logger) {
 		"disabled", r.cfg.PrimaryPodScheduleDisabled)
 
 	var lastExtend int64
+	// lastSweep is the unix-second of the last leader label sweep trigger
+	// (sweep.go, ClickUp 86akr57nj). 0 → sweep on the next leader tick.
+	var lastSweep int64
 
 	for {
 		select {
@@ -235,6 +238,10 @@ func (r *Reconciler) runScheduleLoop(ctx context.Context, log *slog.Logger) {
 				r.isLeader.Store(true)
 				lastExtend = now.Unix()
 				log.Info("acquired primary leadership", "fsm_state", r.deps.FSM.State().String())
+				// Leader-only orphan label sweep on acquisition (Start's
+				// recoverOpenLifecycle already ran before this loop).
+				lastSweep = now.Unix()
+				r.triggerOrphanSweep(ctx, log)
 			} else if now.Unix()-lastExtend >= int64(primaryLockRenewInterval.Seconds()) {
 				ok, err := mutex.ExtendContext(ctx)
 				if err != nil || !ok {
@@ -243,6 +250,12 @@ func (r *Reconciler) runScheduleLoop(ctx context.Context, log *slog.Logger) {
 					continue
 				}
 				lastExtend = now.Unix()
+			}
+
+			// Periodic leader-only orphan label sweep (async, in-flight guarded).
+			if now.Unix()-lastSweep >= int64(orphanSweepInterval.Seconds()) {
+				lastSweep = now.Unix()
+				r.triggerOrphanSweep(ctx, log)
 			}
 
 			// Reviews #2 + UAT 14 follow-up (2026-05-19): DISABLED is now
@@ -1878,7 +1891,13 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 							"budget_s", hot.ProgressStallBudgetS)
 						r.bestEffortReportMachine(ctx, inst.MachineID, instanceID, inst.PublicIPAddr, vast.ReportProblemTooLongToLoad,
 							fmt.Sprintf("Automated report: weights download bytes frozen for %ds (no progress past %d bytes) — host network stalled mid-download.", int(time.Since(lastProgressAt).Seconds()), maxBytes), log)
-						vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+						if derr := vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID); derr != nil {
+							// The row still closes (the FSM must be freed). Once
+							// closed it no longer protects the instance, so the
+							// leader label sweep (sweep.go) will destroy it.
+							log.Error("primary provisioning: regime-3 destroy failed; instance left for leader label sweep",
+								"lifecycle_id", lifecycleID, "vast_instance_id", instanceID, "err", derr)
+						}
 						_ = r.closeLifecycle(context.Background(), lifecycleID, "progress_stall_timeout", 0)
 						return "progress_stall_timeout", errors.New("primary: download progress stalled (regime 3)")
 					}

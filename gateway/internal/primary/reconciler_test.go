@@ -89,7 +89,13 @@ type fakeVast struct {
 	destroyFn        func(ctx context.Context, id int64) error
 	onstartLogFn     func(ctx context.Context, id int64) (vast.OnstartLogResult, error)
 
+	// listInstances / listErr script ListInstances (leader label sweep).
+	listInstances []vast.Instance
+	listErr       error
+
 	destroyCalls atomic.Int32
+	// destroyedIDs records every DestroyInstance id (sweep assertions).
+	destroyedIDs []int64
 
 	// reportCalls records ReportMachine invocations (machineID + problem) so
 	// tests can assert the bad-host report fired before the destroy.
@@ -143,9 +149,25 @@ func (f *fakeVast) GetInstance(ctx context.Context, id int64) (vast.Instance, er
 	return fn(ctx, id)
 }
 
+func (f *fakeVast) ListInstances(_ context.Context) ([]vast.Instance, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]vast.Instance(nil), f.listInstances...), nil
+}
+
+func (f *fakeVast) destroyed() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.destroyedIDs...)
+}
+
 func (f *fakeVast) DestroyInstance(ctx context.Context, id int64) error {
 	f.destroyCalls.Add(1)
 	f.mu.Lock()
+	f.destroyedIDs = append(f.destroyedIDs, id)
 	fn := f.destroyFn
 	f.mu.Unlock()
 	if fn != nil {

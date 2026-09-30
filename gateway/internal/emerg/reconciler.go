@@ -203,6 +203,13 @@ type Reconciler struct {
 	vastOverride        VastAPI
 	healthCheckOverride HealthChecker
 
+	// sweepRunning / lastSweepUnix drive the async leader label sweep
+	// (sweep.go, ClickUp 86akr57nj). sweepQuerierOverride is the test-only
+	// seam for its DB read (nil in production → r.q).
+	sweepRunning         atomic.Bool
+	lastSweepUnix        atomic.Int64
+	sweepQuerierOverride emergSweepQuerier
+
 	// budgetDedupe gates Sentry monthly-budget warnings to once per UTC
 	// day (Plan 06-09 D-D2 / Pitfall 11). Constructed inside NewReconciler
 	// so checkBudget can rely on a non-nil pointer.
@@ -404,6 +411,10 @@ func (r *Reconciler) runOneTick(ctx context.Context, mutex *redsync.Mutex, now t
 		if err := r.recoverOrphanLifecycles(ctx); err != nil {
 			log.Error("orphan recovery failed", "err", err)
 		}
+		// ClickUp 86akr57nj — then the label sweep catches instances whose
+		// lifecycle row is already CLOSED (invisible to recovery above).
+		r.lastSweepUnix.Store(now.Unix())
+		r.triggerOrphanSweep(ctx, log)
 	} else {
 		// Renew gate: only call ExtendContext when 10s have elapsed since
 		// the last successful extend (or initial acquire). This keeps
@@ -423,6 +434,12 @@ func (r *Reconciler) runOneTick(ctx context.Context, mutex *redsync.Mutex, now t
 			}
 			r.lastExtendUnix.Store(now.Unix())
 		}
+	}
+
+	// Periodic leader-only orphan label sweep (async, in-flight guarded).
+	if now.Unix()-r.lastSweepUnix.Load() >= int64(orphanSweepInterval.Seconds()) {
+		r.lastSweepUnix.Store(now.Unix())
+		r.triggerOrphanSweep(ctx, log)
 	}
 
 	// Leader path: evaluate FSM transitions. STUB in Plan 04.
@@ -964,10 +981,14 @@ func (r *Reconciler) destroyAndCloseLifecycle(ctx context.Context, lc *ActiveLif
 	if r.deps.Loader != nil {
 		r.deps.Loader.RestoreTier0("llm")
 	}
-	// Step 3 — destroy Vast.ai instance. Best-effort: failure is logged
-	// + swallowed by the helper; the orphan-recovery branch on the next
-	// leader acquisition will reconcile any leak.
-	vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID)
+	// Step 3 — destroy Vast.ai instance. Best-effort: on failure the row
+	// still closes below; once closed it no longer protects the instance,
+	// so the leader label sweep (sweep.go) destroys it within
+	// orphanSweepInterval (ClickUp 86akr57nj).
+	if derr := vastutil.BestEffortDestroy(ctx, r.vastAPI(), r.deps.Log, lc.VastInstanceID); derr != nil {
+		r.deps.Log.Error("destroyAndCloseLifecycle: destroy failed; instance left for leader label sweep",
+			"lifecycle_id", lc.ID, "vast_instance_id", lc.VastInstanceID, "err", derr)
+	}
 	// Step 1 (intentionally last in code order, but the actual SQL UPDATE
 	// runs INSIDE closeLifecycle which itself emits the
 	// `lifecycle_close` event via mustEventJSON before the UPDATE — the
