@@ -1,5 +1,5 @@
 [Unit]
-Description=Start pod 3060 unificado (STT+TTS+rerank+embed) + flip envs se remapear
+Description=Provisiona pod 3060 unificado FRESCO (up->destroy diario) + flip stack 38
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /opt/vast-3060/unified3060.py start
