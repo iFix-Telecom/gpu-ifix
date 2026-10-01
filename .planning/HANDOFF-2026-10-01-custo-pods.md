@@ -5,22 +5,23 @@ Relacionados em "em testes": 86akregky (custo 3060), 86akreh6u (STT→gemini).
 
 ## Estado
 
-### Em execução (pode já ter terminado)
-- **Quick 261001-qdd** (primário 3090): executor gsd em worktree
-  `.claude/worktrees/agent-ae3bfecd27e30132b`, branch `worktree-agent-ae3bfecd27e30132b`,
-  base `0a9c9fa`. Escopo (PLAN em `.planning/quick/261001-qdd-primario-3090-custo-real-bid-fallback/`):
-  - migration **0039**: pod_config `offer_mode` (default `bid`), `bid_margin` 1.15,
-    `max_preemptions_per_day` 2, **`min_reliability` 0.95** (decisão Pedro 2026-10-01, só primário;
-    hoje filtro é `reliability >= 0.99` em emerg/vast/types.go:357-368 — emerg NÃO muda);
-    primary_lifecycles `is_bid`, `bid_price`.
-  - ranking por custo real = GPU (base ou lance) + storage×disk/730 + **download amortizado**
-    (inet_down_cost × ~20G / ~8h) — teto aplicado em GPU+disco.
-  - bid default com fallback on-demand (sem oferta bid / ≥2 preempções no dia);
-    preempção → destroy + close reason `preempted` (sem blocklist, sem no-credit block) → reprovisiona.
-  - métrica `gateway_primary_preemptions_total`; MODE em `gatewayctl primary lifecycles`.
+### Status do código (atualizado 2026-10-01 ~19:50)
+- **Quick 261001-qdd CONCLUÍDA e MERGEADA em develop** (commits c4fd3e5..02e5736 + merge; SUMMARY em
+  `.planning/quick/261001-qdd-primario-3090-custo-real-bid-fallback/261001-qdd-SUMMARY.md`).
+  `go test ./...` OK pós-merge. **NÃO pushado, NÃO deployado.** Falta integração Docker + push + CI + deploy.
+- Escopo entregue: migration **0039** (pod_config `offer_mode='bid'`, `bid_margin` 1.15,
+  `max_preemptions_per_day` 2, `min_reliability` 0.95 só primário; primary_lifecycles `is_bid`,`bid_price`);
+  ranking custo real (GPU + storage + download amortizado `inet_down_cost×20G/8h`, envs
+  `PRIMARY_WEIGHTS_DOWNLOAD_GB`/`PRIMARY_EXPECTED_HOURS_PER_START`); bid + fallback on-demand;
+  preempção → destroy + close `preempted` + reprovisão; métrica `gateway_primary_preemptions_total`;
+  coluna MODE no `gatewayctl primary lifecycles`.
+- Conferência pós-migration: `SELECT offer_mode,bid_margin,max_preemptions_per_day,min_reliability FROM ai_gateway.pod_config;`
+  → `bid | 1.15 | 2 | 0.950` (`gatewayctl primary config show` NÃO existe).
+- Rollback a quente: `UPDATE ai_gateway.pod_config SET offer_mode='ondemand', updated_at=NOW() WHERE id=TRUE;`
+  (idem `min_reliability=0.99`). Completo: imagem anterior no stack 38 primeiro, depois `migrate down`.
 
 ### Próximos passos (APROVADOS pelo Pedro: "ok para os próximos passos")
-1. Se o worktree existir: conferir commits, copiar SUMMARY, merge `--no-ff` em develop, remover worktree.
+1. ~~merge~~ FEITO (develop local, 4+ commits à frente do origin).
 2. Verificar: `cd gateway && gofmt -l . && go build ./... && go vet ./... && go vet -tags integration ./... && go test ./...`
    + integração com Docker via sudo (receita na memória `gateway-prod-build-deploy`):
    `sudo -n env CI_ALLOW_TIGHT_SHED_TIMING=1 PATH=... go test -tags=integration ./gateway/internal/integration_test/... ./gateway/cmd/gatewayctl/...`
