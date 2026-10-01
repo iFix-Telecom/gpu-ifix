@@ -203,6 +203,22 @@ func freshSchema(t *testing.T, ctx context.Context) (*pgxpool.Pool, *redis.Clien
 	// model_aliases seed is idempotent — migration inserted it, truncate
 	// did not touch it (not in truncate list).
 
+	// Quick 260930-vkt: partições mensais (audit_log, audit_log_content,
+	// billing_events) do mês anterior até +3, com a MESMA função que o
+	// gateway roda no boot (db.EnsurePartitions). Sem isso, testes que
+	// semeiam billing_events com "hoje em America/Sao_Paulo"
+	// (TestAdminUsageResponseShape, TestBillingReconcileDrift) quebravam com
+	// SQLSTATE 23514 na virada de mês: a migration 0010 semeia a partir de
+	// DATE_TRUNC('month', CURRENT_DATE) do Postgres (UTC) — entre 00:00 e
+	// 03:00 UTC do dia 1 o "hoje" de SP ainda é o mês anterior, sem partição.
+	{
+		now := time.Now().UTC()
+		prev := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+		if err := db.EnsurePartitions(ctx, pool, prev, db.DefaultPartitionLookahead+1); err != nil {
+			t.Fatalf("ensure partitions: %v", err)
+		}
+	}
+
 	rdb, err := redisx.NewClient(ctx, cfg)
 	if err != nil {
 		t.Fatalf("redis: %v", err)

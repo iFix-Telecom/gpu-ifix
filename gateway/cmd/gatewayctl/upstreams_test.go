@@ -162,6 +162,22 @@ func freshSchema(t *testing.T, ctx context.Context) (*pgxpool.Pool, *redis.Clien
 		t.Fatalf("reset upstreams: %v", err)
 	}
 
+	// Quick 260930-vkt: model_aliases não é truncada e os testes de
+	// model-alias (set/delete) mutam a tabela → TestModelAliasList_Returns6Rows
+	// dependia da ordem de execução. Restauramos o estado do seed das
+	// migrations a partir de um snapshot tirado na 1ª chamada (container novo,
+	// logo após db.Up = estado do seed). Snapshot column-agnostic (to_jsonb /
+	// jsonb_populate_recordset) para não precisar replicar os INSERTs
+	// espalhados por 0005/0026/0028/0029/0037.
+	restoreModelAliasesSeed(t, ctx, pool)
+
+	// Quick 260930-vkt: garante partições mensais (audit_log, audit_log_content,
+	// billing_events) do mês anterior até +3 com a MESMA função que o gateway
+	// roda no boot — testes que semeiam com "hoje em SP" não quebram na virada
+	// de mês (migration 0010 parte do CURRENT_DATE UTC do Postgres; entre 00:00
+	// e 03:00 UTC do dia 1 o hoje de SP ainda é o mês anterior).
+	ensureTestPartitions(t, ctx, pool)
+
 	rdb, err := redisx.NewClient(ctx, cfg)
 	if err != nil {
 		t.Fatalf("redis: %v", err)

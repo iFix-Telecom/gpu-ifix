@@ -151,7 +151,8 @@ func TestModelAliasGet_ReturnsSpecificRow(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &row); err != nil {
 		t.Fatalf("output not JSON: %v\n%s", err, out)
 	}
-	if row["Alias"] != "qwen" || row["UpstreamName"] != "openrouter-chat" {
+	// Quick 260930-vkt: `get` emite snake_case desde 49b8be9 (model_alias.go).
+	if row["alias"] != "qwen" || row["upstream_name"] != "openrouter-chat" {
 		t.Errorf("get output:\n%s", out)
 	}
 }

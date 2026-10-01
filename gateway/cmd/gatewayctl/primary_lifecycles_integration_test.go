@@ -168,9 +168,13 @@ func TestRunPrimaryLifecyclesIntegration_FetchesFromDB(t *testing.T) {
 	pool := freshPrimaryLifecyclesPool(t, ctx)
 
 	// Seed 3 rows with varying timestamps. Higher offset = older.
-	id1 := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", 10, 101, false)
-	id2 := seedPrimaryLifecycle(t, ctx, pool, "manual_force_up", 5, 102, false)
-	id3 := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", 1, 103, true)
+	// Quick 260930-vkt: o índice único parcial primary_live_singleton
+	// (migration 0023) só admite 1 linha aberta (ended_at IS NULL) — as
+	// mais antigas são fechadas antes do próximo insert; só a mais recente
+	// (id3) fica aberta, como em prod.
+	id1 := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", 10, 101, true)
+	id2 := seedPrimaryLifecycle(t, ctx, pool, "manual_force_up", 5, 102, true)
+	id3 := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", 1, 103, false)
 
 	stdout := capturePrimaryLifecyclesStdout(t, func() {
 		code := runPrimaryLifecyclesWithPool(ctx, pool, 7*24*time.Hour, 20, "table")
@@ -205,7 +209,8 @@ func TestRunPrimaryLifecycles_RespectsLimitFlag(t *testing.T) {
 	ids := make([]int64, 0, 5)
 	for i := 0; i < 5; i++ {
 		offset := 10 - i // older rows first
-		id := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", offset, int64(200+i), false)
+		// Só a última (mais recente) fica aberta — primary_live_singleton.
+		id := seedPrimaryLifecycle(t, ctx, pool, "schedule_window_entered", offset, int64(200+i), i < 4)
 		ids = append(ids, id)
 	}
 
