@@ -34,6 +34,10 @@ type fakeQueries struct {
 	forceErr     error
 	verifyCalls  int64
 	hashOverride map[string]string // raw → hash; if not present, key not known
+	// gate (opcional): se não-nil, GetActiveKeyByLookupHash bloqueia até o
+	// canal fechar. entered conta quantas chamadas chegaram ao gate.
+	gate    chan struct{}
+	entered int64
 }
 
 func newFakeQueries() *fakeQueries {
@@ -80,6 +84,10 @@ func hexLookup(raw string) string {
 
 func (f *fakeQueries) GetActiveKeyByLookupHash(ctx context.Context, lookup []byte) (gen.GetActiveKeyByLookupHashRow, error) {
 	atomic.AddInt64(&f.lookupCalls, 1)
+	atomic.AddInt64(&f.entered, 1)
+	if f.gate != nil {
+		<-f.gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.forceErr != nil {
