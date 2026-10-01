@@ -1,0 +1,10 @@
+[Unit]
+Description=Watchdog pod 3060 unificado a cada 3 min (07:00-19:57)
+[Timer]
+# host ops-claude em America/Sao_Paulo (timedatectl) -> horario local = BRT.
+# A janela tambem e' checada dentro do codigo (defesa dupla).
+OnCalendar=*-*-* 07..19:00/3:00
+Persistent=false
+AccuracySec=30s
+[Install]
+WantedBy=timers.target

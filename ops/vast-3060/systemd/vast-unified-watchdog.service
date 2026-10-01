@@ -1,0 +1,8 @@
+[Unit]
+Description=Watchdog de preempcao do pod 3060 unificado (bid)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/vast-3060/unified3060.py watchdog
+# 3 health x 8s + GET Vast + destroy cabem folgado; o start de reprovisao e'
+# disparado com `systemctl start --no-block` (nao herda este timeout).
+TimeoutStartSec=120
