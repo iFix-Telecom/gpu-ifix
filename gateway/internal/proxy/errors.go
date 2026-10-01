@@ -69,6 +69,22 @@ var errDialFailedFallthrough = errors.New("proxy: dial failed, fall through to t
 //     the SSE tee may already have flushed bytes.
 var errUpstreamRetryable = errors.New("proxy: upstream retryable error, fall through to next candidate")
 
+// errSTTResourceExhausted marks an STT fallthrough whose upstream reported a
+// transient RESOURCE exhaustion (GPU "out of memory") for THIS request, as
+// opposed to the upstream being degraded. It is never returned on its own: the
+// sttUpstreamStatusError (audio.go) satisfies errors.Is for BOTH this sentinel
+// and errUpstreamRetryable, so the cascade/ErrorHandler path is unchanged and
+// only the dispatcher's breaker bookkeeping branches on it.
+//
+// Why (quick 261001-fjk, card 86akreh6u, diagnóstico 2026-10-01): speaches on
+// the 3060 pod answers HTTP 500 "RuntimeError: CUDA failed with error out of
+// memory" for long audio (13:14 reproduced, peak 11867/12288 MiB). The pod is
+// otherwise healthy — short audio keeps transcribing. Recording a breaker
+// failure per OOM would let a burst of long recordings open the local-stt
+// breaker and divert ALL STT (including what fits) to the paid external
+// provider — the same reasoning as the over-context exemption (T-ucv-05).
+var errSTTResourceExhausted = errors.New("proxy: stt upstream resource exhausted")
+
 // ErrorHandler returns a ReverseProxy ErrorHandler that emits a 502
 // with the OpenAI error envelope and logs the cause + request id.
 //

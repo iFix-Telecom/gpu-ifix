@@ -410,9 +410,14 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// its window. Recording a failure here would open the tier-0
 			// breaker after N big requests and divert ALL traffic — including
 			// everything that fits — to the paid external provider.
+			//
+			// Quick 261001-fjk: a per-request STT GPU OOM is exempt for the
+			// same reason (recordFallthroughFailure). It is NOT added to the
+			// sensitive carve-out below — RES-08 still blocks OOM for
+			// sensitive tenants.
 			overCtx := errors.Is(res.err, errOverContextFallthrough)
 			if !overCtx {
-				cfg.recordUpstreamFailure(t0.Name)
+				cfg.recordFallthroughFailure(r, t0.Name, res.err, log)
 			}
 
 			// D-10 / RES-08 (HARD GATE): sensitive tenants NEVER fall through
@@ -479,7 +484,9 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// still 503-block, never fall through (D-10 HARD GATE).
 			res := cfg.dispatchTo(w, r, t0.Name, streaming, log)
 			if res.fallthrough_ && !res.wrote {
-				cfg.recordUpstreamFailure(t0.Name)
+				// 261001-fjk: STT OOM skips the breaker penalty here too; the
+				// 503 sensitive block below is unconditional (RES-08).
+				cfg.recordFallthroughFailure(r, t0.Name, res.err, log)
 				obs.DialFallthroughTotal.WithLabelValues(cfg.Role, "sensitive_blocked").Inc()
 				cfg.writeSensitiveBlock(w, r)
 			}
@@ -587,7 +594,7 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 		res := cfg.dispatchTo(w, r, c.u.Name, streaming, log)
 		if res.fallthrough_ && !res.wrote {
 			if !errors.Is(res.err, errOverContextFallthrough) {
-				cfg.recordUpstreamFailure(c.u.Name)
+				cfg.recordFallthroughFailure(r, c.u.Name, res.err, log)
 			}
 			continue
 		}
@@ -644,7 +651,7 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 			// fallthrough says the request did not FIT, not that the upstream
 			// is degraded, so it must not push the breaker toward OPEN.
 			if !errors.Is(res.err, errOverContextFallthrough) {
-				cfg.recordUpstreamFailure(t1.Name)
+				cfg.recordFallthroughFailure(r, t1.Name, res.err, log)
 			}
 			continue
 		}
@@ -774,6 +781,31 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 		res.wrote = true
 	}
 	return *res
+}
+
+// recordFallthroughFailure is the breaker bookkeeping for a pre-byte
+// fallthrough: it records a failure on the named breaker UNLESS the cause is a
+// per-request STT resource exhaustion (GPU out of memory), which is logged at
+// WARN and cascades without a breaker penalty.
+//
+// Quick 261001-fjk (card 86akreh6u): speaches on the 3060 pod returns HTTP 500
+// "CUDA failed with error out of memory" for long audio while short audio keeps
+// working. One long request at a time could otherwise accumulate
+// ConsecutiveFailures, open the local-stt breaker and divert ALL STT to the
+// paid external provider. The cascade itself is unchanged — only the breaker
+// penalty is skipped. Over-context exemption (T-ucv-05) stays at the call
+// sites.
+func (cfg DispatcherConfig) recordFallthroughFailure(r *http.Request, name string, err error, log *slog.Logger) {
+	if errors.Is(err, errSTTResourceExhausted) {
+		log.Warn("stt upstream resource exhausted; cascading without breaker penalty",
+			"upstream", name,
+			"status", sttStatusFrom(err),
+			"err", err,
+			"request_id", httpx.RequestIDFrom(r.Context()),
+		)
+		return
+	}
+	cfg.recordUpstreamFailure(name)
 }
 
 // recordUpstreamFailure records a single failure on the named breaker so it
