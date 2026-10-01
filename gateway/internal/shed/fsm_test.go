@@ -124,9 +124,13 @@ func TestFSM_On_SignalDropped_GoesRecovering(t *testing.T) {
 	if f.State() != StateOn {
 		t.Fatalf("precondition on failed: %s", f.State())
 	}
-	f.Evaluate(time.Unix(1003, 0), Signals{}) // clean
+	f.Evaluate(time.Unix(1003, 0), Signals{}) // clean streak starts
+	if f.State() != StateOn {
+		t.Fatalf("on + 1 clean tick must stay on (dwell-out); got %s", f.State())
+	}
+	f.Evaluate(time.Unix(1006, 0), Signals{}) // clean for 3s = dwell-out
 	if f.State() != StateRecovering {
-		t.Fatalf("on+clean should go recovering; got %s", f.State())
+		t.Fatalf("on + clean ≥ dwell-out should go recovering; got %s", f.State())
 	}
 }
 
@@ -147,10 +151,18 @@ func TestFSM_Recovering_SaturatedAgain_GoesOnNotArmed(t *testing.T) {
 	f := newTestFSM(t, 1, 60)
 	f.Evaluate(time.Unix(1000, 0), Signals{InflightOverMax: true, P95OverMax: true})
 	f.Evaluate(time.Unix(1002, 0), Signals{InflightOverMax: true, P95OverMax: true})
-	f.Evaluate(time.Unix(1003, 0), Signals{}) // recovering
-	f.Evaluate(time.Unix(1004, 0), Signals{InflightOverMax: true, P95OverMax: true})
+	f.Evaluate(time.Unix(1003, 0), Signals{})
+	f.Evaluate(time.Unix(1006, 0), Signals{}) // recovering (dwell-out 3s)
+	if f.State() != StateRecovering {
+		t.Fatalf("precondition recovering failed: %s", f.State())
+	}
+	f.Evaluate(time.Unix(1007, 0), Signals{InflightOverMax: true, P95OverMax: true}) // sat streak starts
+	if f.State() != StateRecovering {
+		t.Fatalf("recovering + 1 sat tick must stay recovering (dwell-in); got %s", f.State())
+	}
+	f.Evaluate(time.Unix(1008, 0), Signals{InflightOverMax: true, P95OverMax: true}) // sustained ≥ dwell-in (arm=1s)
 	if f.State() != StateOn {
-		t.Fatalf("recovering+sat should go ON (not armed); got %s", f.State())
+		t.Fatalf("recovering + sustained sat should go ON (not armed); got %s", f.State())
 	}
 }
 
@@ -158,16 +170,77 @@ func TestFSM_Recovering_CleanForRecoverSeconds_GoesOff(t *testing.T) {
 	f := newTestFSM(t, 1, 10)
 	f.Evaluate(time.Unix(1000, 0), Signals{InflightOverMax: true, P95OverMax: true})
 	f.Evaluate(time.Unix(1002, 0), Signals{InflightOverMax: true, P95OverMax: true}) // On
-	f.Evaluate(time.Unix(1003, 0), Signals{})                                        // Recovering
-	// elapsed 9 < 10
+	f.Evaluate(time.Unix(1003, 0), Signals{})                                        // clean streak starts
+	f.Evaluate(time.Unix(1006, 0), Signals{})                                        // Recovering (dwell-out)
+	if f.State() != StateRecovering {
+		t.Fatalf("precondition recovering failed: %s", f.State())
+	}
+	// clean for 9s (since 1003) < 10
 	f.Evaluate(time.Unix(1012, 0), Signals{})
 	if f.State() != StateRecovering {
-		t.Fatalf("elapsed 9 should still recover; got %s", f.State())
+		t.Fatalf("clean 9s should still recover; got %s", f.State())
 	}
-	// elapsed 10 ≥ 10
+	// clean for 10s ≥ 10
 	f.Evaluate(time.Unix(1013, 0), Signals{})
 	if f.State() != StateOff {
-		t.Fatalf("elapsed 10 should go off; got %s", f.State())
+		t.Fatalf("clean 10s should go off; got %s", f.State())
+	}
+}
+
+// Quick 261001-9fh: signal toggling every tick while On (shed holding
+// inflight at the threshold) must NOT flap On↔Recovering.
+func TestFSM_On_SignalTogglingEveryTick_DoesNotFlap(t *testing.T) {
+	var mu sync.Mutex
+	transitions := 0
+	f := NewFSM("test", Config{ArmSeconds: 1, RecoverSeconds: 2}, func(_, _ State, _ string) {
+		mu.Lock()
+		transitions++
+		mu.Unlock()
+	}, slog.Default())
+	sat := Signals{InflightOverMax: true, P95OverMax: true}
+	f.Evaluate(time.Unix(1000, 0), sat)
+	f.Evaluate(time.Unix(1001, 0), sat) // On
+	if f.State() != StateOn {
+		t.Fatalf("precondition on failed: %s", f.State())
+	}
+	mu.Lock()
+	base := transitions
+	mu.Unlock()
+	for i := int64(2); i < 30; i++ {
+		sig := sat
+		if i%2 == 0 {
+			sig = Signals{P95OverMax: true} // inflight dipped below max for this tick
+		}
+		f.Evaluate(time.Unix(1000+i, 0), sig)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := transitions - base; got != 0 {
+		t.Fatalf("toggling signal while On caused %d transitions (flap); want 0, state=%s", got, f.State())
+	}
+}
+
+// Quick 261001-9fh: a single saturated blip inside Recovering neither
+// bounces to On nor lets the recover clock run through it.
+func TestFSM_Recovering_BlipRestartsRecoverClock(t *testing.T) {
+	f := newTestFSM(t, 1, 10)
+	sat := Signals{InflightOverMax: true, P95OverMax: true}
+	f.Evaluate(time.Unix(1000, 0), sat)
+	f.Evaluate(time.Unix(1001, 0), sat)       // On
+	f.Evaluate(time.Unix(1002, 0), Signals{}) // clean starts
+	f.Evaluate(time.Unix(1005, 0), Signals{}) // Recovering
+	f.Evaluate(time.Unix(1008, 0), sat)       // blip (1 tick)
+	if f.State() != StateRecovering {
+		t.Fatalf("single blip must not bounce to on; got %s", f.State())
+	}
+	f.Evaluate(time.Unix(1009, 0), Signals{}) // clean restarts at 1009
+	f.Evaluate(time.Unix(1013, 0), Signals{}) // only 4s clean since blip
+	if f.State() != StateRecovering {
+		t.Fatalf("recover clock must restart after blip; got %s", f.State())
+	}
+	f.Evaluate(time.Unix(1019, 0), Signals{}) // 10s clean since 1009
+	if f.State() != StateOff {
+		t.Fatalf("10s clean after blip should go off; got %s", f.State())
 	}
 }
 

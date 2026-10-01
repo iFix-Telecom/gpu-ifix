@@ -10,9 +10,11 @@
 //   - StateOn:         signal sustained ArmSeconds; shed middleware overrides
 //     tier-0 → tier-1 for tenants whose inflight ≥ cap
 //     (D-B1, D-B4).
-//   - StateRecovering: signal cleared; waiting RecoverSeconds clean before
-//     committing to OFF. Returns to ON immediately if signal
-//     re-saturates (D-C1 hysteresis-out: skip Armed).
+//   - StateRecovering: signal clean for min(3s, RecoverSeconds) while On;
+//     still sheds (middleware isShedding) while waiting RecoverSeconds of
+//     uninterrupted clean signal before committing to OFF. Returns to ON
+//     (skipping Armed) only if saturation is sustained for
+//     min(3s, ArmSeconds) — dwell hysteresis, quick 261001-9fh.
 //
 // All hot-path reads (State, EnteredAt) are lockless atomic.Load. The
 // transition CAS guards against the rare case of two ticks racing —
@@ -112,8 +114,14 @@ type FSM struct {
 	state     atomic.Int32
 	enteredAt atomic.Int64 // unix-seconds when current state was entered
 	cfg       atomic.Pointer[Config]
-	onChange  func(from, to State, reason string)
-	log       *slog.Logger
+	// satSince / cleanSince: unix-seconds of the first tick of the
+	// current saturated / clean streak (0 = no streak). Drive the dwell
+	// hysteresis on On↔Recovering (quick 261001-9fh). Only the 1Hz tick
+	// goroutine writes them.
+	satSince   atomic.Int64
+	cleanSince atomic.Int64
+	onChange   func(from, to State, reason string)
+	log        *slog.Logger
 }
 
 // NewFSM constructs an FSM initialised at StateOff with EnteredAt=now.
@@ -191,6 +199,24 @@ func (f *FSM) Evaluate(now time.Time, sig Signals) {
 	entered := f.enteredAt.Load()
 	elapsed := now.Unix() - entered
 
+	// Streak bookkeeping for the dwell hysteresis (quick 261001-9fh).
+	nowS := now.Unix()
+	if saturated {
+		f.cleanSince.Store(0)
+		if f.satSince.Load() == 0 {
+			f.satSince.Store(nowS)
+		}
+	} else {
+		f.satSince.Store(0)
+		if f.cleanSince.Load() == 0 {
+			f.cleanSince.Store(nowS)
+		}
+	}
+	satFor := streakSeconds(nowS, f.satSince.Load())
+	cleanFor := streakSeconds(nowS, f.cleanSince.Load())
+	dwellOut := minDwell(cfg.RecoverSeconds)
+	dwellIn := minDwell(cfg.ArmSeconds)
+
 	switch current {
 	case StateOff:
 		if saturated {
@@ -203,18 +229,55 @@ func (f *FSM) Evaluate(now time.Time, sig Signals) {
 			f.transition(StateArmed, StateOn, now, "arm_timeout_sustained")
 		}
 	case StateOn:
-		if !saturated {
+		// Dwell-out: one clean tick is not enough. While shedding holds
+		// tier-0 inflight right at the threshold, the signal toggles
+		// request-by-request; leaving On on the first clean tick made the
+		// FSM flap On↔Recovering (SC2: 90+84 transitions in 6 cycles).
+		if !saturated && cleanFor >= dwellOut {
 			f.transition(StateOn, StateRecovering, now, "signal_dropped")
 		}
 	case StateRecovering:
 		if saturated {
 			// Skip ARMED — already proved saturated, no hysteresis-in needed
-			// the second time within the same incident (CONTEXT D-C1).
-			f.transition(StateRecovering, StateOn, now, "signal_returned_during_recover")
-		} else if elapsed >= cfg.RecoverSeconds {
+			// the second time within the same incident (CONTEXT D-C1) — but
+			// require it sustained for dwellIn (Recovering keeps shedding
+			// meanwhile, see middleware isShedding).
+			if satFor >= dwellIn {
+				f.transition(StateRecovering, StateOn, now, "signal_returned_during_recover")
+			}
+		} else if cleanFor >= cfg.RecoverSeconds && elapsed >= dwellOut {
+			// RecoverSeconds of uninterrupted clean signal (a brief
+			// saturated blip inside Recovering restarts the clock).
 			f.transition(StateRecovering, StateOff, now, "recover_timeout_clean")
 		}
 	}
+}
+
+// maxDwellSeconds caps the On↔Recovering dwell (quick 261001-9fh).
+const maxDwellSeconds = 3
+
+// minDwell returns min(maxDwellSeconds, window) with a floor of 1s, so a
+// short arm/recover window (tests use 1s/2s) never waits longer than the
+// window itself.
+func minDwell(window int64) int64 {
+	d := int64(maxDwellSeconds)
+	if window > 0 && window < d {
+		d = window
+	}
+	if d < 1 {
+		d = 1
+	}
+	return d
+}
+
+// streakSeconds returns how long a streak that started at since has
+// lasted at now, counting the starting tick (a streak first observed at
+// now has lasted 0s). since==0 means no streak → 0.
+func streakSeconds(now, since int64) int64 {
+	if since == 0 || now < since {
+		return 0
+	}
+	return now - since
 }
 
 // Transition exposes synthetic state changes for two callers:
