@@ -1002,6 +1002,10 @@ func TestEvaluateProvisioning_TolerantOfTransientInstancesNullFlap(t *testing.T)
 func TestReconcilerVastFallback(t *testing.T) {
 	cfg := testCfg(t)
 	cfg.PrimaryVastMachineAllowlist = nil // disable the allowlist short-circuit
+	// quick-261001-qdd: this test pins the per-shape SearchOffers SEQUENCE
+	// (1 call per shape); bid mode adds a bid search per shape, so run it
+	// on-demand. Bid-mode sequencing is covered by the qdd tests.
+	cfg.PrimaryVastOfferMode = OfferModeOnDemand
 	fsm := NewFSM(nil, nil)
 	_ = fsm.Transition(StateAsleep, StateProvisioning, time.Now(), "test")
 

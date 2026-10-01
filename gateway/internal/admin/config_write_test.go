@@ -80,6 +80,18 @@ func (f *fakeWriteQueries) UpdatePodConfigFieldProvisionLeadS(_ context.Context,
 func (f *fakeWriteQueries) UpdatePodConfigFieldScheduleDisabled(_ context.Context, _ bool) error {
 	return f.hit("UpdatePodConfigFieldScheduleDisabled")
 }
+func (f *fakeWriteQueries) UpdatePodConfigFieldOfferMode(_ context.Context, _ string) error {
+	return f.hit("UpdatePodConfigFieldOfferMode")
+}
+func (f *fakeWriteQueries) UpdatePodConfigFieldBidMargin(_ context.Context, _ pgtype.Numeric) error {
+	return f.hit("UpdatePodConfigFieldBidMargin")
+}
+func (f *fakeWriteQueries) UpdatePodConfigFieldMaxPreemptionsPerDay(_ context.Context, _ int32) error {
+	return f.hit("UpdatePodConfigFieldMaxPreemptionsPerDay")
+}
+func (f *fakeWriteQueries) UpdatePodConfigFieldMinReliability(_ context.Context, _ pgtype.Numeric) error {
+	return f.hit("UpdatePodConfigFieldMinReliability")
+}
 func (f *fakeWriteQueries) UpdatePodConfigBoundCapPrimaryMin(_ context.Context, _ pgtype.Numeric) error {
 	return f.hit("UpdatePodConfigBoundCapPrimaryMin")
 }

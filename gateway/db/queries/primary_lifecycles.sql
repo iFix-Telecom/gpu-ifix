@@ -19,6 +19,24 @@ SET vast_offer_id = $2,
     events = events || sqlc.arg('event_json')::jsonb
 WHERE id = $1;
 
+-- name: SetPrimaryLifecycleOfferMode :exec
+-- quick-261001-qdd: records whether the lifecycle rented a bid (interruptible)
+-- instance and its bid price (US$/h, excl. storage; NULL for on-demand).
+-- Separate from UpdatePrimaryLifecycleVastIDs so that signature is unchanged.
+UPDATE ai_gateway.primary_lifecycles
+SET is_bid = $2,
+    bid_price = $3
+WHERE id = $1;
+
+-- name: CountPrimaryPreemptionsSince :one
+-- quick-261001-qdd: number of primary lifecycles closed as 'preempted' since
+-- $1 (start of today in the schedule timezone). Drives the automatic
+-- bid -> on-demand fallback (pod_config.max_preemptions_per_day).
+SELECT COUNT(*)::bigint AS preemptions
+FROM ai_gateway.primary_lifecycles
+WHERE shutdown_reason = 'preempted'
+  AND ended_at >= $1;
+
 -- name: MarkPrimaryLifecycleHealthy :exec
 -- Called when pod /health first returns healthy. Sets first_health_pass_at
 -- (used by cost calculation: hours_active = ended_at - first_health_pass_at).
@@ -57,7 +75,8 @@ WHERE id = $1 AND ended_at IS NULL;
 -- Bounded LIMIT 1 because primary_live_singleton unique index guarantees at most 1.
 SELECT id, started_at, first_health_pass_at, drain_started_at, ended_at,
        trigger_reason, vast_offer_id, vast_instance_id, accepted_dph,
-       total_cost_brl, shutdown_reason, events, leader_replica
+       total_cost_brl, shutdown_reason, events, leader_replica,
+       is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE ended_at IS NULL
 LIMIT 1;
@@ -69,7 +88,7 @@ LIMIT 1;
 -- shape from emergency_lifecycles.sql (parity per 06.6-PATTERNS.md).
 SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
        vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
-       shutdown_reason, leader_replica
+       shutdown_reason, leader_replica, is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE started_at >= $1
 ORDER BY started_at DESC
@@ -110,7 +129,7 @@ WHERE first_health_pass_at IS NULL
 -- handler reduces over every lifecycle in the period for the Vast accrual.
 SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
        vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
-       shutdown_reason, leader_replica
+       shutdown_reason, leader_replica, is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE started_at >= $1
   AND started_at <  $2

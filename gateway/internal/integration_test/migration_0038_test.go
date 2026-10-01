@@ -103,8 +103,10 @@ func TestIntegration_Migration0038_DownUp(t *testing.T) {
 	if !colExists() {
 		t.Fatal("url_override missing after Up")
 	}
-	if err := db.Down(ctx, pool, 1); err != nil {
-		t.Fatalf("db.Down(1) revert 0038: %v", err)
+	// quick-261001-qdd HEAD bump: Down(1)→Down(2) when 0039 (primary bid mode)
+	// landed on HEAD — Down(2) peels 0039 then 0038.
+	if err := db.Down(ctx, pool, 2); err != nil {
+		t.Fatalf("db.Down(2) revert 0039+0038: %v", err)
 	}
 	if colExists() {
 		t.Fatal("url_override still present after 0038 Down")

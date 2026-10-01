@@ -45,6 +45,15 @@ type PodConfig struct {
 	GraceRampDownS       int
 	ProvisionLeadS       int
 	ScheduleDisabled     bool
+	// quick-261001-qdd: primary offer policy. OfferMode is "bid" (default)
+	// or "ondemand"; BidMargin multiplies Vast min_bid; MaxPreemptionsPerDay
+	// flips bid -> on-demand after N preempted lifecycles today (0 = off).
+	OfferMode            string
+	BidMargin            float64
+	MaxPreemptionsPerDay int
+	// MinReliability is the PRIMARY-only Vast offer reliability floor
+	// (default 0.95, Pedro 2026-10-01; emerg keeps 0.99).
+	MinReliability float64
 }
 
 // PodConfigBounds holds the owner-editable min/max gates for the 10
@@ -187,6 +196,10 @@ func rowToPodConfig(r gen.AiGatewayPodConfig) PodConfig {
 		GraceRampDownS:       int(r.GraceRampDownS),
 		ProvisionLeadS:       int(r.ProvisionLeadS),
 		ScheduleDisabled:     r.ScheduleDisabled,
+		OfferMode:            r.OfferMode,
+		BidMargin:            numericToFloat(r.BidMargin),
+		MaxPreemptionsPerDay: int(r.MaxPreemptionsPerDay),
+		MinReliability:       numericToFloat(r.MinReliability),
 	}
 }
 

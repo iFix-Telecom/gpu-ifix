@@ -108,10 +108,11 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	// quick-260825-anq HEAD bump: Down(8)→Down(9) when 0036 (embed-gpu tier-0) landed on HEAD.
 	// quick-260830-o2j HEAD bump: Down(9)→Down(10) when 0037 (provider_prefs) landed on HEAD.
 	// quick-260930-uru HEAD bump: Down(10)→Down(11) when 0038 (url_override) landed on HEAD.
-	// Down(11) peels 0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028 to reach the same
+	// quick-261001-qdd HEAD bump: Down(11)→Down(12) when 0039 (primary bid mode) landed on HEAD.
+	// Down(12) peels 0039+0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028 to reach the same
 	// point the old Down(2) did when 0029 was HEAD.
-	if err := db.Down(ctx, pool, 11); err != nil {
-		t.Fatalf("db.Down(11) revert 0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028: %v", err)
+	if err := db.Down(ctx, pool, 12); err != nil {
+		t.Fatalf("db.Down(12) revert 0039+0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
 		`DELETE FROM ai_gateway.model_aliases WHERE alias='whisper' AND upstream_name='local-stt'`); err != nil {
@@ -245,11 +246,12 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	// HEAD bump: Down(10)→Down(11) when 0036 (embed-gpu tier-0) landed on HEAD.
 	// quick-260830-o2j HEAD bump: Down(11)→Down(12) when 0037 (provider_prefs) landed.
 	// quick-260930-uru HEAD bump: Down(12)→Down(13) when 0038 (url_override) landed.
-	// Down(13) peels 0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028+0027 then
+	// quick-261001-qdd HEAD bump: Down(13)→Down(14) when 0039 (primary bid mode) landed.
+	// Down(14) peels 0039+0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028+0027 then
 	// fires 0026's R3 guard.
-	err := db.Down(ctx, pool, 13)
+	err := db.Down(ctx, pool, 14)
 	if err == nil {
-		t.Fatal("db.Down(13) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
+		t.Fatal("db.Down(14) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {

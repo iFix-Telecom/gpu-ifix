@@ -77,10 +77,28 @@ func (q *Queries) CountConsecutiveFailedPrimaryProvisions(ctx context.Context) (
 	return fail_streak, err
 }
 
+const countPrimaryPreemptionsSince = `-- name: CountPrimaryPreemptionsSince :one
+SELECT COUNT(*)::bigint AS preemptions
+FROM ai_gateway.primary_lifecycles
+WHERE shutdown_reason = 'preempted'
+  AND ended_at >= $1
+`
+
+// quick-261001-qdd: number of primary lifecycles closed as 'preempted' since
+// $1 (start of today in the schedule timezone). Drives the automatic
+// bid -> on-demand fallback (pod_config.max_preemptions_per_day).
+func (q *Queries) CountPrimaryPreemptionsSince(ctx context.Context, endedAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countPrimaryPreemptionsSince, endedAt)
+	var preemptions int64
+	err := row.Scan(&preemptions)
+	return preemptions, err
+}
+
 const getOpenPrimaryLifecycle = `-- name: GetOpenPrimaryLifecycle :one
 SELECT id, started_at, first_health_pass_at, drain_started_at, ended_at,
        trigger_reason, vast_offer_id, vast_instance_id, accepted_dph,
-       total_cost_brl, shutdown_reason, events, leader_replica
+       total_cost_brl, shutdown_reason, events, leader_replica,
+       is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE ended_at IS NULL
 LIMIT 1
@@ -107,6 +125,8 @@ func (q *Queries) GetOpenPrimaryLifecycle(ctx context.Context) (AiGatewayPrimary
 		&i.ShutdownReason,
 		&i.Events,
 		&i.LeaderReplica,
+		&i.IsBid,
+		&i.BidPrice,
 	)
 	return i, err
 }
@@ -142,7 +162,7 @@ func (q *Queries) InsertPrimaryLifecycle(ctx context.Context, arg InsertPrimaryL
 const listPrimaryLifecycles = `-- name: ListPrimaryLifecycles :many
 SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
        vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
-       shutdown_reason, leader_replica
+       shutdown_reason, leader_replica, is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE started_at >= $1
 ORDER BY started_at DESC
@@ -166,6 +186,8 @@ type ListPrimaryLifecyclesRow struct {
 	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
 	ShutdownReason pgtype.Text        `json:"shutdown_reason"`
 	LeaderReplica  pgtype.Text        `json:"leader_replica"`
+	IsBid          pgtype.Bool        `json:"is_bid"`
+	BidPrice       pgtype.Numeric     `json:"bid_price"`
 }
 
 // Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
@@ -193,6 +215,8 @@ func (q *Queries) ListPrimaryLifecycles(ctx context.Context, arg ListPrimaryLife
 			&i.TotalCostBrl,
 			&i.ShutdownReason,
 			&i.LeaderReplica,
+			&i.IsBid,
+			&i.BidPrice,
 		); err != nil {
 			return nil, err
 		}
@@ -207,7 +231,7 @@ func (q *Queries) ListPrimaryLifecycles(ctx context.Context, arg ListPrimaryLife
 const listPrimaryLifecyclesInRange = `-- name: ListPrimaryLifecyclesInRange :many
 SELECT id, started_at, drain_started_at, ended_at, trigger_reason,
        vast_offer_id, vast_instance_id, accepted_dph, total_cost_brl,
-       shutdown_reason, leader_replica
+       shutdown_reason, leader_replica, is_bid, bid_price
 FROM ai_gateway.primary_lifecycles
 WHERE started_at >= $1
   AND started_at <  $2
@@ -231,6 +255,8 @@ type ListPrimaryLifecyclesInRangeRow struct {
 	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
 	ShutdownReason pgtype.Text        `json:"shutdown_reason"`
 	LeaderReplica  pgtype.Text        `json:"leader_replica"`
+	IsBid          pgtype.Bool        `json:"is_bid"`
+	BidPrice       pgtype.Numeric     `json:"bid_price"`
 }
 
 // Range-overlap variant of ListPrimaryLifecycles for GET /admin/economy
@@ -259,6 +285,8 @@ func (q *Queries) ListPrimaryLifecyclesInRange(ctx context.Context, arg ListPrim
 			&i.TotalCostBrl,
 			&i.ShutdownReason,
 			&i.LeaderReplica,
+			&i.IsBid,
+			&i.BidPrice,
 		); err != nil {
 			return nil, err
 		}
@@ -308,6 +336,27 @@ type MarkPrimaryLifecycleHealthyParams struct {
 // Appends an event to the JSONB timeline.
 func (q *Queries) MarkPrimaryLifecycleHealthy(ctx context.Context, arg MarkPrimaryLifecycleHealthyParams) error {
 	_, err := q.db.Exec(ctx, markPrimaryLifecycleHealthy, arg.ID, arg.EventJson)
+	return err
+}
+
+const setPrimaryLifecycleOfferMode = `-- name: SetPrimaryLifecycleOfferMode :exec
+UPDATE ai_gateway.primary_lifecycles
+SET is_bid = $2,
+    bid_price = $3
+WHERE id = $1
+`
+
+type SetPrimaryLifecycleOfferModeParams struct {
+	ID       int64          `json:"id"`
+	IsBid    pgtype.Bool    `json:"is_bid"`
+	BidPrice pgtype.Numeric `json:"bid_price"`
+}
+
+// quick-261001-qdd: records whether the lifecycle rented a bid (interruptible)
+// instance and its bid price (US$/h, excl. storage; NULL for on-demand).
+// Separate from UpdatePrimaryLifecycleVastIDs so that signature is unchanged.
+func (q *Queries) SetPrimaryLifecycleOfferMode(ctx context.Context, arg SetPrimaryLifecycleOfferModeParams) error {
+	_, err := q.db.Exec(ctx, setPrimaryLifecycleOfferMode, arg.ID, arg.IsBid, arg.BidPrice)
 	return err
 }
 

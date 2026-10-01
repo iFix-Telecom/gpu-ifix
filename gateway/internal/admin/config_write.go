@@ -70,6 +70,10 @@ type podConfigWriteQueries interface {
 	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldProvisionLeadS(ctx context.Context, v int32) error
 	UpdatePodConfigFieldScheduleDisabled(ctx context.Context, v bool) error
+	UpdatePodConfigFieldOfferMode(ctx context.Context, v string) error
+	UpdatePodConfigFieldBidMargin(ctx context.Context, v pgtype.Numeric) error
+	UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, v int32) error
+	UpdatePodConfigFieldMinReliability(ctx context.Context, v pgtype.Numeric) error
 
 	UpdatePodConfigBoundCapPrimaryMin(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigBoundCapPrimaryMax(ctx context.Context, v pgtype.Numeric) error
@@ -255,6 +259,27 @@ func (h *PrimaryConfigWriteHandler) writeConfig(ctx context.Context, w http.Resp
 			return
 		}
 		h.finish(w, h.q.UpdatePodConfigFieldScheduleDisabled(ctx, v))
+	case "offer_mode":
+		// quick-261001-qdd: closed enum (also DB CHECK in 0039).
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			h.badValue(w)
+			return
+		}
+		if v != "bid" && v != "ondemand" {
+			h.validationErr(w, `offer_mode must be "bid" or "ondemand"`)
+			return
+		}
+		h.finish(w, h.q.UpdatePodConfigFieldOfferMode(ctx, v))
+	case "bid_margin":
+		// Fixed range (also DB CHECK in 0039) — not an owner-editable bound.
+		h.writeNumericConfig(ctx, w, raw, 1.00, 5.00, h.q.UpdatePodConfigFieldBidMargin)
+	case "max_preemptions_per_day":
+		// 0 disables the preemption -> on-demand fallback.
+		h.writeIntConfig(ctx, w, raw, 0, 20, h.q.UpdatePodConfigFieldMaxPreemptionsPerDay)
+	case "min_reliability":
+		// PRIMARY-only offer reliability floor (also DB CHECK in 0039).
+		h.writeNumericConfig(ctx, w, raw, 0.5, 1.0, h.q.UpdatePodConfigFieldMinReliability)
 	default:
 		h.unknownField(w, field)
 	}

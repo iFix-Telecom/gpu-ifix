@@ -244,6 +244,20 @@ type Config struct {
 	PrimaryVastPriceCapFallback float64 // PRIMARY_VAST_PRICE_CAP_FALLBACK (default 0.60; 2×3090 EU cap; EVIDENCE-00 found 7 EU offers within this cap)
 	PrimaryVastNumGPUsPrimary   int     // PRIMARY_VAST_NUM_GPUS_PRIMARY (default 1; single-GPU primary)
 	PrimaryVastNumGPUsFallback  int     // PRIMARY_VAST_NUM_GPUS_FALLBACK (default 2; 2×3090 single-pod, auto-tensor-split via llama.cpp -ngl 99)
+	// quick-261001-qdd primary offer policy — BOOT FALLBACK only (used by
+	// bootHotCfg when the pod_config loader is not wired, e.g. unit tests).
+	// In prod the hot values come from pod_config (migration 0039 DEFAULTs:
+	// bid / 1.15 / 2); these env vars are NOT seeded into the DB.
+	PrimaryVastOfferMode            string  // PRIMARY_VAST_OFFER_MODE ("bid" default | "ondemand")
+	PrimaryVastBidMargin            float64 // PRIMARY_VAST_BID_MARGIN (default 1.15; bid = min_bid × margin)
+	PrimaryVastMaxPreemptionsPerDay int     // PRIMARY_VAST_MAX_PREEMPTIONS_PER_DAY (default 2; 0 disables the bid→on-demand fallback)
+	// Real-cost download amortization (BOOT-only, not hot): every primary cold
+	// start downloads ~19.3 GB of weights (FATO L4 benchmark 2026-10-01) billed
+	// at the host's inet_down_cost US$/GB. Ranking adds
+	// inet_down_cost*WeightsDownloadGB/ExpectedHoursPerStart per hour.
+	PrimaryWeightsDownloadGB     float64 // PRIMARY_WEIGHTS_DOWNLOAD_GB (default 20)
+	PrimaryVastMinReliability    float64 // PRIMARY_VAST_MIN_RELIABILITY (default 0.95; boot fallback of pod_config.min_reliability — PRIMARY only, emerg keeps 0.99)
+	PrimaryExpectedHoursPerStart float64 // PRIMARY_EXPECTED_HOURS_PER_START (default 8; conservative — ~10h/day weekdays, preemptions shorten it)
 	// Phase 6.6.Y cold-start plumbing (consumed by plan 6.6.Y-03).
 	PrimaryPublicPortBindBudgetSeconds     int      // PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS (default 120 per D-02; operator-tunable budget for a freshly-provisioned Vast pod to bind its public port — gated on gateway-observable URL reachability, NOT the unreliable Vast ports map per 6.6.Y-01 spike)
 	PrimaryVastRejectPrivateIP             bool     // PRIMARY_VAST_REJECT_PRIVATE_IP (default true; reject Vast hosts whose public IP falls in RFC1918 ranges. Opt-out: only literal "false" disables)
@@ -519,6 +533,13 @@ func Load() (Config, error) {
 		PrimaryVastPriceCapFallback: floatOr(os.Getenv("PRIMARY_VAST_PRICE_CAP_FALLBACK"), 0.60),
 		PrimaryVastNumGPUsPrimary:   atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_PRIMARY"), 1),
 		PrimaryVastNumGPUsFallback:  atoiOr(os.Getenv("PRIMARY_VAST_NUM_GPUS_FALLBACK"), 2),
+		// quick-261001-qdd primary offer policy (boot fallback; hot via pod_config).
+		PrimaryVastOfferMode:            envOr("PRIMARY_VAST_OFFER_MODE", "bid"),
+		PrimaryVastBidMargin:            floatOr(os.Getenv("PRIMARY_VAST_BID_MARGIN"), 1.15),
+		PrimaryVastMaxPreemptionsPerDay: atoiOr(os.Getenv("PRIMARY_VAST_MAX_PREEMPTIONS_PER_DAY"), 2),
+		PrimaryWeightsDownloadGB:        floatOr(os.Getenv("PRIMARY_WEIGHTS_DOWNLOAD_GB"), 20),
+		PrimaryVastMinReliability:       floatOr(os.Getenv("PRIMARY_VAST_MIN_RELIABILITY"), 0.95),
+		PrimaryExpectedHoursPerStart:    floatOr(os.Getenv("PRIMARY_EXPECTED_HOURS_PER_START"), 8),
 		// Phase 6.6.Y cold-start readers (consumed by plan 6.6.Y-03).
 		PrimaryPublicPortBindBudgetSeconds:     atoiOr(os.Getenv("PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS"), 120),
 		PrimaryVastRejectPrivateIP:             os.Getenv("PRIMARY_VAST_REJECT_PRIVATE_IP") != "false",

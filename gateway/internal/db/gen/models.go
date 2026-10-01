@@ -178,6 +178,10 @@ type AiGatewayPodConfig struct {
 	ProgressStallBudgetSMin int32          `json:"progress_stall_budget_s_min"`
 	ProgressStallBudgetSMax int32          `json:"progress_stall_budget_s_max"`
 	ForceMachineID          int64          `json:"force_machine_id"`
+	OfferMode               string         `json:"offer_mode"`
+	BidMargin               pgtype.Numeric `json:"bid_margin"`
+	MaxPreemptionsPerDay    int32          `json:"max_preemptions_per_day"`
+	MinReliability          pgtype.Numeric `json:"min_reliability"`
 }
 
 type AiGatewayPrice struct {
@@ -206,9 +210,12 @@ type AiGatewayPrimaryLifecycle struct {
 	VastInstanceID pgtype.Int8        `json:"vast_instance_id"`
 	AcceptedDph    pgtype.Numeric     `json:"accepted_dph"`
 	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
-	ShutdownReason pgtype.Text        `json:"shutdown_reason"`
-	Events         []byte             `json:"events"`
-	LeaderReplica  pgtype.Text        `json:"leader_replica"`
+	// Final reason the lifecycle ended (e.g. destroyed, instance_terminal_state, billing_stopped, preempted = bid instance stopped/outbid by Vast).
+	ShutdownReason pgtype.Text    `json:"shutdown_reason"`
+	Events         []byte         `json:"events"`
+	LeaderReplica  pgtype.Text    `json:"leader_replica"`
+	IsBid          pgtype.Bool    `json:"is_bid"`
+	BidPrice       pgtype.Numeric `json:"bid_price"`
 }
 
 type AiGatewayTenant struct {

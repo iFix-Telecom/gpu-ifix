@@ -62,6 +62,20 @@ UPDATE ai_gateway.pod_config SET host_id = $1, updated_at = NOW() WHERE id = TRU
 -- name: UpdatePodConfigFieldForceMachineID :exec
 UPDATE ai_gateway.pod_config SET force_machine_id = $1, updated_at = NOW() WHERE id = TRUE;
 
+-- name: UpdatePodConfigFieldOfferMode :exec
+-- quick-261001-qdd: 'bid' | 'ondemand' (DB CHECK + admin validation).
+UPDATE ai_gateway.pod_config SET offer_mode = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldBidMargin :exec
+UPDATE ai_gateway.pod_config SET bid_margin = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldMaxPreemptionsPerDay :exec
+UPDATE ai_gateway.pod_config SET max_preemptions_per_day = $1, updated_at = NOW() WHERE id = TRUE;
+
+-- name: UpdatePodConfigFieldMinReliability :exec
+-- quick-261001-qdd: PRIMARY-only offer reliability floor (0.5..1.0).
+UPDATE ai_gateway.pod_config SET min_reliability = $1, updated_at = NOW() WHERE id = TRUE;
+
 -- name: UpdatePodConfigFieldRejectPrivateIP :exec
 UPDATE ai_gateway.pod_config SET reject_private_ip = $1, updated_at = NOW() WHERE id = TRUE;
 
