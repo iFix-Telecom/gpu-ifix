@@ -423,5 +423,161 @@ class CreatePayloadTest(unittest.TestCase):
         self.assertNotIn("price", put[2])
 
 
+class WatchdogWindowTest(unittest.TestCase):
+    from datetime import datetime as _dt, timezone as _tz
+    from zoneinfo import ZoneInfo as _zi
+
+    def brt(self, h, m):
+        return self._dt(2026, 10, 1, h, m, tzinfo=self._zi("America/Sao_Paulo"))
+
+    def test_window_bounds(self):
+        self.assertFalse(u.in_watchdog_window(self.brt(6, 59)))
+        self.assertTrue(u.in_watchdog_window(self.brt(7, 0)))
+        self.assertTrue(u.in_watchdog_window(self.brt(13, 30)))
+        self.assertTrue(u.in_watchdog_window(self.brt(19, 59)))
+        self.assertFalse(u.in_watchdog_window(self.brt(20, 0)))
+
+    def test_converts_utc(self):
+        # 10:00 UTC = 07:00 BRT (UTC-3)
+        self.assertTrue(u.in_watchdog_window(self._dt(2026, 10, 1, 10, 0, tzinfo=self._tz.utc)))
+        # 23:30 UTC = 20:30 BRT
+        self.assertFalse(u.in_watchdog_window(self._dt(2026, 10, 1, 23, 30, tzinfo=self._tz.utc)))
+
+    def test_reprovision_cutoff(self):
+        self.assertTrue(u.reprovision_allowed(self.brt(17, 59)))
+        self.assertFalse(u.reprovision_allowed(self.brt(18, 0)))
+        self.assertFalse(u.reprovision_allowed(self.brt(19, 30)))
+
+
+class IsTerminalTest(unittest.TestCase):
+    def test_shapes(self):
+        self.assertTrue(u.is_terminal({"actual_status": "exited", "intended_status": "stopped"}))
+        self.assertTrue(u.is_terminal({"actual_status": "stopped"}))
+        self.assertTrue(u.is_terminal({"actual_status": "running", "intended_status": "stopped"}))
+        self.assertTrue(u.is_terminal({"cur_state": "stopped"}))
+        self.assertFalse(u.is_terminal({"actual_status": "running", "intended_status": "running"}))
+        self.assertFalse(u.is_terminal({"actual_status": "loading"}))
+        self.assertFalse(u.is_terminal(None))
+        self.assertFalse(u.is_terminal({}))
+
+
+class WatchdogDecisionTest(unittest.TestCase):
+    RUN = {"actual_status": "running", "intended_status": "running", "cur_state": "running"}
+    EXITED = {"actual_status": "exited", "intended_status": "stopped", "cur_state": "stopped"}
+
+    def d(self, **kw):
+        args = dict(in_window=True, start_running=False, instance_id=123, vast_state="ok",
+                    inst=self.RUN, health_ok=True, fail_streak=0, k=3)
+        args.update(kw)
+        return u.watchdog_decision(**args)
+
+    def test_out_of_window_keeps_streak(self):
+        self.assertEqual(self.d(in_window=False, fail_streak=2, health_ok=False),
+                         ("noop_window", 2))
+
+    def test_start_running_resets(self):
+        self.assertEqual(self.d(start_running=True, fail_streak=2, vast_state="gone"),
+                         ("noop_start", 0))
+
+    def test_no_instance(self):
+        self.assertEqual(self.d(instance_id=None, vast_state=None, inst=None), ("noop_none", 0))
+
+    def test_no_instance_needs_pod_retrigger(self):
+        self.assertEqual(self.d(instance_id=None, needs_pod=True), ("retrigger", 0))
+        self.assertEqual(self.d(instance_id=None, needs_pod=True, minutes_since_trigger=30),
+                         ("retrigger", 0))
+
+    def test_retrigger_respects_30min(self):
+        self.assertEqual(self.d(instance_id=None, needs_pod=True, minutes_since_trigger=12),
+                         ("noop_none", 0))
+
+    def test_api_error_never_counts(self):
+        self.assertEqual(self.d(vast_state="error", inst=None, health_ok=False, fail_streak=2),
+                         ("noop_api", 2))
+        self.assertEqual(self.d(vast_state="error", inst=None, health_ok=True, fail_streak=1),
+                         ("noop_api", 1))
+
+    def test_gone_is_immediate(self):
+        self.assertEqual(self.d(vast_state="gone", inst=None, health_ok=False), ("preempted", 0))
+        self.assertEqual(self.d(vast_state="gone", inst=None, health_ok=True), ("preempted", 0))
+
+    def test_terminal_and_dead_is_immediate(self):
+        self.assertEqual(self.d(inst=self.EXITED, health_ok=False), ("preempted", 0))
+
+    def test_terminal_transient_with_health_needs_k(self):
+        self.assertEqual(self.d(inst=self.EXITED, health_ok=True, fail_streak=0), ("suspect", 1))
+        self.assertEqual(self.d(inst=self.EXITED, health_ok=True, fail_streak=1), ("suspect", 2))
+        self.assertEqual(self.d(inst=self.EXITED, health_ok=True, fail_streak=2), ("preempted", 0))
+
+    def test_running_but_dead_needs_k(self):
+        self.assertEqual(self.d(health_ok=False, fail_streak=0), ("suspect", 1))
+        self.assertEqual(self.d(health_ok=False, fail_streak=1), ("suspect", 2))
+        self.assertEqual(self.d(health_ok=False, fail_streak=2), ("preempted", 0))
+        for st in ("loading", "offline", "unknown"):
+            self.assertEqual(self.d(inst={"actual_status": st}, health_ok=False), ("suspect", 1))
+
+    def test_ok_resets_streak(self):
+        self.assertEqual(self.d(health_ok=True, fail_streak=2), ("ok", 0))
+
+
+class HealthAllTest(unittest.TestCase):
+    INST = {"public_ipaddr": "1.2.3.4",
+            "ports": {"8000/tcp": [{"HostPort": "41000"}], "7998/tcp": [{"HostPort": "41998"}],
+                      "8021/tcp": [{"HostPort": "41021"}]}}
+
+    def run_h(self, alive_ports, inst=None):
+        orig = u.health
+        seen = []
+
+        def fake(ip, port, timeout=8):
+            seen.append(port)
+            return port in alive_ports
+        u.health = fake
+        try:
+            return u.pod_health(inst if inst is not None else self.INST), seen
+        finally:
+            u.health = orig
+
+    def test_all_dead_is_false(self):
+        ok, seen = self.run_h(set())
+        self.assertFalse(ok)
+        self.assertEqual(sorted(seen), [41000, 41021, 41998])
+
+    def test_partial_is_true(self):
+        self.assertTrue(self.run_h({41998})[0])
+
+    def test_all_alive(self):
+        self.assertTrue(self.run_h({41000, 41021, 41998})[0])
+
+    def test_no_ip_or_ports_is_false(self):
+        self.assertFalse(self.run_h({41000}, inst={"ports": self.INST["ports"]})[0])
+        self.assertFalse(self.run_h({41000}, inst={"public_ipaddr": "1.2.3.4"})[0])
+
+
+class VastGetStateTest(unittest.TestCase):
+    def run_g(self, code, raw):
+        orig = u.v.http
+        u.v.http = lambda *a, **k: (code, raw)
+        try:
+            return u.vast_get_state({"VAST_API_KEY": "x"}, 5)
+        finally:
+            u.v.http = orig
+
+    def test_ok(self):
+        self.assertEqual(self.run_g(200, b'{"instances": {"id": 5}}'), ("ok", {"id": 5}))
+
+    def test_gone(self):
+        self.assertEqual(self.run_g(200, b'{"instances": null}'), ("gone", None))
+        self.assertEqual(self.run_g(200, b'{"instances": {}}'), ("gone", None))
+        self.assertEqual(self.run_g(200, b'{"instances": []}'), ("gone", None))
+        self.assertEqual(self.run_g(404, b'nf'), ("gone", None))
+
+    def test_error(self):
+        self.assertEqual(self.run_g(0, b'timeout'), ("error", None))
+        self.assertEqual(self.run_g(500, b'x'), ("error", None))
+        self.assertEqual(self.run_g(429, b'x'), ("error", None))
+        self.assertEqual(self.run_g(200, b'not json'), ("error", None))
+
+
 if __name__ == "__main__":
     unittest.main()
