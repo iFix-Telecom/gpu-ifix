@@ -267,6 +267,13 @@ func newShedStackInternal(t *testing.T, useDCGM bool) *ShedStack {
 	// max stays at 4 (low) so a small burst saturates quickly.
 	stack.seedShedThresholds()
 
+	// Quick 260930-vkt: levanta os limites por tenant acima das taxas de
+	// carga dos testes de shed. Default da migration 0013 = 20 rps → SC1
+	// batia 429 do rate-limiter antes de saturar o tier-0.
+	if _, err := pool.Exec(ctx, `UPDATE ai_gateway.tenants SET rps_limit = 1000, rpm_limit = 60000`); err != nil {
+		t.Fatalf("lift rate limits: %v", err)
+	}
+
 	return stack
 }
 
@@ -434,6 +441,25 @@ func bootGateway(s *ShedStack, envOverrides map[string]string) string {
 			err, stdout.String(), stderr.String())
 	}
 	_ = resp.Body.Close()
+
+	// Quick 260930-vkt: warm-up serial do cache de auth (1 request
+	// autenticada por tenant) antes da fase de carga. Com o singleflight+L1
+	// do Verifier o stampede argon2id já não acontece, mas o warm-up isola
+	// os testes de shed do custo do 1º argon2 (~300ms/key em CI) para que a
+	// latência medida pelo FSM seja só a do tier-0 mock.
+	s.Tier0Mock.SetLatency(0)
+	for slug, key := range s.apiKeys {
+		t0 := time.Now()
+		req, _ := http.NewRequest("GET", s.GatewayURL+"/v1/health/upstreams", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		if r, err := http.DefaultClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			s.T.Logf("WARMUP %s status=%d took=%s", slug, r.StatusCode, time.Since(t0))
+		} else {
+			s.T.Logf("WARMUP %s err=%v", slug, err)
+		}
+	}
 
 	// Cleanup: SIGTERM + wait so the goroutines drain gracefully.
 	s.T.Cleanup(func() {

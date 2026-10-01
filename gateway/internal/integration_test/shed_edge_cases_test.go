@@ -14,6 +14,7 @@
 package integration
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"testing"
@@ -56,6 +57,47 @@ func driveFSMToOn(t *testing.T, stack *ShedStack, gwURL, tenantSlug string) {
 	}
 }
 
+// forceShedOn liga o override do operador gw:shed:force:local-llm=on (D-C5)
+// e espera o FSM refletir "on". Com o force ativo o ticker NÃO avalia sinais
+// (tick.go), então o FSM fica em On de forma determinística — sem depender
+// de carga/p95 (quick 260930-vkt).
+func forceShedOn(t *testing.T, stack *ShedStack) {
+	t.Helper()
+	if err := stack.Rdb.Set(stack.Ctx, "gw:shed:force:local-llm", "on", 60*time.Second).Err(); err != nil {
+		t.Fatalf("set shed-force: %v", err)
+	}
+	t.Cleanup(func() { _ = stack.Rdb.Del(stack.Ctx, "gw:shed:force:local-llm").Err() })
+	if state := waitForState(t, stack, "local-llm", "on", 5*time.Second); state != "on" {
+		t.Fatalf("shed-force on não refletiu no FSM; last state=%q", state)
+	}
+}
+
+// occupyTier0Slot dispara 1 request de chat em background para o tenant e
+// devolve um canal que fecha quando ela termina. Usado para ocupar o único
+// slot de inflight do tenant (cap=1) enquanto o tier-0 mock segura a
+// resposta. NÃO usa authedPost (t.Fatalf fora da goroutine do teste).
+func occupyTier0Slot(t *testing.T, gwURL, apiKey string) <-chan int {
+	t.Helper()
+	done := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequest("POST", gwURL+"/v1/chat/completions", bytes.NewReader(chatBody()))
+		if err != nil {
+			done <- -1
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			done <- -1
+			return
+		}
+		_ = drainBody(resp)
+		done <- resp.StatusCode
+	}()
+	return done
+}
+
 // TestSensitiveSaturated503 validates D-B3 — when a sensitive tenant's
 // request arrives while local-llm FSM=ON and the tenant has exhausted
 // its local inflight cap, the gateway MUST return 503 with
@@ -63,39 +105,37 @@ func driveFSMToOn(t *testing.T, stack *ShedStack, gwURL, tenantSlug string) {
 // + audit row marked upstream="shed_blocked_sensitive" (LGPD: sensitive
 // data cannot be routed to external tier-1 providers).
 //
-// Test approach: drive FSM=on via non-sensitive tenant warmup, then send
-// one telefonia (sensitive) request. We can rely on the cap check inside
-// the middleware: with FSM=on + sensitive tenant + any inflight >= cap
-// → 503 path triggered. The single request may or may not exceed cap,
-// but the FSM=on + sensitive precondition is enough to exercise the
-// 503 branch when inflight is at-or-above any cap value. To make this
-// deterministic, we lower the sensitive tenant's cap to 0 via SQL
-// UPDATE before the test request.
+// Quick 260930-vkt: versão anterior setava local_inflight_max_llm = 0, que
+// no middleware significa "sem config → defaultCapForRole = 4"
+// (middleware.go), então a request passava com 200. Agora o caminho é
+// determinístico: cap=1 gravado ANTES do boot (sem depender de NOTIFY),
+// FSM forçado ON via gw:shed:force, 1 request lenta ocupa o slot e a 2ª
+// cai obrigatoriamente no Branch 10a.
 func TestSensitiveSaturated503(t *testing.T) {
 	if os.Getenv("CI") == "true" && os.Getenv("CI_ALLOW_TIGHT_SHED_TIMING") != "1" {
 		t.Skip("skipping in CI — testcontainers + tight timing flaky on free-tier runners. Run locally or set CI_ALLOW_TIGHT_SHED_TIMING=1.")
 	}
 	stack := newShedStack(t)
-	gwURL := bootGateway(stack, nil)
-
-	// Phase 1: drive FSM=on using non-sensitive tenant.
-	driveFSMToOn(t, stack, gwURL, "converseai")
-
-	// Phase 2: lower telefonia's LLM cap to 0 so any request lands
-	// above-cap immediately, triggering the sensitive 503 path.
-	// tenants_changed NOTIFY triggers tenants.Loader.Refresh; allow
-	// ~1s for propagation.
 	sqlUpdate(t, stack, `
 		UPDATE ai_gateway.tenants
-		SET local_inflight_max_llm = 0
+		SET local_inflight_max_llm = 1
 		WHERE slug = 'telefonia'
 	`)
-	time.Sleep(1500 * time.Millisecond)
+	gwURL := bootGateway(stack, nil)
 
-	// Phase 3: send one sensitive request. Expect 503 + Retry-After:5.
+	forceShedOn(t, stack)
+
+	// Ocupa o único slot de telefonia: tier-0 segura 1.5s.
+	stack.Tier0Mock.SetLatency(1500 * time.Millisecond)
+	firstDone := occupyTier0Slot(t, gwURL, stack.ApiKey("telefonia"))
+	// Auth já aquecido no boot (warm-up) → a 1ª request passa do middleware
+	// em ms; 400ms de folga garante que ela está em voo (inflight=1).
+	time.Sleep(400 * time.Millisecond)
+
 	resp := authedPost(t, gwURL, "/v1/chat/completions", stack.ApiKey("telefonia"), chatBody())
 	body := drainBody(resp)
-	t.Logf("sensitive 503 response: status=%d body=%s", resp.StatusCode, body)
+	t.Logf("sensitive 503 response: status=%d retry-after=%q body=%s",
+		resp.StatusCode, resp.Header.Get("Retry-After"), body)
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("D-B3 FAIL: expected 503, got %d (body=%s)", resp.StatusCode, body)
@@ -103,89 +143,119 @@ func TestSensitiveSaturated503(t *testing.T) {
 	if ra := resp.Header.Get("Retry-After"); ra != "5" {
 		t.Errorf("D-B3 FAIL: expected Retry-After=5, got %q", ra)
 	}
-	// Envelope code can be either "upstream_saturated_for_sensitive_tenant"
-	// or "upstream_unavailable_for_sensitive_tenant" depending on which
-	// middleware fires first (shed vs Phase 3 sensitive-block). Both are
-	// LGPD-compliant 503s; accept either.
-	if !containsAny(body, "upstream_saturated_for_sensitive_tenant",
-		"upstream_unavailable_for_sensitive_tenant") {
-		t.Errorf("D-B3 FAIL: envelope missing sensitive-block code; body=%s", body)
+	if !containsAny(body, "upstream_saturated_for_sensitive_tenant") {
+		t.Errorf("D-B3 FAIL: envelope missing upstream_saturated_for_sensitive_tenant; body=%s", body)
 	}
 
-	// Phase 4: confirm audit row landed with the reserved upstream value.
+	// A request que ocupava o slot deve ter sido servida pelo tier-0.
+	if code := <-firstDone; code != http.StatusOK {
+		t.Errorf("D-B3: request que ocupava o slot terminou com status=%d (esperado 200 do tier-0)", code)
+	}
+
 	// Audit writer is buffered (200ms flush); poll for up to 3s.
 	deadline := time.Now().Add(3 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		if auditCountFor(t, stack, "shed_blocked_sensitive") > 0 ||
-			auditCountFor(t, stack, "blocked_sensitive") > 0 {
+		if auditCountFor(t, stack, "shed_blocked_sensitive") > 0 {
 			found = true
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	if !found {
-		t.Errorf("D-B3 audit row missing: no row with upstream='shed_blocked_sensitive' or 'blocked_sensitive'")
+		t.Errorf("D-B3 audit row missing: no row with upstream='shed_blocked_sensitive'")
 	}
 }
 
-// TestTier1UnavailableShedded503 validates D-D1 — when shed forces
-// tier-1 fallback AND tier-1 is also unavailable (breaker OPEN or 5xx),
-// gateway returns 503 + Retry-After:30 + envelope code "all_chat_upstreams_saturated".
+// TestTier1UnavailableShedded503 validates D-D1 — when shed must divert a
+// normal tenant over its cap AND no tier-1 is available, gateway returns
+// 503 + Retry-After:30 + envelope code "all_chat_upstreams_saturated".
 //
-// Test approach: drive FSM=on; force tier-1 mock to return 503 so the
-// breaker trips; issue a normal-tenant request which should now hit
-// the all-chat-upstreams-saturated path.
+// Quick 260930-vkt: o caminho D-D1 (Branch 10b do shed middleware) só
+// dispara quando Loader.Resolve("llm", 1) não encontra upstream habilitado —
+// breaker aberto no tier-1 NÃO leva ao 10b (o middleware só faz override
+// para o tier-1 e quem decide depois é o dispatcher). A versão anterior
+// tentava abrir o breaker com 503 do mock e por isso nunca era
+// determinística (asserção soft). Agora: tier-1 de llm desabilitado ANTES do
+// boot (reabilitado no Cleanup — tabela upstreams não é truncada pelo
+// freshSchema), cap=1, FSM forçado ON, 1 request lenta ocupa o slot e a 2ª
+// cai obrigatoriamente no 10b. Asserção estrita.
 func TestTier1UnavailableShedded503(t *testing.T) {
 	if os.Getenv("CI") == "true" && os.Getenv("CI_ALLOW_TIGHT_SHED_TIMING") != "1" {
 		t.Skip("skipping in CI — testcontainers + tight timing flaky on free-tier runners. Run locally or set CI_ALLOW_TIGHT_SHED_TIMING=1.")
 	}
 	stack := newShedStack(t)
+
+	rows, err := stack.Pool.Query(stack.Ctx, `
+		UPDATE ai_gateway.upstreams SET enabled = FALSE
+		WHERE role = 'llm' AND tier >= 1 AND enabled
+		RETURNING name`)
+	if err != nil {
+		t.Fatalf("disable llm tier-1: %v", err)
+	}
+	var disabled []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		disabled = append(disabled, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("disable llm tier-1 rows: %v", err)
+	}
+	t.Cleanup(func() {
+		if len(disabled) > 0 {
+			_, _ = stack.Pool.Exec(stack.Ctx,
+				`UPDATE ai_gateway.upstreams SET enabled = TRUE WHERE name = ANY($1)`, disabled)
+		}
+	})
+	t.Logf("D-D1: llm tier-1 desabilitados para o teste: %v", disabled)
+
+	sqlUpdate(t, stack, `
+		UPDATE ai_gateway.tenants
+		SET local_inflight_max_llm = 1
+		WHERE slug = 'converseai'
+	`)
 	gwURL := bootGateway(stack, nil)
 
-	// Drive FSM=on. Keep load on a separate tenant so the test request
-	// triggers the shed → tier-1 → breaker-open path cleanly.
-	driveFSMToOn(t, stack, gwURL, "campanhas")
+	forceShedOn(t, stack)
 
-	// Force tier-1 mock to 503 — drives the openrouter-chat breaker open.
-	stack.Tier1Mock.SetStatus(503)
+	stack.Tier0Mock.SetLatency(1500 * time.Millisecond)
+	firstDone := occupyTier0Slot(t, gwURL, stack.ApiKey("converseai"))
+	time.Sleep(400 * time.Millisecond)
 
-	// Send enough requests to trip the breaker (default
-	// BREAKER_CONSECUTIVE_FAILURES=3 in env defaults). Cap=4 + 5 requests
-	// at 100ms apart pushes most through shed → tier-1 → 503 → trip.
-	for i := 0; i < 8; i++ {
-		resp := authedPost(t, gwURL, "/v1/chat/completions",
-			stack.ApiKey("converseai"), chatBody())
-		_ = drainBody(resp)
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Now the breaker should be open. The next shed-redirected request
-	// must hit the D-D1 path.
-	resp := authedPost(t, gwURL, "/v1/chat/completions",
-		stack.ApiKey("converseai"), chatBody())
+	resp := authedPost(t, gwURL, "/v1/chat/completions", stack.ApiKey("converseai"), chatBody())
 	body := drainBody(resp)
 	t.Logf("D-D1 response: status=%d retry-after=%q body=%s",
 		resp.StatusCode, resp.Header.Get("Retry-After"), body)
 
-	// Soft assertion: at least one of the following must be true for the
-	// path to be exercised. We accept either 503 + Retry-After:30 OR a
-	// 5xx with all_chat_upstreams_saturated; some timing windows may still
-	// see tier-0 succeed (if shed FSM dropped to recovering between probes).
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		if ra := resp.Header.Get("Retry-After"); ra != "30" {
-			t.Logf("D-D1 note: 503 returned but Retry-After=%q (expected 30 if hitting D-D1 path)", ra)
-		}
-		if !containsAny(body, "all_chat_upstreams_saturated",
-			"upstream_unavailable") {
-			t.Logf("D-D1 note: 503 envelope lacks expected code; body=%s", body)
-		}
-	} else {
-		t.Logf("D-D1: tier-1 unavailable path not triggered cleanly (status=%d) — may need breaker-trip retry", resp.StatusCode)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("D-D1 FAIL: expected 503, got %d (body=%s)", resp.StatusCode, body)
 	}
-	// Test does not Fail() — this path is timing-sensitive and the goal
-	// is to exercise it for coverage. Strict assertion is reserved for
-	// LIVE UAT per VALIDATION.md Manual-Only column.
+	if ra := resp.Header.Get("Retry-After"); ra != "30" {
+		t.Errorf("D-D1 FAIL: expected Retry-After=30, got %q", ra)
+	}
+	if !containsAny(body, "all_chat_upstreams_saturated") {
+		t.Errorf("D-D1 FAIL: envelope missing all_chat_upstreams_saturated; body=%s", body)
+	}
+	if code := <-firstDone; code != http.StatusOK {
+		t.Errorf("D-D1: request que ocupava o slot terminou com status=%d (esperado 200 do tier-0)", code)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var found bool
+	for time.Now().Before(deadline) {
+		if auditCountFor(t, stack, "shed_tier1_unavailable") > 0 {
+			found = true
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("D-D1 audit row missing: no row with upstream='shed_tier1_unavailable'")
+	}
 }
 
 // TestPeakOffHoursNoopWithMetric validates D-D3 — when a peak-mode

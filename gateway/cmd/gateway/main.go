@@ -464,6 +464,28 @@ func main() {
 	})
 	shedSet.Rebuild(upstreamNames)
 
+	// Quick 260930-vkt: aplica shed_arm_seconds / shed_recover_seconds do
+	// circuit_config nas FSMs (gap da Phase 5 — antes a FSM ficava fixa em
+	// 30/60). 0/ausente → default 30/60. Prod hoje não tem rows com valores
+	// custom (diagnóstico do debugger) → comportamento de prod inalterado.
+	// Chamado no boot e em onUpstreamsReload (LISTEN + backstop 60s).
+	applyShedConfigs := func() {
+		names := loader.Names()
+		cfgs := make(map[string]shed.Config, len(names))
+		for _, n := range names {
+			u, ok := loader.Get(n)
+			if !ok {
+				continue
+			}
+			cfgs[n] = shed.Config{
+				ArmSeconds:     int64(u.CircuitConfig.ShedArmSeconds),
+				RecoverSeconds: int64(u.CircuitConfig.ShedRecoverSeconds),
+			}
+		}
+		shedSet.ApplyConfigs(cfgs)
+	}
+	applyShedConfigs()
+
 	// Hydrate FSM remote-state overlay from Redis BEFORE Subscribe
 	// starts (RESEARCH Pitfall 3 mitigation #1). Lossy Pub/Sub may have
 	// missed the prior transitions; HGETALL gives the replica an
@@ -537,6 +559,7 @@ func main() {
 	onUpstreamsReload := func() {
 		breakerSet.Rebuild(loader.Names())
 		shedSet.Rebuild(loader.Names())
+		applyShedConfigs()
 		for _, n := range loader.Names() {
 			if _, ok := shedLatency[n]; !ok {
 				shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)

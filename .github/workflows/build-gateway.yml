@@ -108,6 +108,13 @@ jobs:
         run: |
           go test -tags=integration ./gateway/internal/integration_test/... -count=1 -v -timeout=10m
 
+      # Quick 260930-vkt: os testes de integração do gatewayctl
+      # (model_alias, primary_lifecycles, upstreams, ...) não rodavam no CI
+      # e apodreceram sem ninguém ver.
+      - name: Integration tests (gatewayctl)
+        run: |
+          go test -tags=integration ./gateway/cmd/gatewayctl/... -count=1 -v -timeout=10m
+
   compute-tags:
     name: Compute image tags
     runs-on: ubuntu-latest

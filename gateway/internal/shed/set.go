@@ -111,6 +111,39 @@ func (s *Set) Rebuild(names []string) {
 	}
 }
 
+// ApplyConfigs aplica ArmSeconds/RecoverSeconds vindos do circuit_config de
+// cada upstream nas FSMs existentes (quick 260930-vkt). Corrige o gap da
+// Phase 5 (ac8cb8e): shed_arm_seconds/shed_recover_seconds eram parseados do
+// JSONB mas FSM.UpdateConfig não tinha caller fora de testes — FSM ficava
+// fixa nos defaults 30/60.
+//
+// Regras:
+//   - valor <= 0 → default do Set (Options.DefaultArmSeconds/RecoverSeconds);
+//   - nome sem FSM (não passou por Rebuild) → ignorado;
+//   - FSMs ausentes do mapa NÃO são tocadas;
+//   - estado da FSM é preservado (D-C5) — só os tunables mudam, via swap
+//     atômico; vale a partir do próximo Evaluate.
+//
+// Chamar SEMPRE depois de Rebuild (FSMs novas nascem com defaultCfg).
+func (s *Set) ApplyConfigs(cfgs map[string]Config) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for name, in := range cfgs {
+		f, ok := s.fsms[name]
+		if !ok {
+			continue
+		}
+		cfg := s.defaultCfg
+		if in.ArmSeconds > 0 {
+			cfg.ArmSeconds = in.ArmSeconds
+		}
+		if in.RecoverSeconds > 0 {
+			cfg.RecoverSeconds = in.RecoverSeconds
+		}
+		f.UpdateConfig(cfg) // UpdateConfig fixa cfg.Upstream = nome da FSM
+	}
+}
+
 // Get returns the FSM for name + a found flag. The pointer returned is
 // stable across hot-reloads (same pointer for unchanged names) — the
 // dispatcher can safely cache it for the request lifetime.

@@ -5,16 +5,19 @@ package auth
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
@@ -34,13 +37,30 @@ type authQueries interface {
 //   - positive cache hit → 0 DB, 0 argon2
 //   - negative cache hit → 0 DB, 0 argon2
 //   - cache miss → 1 DB (GetActiveKeyByLookupHash, UNIQUE index → ≤1 row) + ≤1 argon2
+//
+// Quick 260930-vkt: hierarquia L1 in-process → Redis positivo → Redis negativo
+// → singleflight(DB + argon2 + cachePut + l1Put). N requests concorrentes da
+// MESMA key em miss executam 1 lookup + 1 argon2 (não N); com Redis fora, o L1
+// evita argon2 por request.
 type Verifier struct {
 	pool     *pgxpool.Pool
 	q        authQueries
 	redis    *redis.Client
 	log      *slog.Logger
 	touchBuf *TouchBuffer
+
+	// sf coalesce misses concorrentes por hex(LookupHash(rawKey)) (sha256
+	// completo → resultado só é compartilhado entre requests da mesma key).
+	sf singleflight.Group
+	// l1 é o cache positivo in-process (ver l1cache.go para invariantes).
+	l1 *l1Cache
+	// verifyHash é VerifyHash em prod; testes substituem para contar argon2.
+	verifyHash func(raw, hash string) (bool, error)
 }
+
+// sfTimeout limita o trabalho compartilhado do singleflight (DB + argon2),
+// que roda desacoplado do ctx do chamador líder.
+const sfTimeout = 5 * time.Second
 
 // NewVerifier wires the pool, queries, redis client, and the debounced
 // TouchBuffer. The caller owns touchBuf lifecycle and MUST call
@@ -51,11 +71,13 @@ func NewVerifier(pool *pgxpool.Pool, rdb *redis.Client, log *slog.Logger, touchB
 		log = slog.Default()
 	}
 	return &Verifier{
-		pool:     pool,
-		q:        gen.New(pool),
-		redis:    rdb,
-		log:      log.With("module", "AUTH"),
-		touchBuf: touchBuf,
+		pool:       pool,
+		q:          gen.New(pool),
+		redis:      rdb,
+		log:        log.With("module", "AUTH"),
+		touchBuf:   touchBuf,
+		l1:         newL1Cache(l1TTL, l1MaxEntries),
+		verifyHash: VerifyHash,
 	}
 }
 
@@ -66,10 +88,12 @@ func NewVerifierWithQueries(q authQueries, rdb *redis.Client, log *slog.Logger, 
 		log = slog.Default()
 	}
 	return &Verifier{
-		q:        q,
-		redis:    rdb,
-		log:      log.With("module", "AUTH"),
-		touchBuf: touchBuf,
+		q:          q,
+		redis:      rdb,
+		log:        log.With("module", "AUTH"),
+		touchBuf:   touchBuf,
+		l1:         newL1Cache(l1TTL, l1MaxEntries),
+		verifyHash: VerifyHash,
 	}
 }
 
@@ -101,13 +125,17 @@ func enumString(v interface{}) string {
 
 // Verify resolves rawKey to an AuthContext.
 //
-// Hot-path design (Codex review [HIGH] 02-03):
+// Hot-path design (Codex review [HIGH] 02-03 + quick 260930-vkt):
 //  1. Malformed reject → 0 DB, 0 argon2.
-//  2. Positive cache hit → 0 DB, 0 argon2.
-//  3. Negative cache hit (D-A2 amendment, formalized) → 0 DB, 0 argon2.
-//  4. Cache miss → GetActiveKeyByLookupHash returns ≤1 row via UNIQUE index
-//     on key_lookup_hash. At most 1 argon2id verify regardless of total
-//     active-key count.
+//  2. L1 in-process hit → 0 Redis, 0 DB, 0 argon2 (sobrevive a Redis fora).
+//  3. Positive Redis cache hit → 0 DB, 0 argon2 (NÃO popula L1 — preserva a
+//     janela de revogação ≤ 60s de D-A2).
+//  4. Negative cache hit (D-A2 amendment, formalized) → 0 DB, 0 argon2.
+//  5. Cache miss → singleflight por hex(LookupHash): 1 GetActiveKeyByLookupHash
+//     (UNIQUE index → ≤1 row) + ≤1 argon2id compartilhados entre todos os
+//     requests concorrentes da mesma key. O trabalho roda com ctx desacoplado
+//     do líder (WithoutCancel + timeout 5s) para que cancelamento do líder não
+//     falhe os waiters; cada waiter ainda respeita o próprio ctx.
 //
 // Timing-attack note: the SHA-256 + DB roundtrip happen for both known and
 // unknown keys (UNIQUE index returns 0 or 1 rows in the same plan shape). An
@@ -122,14 +150,20 @@ func (v *Verifier) Verify(ctx context.Context, rawKey string) (AuthContext, erro
 		return AuthContext{}, ErrMalformedKey
 	}
 
-	// 1. Positive cache fast path.
+	// 1. L1 in-process (só entradas "active" vindas do caminho autoritativo).
+	l1Key := cacheKeyFor(rawKey)
+	if hit, ok := v.l1.get(l1Key); ok {
+		return hitToAuth(hit)
+	}
+
+	// 2. Positive cache fast path.
 	if hit, found, err := v.cacheGet(ctx, rawKey); err == nil && found {
 		return hitToAuth(hit)
 	} else if err != nil {
 		v.log.WarnContext(ctx, "auth cache get failed", "err", err)
 	}
 
-	// 2. Negative cache fast path — formalized D-A2 amendment.
+	// 3. Negative cache fast path — formalized D-A2 amendment.
 	// Unknown keys seen in the last 5s return 401 without DB/argon2. TTL is
 	// deliberately shorter than positive cache (60s) so a newly-issued key
 	// propagates quickly. Codex review [HIGH] 02-03.
@@ -137,28 +171,49 @@ func (v *Verifier) Verify(ctx context.Context, rawKey string) (AuthContext, erro
 		return AuthContext{}, ErrInvalidAPIKey
 	}
 
-	// 3. Indexed lookup — 0 or 1 rows (UNIQUE index on key_lookup_hash).
+	// 4. Singleflight: DB + argon2 + caches, uma vez por key em voo.
 	lookup := LookupHash(rawKey)
+	ch := v.sf.DoChan(hex.EncodeToString(lookup), func() (interface{}, error) {
+		sfCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sfTimeout)
+		defer cancel()
+		return v.lookupAndVerify(sfCtx, rawKey, l1Key, lookup)
+	})
+	select {
+	case <-ctx.Done():
+		return AuthContext{}, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return AuthContext{}, res.Err
+		}
+		return hitToAuth(res.Val.(cacheEntry))
+	}
+}
+
+// lookupAndVerify é o caminho autoritativo (roda dentro do singleflight):
+// lookup indexado + ≤1 argon2 + cachePut (Redis) + l1.put (só "active") +
+// touch. Nenhum erro é cacheado como sucesso.
+func (v *Verifier) lookupAndVerify(ctx context.Context, rawKey, l1Key string, lookup []byte) (cacheEntry, error) {
+	// Indexed lookup — 0 or 1 rows (UNIQUE index on key_lookup_hash).
 	row, err := v.q.GetActiveKeyByLookupHash(ctx, lookup)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			_ = v.negCachePut(ctx, rawKey)
-			return AuthContext{}, ErrInvalidAPIKey
+			return cacheEntry{}, ErrInvalidAPIKey
 		}
-		return AuthContext{}, fmt.Errorf("auth: db lookup: %w", err)
+		return cacheEntry{}, fmt.Errorf("auth: db lookup: %w", err)
 	}
 
-	// 4. At most 1 argon2 verify on the single candidate row. Mismatch here
+	// At most 1 argon2 verify on the single candidate row. Mismatch here
 	// is essentially impossible given the UNIQUE index on key_lookup_hash
 	// (SHA-256 collision), but defense-in-depth: still reject + neg cache.
-	match, vErr := VerifyHash(rawKey, row.KeyHash)
+	match, vErr := v.verifyHash(rawKey, row.KeyHash)
 	if vErr != nil {
 		v.log.ErrorContext(ctx, "argon2 verify error", "err", vErr, "api_key_id", row.ID.String())
-		return AuthContext{}, ErrInvalidAPIKey
+		return cacheEntry{}, ErrInvalidAPIKey
 	}
 	if !match {
 		_ = v.negCachePut(ctx, rawKey)
-		return AuthContext{}, ErrInvalidAPIKey
+		return cacheEntry{}, ErrInvalidAPIKey
 	}
 
 	entry := cacheEntry{
@@ -169,12 +224,15 @@ func (v *Verifier) Verify(ctx context.Context, rawKey string) (AuthContext, erro
 		KeyPrefix: row.KeyPrefix,
 	}
 	_ = v.cachePut(ctx, rawKey, entry)
+	if entry.Status == "active" {
+		v.l1.put(l1Key, entry)
+	}
 	// Debounced touch (Codex review [MEDIUM] 02-03) — coalesce multiple
 	// requests for the same key into one UPDATE flushed every 60s.
 	if v.touchBuf != nil {
 		v.touchBuf.Enqueue(row.ID)
 	}
-	return hitToAuth(entry)
+	return entry, nil
 }
 
 func hitToAuth(e cacheEntry) (AuthContext, error) {
