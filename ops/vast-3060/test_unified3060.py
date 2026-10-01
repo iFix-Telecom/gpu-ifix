@@ -87,5 +87,74 @@ class OnstartTest(unittest.TestCase):
         self.assertLess(body.index("cuda_compat_guard ||"), body.index("speaches-supervisor"))
 
 
+class FlipTargetsTest(unittest.TestCase):
+    PORTS = {"8000/tcp": 41000, "8021/tcp": 41021, "7998/tcp": 41998}
+
+    def test_order_and_urls(self):
+        self.assertEqual(u.build_flip_targets("1.2.3.4", self.PORTS), [
+            ("local-stt", "http://1.2.3.4:41000"),
+            ("kokoro-tts", "http://1.2.3.4:41021"),
+            ("rerank-gpu", "http://1.2.3.4:41998"),
+            ("embed-gpu", "http://1.2.3.4:41998"),
+        ])
+
+    def test_missing_port_raises(self):
+        ports = {"8000/tcp": 41000, "7998/tcp": 41998}
+        with self.assertRaises((KeyError, ValueError)):
+            u.build_flip_targets("1.2.3.4", ports)
+
+    def test_none_port_raises(self):
+        ports = dict(self.PORTS, **{"8021/tcp": None})
+        with self.assertRaises((KeyError, ValueError)):
+            u.build_flip_targets("1.2.3.4", ports)
+
+    def test_empty_ip_raises(self):
+        with self.assertRaises(ValueError):
+            u.build_flip_targets("", self.PORTS)
+
+    def test_rows_match_legacy_envmap_ports(self):
+        # cada row nova aponta pra mesma porta interna da env antiga
+        legacy = {"local-stt": "UPSTREAM_STT_URL", "kokoro-tts": "UPSTREAM_TTS_KOKORO_URL",
+                  "rerank-gpu": "UPSTREAM_RERANK_URL", "embed-gpu": "UPSTREAM_EMBED_GPU_URL"}
+        for row, env in legacy.items():
+            self.assertEqual(u.UPSTREAM_PORTS[row], u.ENVMAP[env])
+
+
+class GatewayctlCmdTest(unittest.TestCase):
+    def test_argv_exact(self):
+        argv = u.gatewayctl_update_cmd("local-stt", "http://1.2.3.4:41000")
+        self.assertEqual(argv[:-1], ["ssh", "-i", u.SSH_KEY, "-o", "BatchMode=yes",
+                                     "-o", "ConnectTimeout=10", "root@10.10.10.50"])
+        self.assertEqual(argv[-1],
+                         "docker exec $(docker ps -q -f name=ai-gateway-prod_gateway | head -1) "
+                         "/gatewayctl upstreams update --name local-stt --url http://1.2.3.4:41000")
+
+    def test_quotes_hostile_values(self):
+        # shlex.quote: nada de injecao no shell remoto
+        argv = u.gatewayctl_update_cmd("x;rm -rf /", "http://1.2.3.4:1")
+        self.assertIn("--name 'x;rm -rf /'", argv[-1])
+
+    def test_invalid_url_raises_before_subprocess(self):
+        for bad in ["", "ftp://h", "http://", "1.2.3.4:80", "not a url", None]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                u.gatewayctl_update_cmd("local-stt", bad)
+
+    def test_validate_url_accepts(self):
+        for ok in ["http://1.2.3.4:5000", "https://h", "http://h:1/x"]:
+            self.assertEqual(u.validate_url(ok), ok)
+
+    def test_flip_upstreams_no_subprocess_on_bad_ports(self):
+        # porta ausente estoura antes de qualquer subprocess.run
+        called = []
+        orig = u.subprocess.run
+        u.subprocess.run = lambda *a, **k: called.append(a)
+        try:
+            with self.assertRaises((KeyError, ValueError)):
+                u.flip_upstreams({}, "1.2.3.4", {"8000/tcp": 1})
+        finally:
+            u.subprocess.run = orig
+        self.assertEqual(called, [])
+
+
 if __name__ == "__main__":
     unittest.main()
