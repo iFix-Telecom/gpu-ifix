@@ -186,11 +186,15 @@ func Middleware(d MiddlewareDeps, log *slog.Logger) func(http.Handler) http.Hand
 				return
 			}
 
-			// Branch 07 — FSM not StateOn. Off / Armed / Recovering
-			// all keep tier-0; trackAndPass records the latency
-			// sample so the FSM ticker can compute p95.
+			// Branch 07 — FSM not shedding. Off / Armed keep tier-0;
+			// trackAndPass records the latency sample so the FSM ticker
+			// can compute p95. Recovering KEEPS shedding (quick
+			// 261001-9fh): passing everything through in Recovering let
+			// load snap back the next tick and the FSM flapped
+			// On↔Recovering (SC2: 90+84 transitions in 6 cycles). Shed
+			// stops only when recover_seconds elapses clean → Off.
 			fsm, _ := d.Set.Get(t0.Name)
-			if fsm == nil || fsm.State() != StateOn {
+			if fsm == nil || !isShedding(fsm.State()) {
 				d.trackAndPass(w, r, next, t0.Name, tenantID)
 				return
 			}
@@ -326,4 +330,10 @@ func defaultCapForRole(role string) int {
 		return 8
 	}
 	return 1
+}
+
+// isShedding reports whether the FSM state sheds over-cap traffic. On and
+// Recovering shed; Off and Armed pass through (quick 261001-9fh).
+func isShedding(s State) bool {
+	return s == StateOn || s == StateRecovering
 }

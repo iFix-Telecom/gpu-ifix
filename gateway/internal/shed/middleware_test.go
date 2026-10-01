@@ -419,6 +419,80 @@ func TestMiddleware_Branch10b_FSMOn_NoTier1(t *testing.T) {
 	}
 }
 
+// Quick 261001-9fh: Recovering keeps shedding (fixes On↔Recovering flap —
+// SC2 measured 90 On→Recovering + 84 Recovering→On in 6 cycles when
+// Recovering passed everything through and load snapped back).
+
+// Branch 09 under Recovering: normal tenant over cap → still diverted to tier-1.
+func TestMiddleware_Recovering_NormalCapped_Diverts(t *testing.T) {
+	d, r, w := buildDeps(t, StateRecovering, 10, "normal", true)
+	called := false
+	h := Middleware(d, silentLogger())(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		if got := auditctx.UpstreamOverrideFromContext(req.Context()); got != "openrouter-chat" {
+			t.Errorf("Recovering over-cap must divert to tier-1; got override %q", got)
+		}
+		if shed := auditctx.ShedDecisionFromContext(req.Context()); shed != auditctx.UpstreamShedSaturatedValue {
+			t.Errorf("expected shed_decision=%q, got %q", auditctx.UpstreamShedSaturatedValue, shed)
+		}
+	}))
+	h.ServeHTTP(w, r)
+	if !called {
+		t.Fatal("Recovering normal-capped must call next with tier-1 override")
+	}
+}
+
+// Branch 10a under Recovering: sensitive tenant over cap → 503 (never external).
+func TestMiddleware_Recovering_SensitiveCapped_503(t *testing.T) {
+	d, r, w := buildDeps(t, StateRecovering, 10, "sensitive", true)
+	called := false
+	h := Middleware(d, silentLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+	}))
+	h.ServeHTTP(w, r)
+	if called {
+		t.Fatal("Recovering sensitive-capped must not reach next")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+// Branch 08 under Recovering: tenant under cap keeps tier-0.
+func TestMiddleware_Recovering_UnderCap_Passes(t *testing.T) {
+	d, r, w := buildDeps(t, StateRecovering, 1, "normal", true)
+	called := false
+	h := Middleware(d, silentLogger())(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		if v := auditctx.UpstreamOverrideFromContext(req.Context()); v != "" {
+			t.Errorf("Recovering under-cap must not divert; got override %q", v)
+		}
+	}))
+	h.ServeHTTP(w, r)
+	if !called {
+		t.Fatal("Recovering under-cap should call next")
+	}
+}
+
+// Branch 07 under Armed: not shedding yet (hysteresis-in) → pass even over cap.
+func TestMiddleware_Armed_OverCap_Passes(t *testing.T) {
+	d, r, w := buildDeps(t, StateArmed, 10, "normal", true)
+	called := false
+	h := Middleware(d, silentLogger())(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		if v := auditctx.UpstreamOverrideFromContext(req.Context()); v != "" {
+			t.Errorf("Armed must not divert; got override %q", v)
+		}
+		if shed := auditctx.ShedDecisionFromContext(req.Context()); shed != "passed" {
+			t.Errorf("Armed must stamp shed_decision=passed; got %q", shed)
+		}
+	}))
+	h.ServeHTTP(w, r)
+	if !called {
+		t.Fatal("Armed should pass through")
+	}
+}
+
 // Compile-time guard: *tenants.Loader must satisfy TenantLookup so
 // production main.go can pass the real loader without an adapter.
 var _ TenantLookup = (*tenants.Loader)(nil)
