@@ -579,5 +579,101 @@ class VastGetStateTest(unittest.TestCase):
         self.assertEqual(self.run_g(200, b'not json'), ("error", None))
 
 
+class CmdWatchdogTest(unittest.TestCase):
+    """cmd_watchdog com todo I/O mockado (sem Vast, sem systemctl real)."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _zi
+
+    def run_wd(self, h, st, vstate=("ok", {"actual_status": "running"}), health_ok=True,
+               running=False):
+        state = dict(st)
+        rec = {"destroy": [], "trigger": 0, "notify": [], "get": 0}
+
+        def get_state(env, iid):
+            rec["get"] += 1
+            return vstate
+        patches = {
+            "load_state": lambda: state,
+            "save_state": lambda s: state.update(s),
+            "start_running": lambda: running,
+            "vast_get_state": get_state,
+            "pod_health": lambda inst: health_ok,
+            "vast_destroy": lambda env, iid: rec["destroy"].append(iid) or 200,
+            "trigger_start": lambda: rec.__setitem__("trigger", rec["trigger"] + 1) or True,
+            "today_brt": lambda: "2026-10-01",
+        }
+        orig = {k: getattr(u, k) for k in patches}
+        orig_notify = u.v.notify
+        try:
+            for k, f in patches.items():
+                setattr(u, k, f)
+            u.v.notify = lambda env, text: rec["notify"].append(text)
+            now = self._dt(2026, 10, 1, h, 0, tzinfo=self._zi("America/Sao_Paulo"))
+            action = u.cmd_watchdog({}, now=now)
+        finally:
+            for k, f in orig.items():
+                setattr(u, k, f)
+            u.v.notify = orig_notify
+        return action, state, rec
+
+    def test_out_of_window_no_io(self):
+        action, _, rec = self.run_wd(21, {"instance_id": 5})
+        self.assertEqual(action, "noop_window")
+        self.assertEqual(rec["get"], 0)
+
+    def test_gone_destroys_counts_and_triggers(self):
+        action, st, rec = self.run_wd(10, {"instance_id": 5}, vstate=("gone", None),
+                                      health_ok=False)
+        self.assertEqual(action, "preempted")
+        self.assertEqual(rec["destroy"], [5])
+        self.assertEqual(rec["trigger"], 1)
+        self.assertIsNone(st["instance_id"])
+        self.assertEqual(st["preempt_count"], 1)
+        self.assertTrue(st["wd_needs_pod"])
+        self.assertEqual(len(rec["notify"]), 1)
+
+    def test_second_preempt_announces_ondemand(self):
+        _, st, rec = self.run_wd(10, {"instance_id": 5, "preempt_day": "2026-10-01",
+                                      "preempt_count": 1}, vstate=("gone", None))
+        self.assertEqual(st["preempt_count"], 2)
+        self.assertIn("modo ondemand", rec["notify"][0])
+
+    def test_after_cutoff_no_trigger(self):
+        action, st, rec = self.run_wd(18, {"instance_id": 5}, vstate=("gone", None))
+        self.assertEqual(action, "preempted")
+        self.assertEqual(rec["destroy"], [5])
+        self.assertEqual(rec["trigger"], 0)
+        self.assertFalse(st["wd_needs_pod"])
+        self.assertIn("sem reprovisao", rec["notify"][0])
+
+    def test_api_error_no_destroy(self):
+        action, st, rec = self.run_wd(10, {"instance_id": 5, "wd_fail_streak": 2},
+                                      vstate=("error", None))
+        self.assertEqual(action, "noop_api")
+        self.assertEqual(rec["destroy"], [])
+        self.assertEqual(st["wd_fail_streak"], 2)
+
+    def test_pending_start_in_flight_is_noop(self):
+        action, _, rec = self.run_wd(10, {"instance_id": 5, "pending_id": 9},
+                                     vstate=("gone", None))
+        self.assertEqual(action, "noop_start")
+        self.assertEqual(rec["destroy"], [])
+        self.assertEqual(rec["get"], 0)
+
+    def test_suspect_persists_streak(self):
+        action, st, rec = self.run_wd(10, {"instance_id": 5}, health_ok=False)
+        self.assertEqual(action, "suspect")
+        self.assertEqual(st["wd_fail_streak"], 1)
+        self.assertEqual(rec["destroy"], [])
+
+    def test_retrigger_after_30min(self):
+        st0 = {"instance_id": None, "wd_needs_pod": True,
+               "wd_last_trigger": "2026-10-01T09:20:00-03:00"}
+        action, st, rec = self.run_wd(10, st0)
+        self.assertEqual(action, "retrigger")
+        self.assertEqual(rec["trigger"], 1)
+        self.assertEqual(rec["notify"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

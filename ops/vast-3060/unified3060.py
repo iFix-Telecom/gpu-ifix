@@ -12,12 +12,18 @@ Historia:
   pip PINADO de infinity-freeze.txt (o pip solto quebrou: colpali-engine novo
   × transformers git-pinado = ResolutionImpossible).
 
-Uso: unified3060.py {start|stop|status|disk}
+Uso: unified3060.py {start|stop|status|disk|watchdog}
   start  — provisiona pod novo, valida (health+GPU+STT/TTS/embed/rerank),
            seta url_override das 4 rows via gatewayctl (hot-reload, SEM
            recriar a task do gateway), valida via edge, destroi instancia
            anterior, persiste instance_id no state.
   stop   — DESTROI a instancia do state.
+  watchdog — (timer 3 min, 07-19h BRT) detecta pod preemptado/morto, destroi,
+           conta preempcao do dia, notifica e dispara o start via systemd.
+  Desde 2026-10-01 (quick 261001-cwi): oferta escolhida por custo REAL
+  (preco/h + storage_cost*DISK_GB/730), disco 30G, pod interruptivel (bid)
+  por padrao com fallback on-demand. Rollback: VAST3060_MODE=ondemand no
+  /etc/onboard/secrets/vast-3060.env.
   flip-stack-legacy — LEGADO: flipa as 4 envs do stack 38 via PUT no
            Portainer (recria a task do gateway). So manual, p/ rollback da
            migration 0038 / url_override indisponivel.
@@ -936,6 +942,227 @@ def cmd_stop(env):
         save_state(st)
 
 
+# ------------------------------------------------------------------ watchdog
+# quick 261001-cwi (A3): pod interruptivel so e' aceitavel com watchdog que
+# reprovisiona sozinho. Timer a cada 3 min 07:00-19:59 BRT.
+#
+# Discricao (documentada): sinal Vast terminal + health OK NAO destroi de
+# imediato porque `exited` ja foi visto transiente (Phase 12 D-02) -> exige K
+# checagens. Vast terminal + health falhando = imediato (assinatura de outbid:
+# "When outbid, the instance moves to stopped", vast-cli SKILL.md). "Health
+# falha" = as 3 portas mortas (pod/container fora); falha parcial so loga —
+# reprovisionar o pod inteiro por 1 servico deixaria os 4 upstreams em fallback
+# por 1-2h. API Vast com erro NUNCA conta como preempcao.
+WATCHDOG_K = 3            # 3 checagens x 3 min = 9 min
+WINDOW_START_H = 7
+WINDOW_END_H = 20         # exclusivo: ultima checagem 19:59
+REPROVISION_CUTOFF_H = 18  # provisao leva ~1-2h; stop das 20:00 mataria o pod novo
+RETRIGGER_MIN = 30
+HEALTH_PORTS = ("8000/tcp", "7998/tcp", "8021/tcp")
+START_UNIT = "vast-unified-start.service"
+
+
+def _brt(dt):
+    return dt.astimezone(TZ)
+
+
+def in_watchdog_window(dt):
+    """PURA. True em [07:00, 20:00) BRT (dt timezone-aware)."""
+    return WINDOW_START_H <= _brt(dt).hour < WINDOW_END_H
+
+
+def reprovision_allowed(dt):
+    """PURA. False a partir de 18:00 BRT."""
+    return _brt(dt).hour < REPROVISION_CUTOFF_H
+
+
+def is_terminal(inst):
+    """PURA. Instancia parada/saida (shape de outbid: exited + intended stopped)."""
+    if not inst:
+        return False
+    return (inst.get("actual_status") in ("exited", "stopped")
+            or inst.get("intended_status") == "stopped"
+            or inst.get("cur_state") == "stopped")
+
+
+def watchdog_decision(in_window, start_running, instance_id, vast_state, inst, health_ok,
+                      fail_streak, k=WATCHDOG_K, needs_pod=False, minutes_since_trigger=None):
+    """PURA. -> (action, new_streak). action em: noop_window, noop_start,
+    noop_none, retrigger, noop_api, preempted, suspect, ok."""
+    streak = int(fail_streak or 0)
+    if not in_window:
+        return ("noop_window", streak)
+    if start_running:
+        return ("noop_start", 0)
+    if instance_id is None:
+        if needs_pod and (minutes_since_trigger is None
+                          or minutes_since_trigger >= RETRIGGER_MIN):
+            return ("retrigger", 0)
+        return ("noop_none", 0)
+    if vast_state == "error":
+        return ("noop_api", streak)
+    if vast_state == "gone":
+        return ("preempted", 0)
+    if is_terminal(inst):
+        if not health_ok:
+            return ("preempted", 0)
+        streak += 1
+        return ("preempted", 0) if streak >= k else ("suspect", streak)
+    if not health_ok:
+        streak += 1
+        return ("preempted", 0) if streak >= k else ("suspect", streak)
+    return ("ok", 0)
+
+
+def vast_get_state(env, iid):
+    """-> ("ok", inst) | ("gone", None) | ("error", None).
+    200 + instances preenchido = ok; 200 + instances vazio/None ou 404 = gone
+    (HIPOTESE: shape exato de instancia inexistente nao confirmado — ambos
+    tratados); qualquer outro codigo (incl. 0 = rede) ou JSON invalido = error."""
+    c, raw = v.http("GET", f"{VAST}/instances/{iid}/",
+                    {"Authorization": f"Bearer {env['VAST_API_KEY']}"})
+    if c == 404:
+        return ("gone", None)
+    if c != 200:
+        return ("error", None)
+    try:
+        inst = json.loads(raw).get("instances")
+    except Exception:
+        return ("error", None)
+    if isinstance(inst, list):
+        inst = inst[0] if inst and isinstance(inst[0], dict) else None
+    if not inst:
+        return ("gone", None)
+    return ("ok", inst)
+
+
+def pod_health(inst):
+    """False SO quando as 3 portas (8000/7998/8021) falham; parcial = True + WARN.
+    Sem ip/ports = False."""
+    ip = (inst or {}).get("public_ipaddr")
+    ports = (inst or {}).get("ports") or {}
+    if not ip or not ports:
+        return False
+    alive, dead = [], []
+    for k in HEALTH_PORTS:
+        try:
+            hp = int(ports[k][0]["HostPort"])
+        except Exception:
+            dead.append(k)
+            continue
+        (alive if health(ip, hp) else dead).append(k)
+    if alive and dead:
+        log(f"watchdog: WARN health parcial — mortas {dead}, vivas {alive} (sem acao)")
+    return bool(alive)
+
+
+def start_running():
+    """True se o start.service esta active/activating OU o start.lock esta
+    ocupado. Na duvida (excecao) -> True (conservador: nao dispara)."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", START_UNIT],
+                           capture_output=True, text=True, timeout=15)
+        if r.stdout.strip() in ("active", "activating"):
+            return True
+        return start_lock_held()
+    except Exception as e:
+        log(f"watchdog: start_running excecao {e} -> assumindo True")
+        return True
+
+
+def trigger_start():
+    """Dispara o start via systemd (--no-block): reusa as 3 tentativas, o
+    TimeoutStartSec de 6h e o lock nativo do systemd (nao herda o timeout do
+    watchdog). argv fixo, sem input externo."""
+    r = subprocess.run(["systemctl", "start", "--no-block", START_UNIT],
+                       capture_output=True, text=True, timeout=30)
+    log(f"watchdog: systemctl start --no-block {START_UNIT} -> rc={r.returncode} "
+        f"{(r.stderr or '').strip()[-300:]}")
+    return r.returncode == 0
+
+
+def _minutes_since(iso, now):
+    if not iso:
+        return None
+    try:
+        return (now - datetime.fromisoformat(iso)).total_seconds() / 60
+    except Exception:
+        return None
+
+
+def cmd_watchdog(env, now=None):
+    """Checagem de preempcao (timer 3 min). Fora da janela: sai sem I/O de rede."""
+    now = now or datetime.now(TZ)
+    if not in_watchdog_window(now):
+        log(f"watchdog: fora da janela ({_brt(now):%H:%M} BRT) — noop")
+        return "noop_window"
+    st = load_state()
+    iid = st.get("instance_id")
+    pending = st.get("pending_id")
+    running = start_running() or bool(pending and pending != iid)
+    vstate, inst, hok = None, None, False
+    if iid is not None and not running:
+        vstate, inst = vast_get_state(env, iid)
+        if vstate == "ok":
+            hok = pod_health(inst)
+    action, streak = watchdog_decision(
+        True, running, iid, vstate, inst, hok, st.get("wd_fail_streak", 0),
+        k=WATCHDOG_K, needs_pod=bool(st.get("wd_needs_pod")),
+        minutes_since_trigger=_minutes_since(st.get("wd_last_trigger"), now))
+    if st.get("wd_fail_streak", 0) != streak:
+        st["wd_fail_streak"] = streak
+        save_state(st)
+
+    if action == "ok":
+        log(f"watchdog: ok ({iid})")
+    elif action == "suspect":
+        log(f"watchdog: SUSPEITO {iid} streak {streak}/{WATCHDOG_K} "
+            f"vast={(inst or {}).get('actual_status')}/{(inst or {}).get('intended_status')} "
+            f"health={hok}")
+    elif action == "preempted":
+        why = (f"vast={vstate} actual={(inst or {}).get('actual_status')} "
+               f"intended={(inst or {}).get('intended_status')} "
+               f"cur_state={(inst or {}).get('cur_state')} "
+               f"msg={((inst or {}).get('status_msg') or '')[:120]!r} health={hok}")
+        log(f"watchdog: PREEMPTADO {iid} — {why}")
+        c = vast_destroy(env, iid)  # parada segue cobrando storage; 404 ok
+        log(f"watchdog: destroy {iid} -> HTTP {c}")
+        today = today_brt()
+        n = bump_preempt(st, today)
+        machine, geo, old_mode = st.get("machine_id"), st.get("geolocation"), st.get("mode")
+        st.update(instance_id=None, wd_fail_streak=0)
+        save_state(st)
+        conf = cfg(env)
+        next_mode = choose_mode(conf["mode"], n, conf["max_preempt"])
+        if reprovision_allowed(now):
+            st.update(wd_needs_pod=True, wd_last_trigger=now.isoformat())
+            save_state(st)
+            trigger_start()
+            v.notify(env, f"pod 3060 PREEMPTADO/morto ({iid}, machine {machine}, {geo}, "
+                          f"modo {old_mode}): {why}. Preempcoes hoje: {n}. Instancia "
+                          f"destruida; reprovisionando agora em modo {next_mode} "
+                          f"(fallback do gateway ate o pod novo subir)")
+        else:
+            st.update(wd_needs_pod=False)
+            save_state(st)
+            v.notify(env, f"pod 3060 preemptado apos {REPROVISION_CUTOFF_H}h ({iid}, machine "
+                          f"{machine}, {geo}) — sem reprovisao hoje, fallback ate amanha. "
+                          f"Preempcoes hoje: {n}")
+    elif action == "retrigger":
+        if reprovision_allowed(now):
+            st.update(wd_last_trigger=now.isoformat())
+            save_state(st)
+            log("watchdog: pod ainda ausente apos reprovisao — re-disparando start")
+            trigger_start()
+        else:
+            st.update(wd_needs_pod=False)
+            save_state(st)
+            log(f"watchdog: retrigger apos {REPROVISION_CUTOFF_H}h — desistindo hoje")
+    else:
+        log(f"watchdog: {action} (instance={iid} pending={pending})")
+    return action
+
+
 def disk_pct(inst):
     space, usage = inst.get("disk_space") or 0, inst.get("disk_usage") or 0
     return round(usage / space * 100) if space else None
@@ -979,14 +1206,14 @@ def cmd_flip_stack_legacy(env):
     flip_stack(env, ip, ports)  # legacy: so via subcomando manual
 
 
-USAGE = "uso: unified3060.py {start [instance_id]|stop|status|disk|flip-stack-legacy}"
+USAGE = "uso: unified3060.py {start [instance_id]|stop|status|disk|watchdog|flip-stack-legacy}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(USAGE, file=sys.stderr)
         sys.exit(64)
     cmd = sys.argv[1]
-    if cmd not in ("start", "stop", "status", "disk", "flip-stack-legacy"):
+    if cmd not in ("start", "stop", "status", "disk", "watchdog", "flip-stack-legacy"):
         print(f"comando desconhecido '{cmd}'. {USAGE}", file=sys.stderr)
         sys.exit(64)
     e = v.load_env()
@@ -1015,5 +1242,7 @@ if __name__ == "__main__":
         cmd_status(e)
     elif cmd == "disk":
         cmd_disk(e)
+    elif cmd == "watchdog":
+        cmd_watchdog(e)
     elif cmd == "flip-stack-legacy":
         cmd_flip_stack_legacy(e)
