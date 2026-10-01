@@ -32,14 +32,12 @@ func TestGenerateAPIKey_Format(t *testing.T) {
 }
 
 func TestGenerateAPIKey_UniquePer1000(t *testing.T) {
-	// 1000× argon2id hashes (64 MiB × 3 iter × 2 parallelism) under -race takes
-	// 5–8 min on GitHub free-tier runners. CI uses `go test -short` to skip.
-	if testing.Short() {
-		t.Skip("skipping 1000-iter argon2 uniqueness check in short mode (CI runs locally and via integration suite)")
-	}
+	// Uniqueness comes from newRawKey's 160 random bits, not from argon2 —
+	// sample the raw generator directly (1000× argon2id took ~157s locally
+	// and blew the -race timeout).
 	seen := make(map[string]struct{}, 1000)
 	for i := 0; i < 1000; i++ {
-		raw, _, _, _, err := GenerateAPIKey()
+		raw, err := newRawKey()
 		if err != nil {
 			t.Fatalf("iter %d: %v", i, err)
 		}

@@ -24,8 +24,9 @@ const keyBodyLen = 32
 const keyTotalLen = len(KeyPrefix) + keyBodyLen
 
 // DefaultParams are OWASP 2026 recommendations for argon2id bearer tokens.
-// Tuned so verification on a 4 vCPU VPS takes ~30-50ms; cache TTL of 60s
-// (cache.go) keeps that off the hot path.
+// Measured on prod worker-vm (2026-10-01): ~300ms per verify, ~27s for 50
+// concurrent — the L1 + Redis caches and the singleflight in apikey.go keep
+// it off the hot path (quick 260930-vkt).
 var DefaultParams = &argon2id.Params{
 	Memory:      64 * 1024, // 64 MiB
 	Iterations:  3,
@@ -44,11 +45,10 @@ var keyEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // lookupHash is stored in api_keys.key_lookup_hash (BYTEA, UNIQUE index) for
 // fast indexed lookup on the hot path (Codex review [HIGH] 02-03).
 func GenerateAPIKey() (raw string, hash string, lookupHash []byte, prefix string, err error) {
-	b := make([]byte, 20) // 20 bytes = 32 base32 chars
-	if _, err = rand.Read(b); err != nil {
+	raw, err = newRawKey()
+	if err != nil {
 		return "", "", nil, "", err
 	}
-	raw = KeyPrefix + strings.ToLower(keyEncoding.EncodeToString(b))
 	hash, err = argon2id.CreateHash(raw, DefaultParams)
 	if err != nil {
 		return "", "", nil, "", err
@@ -56,6 +56,17 @@ func GenerateAPIKey() (raw string, hash string, lookupHash []byte, prefix string
 	lookupHash = LookupHash(raw)
 	prefix = KeyPrefix + "****" + raw[len(raw)-4:]
 	return raw, hash, lookupHash, prefix, nil
+}
+
+// newRawKey draws 160 random bits and encodes them as the raw API key
+// (KeyPrefix + 32 lowercase base32 chars). Split out of GenerateAPIKey so
+// uniqueness can be tested without paying one argon2id hash per sample.
+func newRawKey() (string, error) {
+	b := make([]byte, 20) // 20 bytes = 32 base32 chars
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return KeyPrefix + strings.ToLower(keyEncoding.EncodeToString(b)), nil
 }
 
 // LookupHash returns the SHA-256 of the raw key as a 32-byte slice. The
