@@ -337,3 +337,30 @@ func TestIsRFC1918(t *testing.T) {
 		require.Equalf(t, c.want, isRFC1918(c.ip), "isRFC1918(%q)", c.ip)
 	}
 }
+
+// TestCreateRequest_PriceOmitempty — quick-261001-qdd. Price is a pointer +
+// omitempty so an on-demand (emerg or primary) request carries NO "price"
+// key; a bid request carries "price": <US$/h>.
+func TestCreateRequest_PriceOmitempty(t *testing.T) {
+	t.Run("nil_omits_price", func(t *testing.T) {
+		b, err := json.Marshal(CreateRequest{ClientID: "me", Image: "img", Disk: 45})
+		require.NoError(t, err)
+		require.NotContains(t, string(b), `"price"`)
+	})
+	t.Run("set_emits_price", func(t *testing.T) {
+		p := 0.1234
+		b, err := json.Marshal(CreateRequest{ClientID: "me", Image: "img", Disk: 45, Price: &p})
+		require.NoError(t, err)
+		require.Contains(t, string(b), `"price":0.1234`)
+	})
+}
+
+// TestOffer_RealCostFieldsDecode — dph_base / storage_cost / min_bid decode.
+func TestOffer_RealCostFieldsDecode(t *testing.T) {
+	var o Offer
+	require.NoError(t, json.Unmarshal([]byte(`{"id":1,"dph_total":0.16,"dph_base":0.1466,"storage_cost":0.27,"min_bid":0.09,"inet_down_cost":0.0267}`), &o))
+	require.InDelta(t, 0.1466, o.DphBase, 1e-9)
+	require.InDelta(t, 0.27, o.StorageCost, 1e-9)
+	require.InDelta(t, 0.09, o.MinBid, 1e-9)
+	require.InDelta(t, 0.0267, o.InetDownCost, 1e-9)
+}

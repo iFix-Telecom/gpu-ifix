@@ -12,7 +12,7 @@ import (
 )
 
 const getPodConfig = `-- name: GetPodConfig :one
-SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max, force_machine_id FROM ai_gateway.pod_config WHERE id = TRUE
+SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max, force_machine_id, offer_mode, bid_margin, max_preemptions_per_day FROM ai_gateway.pod_config WHERE id = TRUE
 `
 
 // Hot-path single-row read at boot and on every pod_config_changed NOTIFY
@@ -67,6 +67,9 @@ func (q *Queries) GetPodConfig(ctx context.Context) (AiGatewayPodConfig, error) 
 		&i.ProgressStallBudgetSMin,
 		&i.ProgressStallBudgetSMax,
 		&i.ForceMachineID,
+		&i.OfferMode,
+		&i.BidMargin,
+		&i.MaxPreemptionsPerDay,
 	)
 	return i, err
 }
@@ -431,6 +434,15 @@ func (q *Queries) UpdatePodConfigFieldAllowlist(ctx context.Context, vastMachine
 	return err
 }
 
+const updatePodConfigFieldBidMargin = `-- name: UpdatePodConfigFieldBidMargin :exec
+UPDATE ai_gateway.pod_config SET bid_margin = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigFieldBidMargin(ctx context.Context, bidMargin pgtype.Numeric) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldBidMargin, bidMargin)
+	return err
+}
+
 const updatePodConfigFieldBlocklist = `-- name: UpdatePodConfigFieldBlocklist :exec
 
 UPDATE ai_gateway.pod_config SET vast_machine_blocklist = $1, updated_at = NOW() WHERE id = TRUE
@@ -518,12 +530,31 @@ func (q *Queries) UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) 
 	return err
 }
 
+const updatePodConfigFieldMaxPreemptionsPerDay = `-- name: UpdatePodConfigFieldMaxPreemptionsPerDay :exec
+UPDATE ai_gateway.pod_config SET max_preemptions_per_day = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+func (q *Queries) UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, maxPreemptionsPerDay int32) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldMaxPreemptionsPerDay, maxPreemptionsPerDay)
+	return err
+}
+
 const updatePodConfigFieldMonthlyBudgetBRL = `-- name: UpdatePodConfigFieldMonthlyBudgetBRL :exec
 UPDATE ai_gateway.pod_config SET monthly_budget_brl = $1, updated_at = NOW() WHERE id = TRUE
 `
 
 func (q *Queries) UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error {
 	_, err := q.db.Exec(ctx, updatePodConfigFieldMonthlyBudgetBRL, monthlyBudgetBrl)
+	return err
+}
+
+const updatePodConfigFieldOfferMode = `-- name: UpdatePodConfigFieldOfferMode :exec
+UPDATE ai_gateway.pod_config SET offer_mode = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+// quick-261001-qdd: 'bid' | 'ondemand' (DB CHECK + admin validation).
+func (q *Queries) UpdatePodConfigFieldOfferMode(ctx context.Context, offerMode string) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldOfferMode, offerMode)
 	return err
 }
 

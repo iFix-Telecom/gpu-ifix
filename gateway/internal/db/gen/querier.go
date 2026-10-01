@@ -39,6 +39,10 @@ type Querier interface {
 	// 1-2 (fail_streak < 2) search the cheapest qualified open market; attempt 3+
 	// (fail_streak >= 2) prefer the known-good PRIMARY_VAST_MACHINE_ALLOWLIST hosts.
 	CountConsecutiveFailedPrimaryProvisions(ctx context.Context) (int64, error)
+	// quick-261001-qdd: number of primary lifecycles closed as 'preempted' since
+	// $1 (start of today in the schedule timezone). Drives the automatic
+	// bid -> on-demand fallback (pod_config.max_preemptions_per_day).
+	CountPrimaryPreemptionsSince(ctx context.Context, endedAt pgtype.Timestamptz) (int64, error)
 	// Boot-time defensive check (D-C1 path 3). The CHECK constraint should make
 	// this impossible. If COUNT > 0, gateway os.Exit(1).
 	CountSensitivePeakInvariant(ctx context.Context) (int64, error)
@@ -255,6 +259,10 @@ type Querier interface {
 	// DO NOTHING makes a second boot a no-op so operator edits are NEVER overwritten
 	// (T-17-01). The id column defaults to TRUE (single-row guard).
 	SeedPodConfig(ctx context.Context, arg SeedPodConfigParams) error
+	// quick-261001-qdd: records whether the lifecycle rented a bid (interruptible)
+	// instance and its bid price (US$/h, excl. storage; NULL for on-demand).
+	// Separate from UpdatePrimaryLifecycleVastIDs so that signature is unchanged.
+	SetPrimaryLifecycleOfferMode(ctx context.Context, arg SetPrimaryLifecycleOfferModeParams) error
 	// Shortcut for enable/disable subcommands.
 	SetUpstreamEnabled(ctx context.Context, arg SetUpstreamEnabledParams) error
 	// Quick 260930-uru: gatewayctl upstreams update --url / --clear-url.
@@ -336,6 +344,7 @@ type Querier interface {
 	UpdatePodConfigBoundScheduleUpHourMax(ctx context.Context, scheduleUpHourMax int32) error
 	UpdatePodConfigBoundScheduleUpHourMin(ctx context.Context, scheduleUpHourMin int32) error
 	UpdatePodConfigFieldAllowlist(ctx context.Context, vastMachineAllowlist []int64) error
+	UpdatePodConfigFieldBidMargin(ctx context.Context, bidMargin pgtype.Numeric) error
 	// ----------------------------------------------------------------------------
 	// UpdatePodConfigField — one :exec per editable HOT column (Plan 17-04). One
 	// column per query keeps the dashboard audit diff clean (PATTERNS.md line 184).
@@ -350,7 +359,10 @@ type Querier interface {
 	UpdatePodConfigFieldForceMachineID(ctx context.Context, forceMachineID int64) error
 	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, graceRampDownS int32) error
 	UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) error
+	UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, maxPreemptionsPerDay int32) error
 	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error
+	// quick-261001-qdd: 'bid' | 'ondemand' (DB CHECK + admin validation).
+	UpdatePodConfigFieldOfferMode(ctx context.Context, offerMode string) error
 	UpdatePodConfigFieldPortBindBudgetS(ctx context.Context, portBindBudgetS int32) error
 	UpdatePodConfigFieldProgressStallBudgetS(ctx context.Context, progressStallBudgetS int32) error
 	UpdatePodConfigFieldProvisionLeadS(ctx context.Context, provisionLeadS int32) error

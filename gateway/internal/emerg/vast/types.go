@@ -63,6 +63,18 @@ type Offer struct {
 	// map has no clean comparator for public_ipaddr, so the RFC1918 reject is
 	// always a post-search slice filter, mirroring vastutil.FilterBelowCap.
 	PublicIPAddr string `json:"public_ipaddr"`
+	// quick-261001-qdd real-cost fields (primary ranking). DphBase is the
+	// on-demand compute price US$/h WITHOUT storage/bandwidth; StorageCost is
+	// US$/GB/month; MinBid is the minimum interruptible (bid) price US$/h.
+	// Zero when Vast omits them — primary.RealCost then falls back to
+	// DphTotal and a zero MinBid makes the offer bid-ineligible.
+	DphBase     float64 `json:"dph_base"`
+	StorageCost float64 `json:"storage_cost"`
+	MinBid      float64 `json:"min_bid"`
+	// InetDownCost is the host's per-GB download charge (US$/GB). Every
+	// primary cold start pulls ~20 GB of weights, so this is amortized into
+	// the primary real-cost ranking (quick-261001-qdd, L4 benchmark).
+	InetDownCost float64 `json:"inet_down_cost"`
 }
 
 // isRFC1918 reports whether ip parses to an IPv4 address inside one of the
@@ -284,6 +296,11 @@ type CreateRequest struct {
 	Disk        int      `json:"disk"`
 	Label       string   `json:"label"`
 	TargetState string   `json:"target_state,omitempty"` // "running" default
+	// Price is the interruptible (bid) price in US$/h. nil = on-demand rental
+	// (field omitted from the wire — emerg's request JSON is byte-identical).
+	// Set only by the primary reconciler for bid candidates (quick-261001-qdd;
+	// vast-cli sends `price` in PUT /asks/{id}/ for interruptible instances).
+	Price *float64 `json:"price,omitempty"`
 }
 
 // CreateResponse is the body returned by PUT /asks/{offer_id}/. `NewContract`

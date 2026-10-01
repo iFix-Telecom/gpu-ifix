@@ -60,6 +60,10 @@ type ConfigSection struct {
 	GraceRampDownS       int      `json:"grace_ramp_down_s"`
 	ProvisionLeadS       int      `json:"provision_lead_s"`
 	ScheduleDisabled     bool     `json:"schedule_disabled"`
+	// quick-261001-qdd: primary bid/on-demand offer policy.
+	OfferMode            string  `json:"offer_mode"`
+	BidMargin            float64 `json:"bid_margin"`
+	MaxPreemptionsPerDay int     `json:"max_preemptions_per_day"`
 }
 
 // BoundsSection is the owner-editable min/max gate pairs for the numeric hot
@@ -161,6 +165,9 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			GraceRampDownS:       int(row.GraceRampDownS),
 			ProvisionLeadS:       int(row.ProvisionLeadS),
 			ScheduleDisabled:     row.ScheduleDisabled,
+			OfferMode:            row.OfferMode,
+			BidMargin:            numericFloat(row.BidMargin),
+			MaxPreemptionsPerDay: int(row.MaxPreemptionsPerDay),
 		},
 		Bounds: BoundsSection{
 			CapPrimaryMin:           numericFloat(row.CapPrimaryMin),
