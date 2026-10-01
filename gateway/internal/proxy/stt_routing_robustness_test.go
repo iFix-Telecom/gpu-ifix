@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -57,16 +58,16 @@ func TestIsRetryableSTTStatus(t *testing.T) {
 // drive the tier cascade.
 func TestSTTRetryableStatusInterceptor(t *testing.T) {
 	ic := sttRetryableStatusInterceptor{}
-	if err := ic.Intercept(&http.Response{StatusCode: 404}); err != errUpstreamRetryable {
+	if err := ic.Intercept(&http.Response{StatusCode: 404}); !errors.Is(err, errUpstreamRetryable) {
 		t.Fatalf("404: want errUpstreamRetryable, got %v", err)
 	}
-	if err := ic.Intercept(&http.Response{StatusCode: 429}); err != errUpstreamRetryable {
+	if err := ic.Intercept(&http.Response{StatusCode: 429}); !errors.Is(err, errUpstreamRetryable) {
 		t.Fatalf("429: want errUpstreamRetryable, got %v", err)
 	}
 	if err := ic.Intercept(&http.Response{StatusCode: 200}); err != nil {
 		t.Fatalf("200: want nil, got %v", err)
 	}
-	if err := ic.Intercept(&http.Response{StatusCode: 400}); err != errUpstreamRetryable {
+	if err := ic.Intercept(&http.Response{StatusCode: 400}); !errors.Is(err, errUpstreamRetryable) {
 		t.Fatalf("400: want errUpstreamRetryable (upstream bug can wear 4xx — disco cheio 2026-08-27), got %v", err)
 	}
 }
