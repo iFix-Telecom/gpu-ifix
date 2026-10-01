@@ -1,5 +1,10 @@
 [Unit]
-Description=Stop pod 3060 unificado (preserva disco)
+Description=Destroi pod 3060 unificado + sweep por label (20:00)
 [Service]
 Type=oneshot
+# Interrompe um start em voo antes de destruir: um start disparado tarde pelo
+# watchdog (ou o start da manha atrasado) nao pode sobreviver ao stop das 20:00
+# e criar pod noturno. O pending_id + sweep por label destroem o que ele tiver
+# criado. "-" = ignora falha (ex.: start ja inativo).
+ExecStartPre=-/bin/systemctl stop vast-unified-start.service
 ExecStart=/usr/bin/python3 /opt/vast-3060/unified3060.py stop
