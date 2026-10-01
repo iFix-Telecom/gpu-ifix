@@ -3,25 +3,31 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 )
 
 // fakeKeysQueries records calls so a rejected body can be asserted to reach NO
-// InsertAPIKey. RevokeAPIKey always returns nil (models the idempotent UPDATE).
+// InsertAPIKey. RevokeAPIKeyReturningHash returns a fixed 32-byte hash
+// (RevokedNow only on the first call) unless revokeErr is set.
 type fakeKeysQueries struct {
 	tenant       gen.GetTenantBySlugRow
 	listRows     []gen.ListActiveKeysByTenantWithMetaRow
 	insertCalls  int
 	revokeCalls  int
 	getSlugCalls int
+	revokeErr    error
 }
 
 func (f *fakeKeysQueries) GetTenantBySlug(_ context.Context, _ string) (gen.GetTenantBySlugRow, error) {
@@ -44,9 +50,12 @@ func (f *fakeKeysQueries) InsertAPIKey(_ context.Context, arg gen.InsertAPIKeyPa
 	}, nil
 }
 
-func (f *fakeKeysQueries) RevokeAPIKey(_ context.Context, _ uuid.UUID) error {
+func (f *fakeKeysQueries) RevokeAPIKeyReturningHash(_ context.Context, _ uuid.UUID) (gen.RevokeAPIKeyReturningHashRow, error) {
 	f.revokeCalls++
-	return nil
+	if f.revokeErr != nil {
+		return gen.RevokeAPIKeyReturningHashRow{}, f.revokeErr
+	}
+	return gen.RevokeAPIKeyReturningHashRow{KeyLookupHash: make([]byte, 32), RevokedNow: f.revokeCalls == 1}, nil
 }
 
 // withSlug/withID inject a chi route param into the request so chi.URLParam
@@ -65,7 +74,7 @@ func withID(r *http.Request, id string) *http.Request {
 
 func TestKeyCreate_ReturnsRawOnceNoHash(t *testing.T) {
 	fake := &fakeKeysQueries{tenant: gen.GetTenantBySlugRow{ID: uuid.New(), Slug: "alpha"}}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	rec := httptest.NewRecorder()
 	req := withSlug(httptest.NewRequest(http.MethodPost, "/admin/tenants/alpha/keys",
 		strings.NewReader(`{"data_class":"normal"}`)), "alpha")
@@ -91,7 +100,7 @@ func TestKeyCreate_ReturnsRawOnceNoHash(t *testing.T) {
 
 func TestKeyCreate_InvalidDataClass_400_NoInsert(t *testing.T) {
 	fake := &fakeKeysQueries{tenant: gen.GetTenantBySlugRow{ID: uuid.New(), Slug: "alpha"}}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	rec := httptest.NewRecorder()
 	req := withSlug(httptest.NewRequest(http.MethodPost, "/admin/tenants/alpha/keys",
 		strings.NewReader(`{"data_class":"invalido"}`)), "alpha")
@@ -111,7 +120,7 @@ func TestKeyCreate_InvalidDataClass_400_NoInsert(t *testing.T) {
 
 func TestKeyCreate_DefaultDataClassNormal(t *testing.T) {
 	fake := &fakeKeysQueries{tenant: gen.GetTenantBySlugRow{ID: uuid.New(), Slug: "alpha"}}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	rec := httptest.NewRecorder()
 	// Empty body → data_class defaults to "normal".
 	req := withSlug(httptest.NewRequest(http.MethodPost, "/admin/tenants/alpha/keys",
@@ -131,7 +140,7 @@ func TestKeyCreate_DefaultDataClassNormal(t *testing.T) {
 
 func TestKeyRevoke_InvalidID_400(t *testing.T) {
 	fake := &fakeKeysQueries{}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	rec := httptest.NewRecorder()
 	req := withID(httptest.NewRequest(http.MethodPost, "/admin/keys/not-a-uuid/revoke", nil), "not-a-uuid")
 	h.Revoke(rec, req)
@@ -145,7 +154,7 @@ func TestKeyRevoke_InvalidID_400(t *testing.T) {
 
 func TestKeyRevoke_Idempotent(t *testing.T) {
 	fake := &fakeKeysQueries{}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	id := uuid.New().String()
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
@@ -167,7 +176,7 @@ func TestKeyList_NoHashInBody(t *testing.T) {
 			{ID: uuid.New(), TenantSlug: "alpha", KeyPrefix: "ifix_****abcd", Status: "active", DataClass: "normal"},
 		},
 	}
-	h := newKeysAdminHandlerWithQueries(fake, discardLog())
+	h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
 	rec := httptest.NewRecorder()
 	req := withSlug(httptest.NewRequest(http.MethodGet, "/admin/tenants/alpha/keys", nil), "alpha")
 	h.List(rec, req)
@@ -184,5 +193,67 @@ func TestKeyList_NoHashInBody(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].KeyPrefix != "ifix_****abcd" {
 		t.Errorf("unexpected list body: %+v", out)
+	}
+}
+
+// Quick 260930-wpv: revoke invalida o cache Redis (DEL gw:apikey:<hex>) e
+// reporta cache_invalidated; erro de DB → 500; id desconhecido → 200 no-op;
+// sem Redis → 200 com cache_invalidated=false.
+func TestKeyRevoke_InvalidatesCache(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	cacheKey := "gw:apikey:" + strings.Repeat("00", 32)
+	_ = mr.Set(cacheKey, `{"status":"active"}`)
+
+	fake := &fakeKeysQueries{}
+	h := newKeysAdminHandlerWithQueries(fake, rdb, discardLog())
+	id := uuid.New().String()
+	rec := httptest.NewRecorder()
+	h.Revoke(rec, withID(httptest.NewRequest(http.MethodPost, "/admin/keys/"+id+"/revoke", nil), id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["cache_invalidated"] != true || body["status"] != "revoked" {
+		t.Fatalf("body = %v", body)
+	}
+	if mr.Exists(cacheKey) {
+		t.Fatal("cache Redis da key não foi apagado")
+	}
+}
+
+func TestKeyRevoke_ErrorPaths(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantCode  int
+		wantCache any
+	}{
+		{"db error", errors.New("boom"), http.StatusInternalServerError, nil},
+		{"unknown id", pgx.ErrNoRows, http.StatusOK, false},
+		{"no redis", nil, http.StatusOK, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeKeysQueries{revokeErr: tc.err}
+			h := newKeysAdminHandlerWithQueries(fake, nil, discardLog())
+			id := uuid.New().String()
+			rec := httptest.NewRecorder()
+			h.Revoke(rec, withID(httptest.NewRequest(http.MethodPost, "/admin/keys/"+id+"/revoke", nil), id))
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if tc.wantCode == http.StatusOK {
+				var body map[string]any
+				_ = json.Unmarshal(rec.Body.Bytes(), &body)
+				if body["cache_invalidated"] != tc.wantCache {
+					t.Fatalf("cache_invalidated = %v, want %v", body["cache_invalidated"], tc.wantCache)
+				}
+			}
+		})
 	}
 }

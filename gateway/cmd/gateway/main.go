@@ -271,6 +271,11 @@ func main() {
 	defer tbCancel() // triggers final flush on shutdown
 
 	verifier := auth.NewVerifier(pool, rdb, log, touchBuf)
+	// Quick 260930-wpv: revogação imediata cross-réplica — assina
+	// gw:apikey:revoked e evicta o L1 (com tombstone) a cada revoke. Não
+	// bloqueia o boot esperando a assinatura: o PubSub do go-redis reassina
+	// sozinho, e cada (re)assinatura esvazia o L1.
+	_ = verifier.StartRevocationListener(ctx)
 
 	// Audit writer — async buffered flusher (Plan 02-05). Run exits on ctx
 	// cancel after draining the channel. Non-blocking Enqueue on the hot
@@ -1513,7 +1518,7 @@ func main() {
 	// raw once) + POST /keys/{id}/revoke (idempotent). Thin over existing sqlc
 	// queries + auth.GenerateAPIKey — no new migration.
 	adminTenantHandler := admin.NewTenantAdminHandler(gen.New(pool), tenantsLoader, log)
-	adminKeysHandler := admin.NewKeysAdminHandler(gen.New(pool), log)
+	adminKeysHandler := admin.NewKeysAdminHandler(gen.New(pool), rdb, log)
 
 	// quick 260830-o2j — model-alias CRUD (+provider_prefs, refreshes THIS
 	// replica's resolver on write), upstream enable/disable (NOTIFY trigger

@@ -33,8 +33,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -185,14 +185,14 @@ func TestRunPrimaryLifecyclesIntegration_FetchesFromDB(t *testing.T) {
 	require.Contains(t, stdout, "ID", "table header must be present")
 	require.Contains(t, stdout, "STARTED")
 	require.Contains(t, stdout, "TRIGGER")
-	require.Contains(t, stdout, fmt.Sprintf("%d\t", id1), "row id %d must appear in output", id1)
-	require.Contains(t, stdout, fmt.Sprintf("%d\t", id2), "row id %d must appear in output", id2)
-	require.Contains(t, stdout, fmt.Sprintf("%d\t", id3), "row id %d must appear in output", id3)
+	require.Regexp(t, rowIDRe(id1), stdout, "row id %d must appear in output", id1)
+	require.Regexp(t, rowIDRe(id2), stdout, "row id %d must appear in output", id2)
+	require.Regexp(t, rowIDRe(id3), stdout, "row id %d must appear in output", id3)
 
 	// DESC chronological order: id3 (newest) appears BEFORE id1 (oldest).
-	idxID3 := strings.Index(stdout, fmt.Sprintf("%d\t", id3))
-	idxID2 := strings.Index(stdout, fmt.Sprintf("%d\t", id2))
-	idxID1 := strings.Index(stdout, fmt.Sprintf("%d\t", id1))
+	idxID3 := rowIDIndex(stdout, id3)
+	idxID2 := rowIDIndex(stdout, id2)
+	idxID1 := rowIDIndex(stdout, id1)
 	require.True(t, idxID3 < idxID2 && idxID2 < idxID1,
 		"rows must be ORDER BY started_at DESC: id3(newest) < id2 < id1(oldest); got idxID3=%d idxID2=%d idxID1=%d",
 		idxID3, idxID2, idxID1)
@@ -224,7 +224,7 @@ func TestRunPrimaryLifecycles_RespectsLimitFlag(t *testing.T) {
 	// how many seeded IDs appear in the output.
 	count := 0
 	for _, id := range ids {
-		if strings.Contains(stdout, fmt.Sprintf("%d\t", id)) {
+		if rowIDRe(id).MatchString(stdout) {
 			count++
 		}
 	}
@@ -248,5 +248,21 @@ func TestRunPrimaryLifecycles_EmptyTable_NoRows(t *testing.T) {
 
 	require.Contains(t, stdout, "ID", "header must print even on empty table")
 	require.Contains(t, stdout, "STARTED")
-	require.NotContains(t, stdout, "\t101\t", "no seeded row id 101 should appear")
+	require.NotRegexp(t, rowIDRe(101), stdout, "no seeded row id 101 should appear")
+}
+
+// rowIDRe casa uma linha de dados cuja 1ª coluna (ID) é id. O tabwriter
+// converte os \t em espaços de padding, então a asserção não pode depender de
+// tab (quick 260930-wpv): início de linha + id + whitespace.
+func rowIDRe(id int64) *regexp.Regexp {
+	return regexp.MustCompile(fmt.Sprintf(`(?m)^%d\s`, id))
+}
+
+// rowIDIndex devolve o offset da linha do id em out (-1 se ausente).
+func rowIDIndex(out string, id int64) int {
+	loc := rowIDRe(id).FindStringIndex(out)
+	if loc == nil {
+		return -1
+	}
+	return loc[0]
 }

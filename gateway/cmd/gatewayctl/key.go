@@ -13,9 +13,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 )
 
 func runKey(ctx context.Context, args []string, log *slog.Logger) int {
@@ -125,41 +127,66 @@ func runKeyRevoke(ctx context.Context, args []string, log *slog.Logger) int {
 		return 2
 	}
 
-	_, pool, err := loadAndPool(ctx, log)
+	cfg, pool, err := loadAndPool(ctx, log)
 	if err != nil {
 		fmt.Fprintf(fs.Output(), "error: %v\n", err)
 		return 1
 	}
 	defer pool.Close()
-	q := gen.New(pool)
 
+	// Quick 260930-wpv: revoke invalida o cache (DEL + PUBLISH) usando o mesmo
+	// Redis do gateway (AI_GATEWAY_REDIS_* do container). Redis indisponível
+	// não impede o revoke no DB — só avisa que a propagação volta a ≤ 60s.
+	// uc fica como interface nil (não *redis.Client nil) quando o Redis falha,
+	// para auth.InvalidateKey reconhecer a ausência.
+	var uc redis.UniversalClient
+	if rdb, rerr := redisx.NewClient(ctx, cfg); rerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: redis indisponível (%v); a revogação vale no DB mas propaga em até 60s\n", rerr)
+	} else {
+		defer func() { _ = rdb.Close() }()
+		uc = rdb
+	}
+	return revokeKey(ctx, gen.New(pool), uc, id, os.Stdout, os.Stderr, log)
+}
+
+// keyRevokeQueries is the sqlc surface consumed by revokeKey (interface so
+// key_test.go can drive it with a fake + miniredis).
+type keyRevokeQueries interface {
+	GetAPIKeyByID(ctx context.Context, id uuid.UUID) (gen.GetAPIKeyByIDRow, error)
+	auth.KeyRevoker
+}
+
+// revokeKey is the testable body of `gatewayctl key revoke`. Exit codes:
+// 0 revoked (or already revoked — cache re-invalidated), 1 not found / DB
+// error. A cache-invalidation failure is a warning on stderr, exit 0.
+func revokeKey(ctx context.Context, q keyRevokeQueries, rdb redis.UniversalClient, id uuid.UUID, stdout, stderr io.Writer, log *slog.Logger) int {
 	existing, err := q.GetAPIKeyByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			fmt.Fprintf(fs.Output(), "error: api_key '%s' not found\n", id.String())
+			fmt.Fprintf(stderr, "error: api_key '%s' not found\n", id.String())
 			return 1
 		}
-		fmt.Fprintf(fs.Output(), "error: lookup key: %v\n", err)
+		fmt.Fprintf(stderr, "error: lookup key: %v\n", err)
 		return 1
 	}
-	// Status comes back from sqlc as interface{} (Postgres ENUM). Coerce.
-	statusStr := ""
-	switch s := existing.Status.(type) {
-	case string:
-		statusStr = s
-	case []byte:
-		statusStr = string(s)
+	res, err := auth.RevokeAPIKey(ctx, q, rdb, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, auth.ErrCacheInvalidation):
+		fmt.Fprintf(stderr, "warning: revogada no DB, mas a invalidação do cache falhou (%v); propaga em até 60s. Rode o revoke de novo para re-invalidar.\n", err)
+	case errors.Is(err, pgx.ErrNoRows):
+		fmt.Fprintf(stderr, "error: api_key '%s' not found\n", id.String())
+		return 1
+	default:
+		fmt.Fprintf(stderr, "error: revoke key: %v\n", err)
+		return 1
 	}
-	if statusStr == "revoked" {
-		fmt.Printf("already revoked: id=%s\n", id.String())
+	if !res.RevokedNow {
+		fmt.Fprintf(stdout, "already revoked: id=%s cache_invalidated=%t\n", id.String(), res.Invalidated)
 		return 0
 	}
-	if err := q.RevokeAPIKey(ctx, id); err != nil {
-		fmt.Fprintf(fs.Output(), "error: revoke key: %v\n", err)
-		return 1
-	}
-	fmt.Printf("revoked: id=%s prefix=%s\n", id.String(), existing.KeyPrefix)
-	log.Info("api key revoked", "api_key_id", id.String(), "key_prefix", existing.KeyPrefix)
+	fmt.Fprintf(stdout, "revoked: id=%s prefix=%s cache_invalidated=%t\n", id.String(), existing.KeyPrefix, res.Invalidated)
+	log.Info("api key revoked", "api_key_id", id.String(), "key_prefix", existing.KeyPrefix, "cache_invalidated", res.Invalidated)
 	return 0
 }
 

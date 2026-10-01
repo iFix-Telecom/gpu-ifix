@@ -241,6 +241,14 @@ type Querier interface {
 	// from the SUM(billing_events). Idempotent; safe to call repeatedly.
 	ResetUsageCountersForReconcile(ctx context.Context, arg ResetUsageCountersForReconcileParams) error
 	RevokeAPIKey(ctx context.Context, id uuid.UUID) error
+	// Quick 260930-wpv: revoke + devolve o key_lookup_hash para invalidar o cache
+	// (Redis gw:apikey:<hex> + L1 de todas as réplicas via PUBLISH). Idempotente:
+	// o UPDATE continua escopado WHERE status='active'; numa segunda chamada
+	// revoked_now=false mas o hash volta igual, então um retry re-invalida o cache
+	// (cobre o caso do Redis ter falhado na primeira). id inexistente → ErrNoRows.
+	// O SELECT externo enxerga o snapshot anterior ao UPDATE, mas key_lookup_hash
+	// é imutável, então o valor é o mesmo.
+	RevokeAPIKeyReturningHash(ctx context.Context, id uuid.UUID) (RevokeAPIKeyReturningHashRow, error)
 	RevokeAdminKey(ctx context.Context, id uuid.UUID) error
 	// Idempotent env->DB first-boot seed (Plan 17-03). Inserts the 16 hot fields +
 	// 10 numeric bound pairs from the current env-derived config. ON CONFLICT (id)
