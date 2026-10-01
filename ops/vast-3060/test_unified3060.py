@@ -198,10 +198,10 @@ class RealCostTest(unittest.TestCase):
         c = u.real_cost({})
         self.assertGreater(c["total"], 1.0)  # inelegivel, mas sem excecao
 
-    def test_disk_default_is_30(self):
-        self.assertEqual(u.DISK_GB, 30)
+    def test_disk_default_is_40(self):
+        self.assertEqual(u.DISK_GB, 40)
         c = u.real_cost({"dph_base": 0.0, "storage_cost": 0.73})
-        self.assertAlmostEqual(c["storage_h"], 0.03, places=6)
+        self.assertAlmostEqual(c["storage_h"], 0.04, places=6)
 
 
 class BidPriceTest(unittest.TestCase):
@@ -408,12 +408,12 @@ class CreatePayloadTest(unittest.TestCase):
         return {"offer": o, "mode": mode, "bid": bid, "cap_mult": 1.3,
                 "cost": u.real_cost(o, mode, bid)}
 
-    def test_bid_sends_price_and_disk30(self):
+    def test_bid_sends_price_and_disk40(self):
         calls, saved = self.run_start(self.pick("bid", 0.0345))
         put = [c for c in calls if c[0] == "PUT"][0]
         self.assertTrue(put[1].endswith("/asks/7/"))
         self.assertEqual(put[2]["price"], 0.0345)
-        self.assertEqual(put[2]["disk"], 30)
+        self.assertEqual(put[2]["disk"], 40)
         self.assertEqual(saved[-1]["pending_id"], 999)
         self.assertEqual(saved[-1]["pending_mode"], "bid")
 

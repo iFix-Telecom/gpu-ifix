@@ -72,6 +72,12 @@ fi
 # ---- speaches (STT/TTS) — loop supervisor: processo morreu em prod
 # (2026-09-07, provavel OOM em maquina de 7GB RAM) e nada religava ----
 export WHISPER_MODEL="${WHISPER_MODEL:-Systran/faster-whisper-large-v3}"
+# int8_float16: pesos do large-v3 ~3G→~1,5G na VRAM. Com float16 o batched
+# decode (batch 8) de audio longo estourava os ~2,5G livres da 3060 (12G
+# dividida com Infinity + XTTS): CUDA OOM → 500 → gateway cascateava p/ gemini
+# (46% dos minutos de STT externo). Medido 2026-10-01 audio 13:14: fp16 = 500
+# pico 11867MiB; int8 = 200 pico 10843MiB, texto identico (ClickUp 86akreh6u).
+export WHISPER__COMPUTE_TYPE="${WHISPER__COMPUTE_TYPE:-int8_float16}"
 cd /home/ubuntu/speaches || cd /
 UVICORN_BIN=$(command -v uvicorn || echo /home/ubuntu/speaches/.venv/bin/uvicorn)
 if ! pgrep -f 'speaches-supervisor' >/dev/null; then

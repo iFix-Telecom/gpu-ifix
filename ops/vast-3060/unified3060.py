@@ -57,11 +57,10 @@ PORTAINER = "https://portainer3.ifixtelecom.com.br/api"
 VAST = "https://console.vast.ai/api/v0"
 STATE_PATH = "/var/lib/vast-3060/state.json"
 HERE = os.path.dirname(os.path.abspath(__file__))
-# quick 261001-cwi (decisao Pedro 2026-10-01): 40 -> 30G. Stack instalado
-# ~19-23G; 25G vivia a 90% (incidente multipart 400) -> 30G = minimo seguro.
-# Thresholds existentes seguem coerentes com 30G e NAO mudam: disk-guard limpa
-# em >=85% (=25,5G) e cmd_disk alerta em >=90% (=27G).
-DISK_GB = 30
+# quick 261001-cwi: 40 -> 30G foi REVERTIDO no mesmo dia. Medido no pod vivo
+# 2026-10-01: stack instalado ocupa ~30G (a estimativa 19-23G era pre-XTTS);
+# com 30G o disk-guard (limpa em >=85%) dispararia o tempo todo e o pod lotaria.
+DISK_GB = 40
 HOURS_PER_MONTH = 730  # storage_cost da Vast = US$/GB/mes -> /730 = US$/GB/h
 # Modo de aluguel (quick 261001-cwi). Overrides em /etc/onboard/secrets/vast-3060.env:
 #   VAST3060_MODE=bid|ondemand  VAST3060_BID_MARGIN=<float 1..5>  VAST3060_MAX_PREEMPT=<int>=0>
