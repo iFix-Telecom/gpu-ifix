@@ -9,6 +9,8 @@ SET search_path = ai_gateway, public;
 -- max_preemptions_per_day: after N 'preempted' lifecycles today (BRT) the
 --   reconciler falls back to on-demand for the rest of the day. 0 disables
 --   the fallback (cfg mode always honored).
+-- min_reliability: PRIMARY-only Vast offer reliability floor (Pedro decision
+--   2026-10-01: 0.99 -> 0.95; emerg keeps its own 0.99 filter untouched).
 -- DEFAULTs backfill the already-seeded prod row. ADDITIVE only.
 ALTER TABLE ai_gateway.pod_config
     ADD COLUMN offer_mode TEXT NOT NULL DEFAULT 'bid'
@@ -16,7 +18,9 @@ ALTER TABLE ai_gateway.pod_config
     ADD COLUMN bid_margin NUMERIC(4,2) NOT NULL DEFAULT 1.15
         CHECK (bid_margin >= 1.00 AND bid_margin <= 5.00),
     ADD COLUMN max_preemptions_per_day INTEGER NOT NULL DEFAULT 2
-        CHECK (max_preemptions_per_day >= 0 AND max_preemptions_per_day <= 20);
+        CHECK (max_preemptions_per_day >= 0 AND max_preemptions_per_day <= 20),
+    ADD COLUMN min_reliability NUMERIC(4,3) NOT NULL DEFAULT 0.95
+        CHECK (min_reliability >= 0.5 AND min_reliability <= 1.0);
 
 -- Lifecycle audit: was this lifecycle a bid (interruptible) rental and at
 -- what bid price (US$/h, excl. storage). NULL = legacy row (pre-0039).
@@ -27,7 +31,7 @@ ALTER TABLE ai_gateway.primary_lifecycles
 COMMENT ON COLUMN ai_gateway.primary_lifecycles.shutdown_reason IS
     'Final reason the lifecycle ended (e.g. destroyed, instance_terminal_state, billing_stopped, preempted = bid instance stopped/outbid by Vast).';
 
--- Recreate the UPDATE NOTIFY trigger with the 3 new columns in its WHEN
+-- Recreate the UPDATE NOTIFY trigger with the 4 new columns in its WHEN
 -- predicate so a PATCH hot-reloads (DROP + CREATE idiom, repo standard).
 DROP TRIGGER IF EXISTS pod_config_update_notify ON ai_gateway.pod_config;
 
@@ -82,6 +86,7 @@ WHEN (
         OR NEW.offer_mode IS DISTINCT FROM OLD.offer_mode
         OR NEW.bid_margin IS DISTINCT FROM OLD.bid_margin
         OR NEW.max_preemptions_per_day IS DISTINCT FROM OLD.max_preemptions_per_day
+        OR NEW.min_reliability IS DISTINCT FROM OLD.min_reliability
     )
 )
 EXECUTE FUNCTION ai_gateway.notify_pod_config_changed();
@@ -101,6 +106,7 @@ ALTER TABLE ai_gateway.primary_lifecycles
 COMMENT ON COLUMN ai_gateway.primary_lifecycles.shutdown_reason IS NULL;
 
 ALTER TABLE ai_gateway.pod_config
+    DROP COLUMN IF EXISTS min_reliability,
     DROP COLUMN IF EXISTS max_preemptions_per_day,
     DROP COLUMN IF EXISTS bid_margin,
     DROP COLUMN IF EXISTS offer_mode;

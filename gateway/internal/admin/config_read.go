@@ -64,6 +64,7 @@ type ConfigSection struct {
 	OfferMode            string  `json:"offer_mode"`
 	BidMargin            float64 `json:"bid_margin"`
 	MaxPreemptionsPerDay int     `json:"max_preemptions_per_day"`
+	MinReliability       float64 `json:"min_reliability"`
 }
 
 // BoundsSection is the owner-editable min/max gate pairs for the numeric hot
@@ -168,6 +169,7 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			OfferMode:            row.OfferMode,
 			BidMargin:            numericFloat(row.BidMargin),
 			MaxPreemptionsPerDay: int(row.MaxPreemptionsPerDay),
+			MinReliability:       numericFloat(row.MinReliability),
 		},
 		Bounds: BoundsSection{
 			CapPrimaryMin:           numericFloat(row.CapPrimaryMin),

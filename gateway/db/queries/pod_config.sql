@@ -72,6 +72,10 @@ UPDATE ai_gateway.pod_config SET bid_margin = $1, updated_at = NOW() WHERE id = 
 -- name: UpdatePodConfigFieldMaxPreemptionsPerDay :exec
 UPDATE ai_gateway.pod_config SET max_preemptions_per_day = $1, updated_at = NOW() WHERE id = TRUE;
 
+-- name: UpdatePodConfigFieldMinReliability :exec
+-- quick-261001-qdd: PRIMARY-only offer reliability floor (0.5..1.0).
+UPDATE ai_gateway.pod_config SET min_reliability = $1, updated_at = NOW() WHERE id = TRUE;
+
 -- name: UpdatePodConfigFieldRejectPrivateIP :exec
 UPDATE ai_gateway.pod_config SET reject_private_ip = $1, updated_at = NOW() WHERE id = TRUE;
 

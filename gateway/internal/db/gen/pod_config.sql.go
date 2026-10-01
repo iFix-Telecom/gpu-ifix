@@ -12,7 +12,7 @@ import (
 )
 
 const getPodConfig = `-- name: GetPodConfig :one
-SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max, force_machine_id, offer_mode, bid_margin, max_preemptions_per_day FROM ai_gateway.pod_config WHERE id = TRUE
+SELECT id, vast_machine_blocklist, vast_machine_allowlist, cap_primary, cap_fallback, host_id, reject_private_ip, coldstart_budget_s, port_bind_budget_s, failure_cooldown_s, monthly_budget_brl, schedule_up_hour, schedule_down_hour, schedule_days, grace_ramp_down_s, provision_lead_s, schedule_disabled, cap_primary_min, cap_primary_max, cap_fallback_min, cap_fallback_max, coldstart_budget_s_min, coldstart_budget_s_max, port_bind_budget_s_min, port_bind_budget_s_max, failure_cooldown_s_min, failure_cooldown_s_max, monthly_budget_brl_min, monthly_budget_brl_max, schedule_up_hour_min, schedule_up_hour_max, schedule_down_hour_min, schedule_down_hour_max, grace_ramp_down_s_min, grace_ramp_down_s_max, provision_lead_s_min, provision_lead_s_max, updated_at, created_budget_s, created_budget_s_min, created_budget_s_max, progress_stall_budget_s, progress_stall_budget_s_min, progress_stall_budget_s_max, force_machine_id, offer_mode, bid_margin, max_preemptions_per_day, min_reliability FROM ai_gateway.pod_config WHERE id = TRUE
 `
 
 // Hot-path single-row read at boot and on every pod_config_changed NOTIFY
@@ -70,6 +70,7 @@ func (q *Queries) GetPodConfig(ctx context.Context) (AiGatewayPodConfig, error) 
 		&i.OfferMode,
 		&i.BidMargin,
 		&i.MaxPreemptionsPerDay,
+		&i.MinReliability,
 	)
 	return i, err
 }
@@ -536,6 +537,16 @@ UPDATE ai_gateway.pod_config SET max_preemptions_per_day = $1, updated_at = NOW(
 
 func (q *Queries) UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, maxPreemptionsPerDay int32) error {
 	_, err := q.db.Exec(ctx, updatePodConfigFieldMaxPreemptionsPerDay, maxPreemptionsPerDay)
+	return err
+}
+
+const updatePodConfigFieldMinReliability = `-- name: UpdatePodConfigFieldMinReliability :exec
+UPDATE ai_gateway.pod_config SET min_reliability = $1, updated_at = NOW() WHERE id = TRUE
+`
+
+// quick-261001-qdd: PRIMARY-only offer reliability floor (0.5..1.0).
+func (q *Queries) UpdatePodConfigFieldMinReliability(ctx context.Context, minReliability pgtype.Numeric) error {
+	_, err := q.db.Exec(ctx, updatePodConfigFieldMinReliability, minReliability)
 	return err
 }
 

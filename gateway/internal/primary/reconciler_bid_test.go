@@ -212,15 +212,45 @@ func TestProvision_OnDemandMode_NoBidSearch(t *testing.T) {
 
 func TestPrimaryFilter_CopiesAndSpecialises(t *testing.T) {
 	base := vast.DefaultSearchFilter(0.2, 0, "RTX 3090", 1)
-	od := primaryFilter(base, "on-demand")
-	bd := primaryFilter(base, "bid")
+	od := primaryFilter(base, "on-demand", 0.95)
+	bd := primaryFilter(base, "bid", 0.95)
 	require.Equal(t, "on-demand", od["type"])
 	require.Equal(t, 64, od["limit"])
 	require.Contains(t, od, "dph_total")
 	require.Equal(t, "bid", bd["type"])
 	require.NotContains(t, bd, "dph_total")
+	require.Equal(t, map[string]any{"gte": 0.95}, od["reliability"])
+	require.Equal(t, map[string]any{"gte": 0.95}, bd["reliability"])
+	// Invalid / unset floor falls back to the 0.95 default.
+	require.Equal(t, map[string]any{"gte": 0.95}, primaryFilter(base, "on-demand", 0)["reliability"])
+	require.Equal(t, map[string]any{"gte": 0.97}, primaryFilter(base, "on-demand", 0.97)["reliability"])
 	// Shared filter untouched (emerg uses DefaultSearchFilter too).
+	require.Equal(t, map[string]any{"gte": 0.99}, base["reliability"], "emerg/shared filter keeps 0.99")
 	require.NotContains(t, base, "type")
 	require.Equal(t, 20, base["limit"])
 	require.Contains(t, base, "dph_total")
+}
+
+// TestFilterMinReliability — Pedro 2026-10-01: primary floor 0.95. A 0.96
+// offer passes, a 0.94 offer is rejected; Reliability 0 (absent) is kept.
+func TestFilterMinReliability(t *testing.T) {
+	in := []vast.Offer{{ID: 1, Reliability: 0.96}, {ID: 2, Reliability: 0.94}, {ID: 3, Reliability: 0}, {ID: 4, Reliability: 0.95}}
+	got := filterMinReliability(in, 0.95)
+	ids := make([]int64, 0, len(got))
+	for _, o := range got {
+		ids = append(ids, o.ID)
+	}
+	require.Equal(t, []int64{1, 3, 4}, ids)
+}
+
+// TestProvision_MinReliability_RejectsBelowFloor — end to end through
+// provisionLifecycle: the server filter carries gte 0.95 and a 0.94 offer the
+// (fake) server still returns is dropped client-side; the 0.96 one is rented.
+func TestProvision_MinReliability_RejectsBelowFloor(t *testing.T) {
+	od := []vast.Offer{
+		{ID: 30, MachineID: 130, DphTotal: 0.15, DphBase: 0.12, StorageCost: 0.1, Reliability: 0.94},
+		{ID: 31, MachineID: 131, DphTotal: 0.17, DphBase: 0.16, StorageCost: 0.1, Reliability: 0.96},
+	}
+	res := runBidProbe(t, OfferModeOnDemand, 0, od, nil, nil)
+	require.Equal(t, int64(31), res.createdOffer, "0.94 must be rejected, 0.96 accepted")
 }

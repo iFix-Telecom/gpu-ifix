@@ -360,6 +360,8 @@ type Querier interface {
 	UpdatePodConfigFieldGraceRampDownS(ctx context.Context, graceRampDownS int32) error
 	UpdatePodConfigFieldHostID(ctx context.Context, hostID int64) error
 	UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, maxPreemptionsPerDay int32) error
+	// quick-261001-qdd: PRIMARY-only offer reliability floor (0.5..1.0).
+	UpdatePodConfigFieldMinReliability(ctx context.Context, minReliability pgtype.Numeric) error
 	UpdatePodConfigFieldMonthlyBudgetBRL(ctx context.Context, monthlyBudgetBrl pgtype.Numeric) error
 	// quick-261001-qdd: 'bid' | 'ondemand' (DB CHECK + admin validation).
 	UpdatePodConfigFieldOfferMode(ctx context.Context, offerMode string) error

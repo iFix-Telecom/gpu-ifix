@@ -1297,6 +1297,7 @@ func bootHotCfg(cfg config.Config) podconfig.PodConfig {
 		OfferMode:            cfg.PrimaryVastOfferMode,
 		BidMargin:            cfg.PrimaryVastBidMargin,
 		MaxPreemptionsPerDay: cfg.PrimaryVastMaxPreemptionsPerDay,
+		MinReliability:       cfg.PrimaryVastMinReliability,
 	}
 }
 
@@ -1416,6 +1417,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	preemptToday := r.countPreemptionsToday(ctx, log)
 	offerMode := ChooseMode(hot.OfferMode, preemptToday, hot.MaxPreemptionsPerDay)
 	costParams := r.costParams()
+	minRel := primaryMinReliability(hot.MinReliability)
 	// A fresh provision never inherits a previous lifecycle's flags.
 	r.activeIsBid.Store(false)
 	r.pendingCloseReason.Store(nil)
@@ -1457,7 +1459,9 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	// quick-261001-qdd: the pin is ALWAYS on-demand and still bypasses the cap
 	// (an ops/UAT pin must not be preempted mid-test nor priced out).
 	if hot.ForceMachineID > 0 {
-		forceFilter := vast.WithMachineAllowlist(filters[0], []int64{hot.ForceMachineID})
+		// on-demand type + the primary reliability floor (same as the market
+		// pick) so a pinned 0.95-0.99 host is not silently filtered out.
+		forceFilter := primaryFilter(vast.WithMachineAllowlist(filters[0], []int64{hot.ForceMachineID}), "on-demand", minRel)
 		offers, err := r.deps.Vast.SearchOffers(ctx, forceFilter)
 		if err != nil {
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
@@ -1481,19 +1485,19 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	// mirrors the 3060 pick_offer); an on-demand search error aborts like
 	// before.
 	searchRanked := func(f vast.SearchFilter, shape int, pass string) (Candidate, bool, error) {
-		od, err := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "on-demand"))
+		od, err := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "on-demand", minRel))
 		if err != nil {
 			return Candidate{}, false, err
 		}
-		od = r.rejectPrivateIPOffers(od, log, shape, pass)
+		od = filterMinReliability(r.rejectPrivateIPOffers(od, log, shape, pass), minRel)
 		var bd []vast.Offer
 		if offerMode == OfferModeBid {
-			b, berr := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "bid"))
+			b, berr := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "bid", minRel))
 			if berr != nil {
 				log.Warn("primary bid offer search failed; continuing with on-demand only",
 					"err", berr, "shape", shape, "pass", pass)
 			} else {
-				bd = r.rejectPrivateIPOffers(b, log, shape, pass+"_bid")
+				bd = filterMinReliability(r.rejectPrivateIPOffers(b, log, shape, pass+"_bid"), minRel)
 			}
 		}
 		c, ok := RankCandidates(od, bd, offerMode, shapeCaps[shape], hot.BidMargin, costParams)
@@ -1503,7 +1507,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 				"ondemand_count", len(od), "bid_count", len(bd),
 				"cap", shapeCaps[shape], "gpu_shape", gpuShapeLabel(r.cfg, shape),
 				"fail_streak", failStreak, "mode", mode,
-				"offer_mode", offerMode, "preempt_today", preemptToday)
+				"offer_mode", offerMode, "preempt_today", preemptToday,
+				"min_reliability", minRel)
 		}
 		return c, ok, nil
 	}
@@ -2756,20 +2761,52 @@ func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, fail
 	}
 }
 
+// defaultPrimaryMinReliability is the PRIMARY offer reliability floor used
+// when pod_config.min_reliability is unavailable/invalid (Pedro decision
+// 2026-10-01: 0.99 -> 0.95 for the primary only; emerg keeps its own 0.99).
+const defaultPrimaryMinReliability = 0.95
+
+// primaryMinReliability clamps the configured floor to the DB CHECK range
+// [0.5, 1.0]; anything outside (incl. 0 = unset) falls back to the default.
+func primaryMinReliability(v float64) float64 {
+	if v < 0.5 || v > 1.0 {
+		return defaultPrimaryMinReliability
+	}
+	return v
+}
+
+// filterMinReliability is the client-side mirror of the server-side
+// `reliability gte` clause (defense in depth, like FilterBelowCap). An offer
+// with Reliability 0 (field absent from the row) is KEPT — "cannot prove
+// unreliable"; the server-side filter already applied the floor.
+func filterMinReliability(offers []vast.Offer, minRel float64) []vast.Offer {
+	out := make([]vast.Offer, 0, len(offers))
+	for _, o := range offers {
+		if o.Reliability > 0 && o.Reliability < minRel-1e-9 {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
 // primaryFilter returns a COPY of the shared search filter specialised for
-// the primary picker (quick-261001-qdd): `type` = "on-demand" | "bid" and a
-// wider `limit` (64) because ranking is now by real cost client-side, so the
-// server's dph_total order is no longer the final order. For "bid" the
-// server-side dph_total ceiling is dropped (the bid price is chosen
-// client-side from min_bid and capped in RankCandidates). The shared
-// DefaultSearchFilter output (also used by emerg) is never mutated.
-func primaryFilter(f vast.SearchFilter, kind string) vast.SearchFilter {
+// the primary picker (quick-261001-qdd): `type` = "on-demand" | "bid", a
+// wider `limit` (64) because ranking is now by real cost client-side (the
+// server's dph_total order is no longer the final order), and the
+// PRIMARY-only reliability floor (`reliability gte minRel`, default 0.95 —
+// cuda/driver/inet clauses unchanged). For "bid" the server-side dph_total
+// ceiling is dropped (the bid price is chosen client-side from min_bid and
+// capped in RankCandidates). The shared DefaultSearchFilter output (also used
+// by emerg, which keeps reliability 0.99) is never mutated.
+func primaryFilter(f vast.SearchFilter, kind string, minRel float64) vast.SearchFilter {
 	out := make(vast.SearchFilter, len(f)+2)
 	for k, v := range f {
 		out[k] = v
 	}
 	out["type"] = kind
 	out["limit"] = 64
+	out["reliability"] = map[string]any{"gte": primaryMinReliability(minRel)}
 	if kind == "bid" {
 		delete(out, "dph_total")
 	}

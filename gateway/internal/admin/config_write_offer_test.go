@@ -26,6 +26,9 @@ func TestConfigWrite_OfferPolicyFields(t *testing.T) {
 		{"max_preempt_ok", `{"field":"max_preemptions_per_day","value":3,"kind":"config"}`, http.StatusOK, "UpdatePodConfigFieldMaxPreemptionsPerDay"},
 		{"max_preempt_neg", `{"field":"max_preemptions_per_day","value":-1,"kind":"config"}`, http.StatusBadRequest, ""},
 		{"max_preempt_high", `{"field":"max_preemptions_per_day","value":21,"kind":"config"}`, http.StatusBadRequest, ""},
+		{"min_rel_ok", `{"field":"min_reliability","value":0.95,"kind":"config"}`, http.StatusOK, "UpdatePodConfigFieldMinReliability"},
+		{"min_rel_low", `{"field":"min_reliability","value":0.4,"kind":"config"}`, http.StatusBadRequest, ""},
+		{"min_rel_high", `{"field":"min_reliability","value":1.01,"kind":"config"}`, http.StatusBadRequest, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

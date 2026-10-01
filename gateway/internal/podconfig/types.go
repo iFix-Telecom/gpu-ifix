@@ -51,6 +51,9 @@ type PodConfig struct {
 	OfferMode            string
 	BidMargin            float64
 	MaxPreemptionsPerDay int
+	// MinReliability is the PRIMARY-only Vast offer reliability floor
+	// (default 0.95, Pedro 2026-10-01; emerg keeps 0.99).
+	MinReliability float64
 }
 
 // PodConfigBounds holds the owner-editable min/max gates for the 10
@@ -196,6 +199,7 @@ func rowToPodConfig(r gen.AiGatewayPodConfig) PodConfig {
 		OfferMode:            r.OfferMode,
 		BidMargin:            numericToFloat(r.BidMargin),
 		MaxPreemptionsPerDay: int(r.MaxPreemptionsPerDay),
+		MinReliability:       numericToFloat(r.MinReliability),
 	}
 }
 

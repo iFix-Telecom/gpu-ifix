@@ -73,6 +73,7 @@ type podConfigWriteQueries interface {
 	UpdatePodConfigFieldOfferMode(ctx context.Context, v string) error
 	UpdatePodConfigFieldBidMargin(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigFieldMaxPreemptionsPerDay(ctx context.Context, v int32) error
+	UpdatePodConfigFieldMinReliability(ctx context.Context, v pgtype.Numeric) error
 
 	UpdatePodConfigBoundCapPrimaryMin(ctx context.Context, v pgtype.Numeric) error
 	UpdatePodConfigBoundCapPrimaryMax(ctx context.Context, v pgtype.Numeric) error
@@ -276,6 +277,9 @@ func (h *PrimaryConfigWriteHandler) writeConfig(ctx context.Context, w http.Resp
 	case "max_preemptions_per_day":
 		// 0 disables the preemption -> on-demand fallback.
 		h.writeIntConfig(ctx, w, raw, 0, 20, h.q.UpdatePodConfigFieldMaxPreemptionsPerDay)
+	case "min_reliability":
+		// PRIMARY-only offer reliability floor (also DB CHECK in 0039).
+		h.writeNumericConfig(ctx, w, raw, 0.5, 1.0, h.q.UpdatePodConfigFieldMinReliability)
 	default:
 		h.unknownField(w, field)
 	}

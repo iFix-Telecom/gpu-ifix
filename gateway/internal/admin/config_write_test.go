@@ -89,6 +89,9 @@ func (f *fakeWriteQueries) UpdatePodConfigFieldBidMargin(_ context.Context, _ pg
 func (f *fakeWriteQueries) UpdatePodConfigFieldMaxPreemptionsPerDay(_ context.Context, _ int32) error {
 	return f.hit("UpdatePodConfigFieldMaxPreemptionsPerDay")
 }
+func (f *fakeWriteQueries) UpdatePodConfigFieldMinReliability(_ context.Context, _ pgtype.Numeric) error {
+	return f.hit("UpdatePodConfigFieldMinReliability")
+}
 func (f *fakeWriteQueries) UpdatePodConfigBoundCapPrimaryMin(_ context.Context, _ pgtype.Numeric) error {
 	return f.hit("UpdatePodConfigBoundCapPrimaryMin")
 }

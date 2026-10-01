@@ -181,6 +181,7 @@ type AiGatewayPodConfig struct {
 	OfferMode               string         `json:"offer_mode"`
 	BidMargin               pgtype.Numeric `json:"bid_margin"`
 	MaxPreemptionsPerDay    int32          `json:"max_preemptions_per_day"`
+	MinReliability          pgtype.Numeric `json:"min_reliability"`
 }
 
 type AiGatewayPrice struct {

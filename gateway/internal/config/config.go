@@ -256,6 +256,7 @@ type Config struct {
 	// at the host's inet_down_cost US$/GB. Ranking adds
 	// inet_down_cost*WeightsDownloadGB/ExpectedHoursPerStart per hour.
 	PrimaryWeightsDownloadGB     float64 // PRIMARY_WEIGHTS_DOWNLOAD_GB (default 20)
+	PrimaryVastMinReliability    float64 // PRIMARY_VAST_MIN_RELIABILITY (default 0.95; boot fallback of pod_config.min_reliability — PRIMARY only, emerg keeps 0.99)
 	PrimaryExpectedHoursPerStart float64 // PRIMARY_EXPECTED_HOURS_PER_START (default 8; conservative — ~10h/day weekdays, preemptions shorten it)
 	// Phase 6.6.Y cold-start plumbing (consumed by plan 6.6.Y-03).
 	PrimaryPublicPortBindBudgetSeconds     int      // PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS (default 120 per D-02; operator-tunable budget for a freshly-provisioned Vast pod to bind its public port — gated on gateway-observable URL reachability, NOT the unreliable Vast ports map per 6.6.Y-01 spike)
@@ -537,6 +538,7 @@ func Load() (Config, error) {
 		PrimaryVastBidMargin:            floatOr(os.Getenv("PRIMARY_VAST_BID_MARGIN"), 1.15),
 		PrimaryVastMaxPreemptionsPerDay: atoiOr(os.Getenv("PRIMARY_VAST_MAX_PREEMPTIONS_PER_DAY"), 2),
 		PrimaryWeightsDownloadGB:        floatOr(os.Getenv("PRIMARY_WEIGHTS_DOWNLOAD_GB"), 20),
+		PrimaryVastMinReliability:       floatOr(os.Getenv("PRIMARY_VAST_MIN_RELIABILITY"), 0.95),
 		PrimaryExpectedHoursPerStart:    floatOr(os.Getenv("PRIMARY_EXPECTED_HOURS_PER_START"), 8),
 		// Phase 6.6.Y cold-start readers (consumed by plan 6.6.Y-03).
 		PrimaryPublicPortBindBudgetSeconds:     atoiOr(os.Getenv("PRIMARY_PUBLIC_PORT_BIND_BUDGET_SECONDS"), 120),
