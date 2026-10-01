@@ -615,14 +615,18 @@ func (r *Reconciler) pollDeathOnReadyTick(ctx context.Context, log *slog.Logger)
 	// Healthy GET — reset the not-found counter (a single transient null
 	// between healthy polls must not trip the 3-strike close).
 	r.notFoundStrikes = 0
-	if inst.IsTerminal() {
+	// quick-261001-qdd: for a bid instance, Vast's outbid/preempt signal is
+	// intended_status=stopped or actual_status=stopped (vast-cli; the 3060
+	// is_terminal shape) — a non-IsTerminal state the on-demand path ignores.
+	isBid := r.activeIsBid.Load()
+	if inst.IsTerminal() || (isBid && bidStopped(inst)) {
 		r.terminalStrikes++
 		log.Warn("primary death poll: Vast reports terminal status",
 			"vast_instance_id", instanceID, "actual_status", inst.ActualStatus,
-			"intended_status", inst.IntendedStatus,
+			"intended_status", inst.IntendedStatus, "is_bid", isBid,
 			"strike", r.terminalStrikes, "confirm_at", terminalConfirmStrikes)
 		if r.terminalStrikes >= terminalConfirmStrikes {
-			return &deathClassification{dead: true, cause: classifyDeath(inst)}
+			return &deathClassification{dead: true, cause: classifyDeathForMode(inst, isBid)}
 		}
 		return nil
 	}
@@ -705,6 +709,17 @@ func (r *Reconciler) handleConfirmedDeath(ctx context.Context, death deathClassi
 		}
 	}
 
+	// quick-261001-qdd: a preempted bid lifecycle closes as "preempted"
+	// (consumed by evaluateDestroying) — set BEFORE startDrain so the
+	// drain→destroy path can never close it as plain "destroyed". No billing
+	// marker (below is conditional on billing_stopped) and no machine
+	// blocklisting: a lost bid is the market, not the host.
+	if death.cause == "preempted" {
+		reasonPreempted := "preempted"
+		r.pendingCloseReason.Store(&reasonPreempted)
+		obs.PrimaryPreemptionsTotal.WithLabelValues("ready").Inc()
+	}
+
 	// (1) startDrain advances Ready→Draining + RestoreTier0s the slots.
 	r.startDrain(ctx, reason, log)
 
@@ -730,7 +745,7 @@ func (r *Reconciler) handleConfirmedDeath(ctx context.Context, death deathClassi
 		Type:        "primary_death_confirmed",
 		State:       "draining",
 		LifecycleID: r.activeLifecycleID.Load(),
-		Reason:      death.cause, // "billing_stopped" | "host_death" | "not_found"
+		Reason:      death.cause, // "billing_stopped" | "host_death" | "not_found" | "preempted"
 		SinceUnix:   time.Now().Unix(),
 		ReplicaID:   r.deps.ReplicaID,
 	}, log)
@@ -772,12 +787,45 @@ func classifyDeath(inst vast.Instance) string {
 		return "billing_stopped"
 	}
 	if strings.EqualFold(strings.TrimSpace(inst.ActualStatus), "exited") {
-		msg := strings.ToLower(inst.StatusMsg)
-		if strings.Contains(msg, "credit") || strings.Contains(msg, "account") || strings.Contains(msg, "saldo") {
+		if statusMsgBillingMarker(inst.StatusMsg) {
 			return "billing_stopped"
 		}
 	}
 	return "host_death"
+}
+
+// statusMsgBillingMarker reports whether a Vast status_msg carries the
+// credit/account/saldo marker of a zero-balance stop (case-insensitive).
+func statusMsgBillingMarker(statusMsg string) bool {
+	msg := strings.ToLower(statusMsg)
+	return strings.Contains(msg, "credit") || strings.Contains(msg, "account") || strings.Contains(msg, "saldo")
+}
+
+// bidStopped reports the Vast stop signal of an interruptible instance:
+// intended_status=stopped or actual_status=stopped (quick-261001-qdd).
+func bidStopped(inst vast.Instance) bool {
+	return strings.EqualFold(strings.TrimSpace(inst.IntendedStatus), "stopped") ||
+		strings.EqualFold(strings.TrimSpace(inst.ActualStatus), "stopped")
+}
+
+// classifyDeathForMode extends classifyDeath for bid lifecycles
+// (quick-261001-qdd). The credit/account/saldo status_msg marker is checked
+// FIRST so a zero-credit stop still arms the billing suppression even for a
+// bid pod (T-qdd-05); any other confirmed stop/terminal of a bid instance is
+// "preempted". On-demand lifecycles keep classifyDeath unchanged.
+//
+// HIPÓTESE (no live evidence yet): a zero-credit stop of a bid instance whose
+// status_msg lacks the marker would be classified "preempted"; the blast
+// radius is bounded by max_preemptions_per_day (then on-demand create fails
+// and the existing provision-failure cooldown applies).
+func classifyDeathForMode(inst vast.Instance, isBid bool) string {
+	if !isBid {
+		return classifyDeath(inst)
+	}
+	if statusMsgBillingMarker(inst.StatusMsg) {
+		return "billing_stopped"
+	}
+	return "preempted"
 }
 
 // evaluateDraining ramps down the pod. Transitions Draining→Destroying
@@ -834,14 +882,21 @@ func (r *Reconciler) evaluateDestroying(ctx context.Context, now time.Time, log 
 		vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
 	}
 	lifecycleID := r.activeLifecycleID.Load()
+	// quick-261001-qdd: a confirmed bid preemption overrides the plain
+	// "destroyed" reason (consumed exactly once).
+	closeReason := "destroyed"
+	if p := r.pendingCloseReason.Swap(nil); p != nil {
+		closeReason = *p
+	}
 	if lifecycleID != 0 {
-		if err := r.closeLifecycle(ctx, lifecycleID, "destroyed", 0); err != nil {
+		if err := r.closeLifecycle(ctx, lifecycleID, closeReason, 0); err != nil {
 			log.Error("primary evaluateDestroying: closeLifecycle failed",
 				"lifecycle_id", lifecycleID, "err", err)
 		}
 	}
 	r.activeInstanceID.Store(0)
 	r.activeLifecycleID.Store(0)
+	r.activeIsBid.Store(false)
 	_ = r.deps.FSM.Transition(StateDestroying, StateAsleep, now, "destroy_complete")
 }
 
@@ -972,6 +1027,8 @@ func (r *Reconciler) markReady(ctx context.Context, lifecycleID int64, urls prim
 	r.terminalStrikes = 0
 	r.notFoundStrikes = 0
 	r.deathStrikeMu.Unlock()
+	// quick-261001-qdd: a fresh Ready pod never carries a stale close reason.
+	r.pendingCloseReason.Store(nil)
 	// Phase 12 Plan 02 (D-01): a successful provision naturally consumes any
 	// active billing-stop suppression marker — the operator clearly has credit
 	// again (this pod was created + reached Ready), so the schedule loop must be
@@ -1207,6 +1264,8 @@ func (r *Reconciler) spawnProvisioning(parentCtx context.Context, reason string,
 			r.deps.FSM.SetState(StateAsleep, time.Now(), "provision_error:"+errReason(err))
 			r.activeInstanceID.Store(0)
 			r.activeLifecycleID.Store(0)
+			r.activeIsBid.Store(false)
+			r.pendingCloseReason.Store(nil)
 		}
 	}()
 }
@@ -1917,12 +1976,25 @@ func (r *Reconciler) waitForReadyOrDestroy(ctx context.Context, lifecycleID, ins
 			// terminal path so provisioning fast-fails and the schedule loop
 			// re-bids a different host.
 			billingStopped := strings.EqualFold(strings.TrimSpace(inst.IntendedStatus), "stopped")
-			if inst.IsTerminal() || billingStopped {
+			isBid := r.activeIsBid.Load()
+			if inst.IsTerminal() || billingStopped || (isBid && bidStopped(inst)) {
 				terminalStrikes++
 				log.Warn("primary provisioning: Vast reports terminal/stopped status",
 					"instance_id", instanceID, "actual_status", inst.ActualStatus,
-					"intended_status", inst.IntendedStatus,
+					"intended_status", inst.IntendedStatus, "is_bid", isBid,
 					"strike", terminalStrikes, "confirm_at", terminalConfirmStrikes)
+				if terminalStrikes >= terminalConfirmStrikes && isBid && !statusMsgBillingMarker(inst.StatusMsg) {
+					// quick-261001-qdd: a bid instance stopped by Vast during
+					// cold start was outbid/preempted — market, not host fault:
+					// "preempted" is NOT machine-attributable (no blocklist,
+					// no machine report). The schedule loop re-provisions after
+					// the normal failure cooldown; ChooseMode flips to
+					// on-demand once max_preemptions_per_day is reached.
+					vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instanceID)
+					_ = r.closeLifecycle(context.Background(), lifecycleID, "preempted", 0)
+					obs.PrimaryPreemptionsTotal.WithLabelValues("provisioning").Inc()
+					return "preempted", errors.New("primary: bid instance preempted")
+				}
 				if terminalStrikes >= terminalConfirmStrikes {
 					// No machine report here: terminal/stopped is ambiguous —
 					// intended=stopped may be OUR billing stop (zero credit),
@@ -2466,6 +2538,9 @@ func errReason(err error) string {
 	}
 	if strings.Contains(msg, "instance_terminal_state") || strings.Contains(msg, "instance terminal") {
 		return "instance_terminal_state"
+	}
+	if strings.Contains(msg, "preempted") {
+		return "preempted"
 	}
 	if strings.Contains(msg, "create_error") {
 		return "create_error"

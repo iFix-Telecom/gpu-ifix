@@ -598,14 +598,28 @@ var OverContextCascadedTotal = promauto.NewCounterVec(
 
 // PrimaryDeathDetectedTotal counts confirmed primary-pod deaths detected on
 // the Ready tick (RES-11, Plan 02). cause ∈ {billing_stopped, host_death,
-// not_found}. ALERTABLE: cause=billing_stopped (Vast account out of credit —
-// operator-actionable; drives a critical alert series).
+// not_found, preempted}. ALERTABLE: cause=billing_stopped (Vast account out of
+// credit — operator-actionable; drives a critical alert series). preempted =
+// a bid (interruptible) instance stopped by Vast (quick-261001-qdd).
 var PrimaryDeathDetectedTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "gateway_primary_death_detected_total",
-		Help: "Confirmed primary-pod deaths detected on the Ready tick, by cause (billing_stopped|host_death|not_found).",
+		Help: "Confirmed primary-pod deaths detected on the Ready tick, by cause (billing_stopped|host_death|not_found|preempted).",
 	},
 	[]string{"cause"},
+)
+
+// PrimaryPreemptionsTotal counts primary bid (interruptible) instances that
+// Vast stopped/outbid (quick-261001-qdd), by phase ∈ {ready, provisioning}.
+// Each one is destroyed, closed shutdown_reason='preempted' and re-provisioned;
+// after pod_config.max_preemptions_per_day in a day the reconciler falls back
+// to on-demand. Sustained growth = the bid market is too hot for the margin.
+var PrimaryPreemptionsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_primary_preemptions_total",
+		Help: "Primary bid instances preempted (stopped by Vast), by phase (ready|provisioning).",
+	},
+	[]string{"phase"},
 )
 
 // Handler returns the /metrics endpoint handler.

@@ -60,6 +60,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -456,9 +457,9 @@ func runPrimaryLifecyclesWithPool(ctx context.Context, pool *pgxpool.Pool, dur t
 	case "table":
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(tw,
-			"ID\tSTARTED\tDRAIN\tENDED\tTRIGGER\tVAST_OFFER\tVAST_INST\tDPH\tCOST_BRL\tSHUTDOWN\tREPLICA")
+			"ID\tSTARTED\tDRAIN\tENDED\tTRIGGER\tVAST_OFFER\tVAST_INST\tMODE\tDPH\tCOST_BRL\tSHUTDOWN\tREPLICA")
 		for _, r := range rows {
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				r.ID,
 				r.StartedAt.UTC().Format(time.RFC3339),
 				timestamptzOrDash(r.DrainStartedAt),
@@ -466,6 +467,7 @@ func runPrimaryLifecyclesWithPool(ctx context.Context, pool *pgxpool.Pool, dur t
 				r.TriggerReason,
 				int8OrDash(r.VastOfferID),
 				int8OrDash(r.VastInstanceID),
+				offerModeLabel(r.IsBid, r.BidPrice),
 				numericOrDash(r.AcceptedDph),
 				numericOrDash(r.TotalCostBrl),
 				textOrDash(r.ShutdownReason),
@@ -478,4 +480,18 @@ func runPrimaryLifecyclesWithPool(ctx context.Context, pool *pgxpool.Pool, dur t
 		}
 	}
 	return 0
+}
+
+// offerModeLabel renders the MODE column of `gatewayctl primary lifecycles`
+// (quick-261001-qdd): "bid@<price>" for an interruptible lifecycle,
+// "ondemand" for on-demand, "-" for a legacy (pre-0039, NULL) row. The json
+// output carries the raw is_bid / bid_price fields.
+func offerModeLabel(isBid pgtype.Bool, bidPrice pgtype.Numeric) string {
+	if !isBid.Valid {
+		return "-"
+	}
+	if !isBid.Bool {
+		return "ondemand"
+	}
+	return "bid@" + numericOrDash(bidPrice)
 }
