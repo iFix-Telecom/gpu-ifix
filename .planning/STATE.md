@@ -195,6 +195,8 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 261001-fjk | **STT OOM sem penalizar breaker (86akreh6u).** Interceptor STT lê ≤2KiB do erro; OOM cascateia sem recordUpstreamFailure (4 pontos); erro carrega status+corpo; RES-08 intacto. | 2026-10-01 | e6386e2 | [261001-fjk-stt-oom-nao-abre-breaker-log-erro](./quick/261001-fjk-stt-oom-nao-abre-breaker-log-erro/) |
+| 261001-cwi | **Custo pod 3060 (86akregky).** Ranking por custo real (GPU+disco), bid default com fallback on-demand (sem oferta / ≥2 preempções/dia), watchdog 3 min 07-19h, stop interrompe start; disco mantido 40G (stack real ~30G); onstart whisper int8_float16 (fim do OOM, 86akreh6u). | 2026-10-01 | 78b062f | [261001-cwi-pod-3060-custo-interruptivel-watchdog](./quick/261001-cwi-pod-3060-custo-interruptivel-watchdog/) |
 | 261001-czn | Teste de unicidade de API key sem argon2 (157s → ms); auth -race volta a caber no timeout. | 2026-10-01 | 7eac7e3 | [261001-czn-teste-unicidade-api-key-sem-argon2](./quick/261001-czn-teste-unicidade-api-key-sem-argon2/) |
 | 261001-9fh | **Shed sem flapping (86akrbgbt).** Recovering continua sheddando + dwell min(3s) On↔Recovering; SC2 192→24 transições. | 2026-10-01 | 9c45390 | [261001-9fh-shed-recovering-continua-sheddando](./quick/261001-9fh-shed-recovering-continua-sheddando/) |
 | 260930-wpv | **Revoke de API key imediato (86akrbgbt).** RevokeAPIKeyReturningHash + DEL Redis + pubsub `gw:apikey:revoked` evicta L1 em todas as réplicas; fix asserções PrimaryLifecycles. | 2026-10-01 | 7fdac9f | [260930-wpv-revoke-invalida-cache-auth-imediato](./quick/260930-wpv-revoke-invalida-cache-auth-imediato/) |
