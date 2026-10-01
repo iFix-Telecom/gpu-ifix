@@ -1,9 +1,14 @@
 package proxy
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
@@ -52,10 +57,95 @@ func STTRetryableStatusInterceptor() ProxyResponseInterceptor {
 }
 
 func (sttRetryableStatusInterceptor) Intercept(resp *http.Response) error {
-	if resp != nil && isRetryableSTTStatus(resp.StatusCode) {
-		return errUpstreamRetryable
+	if resp == nil || !isRetryableSTTStatus(resp.StatusCode) {
+		return nil
 	}
-	return nil
+	head := peekSTTErrorBody(resp)
+	return &sttUpstreamStatusError{
+		status:  resp.StatusCode,
+		excerpt: sttErrorExcerpt(head),
+		// Classified on the full peeked head (≤2 KiB), not the 300-char
+		// excerpt, so a long traceback prefix cannot hide the OOM marker.
+		oom: strings.Contains(strings.ToLower(string(head)), "out of memory"),
+	}
+}
+
+const (
+	// sttErrorPeekMax bounds how much of an error body the interceptor reads
+	// to classify/log it. Error bodies are small JSON envelopes; a hostile or
+	// buggy upstream streaming megabytes must not be buffered (Codex-style
+	// bounded read).
+	sttErrorPeekMax = 2 << 10 // 2 KiB
+	// sttErrorExcerptMax caps the excerpt embedded in the error message so a
+	// log line stays readable.
+	sttErrorExcerptMax = 300
+)
+
+// sttUpstreamStatusError is the fallthrough error the STT interceptor emits
+// for a status >= 400 (quick 261001-fjk). It exists so the fallthrough log —
+// previously only "proxy interceptor #0: upstream retryable error" — carries
+// the upstream status and the head of its error body (e.g. the speaches
+// "CUDA failed with error out of memory"), and so the dispatcher can tell a
+// per-request GPU OOM apart from real upstream degradation.
+//
+// errors.Is ALWAYS matches errUpstreamRetryable (cascade + ErrorHandler write
+// suppression unchanged — decisão Pedro 2026-08-27 "qualquer erro deveria ter
+// acionado os fallbacks"), and additionally matches errSTTResourceExhausted
+// when the excerpt mentions "out of memory".
+type sttUpstreamStatusError struct {
+	status  int
+	excerpt string
+	oom     bool
+}
+
+func (e *sttUpstreamStatusError) Error() string {
+	if e.excerpt == "" {
+		return fmt.Sprintf("%s (stt upstream status %d)", errUpstreamRetryable.Error(), e.status)
+	}
+	return fmt.Sprintf("%s (stt upstream status %d: %s)", errUpstreamRetryable.Error(), e.status, e.excerpt)
+}
+
+func (e *sttUpstreamStatusError) Unwrap() error { return errUpstreamRetryable }
+
+func (e *sttUpstreamStatusError) Is(target error) bool {
+	return target == errUpstreamRetryable || (e.oom && target == errSTTResourceExhausted)
+}
+
+// sttStatusFrom extracts the upstream status carried by an STT fallthrough
+// error, or 0 when err is not one.
+func sttStatusFrom(err error) int {
+	var se *sttUpstreamStatusError
+	if errors.As(err, &se) {
+		return se.status
+	}
+	return 0
+}
+
+// peekSTTErrorBody reads up to sttErrorPeekMax bytes of resp.Body and restores
+// resp.Body so the bytes remain readable downstream (peeked head + untouched
+// rest, original Closer preserved). Returns the peeked head.
+func peekSTTErrorBody(resp *http.Response) []byte {
+	if resp.Body == nil || resp.Body == http.NoBody {
+		return nil
+	}
+	head, _ := io.ReadAll(io.LimitReader(resp.Body, sttErrorPeekMax))
+	orig := resp.Body
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), orig), orig}
+	return head
+}
+
+// sttErrorExcerpt renders head as a sanitized single-line excerpt of at most
+// sttErrorExcerptMax bytes (whitespace/newlines collapsed, invalid UTF-8
+// dropped) — safe to embed in a structured log field.
+func sttErrorExcerpt(head []byte) string {
+	one := strings.Join(strings.Fields(strings.ToValidUTF8(string(head), "")), " ")
+	if len(one) > sttErrorExcerptMax {
+		one = strings.ToValidUTF8(one[:sttErrorExcerptMax], "")
+	}
+	return one
 }
 
 // isRetryableSTTStatus reports whether an STT upstream status warrants a cascade
