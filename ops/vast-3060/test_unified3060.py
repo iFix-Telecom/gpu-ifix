@@ -198,6 +198,38 @@ class RealCostTest(unittest.TestCase):
         c = u.real_cost({})
         self.assertGreater(c["total"], 1.0)  # inelegivel, mas sem excecao
 
+    def test_download_amortized_into_rank_not_total(self):
+        o = {"dph_base": 0.05, "storage_cost": 0.2, "inet_down_cost": 0.0267}
+        c = u.real_cost(o, disk_gb=40)
+        exp_dl = 0.0267 * u.DOWNLOAD_GB_PER_START / u.HOURS_PER_START
+        self.assertAlmostEqual(c["download_h"], exp_dl, places=9)
+        self.assertAlmostEqual(c["total"], 0.05 + 0.2 * 40 / 730, places=9)
+        self.assertAlmostEqual(c["rank"], c["total"] + exp_dl, places=9)
+
+    def test_download_missing_is_zero(self):
+        c = u.real_cost({"dph_base": 0.05, "storage_cost": 0.2}, disk_gb=40)
+        self.assertEqual(c["download_h"], 0.0)
+        self.assertAlmostEqual(c["rank"], c["total"], places=12)
+
+    def test_rank_prefers_cheap_download_over_cheaper_gpu(self):
+        # GPU 0.002/h mais barata mas download 0.0267/GB (≈0.045/h amortizado)
+        # perde para a ligeiramente mais cara com download barato.
+        cheap_gpu = {"id": 1, "machine_id": 1, "host_id": 1, "geolocation": "US",
+                     "dph_base": 0.050, "storage_cost": 0.2, "inet_down_cost": 0.0267}
+        cheap_dl = {"id": 2, "machine_id": 2, "host_id": 2, "geolocation": "US",
+                    "dph_base": 0.052, "storage_cost": 0.2, "inet_down_cost": 0.001}
+        pick = u.rank_candidates([cheap_gpu, cheap_dl], [], "ondemand", disk_gb=40,
+                                 price_cap=0.1, cap_steps=[1.0])
+        self.assertEqual(pick["offer"]["id"], 2)
+
+    def test_cap_applies_to_gpu_plus_storage_only(self):
+        # download alto NAO tira a oferta do teto (teto = GPU+disco)
+        o = {"id": 3, "machine_id": 3, "host_id": 3, "geolocation": "US",
+             "dph_base": 0.05, "storage_cost": 0.2, "inet_down_cost": 1.0}
+        pick = u.rank_candidates([o], [], "ondemand", disk_gb=40,
+                                 price_cap=0.061, cap_steps=[1.0])
+        self.assertIsNotNone(pick)
+
     def test_disk_default_is_40(self):
         self.assertEqual(u.DISK_GB, 40)
         c = u.real_cost({"dph_base": 0.0, "storage_cost": 0.73})

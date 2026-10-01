@@ -62,6 +62,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # com 30G o disk-guard (limpa em >=85%) dispararia o tempo todo e o pod lotaria.
 DISK_GB = 40
 HOURS_PER_MONTH = 730  # storage_cost da Vast = US$/GB/mes -> /730 = US$/GB/h
+# Download cobrado por GB pelo host (offer.inet_down_cost, US$/GB). Cada subida
+# FRESCA baixa o stack inteiro (HF ~10G + venvs pip infinity/xtts ~12G):
+# instancia de 2026-10-01 faturou inet_down_billed=21.495.808 (HIPOTESE: KB ->
+# ~21,5G). Benchmark L4 mediu ate US$0,50/subida num host caro. Amortizado
+# pelas horas de uma subida (07-20h = 13h) e somado so ao RANKING; o teto
+# (PRICE_CAP*CAP_STEPS) segue valendo sobre GPU+disco.
+DOWNLOAD_GB_PER_START = 22
+HOURS_PER_START = 13
 # Modo de aluguel (quick 261001-cwi). Overrides em /etc/onboard/secrets/vast-3060.env:
 #   VAST3060_MODE=bid|ondemand  VAST3060_BID_MARGIN=<float 1..5>  VAST3060_MAX_PREEMPT=<int>=0>
 # Rollback para on-demand puro: VAST3060_MODE=ondemand (sem redeploy de codigo).
@@ -274,9 +282,20 @@ def filter_offers(offers, machine_avoid=(), host_avoid=()):
 # para bid.
 
 def real_cost(offer, mode="ondemand", bid=None, disk_gb=DISK_GB):
-    """PURA. -> {hourly, storage_h, total, src}. Nunca levanta: sem dados cai em
-    dph_total; sem nada -> total 9.0 (inelegivel em qualquer teto)."""
+    """PURA. -> {hourly, storage_h, total, download_h, rank, src}. total = GPU +
+    disco (teto aplica aqui); rank = total + download amortizado (ordenacao).
+    Nunca levanta: sem dados cai em dph_total; sem nada -> total 9.0."""
     sc = offer.get("storage_cost")
+    dc = offer.get("inet_down_cost")
+    download_h = (float(dc) * DOWNLOAD_GB_PER_START / HOURS_PER_START
+                  if dc is not None else 0.0)
+    c = _real_cost_base(offer, sc, mode, bid, disk_gb)
+    c["download_h"] = download_h
+    c["rank"] = c["total"] + download_h
+    return c
+
+
+def _real_cost_base(offer, sc, mode, bid, disk_gb):
     if mode == "bid" and bid is not None:
         storage_h = float(sc) * disk_gb / HOURS_PER_MONTH if sc is not None else 0.0
         hourly = float(bid)
@@ -357,7 +376,8 @@ def rank_candidates(ondemand_offers, bid_offers, mode, machine_avoid=(), host_av
                     cap_steps=None):
     """PURA. Para cada degrau do teto (price_cap * cap_steps) monta candidatos
     on-demand (sempre) e bid (so mode == "bid" com lance valido) cujo custo real
-    total cabe no degrau; devolve o de MENOR total (empate -> on-demand) como
+    total (GPU+disco) cabe no degrau; devolve o de MENOR rank (total + download
+    amortizado; empate -> on-demand) como
     {offer, mode, bid, cost, cap_mult}. Nenhum -> None."""
     price_cap = v.PRICE_CAP if price_cap is None else price_cap
     cap_steps = v.CAP_STEPS if cap_steps is None else cap_steps
@@ -369,7 +389,7 @@ def rank_candidates(ondemand_offers, bid_offers, mode, machine_avoid=(), host_av
         for o in od:
             c = real_cost(o, "ondemand", disk_gb=disk_gb)
             if c["total"] <= cap + 1e-12:
-                cands.append((c["total"], 0, {"offer": o, "mode": "ondemand", "bid": None,
+                cands.append((c["rank"], 0, {"offer": o, "mode": "ondemand", "bid": None,
                                               "cost": c, "cap_mult": mult}))
         for o in bd:
             sc = o.get("storage_cost")
@@ -379,7 +399,7 @@ def rank_candidates(ondemand_offers, bid_offers, mode, machine_avoid=(), host_av
                 continue
             c = real_cost(o, "bid", bid=b, disk_gb=disk_gb)
             if c["total"] <= cap + 1e-12:
-                cands.append((c["total"], 1, {"offer": o, "mode": "bid", "bid": b,
+                cands.append((c["rank"], 1, {"offer": o, "mode": "bid", "bid": b,
                                               "cost": c, "cap_mult": mult}))
         if cands:
             cands.sort(key=lambda t: (round(t[0], 9), t[1]))
@@ -475,7 +495,9 @@ def describe_pick(pick):
     return (f"modo={pick['mode']} machine {o.get('machine_id')} host {o.get('host_id')} "
             f"{o.get('geolocation')} | {hourly} + storage ${c['storage_h']:.4f} "
             f"(storage_cost {o.get('storage_cost')} x {DISK_GB}G) = ${c['total']:.4f}/h "
-            f"[{c['src']}] teto {pick['cap_mult']}x")
+            f"+ download ${c.get('download_h', 0):.4f}/h (inet_down_cost "
+            f"{o.get('inet_down_cost')} x {DOWNLOAD_GB_PER_START}G / {HOURS_PER_START}h) "
+            f"= rank ${c.get('rank', c['total']):.4f}/h [{c['src']}] teto {pick['cap_mult']}x")
 
 
 def pick_offer(env, avoid, host_avoid=(), mode="ondemand", margin=BID_MARGIN_DEFAULT):
