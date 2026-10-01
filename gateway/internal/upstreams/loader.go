@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -96,12 +97,20 @@ type Loader struct {
 	// do swap do snapshot, para cada row presente no snapshot anterior E no
 	// novo cuja URL efetiva mudou. Registrado via OnURLChange.
 	urlChangeHook atomic.Pointer[func(name, oldURL, newURL string)]
+
+	// refreshMu serializa Refresh (SELECT + swap). Quick 260930-uru: com o
+	// backstop periódico há dois chamadores (LISTEN e ticker). Sem o mutex um
+	// Refresh do ticker que leu o estado ANTES do UPDATE poderia trocar o
+	// snapshot DEPOIS do Refresh do NOTIFY, revertendo para a URL velha até o
+	// próximo tick. Com o mutex a ordem das leituras é a ordem dos swaps.
+	refreshMu sync.Mutex
 }
 
 // OnURLChange registra o hook de mudança de URL efetiva (quick 260930-uru).
 // main.go usa para resetar o breaker e a janela de latência da row quando o
 // pod muda de endereço. O hook roda na goroutine que chamou Refresh (LISTEN
-// ou backstop periódico). Uma nova chamada substitui o hook anterior; nil
+// ou backstop periódico), com o refreshMu do loader seguro — o hook NÃO pode
+// chamar Refresh (deadlock). Uma nova chamada substitui o hook anterior; nil
 // desativa.
 func (l *Loader) OnURLChange(fn func(name, oldURL, newURL string)) {
 	if fn == nil {
@@ -170,6 +179,8 @@ func newTier0OverrideMap() map[string]*atomic.Pointer[string] {
 // the gateway bootable even when a fallback provider's bearer is not yet
 // configured (CONTEXT.md "Plumbing" / 03-04-PLAN must_haves.truths).
 func (l *Loader) Refresh(ctx context.Context) error {
+	l.refreshMu.Lock()
+	defer l.refreshMu.Unlock()
 	rows, err := l.q.ListEnabledUpstreams(ctx)
 	if err != nil {
 		obs.UpstreamsReloadTotal.WithLabelValues("error").Inc()

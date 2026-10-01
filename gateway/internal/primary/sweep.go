@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -124,6 +125,23 @@ func (r *Reconciler) sweepOrphanInstances(ctx context.Context, log *slog.Logger)
 
 	orphans := vastutil.SelectLabelOrphans(instances, vastutil.PrimaryLabelPrefix,
 		live, keep, time.Now(), orphanSweepMinAge)
+	// Quick 260930-uru: 1 log INFO por execução com os contadores, para o
+	// sweep ser observável mesmo quando não acha nada.
+	matched := 0
+	for _, inst := range instances {
+		if strings.HasPrefix(inst.Label, vastutil.PrimaryLabelPrefix) {
+			matched++
+		}
+	}
+	destroyed, failed := 0, 0
+	defer func() {
+		log.Info("primary orphan sweep done",
+			"listed", len(instances),
+			"matched_label", matched,
+			"orphans", len(orphans),
+			"destroyed", destroyed,
+			"failed", failed)
+	}()
 	for _, inst := range orphans {
 		lcID, _ := vastutil.ParseLifecycleLabel(inst.Label, vastutil.PrimaryLabelPrefix)
 		log.Warn("primary orphan Vast instance found by label sweep; destroying",
@@ -139,8 +157,10 @@ func (r *Reconciler) sweepOrphanInstances(ctx context.Context, log *slog.Logger)
 		if derr := vastutil.BestEffortDestroy(ctx, r.deps.Vast, log, inst.ID); derr != nil {
 			log.Error("primary orphan sweep: destroy failed; next sweep retries",
 				"instance_id", inst.ID, "lifecycle_id", lcID, "err", derr)
+			failed++
 			continue
 		}
+		destroyed++
 		obs.GatewayVastOrphanSweptTotal.WithLabelValues("primary").Inc()
 	}
 }

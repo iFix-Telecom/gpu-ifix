@@ -20,12 +20,8 @@
 package proxy
 
 import (
-	"fmt"
 	"log/slog"
-	"net/http"
 	"net/http/httputil"
-	"net/url"
-	"time"
 )
 
 // NewRerankProxy constructs a reverse proxy for POST /v1/rerank. Same
@@ -35,23 +31,11 @@ import (
 // re-routes to the next tier). Buffered (no FlushInterval): the response is a
 // single JSON body, never SSE.
 func NewRerankProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyResponseInterceptor) (*httputil.ReverseProxy, error) {
-	u, err := url.Parse(upstreamURL)
+	u, err := parseStaticUpstream("rerank", upstreamURL)
 	if err != nil {
-		return nil, fmt.Errorf("proxy/rerank: parse %q: %w", upstreamURL, err)
+		return nil, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("proxy/rerank: invalid upstream url %q", upstreamURL)
-	}
-	rp := &httputil.ReverseProxy{
-		Director: BuildDirector(u),
-		Transport: fallthroughRoundTripper{base: &http.Transport{
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
-		ErrorHandler:   ErrorHandler("rerank", log),
-		ModifyResponse: ComposeInterceptors(interceptors...),
-	}
-	return rp, nil
+	// Quick 260930-uru: alvo fixo delegado ao proxy dinâmico (mesmo
+	// transport/ErrorHandler); cmd/gateway usa NewDynamicRerankProxy.
+	return NewDynamicRerankProxy(staticTarget(u), log, interceptors...), nil
 }

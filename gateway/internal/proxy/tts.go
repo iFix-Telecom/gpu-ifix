@@ -55,30 +55,13 @@ import (
 // preserved. We do NOT copy audio.go's multipart handling — the data
 // direction is opposite (JSON in, binary out).
 func NewTTSProxy(upstreamURL string, log *slog.Logger, interceptors ...ProxyResponseInterceptor) (*httputil.ReverseProxy, error) {
-	u, err := url.Parse(upstreamURL)
+	u, err := parseStaticUpstream("tts", upstreamURL)
 	if err != nil {
-		return nil, fmt.Errorf("proxy/tts: parse %q: %w", upstreamURL, err)
+		return nil, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("proxy/tts: invalid upstream url %q", upstreamURL)
-	}
-	rp := &httputil.ReverseProxy{
-		Director: BuildDirector(u),
-		// FlushInterval deliberately omitted (default 0 = buffered): the
-		// speech response is a single binary WAV body, not SSE.
-		// RES-13 / Plan 12-03: fallthroughRoundTripper surfaces pre-byte
-		// dial failures as the sentinel the ErrorHandler suppresses so the
-		// dispatcher re-routes to tier-1.
-		Transport: fallthroughRoundTripper{base: &http.Transport{
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-		}},
-		ErrorHandler:   ErrorHandler("tts", log),
-		ModifyResponse: ComposeInterceptors(interceptors...),
-	}
-	return rp, nil
+	// Quick 260930-uru: alvo fixo delegado ao proxy dinâmico (mesmo
+	// transport/ErrorHandler); cmd/gateway usa NewDynamicTTSTargetProxy.
+	return NewDynamicTTSTargetProxy(staticTarget(u), log, interceptors...), nil
 }
 
 // NewDynamicTTSProxy builds the tier-0 TTS proxy for the DYNAMIC primary-pod

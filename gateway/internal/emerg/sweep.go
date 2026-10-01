@@ -19,6 +19,7 @@ package emerg
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
@@ -116,6 +117,23 @@ func (r *Reconciler) sweepOrphanInstances(ctx context.Context, log *slog.Logger)
 
 	orphans := vastutil.SelectLabelOrphans(instances, vastutil.EmergLabelPrefix,
 		live, keep, time.Now(), orphanSweepMinAge)
+	// Quick 260930-uru: 1 log INFO por execução com os contadores, para o
+	// sweep ser observável mesmo quando não acha nada.
+	matched := 0
+	for _, inst := range instances {
+		if strings.HasPrefix(inst.Label, vastutil.EmergLabelPrefix) {
+			matched++
+		}
+	}
+	destroyed, failed := 0, 0
+	defer func() {
+		log.Info("emerg orphan sweep done",
+			"listed", len(instances),
+			"matched_label", matched,
+			"orphans", len(orphans),
+			"destroyed", destroyed,
+			"failed", failed)
+	}()
 	for _, inst := range orphans {
 		lcID, _ := vastutil.ParseLifecycleLabel(inst.Label, vastutil.EmergLabelPrefix)
 		log.Warn("emerg orphan Vast instance found by label sweep; destroying",
@@ -131,8 +149,10 @@ func (r *Reconciler) sweepOrphanInstances(ctx context.Context, log *slog.Logger)
 		if derr := vastutil.BestEffortDestroy(ctx, api, log, inst.ID); derr != nil {
 			log.Error("emerg orphan sweep: destroy failed; next sweep retries",
 				"instance_id", inst.ID, "lifecycle_id", lcID, "err", derr)
+			failed++
 			continue
 		}
+		destroyed++
 		obs.GatewayVastOrphanSweptTotal.WithLabelValues("emerg").Inc()
 	}
 }
