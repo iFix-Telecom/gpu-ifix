@@ -156,5 +156,212 @@ class GatewayctlCmdTest(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+# ---------------------------------------------------------------- quick 261001-cwi
+def _od(i, base, storage, mid=None, host=None, geo="US", total=None, min_bid=None):
+    o = {"id": i, "machine_id": mid if mid is not None else 1000 + i,
+         "host_id": host if host is not None else 2000 + i,
+         "dph_base": base, "storage_cost": storage, "geolocation": geo,
+         "dph_total": total if total is not None else (base or 0) + 0.001}
+    if min_bid is not None:
+        o["min_bid"] = min_bid
+    return o
+
+
+class RealCostTest(unittest.TestCase):
+    def test_ondemand_base_plus_storage(self):
+        c = u.real_cost({"dph_base": 0.0533, "storage_cost": 0.2}, disk_gb=30)
+        self.assertAlmostEqual(c["hourly"], 0.0533, places=6)
+        self.assertAlmostEqual(c["storage_h"], 0.2 * 30 / 730, places=6)
+        self.assertAlmostEqual(c["storage_h"], 0.00822, places=5)
+        self.assertAlmostEqual(c["total"], 0.06152, places=5)
+        self.assertEqual(c["src"], "base+storage")
+
+    def test_bid_uses_bid_as_hourly(self):
+        c = u.real_cost({"dph_base": 0.05, "storage_cost": 0.2, "min_bid": 0.03},
+                        mode="bid", bid=0.0345, disk_gb=30)
+        self.assertAlmostEqual(c["hourly"], 0.0345, places=6)
+        self.assertAlmostEqual(c["total"], 0.0345 + 0.2 * 30 / 730, places=6)
+        self.assertEqual(c["src"], "bid+storage")
+
+    def test_fallback_dph_total(self):
+        c = u.real_cost({"dph_total": 0.04})
+        self.assertEqual(c["src"], "dph_total-fallback")
+        self.assertAlmostEqual(c["total"], 0.04)
+        self.assertEqual(c["storage_h"], 0)
+
+    def test_fallback_missing_storage_cost(self):
+        c = u.real_cost({"dph_base": 0.03, "dph_total": 0.031})
+        self.assertEqual(c["src"], "dph_total-fallback")
+        self.assertAlmostEqual(c["total"], 0.031)
+
+    def test_never_raises_on_empty(self):
+        c = u.real_cost({})
+        self.assertGreater(c["total"], 1.0)  # inelegivel, mas sem excecao
+
+    def test_disk_default_is_30(self):
+        self.assertEqual(u.DISK_GB, 30)
+        c = u.real_cost({"dph_base": 0.0, "storage_cost": 0.73})
+        self.assertAlmostEqual(c["storage_h"], 0.03, places=6)
+
+
+class BidPriceTest(unittest.TestCase):
+    def test_margin(self):
+        self.assertEqual(u.bid_price_for({"min_bid": 0.03}, margin=1.15), 0.0345)
+
+    def test_no_min_bid(self):
+        self.assertIsNone(u.bid_price_for({}, margin=1.15))
+        self.assertIsNone(u.bid_price_for({"min_bid": None}))
+
+    def test_capped_to_cap_minus_storage(self):
+        b = u.bid_price_for({"min_bid": 0.03}, margin=1.15, cap_total=0.04, storage_h=0.008)
+        self.assertAlmostEqual(b, 0.032, places=6)
+        self.assertLessEqual(b + 0.008, 0.04 + 1e-9)
+
+    def test_capped_below_min_bid_is_none(self):
+        self.assertIsNone(u.bid_price_for({"min_bid": 0.03}, margin=1.15,
+                                          cap_total=0.035, storage_h=0.008))
+
+    def test_under_cap_unchanged(self):
+        self.assertEqual(u.bid_price_for({"min_bid": 0.02}, margin=1.15,
+                                         cap_total=0.1, storage_h=0.008), 0.023)
+
+
+class ChooseModeTest(unittest.TestCase):
+    def test_ondemand_forced(self):
+        self.assertEqual(u.choose_mode("ondemand", 0, 2), "ondemand")
+
+    def test_bid_after_max_preempt(self):
+        self.assertEqual(u.choose_mode("bid", 2, 2), "ondemand")
+        self.assertEqual(u.choose_mode("bid", 3, 2), "ondemand")
+
+    def test_bid_under_max(self):
+        self.assertEqual(u.choose_mode("bid", 1, 2), "bid")
+        self.assertEqual(u.choose_mode("bid", 0, 2), "bid")
+
+    def test_invalid_defaults_to_bid(self):
+        self.assertEqual(u.choose_mode("spot!!", 0, 2), "bid")
+        self.assertEqual(u.choose_mode(None, 0, 2), "bid")
+
+
+class CfgTest(unittest.TestCase):
+    def test_defaults(self):
+        c = u.cfg({})
+        self.assertEqual((c["mode"], c["margin"], c["max_preempt"]), ("bid", 1.15, 2))
+
+    def test_overrides(self):
+        c = u.cfg({"VAST3060_MODE": "OnDemand", "VAST3060_BID_MARGIN": "1.3",
+                   "VAST3060_MAX_PREEMPT": "4"})
+        self.assertEqual((c["mode"], c["margin"], c["max_preempt"]), ("ondemand", 1.3, 4))
+
+    def test_invalid_values_fall_back(self):
+        c = u.cfg({"VAST3060_MODE": "x", "VAST3060_BID_MARGIN": "abc",
+                   "VAST3060_MAX_PREEMPT": "-1"})
+        self.assertEqual((c["mode"], c["margin"], c["max_preempt"]), ("bid", 1.15, 2))
+
+    def test_margin_below_one_rejected(self):
+        self.assertEqual(u.cfg({"VAST3060_BID_MARGIN": "0.5"})["margin"], 1.15)
+
+
+class RankCandidatesTest(unittest.TestCase):
+    CAP = 0.035
+    STEPS = [1.0, 1.3, 1.6, 2.0]
+
+    def rank(self, od, bid, mode="bid", **kw):
+        return u.rank_candidates(od, bid, mode, disk_gb=30, margin=1.15,
+                                 price_cap=self.CAP, cap_steps=self.STEPS, **kw)
+
+    def test_real_cost_beats_dph_total(self):
+        # A: dph_total menor, mas storage caro -> total real maior
+        a = _od(1, 0.020, 1.0, total=0.021)   # 0.020 + 0.0411 = 0.0611
+        b = _od(2, 0.030, 0.1, total=0.031)   # 0.030 + 0.0041 = 0.0341
+        r = self.rank([a, b], [], mode="ondemand")
+        self.assertEqual(r["offer"]["id"], 2)
+        self.assertEqual(r["mode"], "ondemand")
+        self.assertIsNone(r["bid"])
+        self.assertEqual(r["cap_mult"], 1.0)
+
+    def test_bid_cheaper_wins(self):
+        od = _od(1, 0.0533, 0.2)                     # 0.0615
+        bd = _od(2, 0.05, 0.2, min_bid=0.03)         # bid 0.0345 + 0.0082 = 0.0427
+        r = self.rank([od], [bd])
+        self.assertEqual(r["mode"], "bid")
+        self.assertEqual(r["offer"]["id"], 2)
+        self.assertAlmostEqual(r["bid"], 0.0345)
+        self.assertEqual(r["cap_mult"], 1.3)
+        self.assertLessEqual(r["cost"]["total"], self.CAP * 1.3)
+
+    def test_ondemand_mode_ignores_bids(self):
+        od = _od(1, 0.0533, 0.2)
+        bd = _od(2, 0.05, 0.2, min_bid=0.01)
+        r = self.rank([od], [bd], mode="ondemand")
+        self.assertEqual(r["mode"], "ondemand")
+        self.assertEqual(r["offer"]["id"], 1)
+
+    def test_fallback_to_ondemand_without_eligible_bid(self):
+        od = _od(1, 0.0533, 0.2)
+        no_min = _od(2, 0.05, 0.2)  # sem min_bid -> inelegivel
+        r = self.rank([od], [no_min])
+        self.assertEqual(r["mode"], "ondemand")
+        self.assertEqual(r["offer"]["id"], 1)
+        self.assertEqual(r["cap_mult"], 2.0)
+
+    def test_bid_list_respects_avoid_and_cn(self):
+        od = _od(1, 0.0533, 0.2)
+        cn = _od(2, 0.05, 0.2, min_bid=0.01, geo="Beijing, CN")
+        avm = _od(3, 0.05, 0.2, min_bid=0.01, mid=777)
+        avh = _od(4, 0.05, 0.2, min_bid=0.01, host=888)
+        r = self.rank([od], [cn, avm, avh], machine_avoid=[777], host_avoid=[888])
+        self.assertEqual(r["mode"], "ondemand")
+        self.assertEqual(r["offer"]["id"], 1)
+
+    def test_tie_prefers_ondemand(self):
+        od = _od(1, 0.02, 0.0)
+        bd = _od(2, 0.05, 0.0, min_bid=0.02 / 1.15)
+        r = self.rank([od], [bd])
+        self.assertEqual(r["mode"], "ondemand")
+
+    def test_none_when_nothing_fits(self):
+        self.assertIsNone(self.rank([_od(1, 0.5, 0.2)], [_od(2, 0.5, 0.2, min_bid=0.4)]))
+        self.assertIsNone(self.rank([], []))
+
+    def test_lowest_step_wins_even_if_higher_step_has_cheaper_bid_cap(self):
+        od = _od(1, 0.030, 0.0)  # 0.030 cabe no 1.0x
+        r = self.rank([od], [])
+        self.assertEqual(r["cap_mult"], 1.0)
+
+
+class PreemptCounterTest(unittest.TestCase):
+    def test_first_of_day(self):
+        st = {}
+        self.assertEqual(u.bump_preempt(st, "2026-10-01"), 1)
+        self.assertEqual(st["preempt_day"], "2026-10-01")
+        self.assertEqual(st["preempt_count"], 1)
+
+    def test_increments_same_day(self):
+        st = {"preempt_day": "2026-10-01", "preempt_count": 1}
+        self.assertEqual(u.bump_preempt(st, "2026-10-01"), 2)
+
+    def test_resets_new_day(self):
+        st = {"preempt_day": "2026-09-30", "preempt_count": 5}
+        self.assertEqual(u.bump_preempt(st, "2026-10-01"), 1)
+
+    def test_read_without_mutation(self):
+        st = {"preempt_day": "2026-09-30", "preempt_count": 5}
+        self.assertEqual(u.preempt_today(st, "2026-10-01"), 0)
+        self.assertEqual(u.preempt_today(st, "2026-09-30"), 5)
+        self.assertEqual(st["preempt_count"], 5)
+        self.assertEqual(u.preempt_today({}, "2026-10-01"), 0)
+
+
+class OfferQueryTest(unittest.TestCase):
+    def test_kinds_and_no_mutation(self):
+        self.assertEqual(u.offer_query("bid")["type"], "bid")
+        self.assertEqual(u.offer_query("on-demand")["type"], "on-demand")
+        self.assertEqual(u.v.OFFER_QUERY["type"], "on-demand")
+        q = u.offer_query("bid")
+        q["gpu_name"]["in"].append("X")
+        self.assertNotIn("X", u.v.OFFER_QUERY["gpu_name"]["in"])
+
+
 if __name__ == "__main__":
     unittest.main()
