@@ -195,6 +195,7 @@ Previously: Phases 13/14/15 all COMPLETE/passed (13 user-mgmt deployed live a1c9
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 261001-czn | Teste de unicidade de API key sem argon2 (157s → ms); auth -race volta a caber no timeout. | 2026-10-01 | 7eac7e3 | [261001-czn-teste-unicidade-api-key-sem-argon2](./quick/261001-czn-teste-unicidade-api-key-sem-argon2/) |
 | 261001-9fh | **Shed sem flapping (86akrbgbt).** Recovering continua sheddando + dwell min(3s) On↔Recovering; SC2 192→24 transições. | 2026-10-01 | 9c45390 | [261001-9fh-shed-recovering-continua-sheddando](./quick/261001-9fh-shed-recovering-continua-sheddando/) |
 | 260930-wpv | **Revoke de API key imediato (86akrbgbt).** RevokeAPIKeyReturningHash + DEL Redis + pubsub `gw:apikey:revoked` evicta L1 em todas as réplicas; fix asserções PrimaryLifecycles. | 2026-10-01 | 7fdac9f | [260930-wpv-revoke-invalida-cache-auth-imediato](./quick/260930-wpv-revoke-invalida-cache-auth-imediato/) |
 | 260930-vkt | **Auth sem stampede argon2 + shed config + testes podres (86akrbgbt).** singleflight + L1 30s; shed_arm/recover aplicados; testes shed/gatewayctl consertados; gatewayctl integration no CI; partições billing no setup de teste. | 2026-10-01 | 4a08139 | [260930-vkt-auth-singleflight-argon2-shed-arm-recove](./quick/260930-vkt-auth-singleflight-argon2-shed-arm-recove/) |
