@@ -23,6 +23,9 @@ const (
 	// cacheTTL (60s) so a newly-issued key propagates within seconds.
 	// Codex review [HIGH] 02-03 — formalized D-A2 amendment.
 	negCacheTTL = 5 * time.Second
+
+	// cacheKeyPrefix + hex(sha256(raw)) = chave do cache positivo (e do L1).
+	cacheKeyPrefix = "gw:apikey:"
 )
 
 // cacheEntry is the JSON payload stored in Redis. Includes Status so
@@ -41,7 +44,7 @@ type cacheEntry struct {
 // keys (all `gw:*`).
 func cacheKeyFor(rawKey string) string {
 	sum := sha256.Sum256([]byte(rawKey))
-	return "gw:apikey:" + hex.EncodeToString(sum[:])
+	return cacheKeyPrefix + hex.EncodeToString(sum[:])
 }
 
 // negCacheKeyFor returns the Redis negative-cache key for an unknown raw API

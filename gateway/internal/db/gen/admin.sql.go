@@ -173,3 +173,35 @@ func (q *Queries) RevokeAPIKey(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, revokeAPIKey, id)
 	return err
 }
+
+const revokeAPIKeyReturningHash = `-- name: RevokeAPIKeyReturningHash :one
+WITH upd AS (
+    UPDATE ai_gateway.api_keys
+    SET status = 'revoked', revoked_at = NOW()
+    WHERE id = $1 AND status = 'active'
+    RETURNING id
+)
+SELECT k.key_lookup_hash,
+       EXISTS (SELECT 1 FROM upd) AS revoked_now
+FROM ai_gateway.api_keys k
+WHERE k.id = $1
+`
+
+type RevokeAPIKeyReturningHashRow struct {
+	KeyLookupHash []byte `json:"key_lookup_hash"`
+	RevokedNow    bool   `json:"revoked_now"`
+}
+
+// Quick 260930-wpv: revoke + devolve o key_lookup_hash para invalidar o cache
+// (Redis gw:apikey:<hex> + L1 de todas as réplicas via PUBLISH). Idempotente:
+// o UPDATE continua escopado WHERE status='active'; numa segunda chamada
+// revoked_now=false mas o hash volta igual, então um retry re-invalida o cache
+// (cobre o caso do Redis ter falhado na primeira). id inexistente → ErrNoRows.
+// O SELECT externo enxerga o snapshot anterior ao UPDATE, mas key_lookup_hash
+// é imutável, então o valor é o mesmo.
+func (q *Queries) RevokeAPIKeyReturningHash(ctx context.Context, id uuid.UUID) (RevokeAPIKeyReturningHashRow, error) {
+	row := q.db.QueryRow(ctx, revokeAPIKeyReturningHash, id)
+	var i RevokeAPIKeyReturningHashRow
+	err := row.Scan(&i.KeyLookupHash, &i.RevokedNow)
+	return i, err
+}

@@ -227,6 +227,15 @@ func (v *Verifier) lookupAndVerify(ctx context.Context, rawKey, l1Key string, lo
 	if entry.Status == "active" {
 		v.l1.put(l1Key, entry)
 	}
+	// Quick 260930-wpv: se a revogação chegou enquanto este lookup estava em
+	// voo (leu a row antes do UPDATE), o cachePut acima pode ter recriado
+	// gw:apikey:<hex> depois do DEL do revogador. O check vem DEPOIS do put:
+	// ou o listener processou a mensagem antes (tombstone visto aqui → DEL),
+	// ou depois (o próprio listener faz o DEL). l1.put já é atômico com o
+	// tombstone.
+	if v.l1.tombstoned(l1Key) && v.redis != nil {
+		_ = v.redis.Del(ctx, l1Key).Err()
+	}
 	// Debounced touch (Codex review [MEDIUM] 02-03) — coalesce multiple
 	// requests for the same key into one UPDATE flushed every 60s.
 	if v.touchBuf != nil {

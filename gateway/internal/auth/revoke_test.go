@@ -290,9 +290,6 @@ func TestRevocationListener_TwoReplicasRejectWithinOneSecond(t *testing.T) {
 // Após reconexão do PubSub (mensagens podem ter sido perdidas), o listener
 // esvazia o L1 inteiro.
 func TestRevocationListener_FlushesL1OnResubscribe(t *testing.T) {
-	if testing.Short() {
-		t.Skip("depende do health-check de 3s do go-redis")
-	}
 	mr, rdb := newMiniRedis(t)
 	v := NewVerifierWithQueries(newFakeQueries(), rdb, discardLogger(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -303,6 +300,10 @@ func TestRevocationListener_FlushesL1OnResubscribe(t *testing.T) {
 		t.Fatal("listener não subscreveu")
 	}
 	v.l1.put("gw:apikey:x", cacheEntry{Status: "active"})
+	time.Sleep(100 * time.Millisecond)
+	if v.l1.len() != 1 {
+		t.Fatalf("pré-condição: L1 len=%d want 1 (sem flush antes da queda)", v.l1.len())
+	}
 
 	addr := mr.Addr()
 	mr.Close()

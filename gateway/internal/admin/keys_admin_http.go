@@ -9,7 +9,10 @@
 //     serialized EXACTLY ONCE (field "key"); the hash columns are never in the
 //     response struct and the raw is never logged (threat T-18-04)
 //   - POST /admin/keys/{id}/revoke → 200; idempotent (a second call is a no-op
-//     because the UPDATE is scoped WHERE status='active')
+//     because the UPDATE is scoped WHERE status='active'). Quick 260930-wpv:
+//     goes through auth.RevokeAPIKey — DB revoke + DEL of the Redis cache +
+//     PUBLISH so every replica evicts its in-process L1 (revocation is
+//     immediate instead of ≤60s). A second call re-invalidates the cache.
 //
 // Mirrors the config_read/config_write template: isolated query interface, dual
 // constructor, typed response structs, OpenAI error envelope, admin metric.
@@ -28,6 +31,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
@@ -45,7 +49,7 @@ type keysAdminQueries interface {
 	GetTenantBySlug(ctx context.Context, slug string) (gen.GetTenantBySlugRow, error)
 	ListActiveKeysByTenantWithMeta(ctx context.Context, tenantID uuid.UUID) ([]gen.ListActiveKeysByTenantWithMetaRow, error)
 	InsertAPIKey(ctx context.Context, arg gen.InsertAPIKeyParams) (gen.InsertAPIKeyRow, error)
-	RevokeAPIKey(ctx context.Context, id uuid.UUID) error
+	RevokeAPIKeyReturningHash(ctx context.Context, id uuid.UUID) (gen.RevokeAPIKeyReturningHashRow, error)
 }
 
 // keyListItem is the operator-safe projection — it deliberately has NO hash
@@ -78,24 +82,25 @@ type createKeyRequest struct {
 // methods.
 type KeysAdminHandler struct {
 	q   keysAdminQueries
+	rdb redis.UniversalClient // revoke cache invalidation; nil → TTL-only (≤60s)
 	log *slog.Logger
 }
 
 // NewKeysAdminHandler wires the production dependency (the concrete
 // *gen.Queries).
-func NewKeysAdminHandler(q *gen.Queries, log *slog.Logger) *KeysAdminHandler {
+func NewKeysAdminHandler(q *gen.Queries, rdb redis.UniversalClient, log *slog.Logger) *KeysAdminHandler {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &KeysAdminHandler{q: q, log: log.With("module", "ADMIN_KEYS")}
+	return &KeysAdminHandler{q: q, rdb: rdb, log: log.With("module", "ADMIN_KEYS")}
 }
 
 // newKeysAdminHandlerWithQueries is the test constructor.
-func newKeysAdminHandlerWithQueries(q keysAdminQueries, log *slog.Logger) *KeysAdminHandler {
+func newKeysAdminHandlerWithQueries(q keysAdminQueries, rdb redis.UniversalClient, log *slog.Logger) *KeysAdminHandler {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &KeysAdminHandler{q: q, log: log.With("module", "ADMIN_KEYS")}
+	return &KeysAdminHandler{q: q, rdb: rdb, log: log.With("module", "ADMIN_KEYS")}
 }
 
 // List serves GET /admin/tenants/{slug}/keys.
@@ -219,7 +224,9 @@ func (h *KeysAdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // Revoke serves POST /admin/keys/{id}/revoke. Idempotent by construction: the
 // UPDATE is scoped WHERE status='active', so a second call affects zero rows
-// and still returns 200.
+// and still returns 200 (and re-invalidates the cache). Unknown id → 200 no-op
+// (pre-existing contract). Redis failure after a successful DB revoke → 200
+// with cache_invalidated=false (revocation then propagates within 60s).
 func (h *KeysAdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -227,16 +234,31 @@ func (h *KeysAdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		obs.GatewayAdminRequests.WithLabelValues(keyRevokeRoute, "4xx").Inc()
 		return
 	}
-	if err := h.q.RevokeAPIKey(r.Context(), id); err != nil {
+	res, err := auth.RevokeAPIKey(r.Context(), h.q, h.rdb, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, pgx.ErrNoRows):
+		// Unknown id: same 200 no-op as the old UPDATE-only revoke.
+		h.log.Info("api key revoke: id not found (no-op)", "api_key_id", id.String())
+	case errors.Is(err, auth.ErrCacheInvalidation):
+		h.log.Warn("api key revoked in DB but cache invalidation failed; propagates within 60s",
+			"api_key_id", id.String(), "err", err)
+	default:
 		h.log.Error("RevokeAPIKey failed", "err", err)
 		httpx.WriteOpenAIError(w, http.StatusInternalServerError, "api_error", "key_revoke_failed", "")
 		obs.GatewayAdminRequests.WithLabelValues(keyRevokeRoute, "5xx").Inc()
 		return
 	}
-	h.log.Info("api key revoked", "api_key_id", id.String())
+	if err == nil {
+		h.log.Info("api key revoked", "api_key_id", id.String(), "revoked_now", res.RevokedNow, "cache_invalidated", res.Invalidated)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "revoked", "id": id.String()})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":            "revoked",
+		"id":                id.String(),
+		"cache_invalidated": res.Invalidated,
+	})
 	obs.GatewayAdminRequests.WithLabelValues(keyRevokeRoute, "2xx").Inc()
 }
 
