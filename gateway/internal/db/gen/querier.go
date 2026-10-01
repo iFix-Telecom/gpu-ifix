@@ -249,6 +249,11 @@ type Querier interface {
 	SeedPodConfig(ctx context.Context, arg SeedPodConfigParams) error
 	// Shortcut for enable/disable subcommands.
 	SetUpstreamEnabled(ctx context.Context, arg SetUpstreamEnabledParams) error
+	// Quick 260930-uru: gatewayctl upstreams update --url / --clear-url.
+	// NULL (narg) limpa o override e o loader volta a os.Getenv(url_env).
+	// Dispara NOTIFY upstreams_changed via trigger 0038 (só quando o valor muda:
+	// IS DISTINCT FROM); o LISTEN recarrega o snapshot sem restart.
+	SetUpstreamURLOverride(ctx context.Context, arg SetUpstreamURLOverrideParams) error
 	// GATEWAY-WIDE summary aggregate for GET /admin/economy (OBS-09). No tenant
 	// filter -- sums phantom + real external spend across all tenants. The
 	// INVARIANT (CONTEXT): cost_local_phantom_brl is written ONLY when a request

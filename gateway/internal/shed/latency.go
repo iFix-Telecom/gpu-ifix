@@ -54,6 +54,22 @@ func (r *LatencyRing) Record(ms uint32) {
 	atomic.StoreUint32(&r.buf[i%r.size], ms)
 }
 
+// Reset zera a janela (quick 260930-uru: URL efetiva do upstream mudou, as
+// latências do endereço antigo não valem para o novo). Mesma disciplina do
+// Record: atomic.StoreUint32 por slot + idx.Store(0). Como P95 ignora slots
+// zero, o ring fica semanticamente igual a um recém-criado. Um Record
+// concorrente pode sobreviver ao Reset (1 amostra antiga) — aceitável, mesma
+// classe de perda race-benign do pacote.
+func (r *LatencyRing) Reset() {
+	if r == nil {
+		return
+	}
+	for i := range r.buf {
+		atomic.StoreUint32(&r.buf[i], 0)
+	}
+	r.idx.Store(0)
+}
+
 // P95 returns the 95th percentile of currently-stored samples (in ms).
 // Returns 0 if no samples have been written. The computation copies the
 // buffer once (atomic.LoadUint32 per slot) and sorts the non-zero

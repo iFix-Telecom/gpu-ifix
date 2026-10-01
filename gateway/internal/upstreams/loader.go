@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +24,38 @@ type snapshot struct {
 	byName     map[string]UpstreamConfig
 	byRoleTier map[RoleTier]UpstreamConfig
 	ordered    []UpstreamConfig
+	// parsed guarda a URL efetiva já parseada por nome (quick 260930-uru).
+	// TargetURL devolve o MESMO ponteiro até o próximo Refresh, o que deixa
+	// os proxies dinâmicos cachearem o director por ponteiro.
+	parsed map[string]*url.URL
+}
+
+// newSnapshot monta um snapshot a partir de configs já resolvidas. Usado
+// pelos helpers em memória (testes); Refresh preenche os mesmos campos.
+func newSnapshot(cfgs []UpstreamConfig) *snapshot {
+	s := &snapshot{
+		byName:     make(map[string]UpstreamConfig, len(cfgs)),
+		byRoleTier: make(map[RoleTier]UpstreamConfig, len(cfgs)),
+		ordered:    make([]UpstreamConfig, 0, len(cfgs)),
+		parsed:     make(map[string]*url.URL, len(cfgs)),
+	}
+	for _, u := range cfgs {
+		s.byName[u.Name] = u
+		s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
+		s.ordered = append(s.ordered, u)
+		s.addParsed(u)
+	}
+	return s
+}
+
+// addParsed registra a URL parseada de u quando ela é válida.
+func (s *snapshot) addParsed(u UpstreamConfig) {
+	if ValidateUpstreamURL(u.URL) != nil {
+		return
+	}
+	if pu, err := url.Parse(u.URL); err == nil {
+		s.parsed[u.Name] = pu
+	}
 }
 
 // loaderQueries isolates the sqlc surface so tests can stub it without
@@ -58,6 +92,45 @@ type Loader struct {
 	snap          atomic.Pointer[snapshot]
 	log           *slog.Logger
 	tier0Override map[string]*atomic.Pointer[string]
+
+	// urlChangeHook (quick 260930-uru) é chamado dentro de Refresh, depois
+	// do swap do snapshot, para cada row presente no snapshot anterior E no
+	// novo cuja URL efetiva mudou. Registrado via OnURLChange.
+	urlChangeHook atomic.Pointer[func(name, oldURL, newURL string)]
+
+	// refreshMu serializa Refresh (SELECT + swap). Quick 260930-uru: com o
+	// backstop periódico há dois chamadores (LISTEN e ticker). Sem o mutex um
+	// Refresh do ticker que leu o estado ANTES do UPDATE poderia trocar o
+	// snapshot DEPOIS do Refresh do NOTIFY, revertendo para a URL velha até o
+	// próximo tick. Com o mutex a ordem das leituras é a ordem dos swaps.
+	refreshMu sync.Mutex
+}
+
+// OnURLChange registra o hook de mudança de URL efetiva (quick 260930-uru).
+// main.go usa para resetar o breaker e a janela de latência da row quando o
+// pod muda de endereço. O hook roda na goroutine que chamou Refresh (LISTEN
+// ou backstop periódico), com o refreshMu do loader seguro — o hook NÃO pode
+// chamar Refresh (deadlock). Uma nova chamada substitui o hook anterior; nil
+// desativa.
+func (l *Loader) OnURLChange(fn func(name, oldURL, newURL string)) {
+	if fn == nil {
+		l.urlChangeHook.Store(nil)
+		return
+	}
+	l.urlChangeHook.Store(&fn)
+}
+
+// TargetURL devolve a URL efetiva parseada do upstream (url_override válido
+// > os.Getenv(url_env)). Lock-free. (nil, false) quando o nome não está no
+// snapshot (row ausente, desabilitada ou skipped por falta de URL). Os
+// proxies dinâmicos chamam isto a cada request (quick 260930-uru).
+func (l *Loader) TargetURL(name string) (*url.URL, bool) {
+	s := l.snap.Load()
+	if s == nil || s.parsed == nil {
+		return nil, false
+	}
+	u, ok := s.parsed[name]
+	return u, ok && u != nil
 }
 
 // NewLoader constructs the Loader and performs the initial Refresh.
@@ -106,6 +179,8 @@ func newTier0OverrideMap() map[string]*atomic.Pointer[string] {
 // the gateway bootable even when a fallback provider's bearer is not yet
 // configured (CONTEXT.md "Plumbing" / 03-04-PLAN must_haves.truths).
 func (l *Loader) Refresh(ctx context.Context) error {
+	l.refreshMu.Lock()
+	defer l.refreshMu.Unlock()
 	rows, err := l.q.ListEnabledUpstreams(ctx)
 	if err != nil {
 		obs.UpstreamsReloadTotal.WithLabelValues("error").Inc()
@@ -115,6 +190,7 @@ func (l *Loader) Refresh(ctx context.Context) error {
 		byName:     make(map[string]UpstreamConfig, len(rows)),
 		byRoleTier: make(map[RoleTier]UpstreamConfig, len(rows)),
 		ordered:    make([]UpstreamConfig, 0, len(rows)),
+		parsed:     make(map[string]*url.URL, len(rows)),
 	}
 	for _, r := range rows {
 		// Phase 5 / WR-02: reject upstream names starting with "force:"
@@ -129,8 +205,29 @@ func (l *Loader) Refresh(ctx context.Context) error {
 				"status", "reserved_name")
 			continue
 		}
-		url := os.Getenv(r.UrlEnv)
-		if url == "" {
+		// Quick 260930-uru: url_override válido tem precedência sobre a env.
+		// Override inválido gera WARN e cai na env (nunca derruba a row que
+		// a env sozinha manteria viva). Row com só override (env vazia)
+		// carrega normalmente.
+		effectiveURL := ""
+		urlSource := ""
+		if r.UrlOverride.Valid && r.UrlOverride.String != "" {
+			if err := ValidateUpstreamURL(r.UrlOverride.String); err != nil {
+				l.log.Warn("upstream url_override invalid; falling back to url_env",
+					"upstream", r.Name,
+					"url_override", r.UrlOverride.String,
+					"err", err.Error(),
+					"status", "invalid_url_override")
+			} else {
+				effectiveURL = r.UrlOverride.String
+				urlSource = URLSourceOverride
+			}
+		}
+		if effectiveURL == "" {
+			effectiveURL = os.Getenv(r.UrlEnv)
+			urlSource = URLSourceEnv
+		}
+		if effectiveURL == "" {
 			l.log.Warn("upstream url env var missing; row skipped",
 				"upstream", r.Name,
 				"url_env", r.UrlEnv,
@@ -160,7 +257,8 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			Role:          r.Role,
 			Tier:          int(r.Tier),
 			TierPriority:  int(r.TierPriority),
-			URL:           url,
+			URL:           effectiveURL,
+			URLSource:     urlSource,
 			AuthBearer:    authBearer,
 			AuthBearerEnv: authBearerEnv,
 			Enabled:       r.Enabled,
@@ -168,6 +266,7 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			CircuitConfig: parseCircuitConfig(r.CircuitConfig),
 		}
 		s.byName[u.Name] = u
+		s.addParsed(u)
 		// Phase 11.2 (D-B5′): when multiple rows share (role, tier), the
 		// lowest tier_priority wins in byRoleTier (rows are loaded in
 		// ASC tier_priority order; first writer wins). This preserves
@@ -192,10 +291,69 @@ func (l *Loader) Refresh(ctx context.Context) error {
 		}
 		return s.ordered[i].TierPriority < s.ordered[j].TierPriority
 	})
-	l.snap.Store(s)
+	prev := l.snap.Swap(s)
 	obs.UpstreamsReloadTotal.WithLabelValues("ok").Inc()
-	l.log.Info("upstreams refreshed", "rows", len(s.byName))
+	changed := snapshotChanged(prev, s)
+	l.notifyURLChanges(prev, s)
+	// Quick 260930-uru: o backstop periódico (60s) chama Refresh mesmo sem
+	// mudança; só loga INFO quando algo relevante mudou.
+	if changed {
+		l.log.Info("upstreams refreshed", "rows", len(s.byName))
+	} else {
+		l.log.Debug("upstreams refreshed (unchanged)", "rows", len(s.byName))
+	}
 	return nil
+}
+
+// notifyURLChanges loga e dispara o hook para cada row presente nos dois
+// snapshots cuja URL efetiva mudou. Rows novas/removidas não disparam.
+func (l *Loader) notifyURLChanges(prev, next *snapshot) {
+	if prev == nil {
+		return
+	}
+	names := make([]string, 0, len(next.byName))
+	for n := range next.byName {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	hook := l.urlChangeHook.Load()
+	for _, n := range names {
+		nu := next.byName[n]
+		pu, ok := prev.byName[n]
+		if !ok || pu.URL == nu.URL {
+			continue
+		}
+		l.log.Info("upstream effective url changed",
+			"upstream", n,
+			"old_url", pu.URL,
+			"new_url", nu.URL,
+			"url_source", nu.URLSource)
+		if hook != nil {
+			(*hook)(n, pu.URL, nu.URL)
+		}
+	}
+}
+
+// snapshotChanged reporta se o conjunto de nomes ou algum campo relevante
+// (URL, origem da URL, role, tier, tier_priority, enabled) mudou.
+func snapshotChanged(prev, next *snapshot) bool {
+	if prev == nil {
+		return true
+	}
+	if len(prev.byName) != len(next.byName) {
+		return true
+	}
+	for n, nu := range next.byName {
+		pu, ok := prev.byName[n]
+		if !ok {
+			return true
+		}
+		if pu.URL != nu.URL || pu.URLSource != nu.URLSource || pu.Role != nu.Role ||
+			pu.Tier != nu.Tier || pu.TierPriority != nu.TierPriority || pu.Enabled != nu.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 // Get returns the upstream by name + found flag. Lock-free (atomic.Pointer read).

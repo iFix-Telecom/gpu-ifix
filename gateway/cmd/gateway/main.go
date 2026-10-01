@@ -514,30 +514,89 @@ func main() {
 		},
 	}, log)
 
-	// Upstreams hot-reload listener — rebuilds BOTH breakerSet and
-	// shedSet when NOTIFY upstreams_changed fires (Phase 3 D-D4 + Phase 5
-	// D-C5). Also tops up shedLatency with rings for newly-added
-	// upstreams; rings for removed upstreams stay (small constant memory
-	// cost) — pruning would risk racing the dispatcher mid-write.
+	// Upstreams hot-reload — rebuilds BOTH breakerSet and shedSet when
+	// NOTIFY upstreams_changed fires (Phase 3 D-D4 + Phase 5 D-C5). Also
+	// tops up shedLatency with rings for newly-added upstreams; rings for
+	// removed upstreams stay (small constant memory cost) — pruning would
+	// risk racing the dispatcher mid-write.
+	//
+	// Quick 260930-uru: o mesmo onUpstreamsReload serve o LISTEN e o backstop
+	// periódico, sempre sob reloadMu, então as escritas em shedLatency nunca
+	// rodam em paralelo entre si. Loader.Refresh já é serializado
+	// internamente (refreshMu), o que impede um Refresh do backstop com
+	// leitura velha de sobrescrever o snapshot do NOTIFY.
+	//
+	// O hook OnURLChange roda DENTRO do Refresh (fora do reloadMu no caminho
+	// LISTEN), por isso ele não toca o map shedLatency: reseta o breaker (que
+	// tem lock próprio) e enfileira o nome; onUpstreamsReload — chamado logo
+	// depois do Refresh nos dois caminhos — zera o anel de latência sob
+	// reloadMu.
+	var reloadMu sync.Mutex
+	var latencyResetMu sync.Mutex
+	pendingLatencyReset := map[string]struct{}{}
+	onUpstreamsReload := func() {
+		breakerSet.Rebuild(loader.Names())
+		shedSet.Rebuild(loader.Names())
+		for _, n := range loader.Names() {
+			if _, ok := shedLatency[n]; !ok {
+				shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)
+			}
+			// WR-05: register newly-added upstreams in the
+			// inflight registry so Inc/Dec from the middleware
+			// start tracking immediately. Without this, a fresh
+			// `gatewayctl upstreams create` would mean shed
+			// middleware silently no-ops (and bumps
+			// gateway_shed_inflight_unknown_upstream_total) until
+			// the next gateway restart.
+			shedInflight.AddUpstream(n)
+		}
+		latencyResetMu.Lock()
+		for n := range pendingLatencyReset {
+			if r, ok := shedLatency[n]; ok {
+				r.Reset()
+			}
+			delete(pendingLatencyReset, n)
+		}
+		latencyResetMu.Unlock()
+	}
+	// Quick 260930-uru: quando a URL efetiva de uma row muda (pod 3060 novo
+	// via url_override), o breaker e a janela de latência do endereço antigo
+	// deixam de valer — breaker volta a CLOSED e o P95 é zerado.
+	loader.OnURLChange(func(name, _, _ string) {
+		breakerSet.Reset(name)
+		latencyResetMu.Lock()
+		pendingLatencyReset[name] = struct{}{}
+		latencyResetMu.Unlock()
+	})
 	go func() {
 		if err := upstreams.ListenAndReload(ctx, cfg.PGDSN, loader, func() {
-			breakerSet.Rebuild(loader.Names())
-			shedSet.Rebuild(loader.Names())
-			for _, n := range loader.Names() {
-				if _, ok := shedLatency[n]; !ok {
-					shedLatency[n] = shed.NewLatencyRing(cfg.ShedLatencyRingSize)
-				}
-				// WR-05: register newly-added upstreams in the
-				// inflight registry so Inc/Dec from the middleware
-				// start tracking immediately. Without this, a fresh
-				// `gatewayctl upstreams create` would mean shed
-				// middleware silently no-ops (and bumps
-				// gateway_shed_inflight_unknown_upstream_total) until
-				// the next gateway restart.
-				shedInflight.AddUpstream(n)
-			}
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			onUpstreamsReload()
 		}, log); err != nil {
 			log.Warn("upstreams listener exited", "err", err)
+		}
+	}()
+	// Quick 260930-uru: backstop periódico. Se um NOTIFY se perder (conexão
+	// LISTEN caiu entre o UPDATE e o reconnect), o snapshot é recarregado em
+	// até upstreamsBackstopRefreshInterval. Erro de Refresh mantém o último
+	// snapshot (WARN). Sem mudança, o loader loga só em Debug.
+	go func() {
+		t := time.NewTicker(upstreamsBackstopRefreshInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				reloadMu.Lock()
+				if err := loader.Refresh(ctx); err != nil {
+					log.Warn("upstreams backstop refresh failed; keeping last snapshot", "err", err)
+				} else {
+					onUpstreamsReload()
+				}
+				reloadMu.Unlock()
+			}
 		}
 	}()
 
@@ -605,18 +664,14 @@ func main() {
 		log.Error("build embeddings proxy", "err", err)
 		os.Exit(2)
 	}
-	// Phase 11.1: local-stt tier-0 was removed (D-A4). audioRP is now built
-	// only when UPSTREAM_STT_URL is still set (transitional compat for stale
-	// .env files); otherwise the local-stt entry in sttRoleProxies is omitted
-	// and STT routes exclusively through the openai-whisper tier-1 fallback.
-	var audioRP http.Handler
-	if cfg.UpstreamSTTURL != "" {
-		audioRP, err = proxy.NewAudioProxy(cfg.UpstreamSTTURL, log, resolver, usageInterceptor)
-		if err != nil {
-			log.Error("build audio proxy", "err", err)
-			os.Exit(2)
-		}
-	}
+	// Quick 260930-uru: local-stt (pod 3060) é um proxy dinâmico — URL
+	// resolvida por request via loader (url_override > env UPSTREAM_STT_URL),
+	// então trocar o pod não recria a task. Registrado SEMPRE: sem URL
+	// efetiva o loader não carrega a row (dispatcher nunca a escolhe) e, se
+	// escolher, o proxy cascateia para o tier-1 via errDialFailedFallthrough.
+	audioRP := proxy.NewDynamicAudioProxy(
+		func() (*url.URL, bool) { return loader.TargetURL("local-stt") },
+		log, resolver, usageInterceptor)
 	// Phase 06.7 — tier-0 TTS proxy (POST /v1/audio/speech). UpstreamTTSURL is
 	// a placeholder the primary-pod reconciler overrides at runtime (D-11), so
 	// it may be empty at boot. The constructor needs a syntactically valid URL;
@@ -701,14 +756,11 @@ func main() {
 	// map mas em tier 2 nunca é resolvido pela cascata (ResolveAllTier1 filtra
 	// tier==1) — entrada dormente para re-enable manual.
 	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}
-	if cfg.UpstreamEmbedGPUURL != "" {
-		embedGPU, perr := proxy.NewEmbeddingsProxy(cfg.UpstreamEmbedGPUURL, log, usageInterceptor)
-		if perr != nil {
-			log.Warn("build embed-gpu proxy", "err", perr)
-		} else {
-			embedRoleProxies["embed-gpu"] = embedGPU
-		}
-	}
+	// Quick 260930-uru: embed-gpu (pod 3060) com URL resolvida por request via
+	// loader (url_override > env UPSTREAM_EMBED_GPU_URL); registrado sempre.
+	embedRoleProxies["embed-gpu"] = proxy.NewDynamicEmbeddingsProxy(
+		func() (*url.URL, bool) { return loader.TargetURL("embed-gpu") },
+		log, usageInterceptor)
 	if u, ok := loader.Get("openai-embed"); ok && u.URL != "" {
 		oaEmbedProxy, perr := buildOpenAIEmbedProxy(u, log, resolver, usageInterceptor)
 		if perr != nil {
@@ -730,12 +782,9 @@ func main() {
 			0, &http.Transport{MaxIdleConns: 20, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
 			resolver, log, usageInterceptor),
 	}
-	// Phase 11.1: local-stt is registered ONLY if UPSTREAM_STT_URL still set
-	// (transitional compat). New deployments leave it unset and STT routes via
-	// the openai-whisper tier-1 fallback below.
-	if audioRP != nil {
-		sttRoleProxies["local-stt"] = audioRP
-	}
+	// Quick 260930-uru: local-stt registrado sempre (proxy dinâmico — URL
+	// resolvida por request via loader: url_override > env UPSTREAM_STT_URL).
+	sttRoleProxies["local-stt"] = audioRP
 	if u, ok := loader.Get("openai-whisper"); ok && u.URL != "" {
 		oaWhisperProxy, perr := buildOpenAIWhisperProxy(u, log, resolver, usageInterceptor)
 		if perr != nil {
@@ -802,18 +851,13 @@ func main() {
 	// 503s ("Upstream proxy not registered") on every pod-routed TTS request.
 	ttsRoleProxies["emergency_pod_tts"] = proxy.NewDynamicTTSProxy(
 		func() (string, bool) { return loader.Tier0OverrideURL("tts") }, log)
-	// tier-1 kokoro-tts (Kokoro-FastAPI OpenAI-compat): passthrough NewTTSProxy
-	// (NOT the Piper adapter — Kokoro speaks OpenAI 1:1, base URL + inbound
-	// /v1/audio/speech resolves via BuildDirector). Registered only when
-	// UPSTREAM_TTS_KOKORO_URL is set (migration 0032 names the DB row kokoro-tts).
-	if cfg.UpstreamTTSKokoroURL != "" {
-		kokoroRP, kerr := proxy.NewTTSProxy(cfg.UpstreamTTSKokoroURL, log)
-		if kerr != nil {
-			log.Warn("build kokoro-tts proxy", "err", kerr)
-		} else {
-			ttsRoleProxies["kokoro-tts"] = kokoroRP
-		}
-	}
+	// kokoro-tts (Kokoro-FastAPI OpenAI-compat): passthrough (NOT the Piper
+	// adapter — Kokoro speaks OpenAI 1:1, base URL + inbound /v1/audio/speech
+	// resolves via BuildDirector). Quick 260930-uru: URL resolvida por request
+	// via loader (url_override > env UPSTREAM_TTS_KOKORO_URL); registrado
+	// sempre. Sem usageInterceptor (paridade com o wiring anterior).
+	ttsRoleProxies["kokoro-tts"] = proxy.NewDynamicTTSTargetProxy(
+		func() (*url.URL, bool) { return loader.TargetURL("kokoro-tts") }, log)
 	// DEPRECATED — voice-api-piper: dead Piper removed from vps-ifix-vm.
 	// Inert in prod (UPSTREAM_TTS_PIPER_URL unset); kept for old .env compat.
 	if cfg.UpstreamTTSPiperURL != "" {
@@ -835,14 +879,11 @@ func main() {
 	// billing captures usage.prompt_tokens from the Infinity rerank response
 	// (route "rerank", cost_external 0 — self-hosted).
 	rerankRoleProxies := map[string]http.Handler{}
-	if cfg.UpstreamRerankURL != "" {
-		rerankGPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankURL, log, usageInterceptor)
-		if rerr != nil {
-			log.Warn("build rerank-gpu proxy", "err", rerr)
-		} else {
-			rerankRoleProxies["rerank-gpu"] = rerankGPU
-		}
-	}
+	// Quick 260930-uru: rerank-gpu (pod 3060) com URL resolvida por request
+	// via loader (url_override > env UPSTREAM_RERANK_URL); registrado sempre.
+	rerankRoleProxies["rerank-gpu"] = proxy.NewDynamicRerankProxy(
+		func() (*url.URL, bool) { return loader.TargetURL("rerank-gpu") },
+		log, usageInterceptor)
 	if cfg.UpstreamRerankFallbackURL != "" {
 		rerankCPU, rerr := proxy.NewRerankProxy(cfg.UpstreamRerankFallbackURL, log, usageInterceptor)
 		if rerr != nil {
@@ -1801,6 +1842,11 @@ func scaffoldNotImplemented(w http.ResponseWriter, _ *http.Request) {
 
 // Compile-time assertion that pgxpool/redis are imported (used inside main).
 // Keeps imports honest if main is restructured.
+// upstreamsBackstopRefreshInterval é o período do Refresh de segurança do
+// loader de upstreams (quick 260930-uru): cobre um NOTIFY perdido durante
+// reconnect do LISTEN. Refresh sem mudança loga só em Debug.
+const upstreamsBackstopRefreshInterval = 60 * time.Second
+
 var (
 	_ = (*pgxpool.Pool)(nil)
 	_ = (*redis.Client)(nil)

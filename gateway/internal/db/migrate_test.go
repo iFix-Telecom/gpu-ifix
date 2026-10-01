@@ -77,6 +77,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0035_upstreams_rerank_role.sql",
 		"0036_embed_gpu_tier0.sql",
 		"0037_model_aliases_provider_prefs.sql",
+		"0038_upstreams_url_override.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)

@@ -262,6 +262,8 @@ type AiGatewayUpstream struct {
 	UpdatedAt       time.Time          `json:"updated_at"`
 	// Phase 11.2: ordering within (role, tier). Lower wins. Tier-0 rows always 0. Tier-1 with multiple providers: (stt,1,10)=gemini-stt primary fallback, (stt,1,15)=groq-whisper secondary, (stt,1,20)=openai-whisper safety net.
 	TierPriority int32 `json:"tier_priority"`
+	// URL efetiva sobrescrita em runtime (hot-reload, sem restart). Quando NULL usa os.Getenv(url_env). Setada por gatewayctl upstreams update --url; limpa com --clear-url.
+	UrlOverride pgtype.Text `json:"url_override"`
 }
 
 type AiGatewayUsageCounter struct {

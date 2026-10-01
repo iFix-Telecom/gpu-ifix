@@ -27,7 +27,7 @@ Commands:
   migrate           Apply or revert Postgres migrations.
   tenant            Create tenants, set mode (24/7 or peak), set per-tenant quotas + shed limits.
   key               Create and revoke API keys.
-  upstreams         List, update, enable, or disable rows in ai_gateway.upstreams.
+  upstreams         List, update (incl. --url/--clear-url hot-reload), enable, or disable rows in ai_gateway.upstreams.
   prices            Set / list / set-fx for ai_gateway.prices and fx_rates (hot-reload via NOTIFY).
   billing           Reconcile usage_counters cache against authoritative billing_events.
   usage             Report per-tenant billing breakdown (day granularity, json|table).

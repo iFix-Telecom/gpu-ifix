@@ -14,7 +14,7 @@ import (
 )
 
 const getUpstreamByName = `-- name: GetUpstreamByName :one
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -28,6 +28,7 @@ type GetUpstreamByNameRow struct {
 	Tier            int32              `json:"tier"`
 	TierPriority    int32              `json:"tier_priority"`
 	UrlEnv          string             `json:"url_env"`
+	UrlOverride     pgtype.Text        `json:"url_override"`
 	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
 	Enabled         bool               `json:"enabled"`
 	Weight          pgtype.Int4        `json:"weight"`
@@ -52,6 +53,7 @@ func (q *Queries) GetUpstreamByName(ctx context.Context, name string) (GetUpstre
 		&i.Tier,
 		&i.TierPriority,
 		&i.UrlEnv,
+		&i.UrlOverride,
 		&i.AuthBearerEnv,
 		&i.Enabled,
 		&i.Weight,
@@ -67,7 +69,7 @@ func (q *Queries) GetUpstreamByName(ctx context.Context, name string) (GetUpstre
 }
 
 const listAllUpstreams = `-- name: ListAllUpstreams :many
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -81,6 +83,7 @@ type ListAllUpstreamsRow struct {
 	Tier            int32              `json:"tier"`
 	TierPriority    int32              `json:"tier_priority"`
 	UrlEnv          string             `json:"url_env"`
+	UrlOverride     pgtype.Text        `json:"url_override"`
 	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
 	Enabled         bool               `json:"enabled"`
 	Weight          pgtype.Int4        `json:"weight"`
@@ -111,6 +114,7 @@ func (q *Queries) ListAllUpstreams(ctx context.Context) ([]ListAllUpstreamsRow, 
 			&i.Tier,
 			&i.TierPriority,
 			&i.UrlEnv,
+			&i.UrlOverride,
 			&i.AuthBearerEnv,
 			&i.Enabled,
 			&i.Weight,
@@ -133,7 +137,7 @@ func (q *Queries) ListAllUpstreams(ctx context.Context) ([]ListAllUpstreamsRow, 
 }
 
 const listEnabledUpstreams = `-- name: ListEnabledUpstreams :many
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -148,6 +152,7 @@ type ListEnabledUpstreamsRow struct {
 	Tier            int32              `json:"tier"`
 	TierPriority    int32              `json:"tier_priority"`
 	UrlEnv          string             `json:"url_env"`
+	UrlOverride     pgtype.Text        `json:"url_override"`
 	AuthBearerEnv   pgtype.Text        `json:"auth_bearer_env"`
 	Enabled         bool               `json:"enabled"`
 	Weight          pgtype.Int4        `json:"weight"`
@@ -181,6 +186,7 @@ func (q *Queries) ListEnabledUpstreams(ctx context.Context) ([]ListEnabledUpstre
 			&i.Tier,
 			&i.TierPriority,
 			&i.UrlEnv,
+			&i.UrlOverride,
 			&i.AuthBearerEnv,
 			&i.Enabled,
 			&i.Weight,
@@ -217,6 +223,27 @@ type SetUpstreamEnabledParams struct {
 // Shortcut for enable/disable subcommands.
 func (q *Queries) SetUpstreamEnabled(ctx context.Context, arg SetUpstreamEnabledParams) error {
 	_, err := q.db.Exec(ctx, setUpstreamEnabled, arg.Name, arg.Enabled)
+	return err
+}
+
+const setUpstreamURLOverride = `-- name: SetUpstreamURLOverride :exec
+UPDATE ai_gateway.upstreams
+SET url_override = $1::text,
+    updated_at = NOW()
+WHERE name = $2
+`
+
+type SetUpstreamURLOverrideParams struct {
+	UrlOverride pgtype.Text `json:"url_override"`
+	Name        string      `json:"name"`
+}
+
+// Quick 260930-uru: gatewayctl upstreams update --url / --clear-url.
+// NULL (narg) limpa o override e o loader volta a os.Getenv(url_env).
+// Dispara NOTIFY upstreams_changed via trigger 0038 (só quando o valor muda:
+// IS DISTINCT FROM); o LISTEN recarrega o snapshot sem restart.
+func (q *Queries) SetUpstreamURLOverride(ctx context.Context, arg SetUpstreamURLOverrideParams) error {
+	_, err := q.db.Exec(ctx, setUpstreamURLOverride, arg.UrlOverride, arg.Name)
 	return err
 }
 

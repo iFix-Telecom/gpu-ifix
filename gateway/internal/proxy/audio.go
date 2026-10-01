@@ -1,12 +1,9 @@
 package proxy
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
-	"time"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
 )
@@ -28,39 +25,15 @@ import (
 // 404 "Model 'whisper' is not installed". On a resolver miss the alias passes
 // through unchanged and the pod 4xx's (breaker classifies 4xx as non-failure).
 func NewAudioProxy(upstreamURL string, log *slog.Logger, resolver *models.Resolver, interceptors ...ProxyResponseInterceptor) (*httputil.ReverseProxy, error) {
-	u, err := url.Parse(upstreamURL)
+	u, err := parseStaticUpstream("audio", upstreamURL)
 	if err != nil {
-		return nil, fmt.Errorf("proxy/audio: parse %q: %w", upstreamURL, err)
+		return nil, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("proxy/audio: invalid upstream url %q", upstreamURL)
-	}
-	rp := &httputil.ReverseProxy{
-		Director: BuildOpenAIWhisperDirector(u, "", resolver, "local-stt", log),
-		// FlushInterval deliberately omitted (default 0 = buffered)
-		// RES-13 / Plan 12-03: wrap the base Transport with
-		// fallthroughRoundTripper so a pre-byte connection-class dial failure
-		// surfaces errDialFailedFallthrough, which the sentinel-aware
-		// ErrorHandler suppresses → the dispatcher re-routes to tier-1
-		// (over-cap STT bodies are exempt from fallthrough — see dispatcher).
-		Transport: fallthroughRoundTripper{base: &http.Transport{
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-		}},
-		ErrorHandler: ErrorHandler("stt", log),
-		// Fix B (Phase 22) + debug stt-400-disco-cheio (2026-08-27): ANY upstream
-		// HTTP status >= 400 raises errUpstreamRetryable FIRST — the sentinel-aware
-		// ErrorHandler suppresses the write and records fallthrough_ so the
-		// dispatcher cascades to the next STT candidate instead of returning the
-		// error. Prepended before billing/other interceptors so a failed upstream
-		// never bills.
-		ModifyResponse: ComposeInterceptors(
-			append([]ProxyResponseInterceptor{sttRetryableStatusInterceptor{}}, interceptors...)...,
-		),
-	}
-	return rp, nil
+	// Quick 260930-uru: alvo fixo delegado ao proxy dinâmico, que preserva
+	// transport (RES-13 fallthrough), ErrorHandler("stt") e o
+	// sttRetryableStatusInterceptor prepended (Fix B Phase 22: status >= 400
+	// cascateia antes de qualquer billing). cmd/gateway usa NewDynamicAudioProxy.
+	return NewDynamicAudioProxy(staticTarget(u), log, resolver, interceptors...), nil
 }
 
 // sttRetryableStatusInterceptor raises errUpstreamRetryable when an STT upstream

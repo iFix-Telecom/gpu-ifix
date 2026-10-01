@@ -99,6 +99,27 @@ func (s *Set) Rebuild(names []string) {
 	}
 }
 
+// Reset substitui o breaker de name por um novo (CLOSED, contadores zerados)
+// e remove o overlay remoteOpen dele. Quick 260930-uru: chamado quando a URL
+// efetiva da row muda (pod 3060 novo) — o histórico de falhas do endereço
+// antigo não diz nada sobre o novo.
+//
+// Nome desconhecido = no-op. forceCache NÃO é tocado: um force-open/close de
+// operador continua prevalecendo. Nenhum evento Redis é publicado; o gauge
+// gateway_breaker_state local volta a 0. Outra réplica que tenha este nome em
+// remoteOpen o mantém até expirar pelo Cooldown.
+func (s *Set) Reset(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.cbs[name]; !ok {
+		return
+	}
+	s.cbs[name] = s.newBreaker(name)
+	delete(s.remoteOpen, name)
+	obs.BreakerState.WithLabelValues(name).Set(stateFloat(gobreaker.StateClosed))
+	s.log.Info("breaker reset (upstream url changed)", "upstream", name)
+}
+
 // Get returns the breaker for name + found flag. Caller uses it for
 // State() introspection OR calls Set.Execute for gated dispatch.
 func (s *Set) Get(name string) (*gobreaker.CircuitBreaker[*http.Response], bool) {

@@ -14,9 +14,17 @@ Historia:
 
 Uso: unified3060.py {start|stop|status|disk}
   start  — provisiona pod novo, valida (health+GPU+STT/TTS/embed/rerank),
-           flipa 4 envs do stack 38, valida via edge, destroi instancia
+           seta url_override das 4 rows via gatewayctl (hot-reload, SEM
+           recriar a task do gateway), valida via edge, destroi instancia
            anterior, persiste instance_id no state.
   stop   — DESTROI a instancia do state.
+  flip-stack-legacy — LEGADO: flipa as 4 envs do stack 38 via PUT no
+           Portainer (recria a task do gateway). So manual, p/ rollback da
+           migration 0038 / url_override indisponivel.
+  Desde 2026-10 (quick 260930-uru): o flip diario NAO faz mais PUT no stack
+  38. A URL vive em ai_gateway.upstreams.url_override, setada por
+  `ssh root@10.10.10.50 docker exec <gateway> /gatewayctl upstreams update
+  --name X --url Y`; o gateway recarrega por LISTEN/NOTIFY (+ backstop 60s).
   Desde 2026-09-17: start e stop RECONCILIAM por label (sweep de orfas) —
   provision falho destroi a nova sempre e o sweep varre o que tenha sobrado
   do label "stt-tts-rerank-unified" (leak: 4 orfas / $13,01).
@@ -27,10 +35,11 @@ State:   /var/lib/vast-3060/state.json (compartilhado com o legado vast3060:
          kill do systemd; retomada/destruida no proximo start).
 Secrets: /etc/onboard/secrets/vast-3060.env (VAST_API_KEY, PORTAINER_API_KEY,
          DINASTIA_BASE_URL, DINASTIA_TOKEN, NOTIFY_PHONE, GW_STT_KEY, GW_TTS_KEY)
+         PORTAINER_API_KEY so e necessario para o flip-stack-legacy.
 Arquivos irmaos (deployados em /opt/vast-3060/): onstart-unified.sh,
          infinity-freeze.txt, vast3060.py (helpers reutilizados).
 """
-import base64, json, os, subprocess, sys, time, urllib.parse, urllib.request
+import base64, json, os, shlex, subprocess, sys, time, urllib.parse, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vast3060 as v  # helpers: http, http_json, load_env, validate_*, notify
@@ -55,6 +64,21 @@ ENVMAP = {
     "UPSTREAM_RERANK_URL": "7998/tcp",
     "UPSTREAM_EMBED_GPU_URL": "7998/tcp",
 }
+# quick 260930-uru: row de ai_gateway.upstreams -> porta INTERNA do pod.
+# Ordem estavel (dict preserva insercao). Mapeamento p/ as envs antigas:
+#   local-stt  = UPSTREAM_STT_URL        kokoro-tts = UPSTREAM_TTS_KOKORO_URL
+#   rerank-gpu = UPSTREAM_RERANK_URL     embed-gpu  = UPSTREAM_EMBED_GPU_URL
+UPSTREAM_PORTS = {
+    "local-stt": "8000/tcp",
+    "kokoro-tts": "8021/tcp",
+    "rerank-gpu": "7998/tcp",
+    "embed-gpu": "7998/tcp",
+}
+# worker-vm (gateway prod). IP fixo: o script roda como ROOT via systemd e o
+# alias ssh "worker-vm" so existe no ~/.ssh/config do pedro; usa o mesmo
+# SSH_KEY explicito do ssh_pod.
+GATEWAY_HOST = "root@10.10.10.50"
+GATEWAY_CONTAINER_FILTER = "name=ai-gateway-prod_gateway"
 
 def log(m): print(f"[unified3060] {m}", flush=True)
 
@@ -290,7 +314,79 @@ def install_model(ip, port, m):
     return False
 
 
+def validate_url(u):
+    """Mesma regra do ValidateUpstreamURL (Go): scheme http/https + host."""
+    if not isinstance(u, str) or not u:
+        raise ValueError(f"url invalida: {u!r}")
+    p = urllib.parse.urlparse(u)
+    if p.scheme not in ("http", "https") or not p.netloc or not p.hostname:
+        raise ValueError(f"url invalida (precisa http(s)://host): {u!r}")
+    return u
+
+
+def build_flip_targets(ip, ports):
+    """[(row, url)] na ordem de UPSTREAM_PORTS. Porta ausente = erro explicito
+    (nunca monta 'http://ip:None')."""
+    if not ip:
+        raise ValueError("ip vazio")
+    out = []
+    for name, internal in UPSTREAM_PORTS.items():
+        if internal not in ports or ports[internal] in (None, ""):
+            raise KeyError(f"porta {internal} ausente em ports (row {name})")
+        url = validate_url(f"http://{ip}:{int(ports[internal])}")
+        out.append((name, url))
+    return out
+
+
+def gatewayctl_remote(args):
+    """Comando remoto: docker exec no container do gateway + /gatewayctl.
+    O container prod e distroless (sem sh/env): /gatewayctl e chamado direto.
+    O $(docker ps ...) fica FORA do quote — expandido no shell do worker-vm."""
+    quoted = " ".join(shlex.quote(a) for a in args)
+    return (f"docker exec $(docker ps -q -f {GATEWAY_CONTAINER_FILTER} | head -1) "
+            f"/gatewayctl {quoted}")
+
+
+def gateway_ssh_argv(remote):
+    return ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            GATEWAY_HOST, remote]
+
+
+def gatewayctl_update_cmd(name, url):
+    """argv do ssh que seta url_override da row `name` (url validada antes)."""
+    validate_url(url)
+    if not name:
+        raise ValueError("name vazio")
+    return gateway_ssh_argv(gatewayctl_remote(
+        ["upstreams", "update", "--name", name, "--url", url]))
+
+
+def flip_upstreams(env, ip, ports):
+    """Seta url_override das 4 rows via gatewayctl no container do gateway.
+
+    Sem idempotencia por leitura previa (parse da tabela do `upstreams list`
+    seria fragil): sempre seta. UPDATE com o mesmo valor NAO dispara NOTIFY
+    (trigger 0038 usa IS DISTINCT FROM), entao repetir e inofensivo.
+    Retorna a lista de mudancas (mesmo contrato do flip_stack)."""
+    targets = build_flip_targets(ip, ports)
+    changed = []
+    for name, url in targets:
+        argv = gatewayctl_update_cmd(name, url)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(f"gatewayctl update {name} rc={r.returncode}: "
+                               f"{(r.stderr or '')[-500:]}")
+        changed.append(f"{name} -> {url}")
+    log(f"upstreams flipados via url_override: {changed}")
+    # LISTEN aplica em <2s; folga antes do validate_edge
+    time.sleep(5)
+    return changed
+
+
 def flip_stack(env, ip, ports):
+    """LEGADO: recria a task do gateway; usar so se url_override indisponivel
+    (ex. rollback da migration 0038). Acessivel apenas pelo subcomando
+    `flip-stack-legacy` — o caminho automatico usa flip_upstreams."""
     hdr = {"X-API-Key": env["PORTAINER_API_KEY"]}
     c, raw = v.http("GET", f"{PORTAINER}/stacks/{STACK}", hdr)
     stack = json.loads(raw)
@@ -333,7 +429,7 @@ def diag(env, inst):
 
 
 def cmd_start(env, resume_id=None):
-    """Provisiona pod FRESCO, valida, flipa stack 38, destroi o anterior.
+    """Provisiona pod FRESCO, valida, seta url_override (gatewayctl), destroi o anterior.
     resume_id: continua orquestracao numa instancia ja criada (pos-falha
     transiente) em vez de criar outra."""
     st = load_state()
@@ -514,9 +610,9 @@ def cmd_start(env, resume_id=None):
     ensure_guard(fresh)  # best-effort: guard ja vai no onstart; ssh pode falhar
 
     try:
-        flip_stack(env, ip, ports)
+        flip_upstreams(env, ip, ports)
     except Exception as e:
-        return fail(f"flip stack: {e}", inst)
+        return fail(f"flip upstreams: {e}", inst)
 
     edge_ok, why = False, ""
     for _ in range(10):
@@ -602,14 +698,29 @@ def cmd_status(env):
                       "ports": inst.get("ports")}, indent=1))
 
 
-USAGE = "uso: unified3060.py {start [instance_id]|stop|status|disk}"
+def cmd_flip_stack_legacy(env):
+    """LEGADO (manual): flipa as 4 envs do stack 38 p/ a instancia do state
+    via PUT no Portainer. Recria a task do gateway."""
+    st = load_state()
+    iid = st.get("instance_id")
+    if not iid:
+        log("flip-stack-legacy: sem instance_id no state"); sys.exit(1)
+    inst = vast_get(env, iid) or {}
+    ip = inst.get("public_ipaddr")
+    if not ip or not inst.get("ports"):
+        log(f"flip-stack-legacy: instancia {iid} sem ip/ports"); sys.exit(1)
+    ports = {k: int(p[0]["HostPort"]) for k, p in inst["ports"].items()}
+    flip_stack(env, ip, ports)  # legacy: so via subcomando manual
+
+
+USAGE = "uso: unified3060.py {start [instance_id]|stop|status|disk|flip-stack-legacy}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(USAGE, file=sys.stderr)
         sys.exit(64)
     cmd = sys.argv[1]
-    if cmd not in ("start", "stop", "status", "disk"):
+    if cmd not in ("start", "stop", "status", "disk", "flip-stack-legacy"):
         print(f"comando desconhecido '{cmd}'. {USAGE}", file=sys.stderr)
         sys.exit(64)
     e = v.load_env()
@@ -638,3 +749,5 @@ if __name__ == "__main__":
         cmd_status(e)
     elif cmd == "disk":
         cmd_disk(e)
+    elif cmd == "flip-stack-legacy":
+        cmd_flip_stack_legacy(e)

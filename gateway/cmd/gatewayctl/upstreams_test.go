@@ -310,6 +310,50 @@ func TestRunUpstreams_Disable_Enable_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestRunUpstreams_Update_URLOverride_SetListClear exercises quick 260930-uru:
+// --url writes url_override, list shows it in URL_OVERRIDE, --clear-url NULLs it.
+func TestRunUpstreams_Update_URLOverride_SetListClear(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, _ := freshSchema(t, ctx)
+
+	stdout, stderr, code := runCLI(t, []string{"update", "--name=local-stt", "--url=http://10.9.8.7:41000"})
+	if code != 0 {
+		t.Fatalf("set url code = %d; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "url_override set to http://10.9.8.7:41000") {
+		t.Errorf("stdout = %q", stdout)
+	}
+	var uo *string
+	if err := pool.QueryRow(ctx,
+		"SELECT url_override FROM ai_gateway.upstreams WHERE name='local-stt'").Scan(&uo); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if uo == nil || *uo != "http://10.9.8.7:41000" {
+		t.Fatalf("url_override = %v", uo)
+	}
+
+	stdout, _, code = runCLI(t, []string{"list"})
+	if code != 0 || !strings.Contains(stdout, "URL_OVERRIDE") || !strings.Contains(stdout, "http://10.9.8.7:41000") {
+		t.Fatalf("list code=%d missing URL_OVERRIDE:\n%s", code, stdout)
+	}
+
+	if _, stderr, code = runCLI(t, []string{"update", "--name=local-stt", "--clear-url"}); code != 0 {
+		t.Fatalf("clear code = %d; stderr=%q", code, stderr)
+	}
+	if err := pool.QueryRow(ctx,
+		"SELECT url_override FROM ai_gateway.upstreams WHERE name='local-stt'").Scan(&uo); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if uo != nil {
+		t.Fatalf("url_override must be NULL after --clear-url, got %q", *uo)
+	}
+
+	if _, _, code = runCLI(t, []string{"update", "--name=local-stt", "--url=ftp://x"}); code != 2 {
+		t.Fatalf("invalid url must exit 2, got %d", code)
+	}
+}
+
 // TestRunUpstreams_Update_UnknownName surfaces a clear error for a typo'd
 // upstream name (otherwise the UPDATE would be a silent no-op).
 func TestRunUpstreams_Update_UnknownName(t *testing.T) {
