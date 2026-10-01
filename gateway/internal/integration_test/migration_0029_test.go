@@ -187,9 +187,10 @@ func TestIntegration_Migration0029_Down_Symmetric(t *testing.T) {
 	// quick-260824-ucv HEAD bump: Down(6)→Down(7) when 0035 (rerank role) landed on HEAD.
 	// quick-260825-anq HEAD bump: Down(7)→Down(8) when 0036 (embed-gpu tier-0) landed on HEAD.
 	// quick-260830-o2j HEAD bump: Down(8)→Down(9) when 0037 (provider_prefs) landed on HEAD.
-	// Down(9) peels 0037+0036+0035+0034+0033+0032+0031+0030 then 0029 to exercise 0029's symmetric Down.
-	if err := db.Down(ctx, pool, 9); err != nil {
-		t.Fatalf("db.Down(9) revert 0037+0036+0035+0034+0033+0032+0031+0030+0029: %v", err)
+	// quick-260930-uru HEAD bump: Down(9)→Down(10) when 0038 (url_override) landed on HEAD.
+	// Down(10) peels 0038+0037+0036+0035+0034+0033+0032+0031+0030 then 0029 to exercise 0029's symmetric Down.
+	if err := db.Down(ctx, pool, 10); err != nil {
+		t.Fatalf("db.Down(10) revert 0038+0037+0036+0035+0034+0033+0032+0031+0030+0029: %v", err)
 	}
 
 	for _, name := range []string{"local-stt", "gemini-stt", "groq-whisper"} {

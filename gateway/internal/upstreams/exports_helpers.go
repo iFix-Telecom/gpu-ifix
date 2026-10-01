@@ -19,16 +19,6 @@ package upstreams
 // accessible only to upstreams_test internal tests).
 func NewLoaderInMemory(cfgs ...UpstreamConfig) *Loader {
 	l := &Loader{tier0Override: newTier0OverrideMap()}
-	s := &snapshot{
-		byName:     make(map[string]UpstreamConfig, len(cfgs)),
-		byRoleTier: make(map[RoleTier]UpstreamConfig, len(cfgs)),
-		ordered:    make([]UpstreamConfig, 0, len(cfgs)),
-	}
-	for _, u := range cfgs {
-		s.byName[u.Name] = u
-		s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
-		s.ordered = append(s.ordered, u)
-	}
-	l.snap.Store(s)
+	l.snap.Store(newSnapshot(cfgs))
 	return l
 }

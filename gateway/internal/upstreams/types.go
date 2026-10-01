@@ -30,8 +30,11 @@ type UpstreamConfig struct {
 	// wins. Phase 11.2 (D-B5′/D-B6′) — STT cascade has 3 tier-1 rows
 	// ordered gemini-stt(10) → groq-whisper(15) → openai-whisper(20).
 	// Other roles default to 0 (single tier-1 row, backward-compat).
-	TierPriority  int           `json:"tier_priority"`
-	URL           string        `json:"url"`
+	TierPriority int    `json:"tier_priority"`
+	URL          string `json:"url"`
+	// URLSource indica de onde veio URL: "override" (coluna url_override,
+	// hot-reload) ou "env" (os.Getenv(url_env)). Quick 260930-uru.
+	URLSource     string        `json:"url_source,omitempty"`
 	AuthBearer    string        `json:"-"` // resolved; NEVER log/serialize
 	AuthBearerEnv string        `json:"auth_bearer_env,omitempty"`
 	Enabled       bool          `json:"enabled"`
@@ -45,6 +48,12 @@ type UpstreamConfig struct {
 	// traffic with the emergency reconciler (idle-grace detection).
 	IsEmergency bool `json:"-"`
 }
+
+// Valores de UpstreamConfig.URLSource (quick 260930-uru).
+const (
+	URLSourceOverride = "override"
+	URLSourceEnv      = "env"
+)
 
 // CircuitConfig overrides breaker defaults for a specific upstream. Loaded
 // from the JSONB column ai_gateway.upstreams.circuit_config. Zero values

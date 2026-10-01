@@ -4,7 +4,7 @@
 -- can deterministically build tier-0/tier-1 maps.
 -- Phase 11.2 (D-B5′/D-B6′): tier_priority widens (role,tier) for the STT
 -- multi-tier-1 cascade.
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -14,7 +14,7 @@ ORDER BY role, tier, tier_priority;
 -- name: ListAllUpstreams :many
 -- Admin surface (gatewayctl upstreams list). Returns every row regardless
 -- of enabled state so the operator can re-enable disabled upstreams.
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -23,7 +23,7 @@ ORDER BY role, tier, tier_priority;
 -- name: GetUpstreamByName :one
 -- Used by gatewayctl upstreams update/enable/disable to verify the name
 -- exists before mutating.
-SELECT id, name, role, tier, tier_priority, url_env, auth_bearer_env, enabled, weight,
+SELECT id, name, role, tier, tier_priority, url_env, url_override, auth_bearer_env, enabled, weight,
        circuit_config, last_probe_at, last_probe_ms, last_probe_status,
        last_probe_error, created_at, updated_at
 FROM ai_gateway.upstreams
@@ -62,3 +62,13 @@ UPDATE ai_gateway.upstreams
 SET enabled = $2,
     updated_at = NOW()
 WHERE name = $1;
+
+-- name: SetUpstreamURLOverride :exec
+-- Quick 260930-uru: gatewayctl upstreams update --url / --clear-url.
+-- NULL (narg) limpa o override e o loader volta a os.Getenv(url_env).
+-- Dispara NOTIFY upstreams_changed via trigger 0038 (só quando o valor muda:
+-- IS DISTINCT FROM); o LISTEN recarrega o snapshot sem restart.
+UPDATE ai_gateway.upstreams
+SET url_override = sqlc.narg('url_override')::text,
+    updated_at = NOW()
+WHERE name = sqlc.arg('name');
