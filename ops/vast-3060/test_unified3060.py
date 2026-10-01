@@ -363,5 +363,65 @@ class OfferQueryTest(unittest.TestCase):
         self.assertNotIn("X", u.v.OFFER_QUERY["gpu_name"]["in"])
 
 
+class _Stop(Exception):
+    pass
+
+
+class CreatePayloadTest(unittest.TestCase):
+    """cmd_start com I/O mockado: so ate o PUT de criacao (vast_get aborta)."""
+
+    def run_start(self, pick):
+        calls, saved = [], []
+
+        def boom(*a, **k):
+            raise _Stop()
+
+        patches = {
+            "acquire_start_lock": lambda *a, **k: True,
+            "load_state": lambda: {"instance_id": None, "machine_avoid": [],
+                                   "host_avoid": [], "pending_id": None},
+            "save_state": lambda st: saved.append(dict(st)),
+            "pick_offer": lambda *a, **k: pick,
+            "build_onstart": lambda: "echo hi",
+            "vast_get": boom,
+        }
+        orig = {k: getattr(u, k) for k in patches}
+        orig_http, orig_sleep, orig_notify = u.v.http_json, u.time.sleep, u.v.notify
+
+        def fake_http(method, url, headers=None, payload=None, timeout=30):
+            calls.append((method, url, payload))
+            return 200, {"new_contract": 999}
+        try:
+            for k, f in patches.items():
+                setattr(u, k, f)
+            u.v.http_json, u.time.sleep, u.v.notify = fake_http, lambda s: None, lambda *a: None
+            with self.assertRaises(_Stop):
+                u.cmd_start({"VAST_API_KEY": "x"})
+        finally:
+            for k, f in orig.items():
+                setattr(u, k, f)
+            u.v.http_json, u.time.sleep, u.v.notify = orig_http, orig_sleep, orig_notify
+        return calls, saved
+
+    def pick(self, mode, bid):
+        o = _od(7, 0.05, 0.2, min_bid=0.03)
+        return {"offer": o, "mode": mode, "bid": bid, "cap_mult": 1.3,
+                "cost": u.real_cost(o, mode, bid)}
+
+    def test_bid_sends_price_and_disk30(self):
+        calls, saved = self.run_start(self.pick("bid", 0.0345))
+        put = [c for c in calls if c[0] == "PUT"][0]
+        self.assertTrue(put[1].endswith("/asks/7/"))
+        self.assertEqual(put[2]["price"], 0.0345)
+        self.assertEqual(put[2]["disk"], 30)
+        self.assertEqual(saved[-1]["pending_id"], 999)
+        self.assertEqual(saved[-1]["pending_mode"], "bid")
+
+    def test_ondemand_has_no_price(self):
+        calls, _ = self.run_start(self.pick("ondemand", None))
+        put = [c for c in calls if c[0] == "PUT"][0]
+        self.assertNotIn("price", put[2])
+
+
 if __name__ == "__main__":
     unittest.main()
