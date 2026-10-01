@@ -91,7 +91,7 @@ func TestRankCandidates_BidCheaperWins(t *testing.T) {
 // server-sorted dph_total but LOWER real cost (dph_base + 45 GB storage)
 // wins: ranking is by real cost, not by dph_total order.
 func TestRankCandidates_ArgentinaLike(t *testing.T) {
-	serbia := vast.Offer{ID: 10, DphTotal: 0.1633, DphBase: 0.155, StorageCost: 0.5} // 0.155 + 0.0308 = 0.1858
+	serbia := vast.Offer{ID: 10, DphTotal: 0.1633, DphBase: 0.155, StorageCost: 0.5}   // 0.155 + 0.0308 = 0.1858
 	argentina := vast.Offer{ID: 11, DphTotal: 0.170, DphBase: 0.130, StorageCost: 0.1} // 0.130 + 0.0062 = 0.1362
 	c, ok := RankCandidates([]vast.Offer{serbia, argentina}, nil, OfferModeBid, 0.2, 1.15, testCostParams)
 	require.True(t, ok)

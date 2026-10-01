@@ -359,6 +359,20 @@ type Reconciler struct {
 	// FLAG checked by the existing schedule evaluator — NOT new retry
 	// machinery (D-01: a flag is allowed, retry logic is not).
 	billingSuppressedAt atomic.Pointer[time.Time]
+
+	// activeIsBid is true when the tracked lifecycle rented an interruptible
+	// (bid) instance (quick-261001-qdd). Set by provisionLifecycle right
+	// after CreateInstance, restored by recoverOpenLifecycle from
+	// primary_lifecycles.is_bid (NULL -> false). Drives the preemption
+	// classification: a bid instance that Vast stops is "preempted".
+	activeIsBid atomic.Bool
+
+	// pendingCloseReason overrides the "destroyed" shutdown_reason that
+	// evaluateDestroying writes (quick-261001-qdd: "preempted"). Set by
+	// handleConfirmedDeath BEFORE startDrain, consumed (and cleared) by
+	// evaluateDestroying; also cleared by markReady and on provision start so
+	// it can never leak into a later lifecycle.
+	pendingCloseReason atomic.Pointer[string]
 }
 
 // NewReconciler constructs a Reconciler with the given Deps. cfg is
@@ -517,7 +531,7 @@ func (r *Reconciler) buildCreateRequest(offer vast.Offer, lifecycleID int64) (va
 		// venv), lowering the coldstart disk peak (image + parallel weight
 		// downloads [qwen 17 + whisper 2.7 + bge-m3 1.2] + tarball extraction
 		// before the .tar.gz files are removed). 45GB keeps comfortable margin.
-		Disk:        45,
+		Disk:        primaryDiskGB,
 		Label:       fmt.Sprintf("ifix-primary-lifecycle-%d", lifecycleID),
 		TargetState: "running",
 	}, nil

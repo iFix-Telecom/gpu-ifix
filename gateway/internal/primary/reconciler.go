@@ -1235,6 +1235,9 @@ func bootHotCfg(cfg config.Config) podconfig.PodConfig {
 		GraceRampDownS:       cfg.PrimaryPodScheduleGraceRampDownSeconds,
 		ProvisionLeadS:       cfg.PrimaryPodScheduleProvisionLeadSeconds,
 		ScheduleDisabled:     cfg.PrimaryPodScheduleDisabled,
+		OfferMode:            cfg.PrimaryVastOfferMode,
+		BidMargin:            cfg.PrimaryVastBidMargin,
+		MaxPreemptionsPerDay: cfg.PrimaryVastMaxPreemptionsPerDay,
 	}
 }
 
@@ -1347,6 +1350,17 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		mode = "allowlist_preferred"
 	}
 
+	// quick-261001-qdd: interruptible (bid) vs on-demand. Count today's
+	// preempted lifecycles (schedule timezone) — reaching
+	// pod_config.max_preemptions_per_day flips this provision to on-demand.
+	// A count failure must NEVER block provisioning → treat as 0.
+	preemptToday := r.countPreemptionsToday(ctx, log)
+	offerMode := ChooseMode(hot.OfferMode, preemptToday, hot.MaxPreemptionsPerDay)
+	costParams := r.costParams()
+	// A fresh provision never inherits a previous lifecycle's flags.
+	r.activeIsBid.Store(false)
+	r.pendingCloseReason.Store(nil)
+
 	// Phase 11.1 D-A6 (Wave 0 EVIDENCE-00): build a [primary, fallback]
 	// SearchFilter pair and iterate — primary shape preferred (1×3090 @
 	// $0.30), fallback shape only when the primary cap returns zero
@@ -1372,7 +1386,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	// try allowlist-first, then broaden to the full qualified search, and
 	// only iterate the next shape when both passes return no qualified
 	// offers below the per-shape cap.
-	var pickable []vast.Offer
+	var picked Candidate
+	var havePick bool
 	var pickedShape int
 
 	// force_machine_id (Phase 999.2 — regime-1 UAT / ops pin): when set (>0),
@@ -1380,6 +1395,8 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 	// this Vast machine_id. Reuses the machine-allowlist filter with a list of one
 	// over filters[0] (primary shape). Fails CLOSED if the pinned machine has no
 	// current offer — never silently falls back to the market pick.
+	// quick-261001-qdd: the pin is ALWAYS on-demand and still bypasses the cap
+	// (an ops/UAT pin must not be preempted mid-test nor priced out).
 	if hot.ForceMachineID > 0 {
 		forceFilter := vast.WithMachineAllowlist(filters[0], []int64{hot.ForceMachineID})
 		offers, err := r.deps.Vast.SearchOffers(ctx, forceFilter)
@@ -1392,14 +1409,48 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			_ = r.closeLifecycle(ctx, lifecycleID, "forced_machine_no_offer", 0)
 			return fmt.Errorf("primary: force_machine_id %d has no offer", hot.ForceMachineID)
 		}
-		pickable = offers
+		picked = Candidate{Offer: offers[0], Cost: RealCost(offers[0], false, 0, costParams)}
+		havePick = true
 		pickedShape = 0
 		log.Warn("primary offer FORCED by force_machine_id (bypasses market/cap)",
 			"force_machine_id", hot.ForceMachineID, "offer_count", len(offers))
 	}
 
+	// searchRanked runs the on-demand search (+ the bid search in bid mode)
+	// for one filter and ranks both by real cost under the shape cap. A bid
+	// search ERROR is logged and treated as "no bid offers" (never aborts —
+	// mirrors the 3060 pick_offer); an on-demand search error aborts like
+	// before.
+	searchRanked := func(f vast.SearchFilter, shape int, pass string) (Candidate, bool, error) {
+		od, err := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "on-demand"))
+		if err != nil {
+			return Candidate{}, false, err
+		}
+		od = r.rejectPrivateIPOffers(od, log, shape, pass)
+		var bd []vast.Offer
+		if offerMode == OfferModeBid {
+			b, berr := r.deps.Vast.SearchOffers(ctx, primaryFilter(f, "bid"))
+			if berr != nil {
+				log.Warn("primary bid offer search failed; continuing with on-demand only",
+					"err", berr, "shape", shape, "pass", pass)
+			} else {
+				bd = r.rejectPrivateIPOffers(b, log, shape, pass+"_bid")
+			}
+		}
+		c, ok := RankCandidates(od, bd, offerMode, shapeCaps[shape], hot.BidMargin, costParams)
+		if ok {
+			log.Info("primary offers found for shape",
+				"shape", shape, "pass", pass,
+				"ondemand_count", len(od), "bid_count", len(bd),
+				"cap", shapeCaps[shape], "gpu_shape", gpuShapeLabel(r.cfg, shape),
+				"fail_streak", failStreak, "mode", mode,
+				"offer_mode", offerMode, "preempt_today", preemptToday)
+		}
+		return c, ok, nil
+	}
+
 	for i, f := range filters {
-		if len(pickable) > 0 {
+		if havePick {
 			break // force_machine_id already pinned the offer above
 		}
 		// Allowlist preference pass for this shape — quick-260702-nse: ONLY
@@ -1408,20 +1459,13 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		// straight to the full qualified broaden search below.
 		if failStreak >= 2 && len(hot.VastMachineAllowlist) > 0 {
 			allowFilter := vast.WithMachineAllowlist(f, hot.VastMachineAllowlist)
-			offers, err := r.deps.Vast.SearchOffers(ctx, allowFilter)
+			c, ok, err := searchRanked(allowFilter, i, "allowlist")
 			if err != nil {
 				_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 				return err
 			}
-			offers = r.rejectPrivateIPOffers(offers, log, i, "allowlist")
-			candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
-			if len(candidates) > 0 {
-				pickable = candidates
-				pickedShape = i
-				log.Info("primary offers found for shape (allowlist pass)",
-					"shape", i, "offer_count", len(candidates),
-					"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i),
-					"fail_streak", failStreak, "mode", mode)
+			if ok {
+				picked, havePick, pickedShape = c, true, i
 				break
 			}
 			log.Info("primary allowlist exhausted for shape; broadening to full qualified search",
@@ -1430,31 +1474,39 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		}
 
 		// Broaden to the full qualified search for this shape.
-		offers, err := r.deps.Vast.SearchOffers(ctx, f)
+		c, ok, err := searchRanked(f, i, "broaden")
 		if err != nil {
 			_ = r.closeLifecycle(ctx, lifecycleID, "search_failed", 0)
 			return err
 		}
-		offers = r.rejectPrivateIPOffers(offers, log, i, "broaden")
-		candidates := vastutil.FilterBelowCap(offers, shapeCaps[i])
-		if len(candidates) > 0 {
-			pickable = candidates
-			pickedShape = i
-			log.Info("primary offers found for shape",
-				"shape", i, "offer_count", len(candidates),
-				"cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i),
-				"fail_streak", failStreak, "mode", mode)
+		if ok {
+			picked, havePick, pickedShape = c, true, i
 			break
 		}
 		log.Info("primary shape returned no qualified offers; trying next",
-			"shape", i, "cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i))
+			"shape", i, "cap", shapeCaps[i], "gpu_shape", gpuShapeLabel(r.cfg, i),
+			"offer_mode", offerMode)
 	}
 
-	if len(pickable) == 0 {
+	if !havePick {
 		_ = r.closeLifecycle(ctx, lifecycleID, "no_offers_below_cap", 0)
 		return errors.New("primary: no offers below cap (both shapes exhausted)")
 	}
-	offer := pickable[0]
+	offer := picked.Offer
+	if offerMode == OfferModeBid && !picked.IsBid {
+		log.Info("primary bid: no eligible/cheaper bid offer, using on-demand",
+			"offer_id", offer.ID, "real_cost", picked.Cost.Total)
+	}
+	// acceptedDPH feeds the lifecycle cost accrual (accepted_dph). On-demand
+	// keeps its historical semantics (Vast dph_total); a bid lifecycle accrues
+	// at bid + storage (what Vast actually bills per hour for it). The
+	// download amortization is a ranking term only (one-off charge).
+	acceptedDPH := offer.DphTotal
+	var bidPrice pgtype.Numeric
+	if picked.IsBid {
+		acceptedDPH = picked.Cost.CapCost
+		bidPrice = vastutil.PgNumericFromFloat(picked.Bid)
+	}
 	// Catalog the picked host so failures (e.g. broken-CDI multi-GPU machines)
 	// can be added to PRIMARY_VAST_MACHINE_BLOCKLIST. machine_id correlates the
 	// later terminal/CDI error (logged with instance_id) back to the host.
@@ -1469,11 +1521,22 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		"geo", offer.Geolocation,
 		"shape", pickedShape,
 		"gpu_shape", gpuShapeLabel(r.cfg, pickedShape),
-		"fail_streak", failStreak, "mode", mode)
+		"fail_streak", failStreak, "mode", mode,
+		"offer_mode", offerMode, "preempt_today", preemptToday,
+		"is_bid", picked.IsBid, "bid_price", picked.Bid,
+		"real_cost", picked.Cost.Total, "cap_cost", picked.Cost.CapCost,
+		"gpu_h", picked.Cost.Hourly, "storage_h", picked.Cost.StorageH,
+		"download_h", picked.Cost.DownloadH, "cost_src", picked.Cost.Src,
+		"dph_base", offer.DphBase, "storage_cost", offer.StorageCost,
+		"inet_down_cost", offer.InetDownCost, "min_bid", offer.MinBid)
 	req, err := r.buildCreateRequest(offer, lifecycleID)
 	if err != nil {
 		_ = r.closeLifecycle(ctx, lifecycleID, "build_create_request_failed:"+err.Error(), 0)
 		return err
+	}
+	if picked.IsBid {
+		p := picked.Bid
+		req.Price = &p
 	}
 	instance, err := r.deps.Vast.CreateInstance(ctx, offer.ID, req)
 	if err != nil {
@@ -1481,6 +1544,7 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 		return err
 	}
 	r.activeInstanceID.Store(instance.ID)
+	r.activeIsBid.Store(picked.IsBid)
 	q := r.queries()
 	if q != nil {
 		eventJSON := vastutil.MustEventJSON("offer_accepted", map[string]any{
@@ -1492,20 +1556,42 @@ func (r *Reconciler) provisionLifecycle(ctx context.Context, lifecycleID int64, 
 			// Phase 11.1 WR-04: per-shape attribution in audit trail
 			"shape":     pickedShape,
 			"gpu_shape": gpuShapeLabel(r.cfg, pickedShape),
+			// quick-261001-qdd: real-cost decomposition + bid audit (T-qdd-04).
+			"offer_mode":     offerMode,
+			"is_bid":         picked.IsBid,
+			"bid_price":      picked.Bid,
+			"real_cost":      picked.Cost.Total,
+			"cap_cost":       picked.Cost.CapCost,
+			"gpu_h":          picked.Cost.Hourly,
+			"storage_h":      picked.Cost.StorageH,
+			"download_h":     picked.Cost.DownloadH,
+			"dph_base":       offer.DphBase,
+			"storage_cost":   offer.StorageCost,
+			"inet_down_cost": offer.InetDownCost,
+			"min_bid":        offer.MinBid,
+			"preempt_today":  preemptToday,
 		})
 		if err := q.UpdatePrimaryLifecycleVastIDs(ctx, gen.UpdatePrimaryLifecycleVastIDsParams{
 			ID:             lifecycleID,
 			VastOfferID:    vastutil.PgInt8(offer.ID),
 			VastInstanceID: vastutil.PgInt8(instance.ID),
-			AcceptedDph:    vastutil.PgNumericFromFloat(offer.DphTotal),
+			AcceptedDph:    vastutil.PgNumericFromFloat(acceptedDPH),
 			EventJson:      eventJSON,
 		}); err != nil {
 			vastutil.BestEffortDestroy(ctx, r.deps.Vast, r.deps.Log, instance.ID)
 			_ = r.closeLifecycle(ctx, lifecycleID, "audit_write_failed", 0)
 			return err
 		}
+		if err := q.SetPrimaryLifecycleOfferMode(ctx, gen.SetPrimaryLifecycleOfferModeParams{
+			ID:       lifecycleID,
+			IsBid:    pgtype.Bool{Bool: picked.IsBid, Valid: true},
+			BidPrice: bidPrice,
+		}); err != nil {
+			log.Warn("primary lifecycle offer-mode write failed (audit only)",
+				"lifecycle_id", lifecycleID, "is_bid", picked.IsBid, "err", err)
+		}
 	}
-	reason, werr := r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, offer.DphTotal, log)
+	reason, werr := r.waitForReadyOrDestroy(ctx, lifecycleID, instance.ID, acceptedDPH, log)
 	// BL-01/AL-01: maintain the machine block/allow lists from the outcome.
 	// Best-effort — a list-write failure never changes werr (the provision's
 	// result). failStreak is pre-attempt (the open row is excluded from the
@@ -2223,6 +2309,10 @@ func (r *Reconciler) recoverOpenLifecycle(ctx context.Context) error {
 	// Healthy! Rehydrate in-memory state.
 	r.activeLifecycleID.Store(open.ID)
 	r.activeInstanceID.Store(open.VastInstanceID.Int64)
+	// quick-261001-qdd: restore the bid flag so a post-restart preemption is
+	// still classified "preempted" (NULL = legacy pre-0039 row → on-demand).
+	r.activeIsBid.Store(open.IsBid.Valid && open.IsBid.Bool)
+	r.pendingCloseReason.Store(nil)
 	r.activePodURLs.Store(&urls)
 	if r.deps.Loader != nil {
 		// Phase 21: 2-role restart-recovery override (tts removed).
@@ -2589,4 +2679,56 @@ func (r *Reconciler) recordProvisionOutcome(ctx context.Context, machineID, fail
 			return
 		}
 	}
+}
+
+// primaryFilter returns a COPY of the shared search filter specialised for
+// the primary picker (quick-261001-qdd): `type` = "on-demand" | "bid" and a
+// wider `limit` (64) because ranking is now by real cost client-side, so the
+// server's dph_total order is no longer the final order. For "bid" the
+// server-side dph_total ceiling is dropped (the bid price is chosen
+// client-side from min_bid and capped in RankCandidates). The shared
+// DefaultSearchFilter output (also used by emerg) is never mutated.
+func primaryFilter(f vast.SearchFilter, kind string) vast.SearchFilter {
+	out := make(vast.SearchFilter, len(f)+2)
+	for k, v := range f {
+		out[k] = v
+	}
+	out["type"] = kind
+	out["limit"] = 64
+	if kind == "bid" {
+		delete(out, "dph_total")
+	}
+	return out
+}
+
+// costParams returns the real-cost model inputs (BOOT config — not hot).
+func (r *Reconciler) costParams() CostParams {
+	return CostParams{
+		DiskGB:                primaryDiskGB,
+		WeightsDownloadGB:     r.cfg.PrimaryWeightsDownloadGB,
+		ExpectedHoursPerStart: r.cfg.PrimaryExpectedHoursPerStart,
+	}
+}
+
+// countPreemptionsToday returns the number of primary lifecycles closed as
+// "preempted" since local midnight in the schedule timezone (UTC when unset).
+// Any error / missing DB -> 0 with a Warn: the count only gates the bid ->
+// on-demand fallback and must never block provisioning.
+func (r *Reconciler) countPreemptionsToday(ctx context.Context, log *slog.Logger) int64 {
+	q := r.queries()
+	if q == nil {
+		return 0
+	}
+	loc := r.rule.Timezone
+	if loc == nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	n, err := q.CountPrimaryPreemptionsSince(ctx, pgtype.Timestamptz{Time: midnight, Valid: true})
+	if err != nil {
+		log.Warn("primary preemption count failed; assuming 0", "err", err)
+		return 0
+	}
+	return n
 }
