@@ -3,6 +3,15 @@
 ClickUp ativo: [pod primário 3090: reduzir custo](https://app.clickup.com/t/86akrnpwc) (86akrnpwc).
 Relacionados em "em testes": 86akregky (custo 3060), 86akreh6u (STT→gemini).
 
+## ATUALIZAÇÃO 2026-10-02 06:05 BRT — DEPLOY FEITO (passos 2–4)
+- Integração local verde (integration_test 383s, gatewayctl 41s); CI run 36940337213 verde (webhook dev = falha esperada).
+- Push develop `1a99386`. Migration **0039 aplicada** em prod (goose v39) via one-off com a imagem nova.
+- Stack 38 → `develop-1a99386@sha256:1fd0e30c40d6…` (84 envs; backup em scratchpad da sessão). 0 ERROR no boot.
+- pod_config: `bid | 1.15 | 2 | 0.950` ✔. Overrides 3060 preservados. Smoke chat (`ok`, stop) + embeddings (1024) ✔.
+- Primário estava `asleep` no deploy (sem lifecycle derrubado). **Pendente passo 5:** 1º primário bid sobe ~09:00 —
+  conferir coluna MODE no `gatewayctl primary lifecycles`, DPH vs `dph_total` da instância; 3060 bid às 07:00
+  (`journalctl -u vast-unified-start -u vast-unified-watchdog`).
+
 ## Estado
 
 ### Status do código (atualizado 2026-10-01 ~19:50)
