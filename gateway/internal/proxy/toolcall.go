@@ -224,11 +224,15 @@ func ToolCallTerminalGuard(next http.Handler, tci *ToolCallInterceptor, upstream
 				// original stack trace is preserved. Without this, the outer
 				// httpx.Recoverer would see a re-panic from this defer's
 				// location rather than the original panic site (HIGH-03 fix).
-				// http.ErrAbortHandler is the canonical client-disconnect
-				// signal; other values are real bugs — both are re-panicked
-				// so http.Server's recovery chain handles them correctly.
-				sentry.CurrentHub().RecoverWithContext(r.Context(), rec)
-				sentry.Flush(200 * time.Millisecond)
+				// http.ErrAbortHandler is an expected client/upstream
+				// disconnect: it is NOT captured in Sentry (httpx.Recoverer
+				// logs it as WARN client_disconnected). Other values are real
+				// bugs and are captured. Both are re-panicked so
+				// http.Server's recovery chain handles them correctly.
+				if rec != http.ErrAbortHandler {
+					sentry.CurrentHub().RecoverWithContext(r.Context(), rec)
+					sentry.Flush(200 * time.Millisecond)
+				}
 				panic(rec)
 			}
 		}()
