@@ -3,6 +3,14 @@
 ClickUp ativo: [pod primário 3090: reduzir custo](https://app.clickup.com/t/86akrnpwc) (86akrnpwc).
 Relacionados em "em testes": 86akregky (custo 3060), 86akreh6u (STT→gemini).
 
+## ATUALIZAÇÃO 2026-10-05 13:46 BRT — PRIMÁRIO DE VOLTA A ON-DEMAND (decisão Pedro)
+- Bid no primário 3090: 3 tentativas, 0 aproveitadas (535 health_timeout, 537 host sem disco, 539 preemptado em 8 min).
+  Ready atrasou 08:10 (sex) e 08:45 (seg) vs janela 07:30; economia só ~10–15% (US$0,12–0,14 vs 0,15–0,16/h).
+- `UPDATE pod_config SET offer_mode='ondemand'` aplicado a quente (NOTIFY + refresh ok, sem restart). Demais campos mantidos
+  (bid_margin 1.15, max_preemptions 2, min_reliability 0.95). Código bid permanece no gateway (reversível).
+- 3060 SEGUE em bid (US$0,045/h); gargalo dele = timeouts de boot (xtts/infinity/boot), não preempção.
+- Pendências: audit flush falha com byte inválido UTF-8 (0x98) → registro descartado; 4× panic `abort Handler` 00:10 05/10.
+
 ## ATUALIZAÇÃO 2026-10-02 06:05 BRT — DEPLOY FEITO (passos 2–4)
 - Integração local verde (integration_test 383s, gatewayctl 41s); CI run 36940337213 verde (webhook dev = falha esperada).
 - Push develop `1a99386`. Migration **0039 aplicada** em prod (goose v39) via one-off com a imagem nova.
