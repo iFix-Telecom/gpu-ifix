@@ -617,7 +617,7 @@ class CmdWatchdogTest(unittest.TestCase):
     from zoneinfo import ZoneInfo as _zi
 
     def run_wd(self, h, st, vstate=("ok", {"actual_status": "running"}), health_ok=True,
-               running=False):
+               running=False, m=0):
         state = dict(st)
         rec = {"destroy": [], "trigger": 0, "notify": [], "get": 0}
 
@@ -640,7 +640,7 @@ class CmdWatchdogTest(unittest.TestCase):
             for k, f in patches.items():
                 setattr(u, k, f)
             u.v.notify = lambda env, text: rec["notify"].append(text)
-            now = self._dt(2026, 10, 1, h, 0, tzinfo=self._zi("America/Sao_Paulo"))
+            now = self._dt(2026, 10, 1, h, m, tzinfo=self._zi("America/Sao_Paulo"))
             action = u.cmd_watchdog({}, now=now)
         finally:
             for k, f in orig.items():
@@ -705,6 +705,133 @@ class CmdWatchdogTest(unittest.TestCase):
         self.assertEqual(action, "retrigger")
         self.assertEqual(rec["trigger"], 1)
         self.assertEqual(rec["notify"], [])
+
+
+    # ---- quick 261007-ou0: re-disparo apos falha final do start ----
+    FAIL_ST = {"instance_id": None, "start_last_fail": "2026-10-01T09:20:00-03:00"}
+
+    def test_start_fail_retrigger(self):
+        action, st, rec = self.run_wd(10, self.FAIL_ST)
+        self.assertEqual(action, "retrigger")
+        self.assertEqual(rec["trigger"], 1)
+        self.assertEqual(len(rec["notify"]), 1)
+        self.assertIn("re-disparando", rec["notify"][0])
+        self.assertEqual(st["wd_last_trigger"], "2026-10-01T10:00:00-03:00")
+        self.assertEqual(st["start_retry_count"], 1)
+        self.assertEqual(st["start_retry_day"], "2026-10-01")
+
+    def test_start_fail_too_recent(self):
+        st0 = {"instance_id": None, "start_last_fail": "2026-10-01T09:45:00-03:00"}
+        action, _, rec = self.run_wd(10, st0)
+        self.assertEqual(action, "noop_none")
+        self.assertEqual(rec["trigger"], 0)
+        self.assertEqual(rec["notify"], [])
+
+    def test_start_fail_counts_from_latest_trigger(self):
+        st0 = {"instance_id": None, "start_last_fail": "2026-10-01T09:00:00-03:00",
+               "wd_last_trigger": "2026-10-01T09:50:00-03:00"}
+        action, _, rec = self.run_wd(10, st0)
+        self.assertEqual(action, "noop_none")
+        self.assertEqual(rec["trigger"], 0)
+
+    def test_start_fail_cutoff_1930(self):
+        st0 = {"instance_id": None, "start_last_fail": "2026-10-01T18:00:00-03:00"}
+        _, _, rec = self.run_wd(19, st0, m=30)
+        self.assertEqual(rec["trigger"], 0)
+        self.assertEqual(rec["notify"], [])
+        _, _, rec = self.run_wd(19, st0)
+        self.assertEqual(rec["trigger"], 1)
+
+    def test_start_fail_while_running(self):
+        action, _, rec = self.run_wd(10, self.FAIL_ST, running=True)
+        self.assertEqual(action, "noop_start")
+        self.assertEqual(rec["trigger"], 0)
+
+    def test_start_fail_out_of_window(self):
+        action, _, rec = self.run_wd(21, self.FAIL_ST)
+        self.assertEqual(action, "noop_window")
+        self.assertEqual(rec["trigger"], 0)
+
+    def test_start_fail_after_stop_noop(self):
+        st0 = dict(self.FAIL_ST, last_stop="2026-10-01T09:30:00-03:00")
+        action, _, rec = self.run_wd(10, st0)
+        self.assertEqual(action, "noop_none")
+        self.assertEqual(rec["trigger"], 0)
+
+    def test_start_fail_daily_cap(self):
+        st0 = dict(self.FAIL_ST, start_retry_day="2026-10-01",
+                   start_retry_count=u.MAX_START_RETRIES_DAY)
+        _, st, rec = self.run_wd(10, st0)
+        self.assertEqual(rec["trigger"], 0)
+        self.assertEqual(len(rec["notify"]), 1)
+        self.assertIn("desistindo", rec["notify"][0])
+        # 2o tick: nao notifica de novo
+        _, _, rec2 = self.run_wd(10, st)
+        self.assertEqual(rec2["trigger"], 0)
+        self.assertEqual(rec2["notify"], [])
+
+    def test_start_retry_counter_resets_new_day(self):
+        st0 = dict(self.FAIL_ST, start_retry_day="2026-09-30",
+                   start_retry_count=u.MAX_START_RETRIES_DAY)
+        _, st, rec = self.run_wd(10, st0)
+        self.assertEqual(rec["trigger"], 1)
+        self.assertEqual(st["start_retry_count"], 1)
+
+
+class StartFailNeedsPodTest(unittest.TestCase):
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _zi
+
+    def now(self, h=10):
+        return self._dt(2026, 10, 1, h, 0, tzinfo=self._zi("America/Sao_Paulo"))
+
+    def test_valid(self):
+        self.assertTrue(u.start_fail_needs_pod(
+            {"start_last_fail": "2026-10-01T09:20:00-03:00"}, self.now()))
+
+    def test_absent_or_invalid(self):
+        self.assertFalse(u.start_fail_needs_pod({}, self.now()))
+        self.assertFalse(u.start_fail_needs_pod({"start_last_fail": "lixo"}, self.now()))
+
+    def test_yesterday(self):
+        self.assertFalse(u.start_fail_needs_pod(
+            {"start_last_fail": "2026-09-30T19:00:00-03:00"}, self.now()))
+
+    def test_stop_after_fail(self):
+        self.assertFalse(u.start_fail_needs_pod(
+            {"start_last_fail": "2026-10-01T09:20:00-03:00",
+             "last_stop": "2026-10-01T09:30:00-03:00"}, self.now()))
+
+    def test_ok_after_fail(self):
+        self.assertFalse(u.start_fail_needs_pod(
+            {"start_last_fail": "2026-10-01T09:20:00-03:00",
+             "start_last_ok": "2026-10-01T09:40:00-03:00"}, self.now()))
+
+    def test_ok_before_fail(self):
+        self.assertTrue(u.start_fail_needs_pod(
+            {"start_last_fail": "2026-10-01T09:20:00-03:00",
+             "start_last_ok": "2026-10-01T08:00:00-03:00",
+             "last_stop": "2026-09-30T20:00:00-03:00"}, self.now()))
+
+    def test_retry_allowed(self):
+        self.assertTrue(u.start_retry_allowed(self.now(19).replace(minute=29)))
+        self.assertFalse(u.start_retry_allowed(self.now(19).replace(minute=30)))
+
+
+class RecordStartFailTest(unittest.TestCase):
+    def test_records(self):
+        from datetime import datetime as _dt
+        state = {"x": 1}
+        orig = (u.load_state, u.save_state)
+        try:
+            u.load_state = lambda: dict(state)
+            u.save_state = lambda s: state.update(s)
+            now = _dt(2026, 10, 1, 9, 20, tzinfo=u.TZ)
+            u.record_start_fail(now)
+        finally:
+            u.load_state, u.save_state = orig
+        self.assertEqual(state["start_last_fail"], now.isoformat())
+        self.assertEqual(state["x"], 1)
 
 
 if __name__ == "__main__":
