@@ -643,7 +643,7 @@ export interface UpstreamRow {
   updated_at: string;
 }
 
-/** GET /admin/model-aliases — every alias row, ordered (alias, upstream_name). */
+/** GET /admin/model-aliases — every alias row, ordered (alias, upstream tier, tier_priority, upstream_name). */
 export function fetchModelAliases(): Promise<ModelAliasRow[]> {
   return proxyGet<ModelAliasRow[]>("model-aliases");
 }

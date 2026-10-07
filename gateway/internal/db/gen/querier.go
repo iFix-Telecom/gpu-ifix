@@ -210,6 +210,10 @@ type Querier interface {
 	// index `emergency_live_singleton` guarantees ≤1 row is returned. Returns
 	// enough state for recovery: vast IDs (to GetInstance) + events (to resume FSM).
 	ListLiveEmergencyLifecycles(ctx context.Context) ([]ListLiveEmergencyLifecyclesRow, error)
+	// quick 261007-gyq: rows of one alias come out in ROUTING order (the order the
+	// gateway tries upstreams: tier, then tier_priority), not alphabetical. The
+	// LEFT JOIN only feeds ORDER BY — returned columns are unchanged. Aliases whose
+	// upstream_name has no upstreams row sort last within the alias.
 	ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error)
 	// Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
 	// Excludes the events JSONB column (callers fetch via id when needed) so the

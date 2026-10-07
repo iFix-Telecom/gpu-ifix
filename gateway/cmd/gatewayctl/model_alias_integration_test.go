@@ -133,6 +133,42 @@ func TestModelAliasSet_InsertsNewTier1Row(t *testing.T) {
 	}
 }
 
+// quick 261007-gyq — ListModelAliases returns the rows of one alias in ROUTING
+// order (upstreams.tier, tier_priority), not alphabetical, and rows whose
+// upstream_name has no upstreams row sort last. Uses the STT cascade seeded by
+// migration 0029: local-stt 0/0 → gemini-stt 1/10 → groq-whisper 1/15 →
+// openai-whisper 1/20 (alphabetical would put gemini-stt first).
+func TestModelAliasList_RoutingOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, _ := freshSchema(t, ctx)
+
+	q := gen.New(pool)
+	// Insert in reverse routing order so insertion order cannot mask the sort.
+	for _, up := range []string{"zz-unknown-upstream", "openai-whisper", "groq-whisper", "gemini-stt", "local-stt"} {
+		if err := q.UpsertModelAlias(ctx, gen.UpsertModelAliasParams{
+			Alias: "order-test", Upstream: "stt", Target: "whisper-1", UpstreamName: up,
+		}); err != nil {
+			t.Fatalf("UpsertModelAlias(%s): %v", up, err)
+		}
+	}
+
+	rows, err := q.ListModelAliases(ctx)
+	if err != nil {
+		t.Fatalf("ListModelAliases: %v", err)
+	}
+	var got []string
+	for _, r := range rows {
+		if r.Alias == "order-test" {
+			got = append(got, r.UpstreamName)
+		}
+	}
+	want := []string{"local-stt", "gemini-stt", "groq-whisper", "openai-whisper", "zz-unknown-upstream"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("order-test rows = %v; want routing order %v", got, want)
+	}
+}
+
 // Test 5 — get returns the single matching row as JSON.
 func TestModelAliasGet_ReturnsSpecificRow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
