@@ -378,9 +378,10 @@ func TestAuditLogCopy_StateChangeRowPositions(t *testing.T) {
 	if got := byColumn["latency_ms"]; got != int32(0) {
 		t.Errorf("latency_ms: want int32(0), got %#v (%T)", got, got)
 	}
-	// cost_brl is always literal nil (Phase 4 populates it elsewhere).
-	if got := byColumn["cost_brl"]; got != nil {
-		t.Errorf("cost_brl: want nil, got %#v", got)
+	// cost_brl was dropped (migration 0040, quick 261007-sjo): the COPY must
+	// not name it, or COPY fails against the migrated table.
+	if _, ok := byColumn["cost_brl"]; ok {
+		t.Errorf("cost_brl must not be in the COPY column list")
 	}
 }
 

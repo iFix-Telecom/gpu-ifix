@@ -247,7 +247,7 @@ type dbFlusher struct {
 var auditLogCopyColumns = []string{
 	"ts", "request_id", "tenant_id", "api_key_id", "data_class",
 	"route", "method", "upstream", "status_code", "latency_ms",
-	"tokens_in", "tokens_out", "cost_brl", "error_code",
+	"tokens_in", "tokens_out", "error_code",
 	"idempotency_replayed", "stream", "truncated",
 	"audio_filename", "audio_mime", "audio_size_bytes", "audio_duration_s", "audio_language",
 	"event_kind", "reason",
@@ -263,7 +263,6 @@ func auditLogCopyRow(e Event) []any {
 		e.TS, e.RequestID, e.TenantID, nullableUUID(e.APIKeyID), e.DataClass,
 		e.Route, e.Method, nullableString(e.Upstream), int16(e.StatusCode), int32(e.LatencyMs),
 		nullableInt(e.TokensIn), nullableInt(e.TokensOut),
-		nil, // cost_brl — Phase 4 populates
 		nullableString(e.ErrorCode), e.IdempotencyReplayed, e.Stream, e.Truncated,
 		nullableString(e.AudioFilename), nullableString(e.AudioMime),
 		nullableInt64(e.AudioSizeBytes), nullableFloat(e.AudioDurationS),

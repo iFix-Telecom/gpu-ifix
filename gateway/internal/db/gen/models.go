@@ -38,28 +38,27 @@ type AiGatewayApiKey struct {
 }
 
 type AiGatewayAuditLog struct {
-	Ts                  time.Time      `json:"ts"`
-	RequestID           uuid.UUID      `json:"request_id"`
-	TenantID            uuid.UUID      `json:"tenant_id"`
-	ApiKeyID            pgtype.UUID    `json:"api_key_id"`
-	DataClass           interface{}    `json:"data_class"`
-	Route               string         `json:"route"`
-	Method              string         `json:"method"`
-	Upstream            pgtype.Text    `json:"upstream"`
-	StatusCode          int16          `json:"status_code"`
-	LatencyMs           int32          `json:"latency_ms"`
-	TokensIn            pgtype.Int4    `json:"tokens_in"`
-	TokensOut           pgtype.Int4    `json:"tokens_out"`
-	CostBrl             pgtype.Numeric `json:"cost_brl"`
-	ErrorCode           pgtype.Text    `json:"error_code"`
-	IdempotencyReplayed bool           `json:"idempotency_replayed"`
-	Stream              bool           `json:"stream"`
-	Truncated           bool           `json:"truncated"`
-	AudioFilename       pgtype.Text    `json:"audio_filename"`
-	AudioMime           pgtype.Text    `json:"audio_mime"`
-	AudioSizeBytes      pgtype.Int8    `json:"audio_size_bytes"`
-	AudioDurationS      pgtype.Float4  `json:"audio_duration_s"`
-	AudioLanguage       pgtype.Text    `json:"audio_language"`
+	Ts                  time.Time     `json:"ts"`
+	RequestID           uuid.UUID     `json:"request_id"`
+	TenantID            uuid.UUID     `json:"tenant_id"`
+	ApiKeyID            pgtype.UUID   `json:"api_key_id"`
+	DataClass           interface{}   `json:"data_class"`
+	Route               string        `json:"route"`
+	Method              string        `json:"method"`
+	Upstream            pgtype.Text   `json:"upstream"`
+	StatusCode          int16         `json:"status_code"`
+	LatencyMs           int32         `json:"latency_ms"`
+	TokensIn            pgtype.Int4   `json:"tokens_in"`
+	TokensOut           pgtype.Int4   `json:"tokens_out"`
+	ErrorCode           pgtype.Text   `json:"error_code"`
+	IdempotencyReplayed bool          `json:"idempotency_replayed"`
+	Stream              bool          `json:"stream"`
+	Truncated           bool          `json:"truncated"`
+	AudioFilename       pgtype.Text   `json:"audio_filename"`
+	AudioMime           pgtype.Text   `json:"audio_mime"`
+	AudioSizeBytes      pgtype.Int8   `json:"audio_size_bytes"`
+	AudioDurationS      pgtype.Float4 `json:"audio_duration_s"`
+	AudioLanguage       pgtype.Text   `json:"audio_language"`
 	// Phase 7: optional discriminator for non-request audit rows (e.g. breaker/shed/emergency FSM state changes). NULL for ordinary request rows.
 	EventKind pgtype.Text `json:"event_kind"`
 	// Phase 7: human-readable cause of a state-change audit row (e.g. the emergency FSM transition reason). NULL for ordinary request rows. Distinct from error_code, which carries request error codes.
