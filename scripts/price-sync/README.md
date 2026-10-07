@@ -3,7 +3,9 @@
 Daily job that syncs **OpenRouter reference pricing** + the **live USD/BRL forex
 rate** into the `ifix-ai-gateway` pricing tables (`ai_gateway.prices` /
 `ai_gateway.fx_rates`) via `gatewayctl`. Runs on **ops-claude** (the control plane);
-reaches the gateway over `ssh n8n-ia-vm 'docker exec ifix-ai-gateway /gatewayctl ...'`.
+reaches the consolidated gateway on worker-vm over
+`ssh worker-vm 'docker exec $(docker ps -q -f name=ai-gateway-prod_gateway|head -1) /gatewayctl ...'`
+(swarm task-container name is dynamic; was `n8n-ia-vm`/`ifix-ai-gateway` before Phase 19-06).
 
 ## Why this exists
 
@@ -61,7 +63,7 @@ for each mapped model, the `model.gguf` input/output `prices set` lines.
 ## Smoke / verify cost populated
 
 ```bash
-ssh n8n-ia-vm 'docker exec ifix-ai-gateway /gatewayctl prices list'   # should show model.gguf rows
+ssh worker-vm 'docker exec $(docker ps -q -f name=ai-gateway-prod_gateway|head -1) /gatewayctl prices list'   # should show model.gguf rows
 ```
 
 After a real run, `gatewayctl prices list` shows live `model.gguf` input/output rows.
@@ -76,7 +78,23 @@ The dashboard `cost_local_phantom_brl` becomes non-zero on subsequent billed tra
 - `gatewayctl prices set` / `set-fx` auto-expire the prior active row, so re-running
   the job (e.g. the next day) is idempotent.
 
+## Auto-discovery (261007-gyq)
+
+Besides `MODEL_MAP`, every run discovers the chat models routed through OpenRouter
+(`upstream='openrouter-chat'`) in the last 7 days from `ai_gateway.billing_events`
+and prices each one whose name is an **exact** OpenRouter `/models` `.id`
+(provider `openrouter-fireworks`). A discovered model missing from OpenRouter is a
+WARN + `models_unmatched` counter (never fails the run); keys already in
+`MODEL_MAP` are skipped. The query runs on worker-vm in a throwaway
+`postgres:16-alpine` container; the DSN is read from the gateway container env
+(`AI_GATEWAY_PG_DSN`) and passed only via container env (never argv/disk/log).
+A failed query is a WARN; the `MODEL_MAP` sync still runs. The final log line
+includes `models_discovered=N models_unmatched=M`.
+
 ## Adding a new model
+
+Only needed for keys that are NOT an OpenRouter `.id` (e.g. `model.gguf`, dated
+upstream keys); exact-`.id` models are picked up by auto-discovery.
 
 Edit the `MODEL_MAP` associative array in `gateway-price-sync.sh`: map the
 gateway-stored model key (often date-suffixed, e.g. `...-20260423`) to its undated
