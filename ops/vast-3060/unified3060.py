@@ -672,8 +672,106 @@ def flip_stack(env, ip, ports):
     return changed
 
 
+# ------------------------------------------------------------------ disco
+# quick 261007-ou0. Incidente 2026-10-07 (machine 145593): create com
+# disk=40 e o `df` do pod mostrou overlay de 19G; o infinity ficou 30min sem
+# subir ("Not enough free disk space" no log) ate o timeout.
+# HIPOTESE (nao verificada): a API Vast pode reportar disk_space=40 mesmo com
+# overlay real menor. Sem SSH NAO ha leitura confiavel do df real do container
+# (onstart nao expoe endpoint proprio; as portas sao speaches/infinity/xtts).
+# Por isso: checagem pela API (barata, pega quando a API ja mostra o problema)
+# + probe SSH best-effort (pega o caso real quando o SSH responde). SSH
+# indisponivel NUNCA causa falha.
+DISK_MIN_FRAC = 0.9
+# comando remoto FIXO (sem input externo)
+DISK_PROBE_CMD = ("echo ==DF==; df -BG --output=size,avail / | tail -1 | tr -d G; "
+                  "echo ==NOSPACE==; grep -c 'Not enough free disk space' "
+                  "/root/unified-infinity.log 2>/dev/null || echo 0")
+
+
+def disk_shortfall_api(inst, want=DISK_GB):
+    """PURA. Motivo (str) se disk_space da API < want*0.9; None se ok ou sem dado."""
+    try:
+        space = float((inst or {}).get("disk_space"))
+    except (TypeError, ValueError):
+        return None
+    if space < want * DISK_MIN_FRAC:
+        return f"disk_space API={space:g}G < {want * DISK_MIN_FRAC:g}G (pedido {want}G)"
+    return None
+
+
+def parse_disk_probe(out):
+    """PURA. Parse estrito da saida de DISK_PROBE_CMD. Lixo -> campos None/False.
+    Nada da saida vira comando."""
+    res = {"size_gb": None, "avail_gb": None, "nospace": False}
+    lines = [ln.strip() for ln in (out or "").splitlines()]
+    for i, ln in enumerate(lines):
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if ln == "==DF==":
+            parts = nxt.replace("G", " ").split()
+            if len(parts) == 2 and all(x.isdigit() for x in parts):
+                res["size_gb"], res["avail_gb"] = int(parts[0]), int(parts[1])
+        elif ln == "==NOSPACE==":
+            if nxt.isdigit() and int(nxt) > 0:
+                res["nospace"] = True
+    return res
+
+
+def disk_probe_verdict(probe, want=DISK_GB):
+    """PURA. Motivo se overlay real < want*0.9 ou infinity reclamou de disco."""
+    if not probe:
+        return None
+    size = probe.get("size_gb")
+    if size is not None and size < want * DISK_MIN_FRAC:
+        return f"df / = {size}G (livre {probe.get('avail_gb')}G) < {want * DISK_MIN_FRAC:g}G"
+    if probe.get("nospace"):
+        return "infinity log: 'Not enough free disk space'"
+    return None
+
+
+def inst_snapshot(inst):
+    """PURA. Linha unica com os campos da API Vast relevantes p/ diagnostico."""
+    if not inst:
+        return "sem dados da API"
+    msg = str(inst.get("status_msg") or "")[:200].replace("\n", " ")
+    return (f"actual_status={inst.get('actual_status')} "
+            f"intended_status={inst.get('intended_status')} "
+            f"cur_state={inst.get('cur_state')} "
+            f"disk_space={inst.get('disk_space')} disk_usage={inst.get('disk_usage')} "
+            f"gpu_temp={inst.get('gpu_temp')} status_msg={msg!r}")
+
+
+def disk_probe(inst):
+    """Best-effort: df real + grep no log do infinity via SSH. None se SSH
+    indisponivel/erro (NUNCA falha a provisao por isso)."""
+    try:
+        r = ssh_pod(inst, DISK_PROBE_CMD, timeout=40)
+    except Exception as e:
+        log(f"disk probe sem SSH ({e}) — seguindo")
+        return None
+    if r is None:
+        log("disk probe sem SSH (sem ssh_host/port) — seguindo")
+        return None
+    if r.returncode != 0:
+        log(f"disk probe sem SSH (rc={r.returncode} {(r.stderr or '').strip()[-200:]}) "
+            "— seguindo")
+        return None
+    probe = parse_disk_probe(r.stdout)
+    log(f"disk probe: {probe}")
+    return probe
+
+
 def diag(env, inst):
-    """Dump de logs do pod via ssh pro journal (falha NAO destroi evidencia)."""
+    """Dump de logs do pod via ssh pro journal (falha NAO destroi evidencia).
+    Snapshot da API Vast SEMPRE antes (evidencia mesmo com SSH recusado)."""
+    fresh = None
+    try:
+        iid = (inst or {}).get("id")
+        if iid:
+            fresh = vast_get(env, iid)
+    except Exception as e:
+        log(f"DIAG API: GET falhou ({e}) — usando instancia em memoria")
+    log(f"DIAG API: {inst_snapshot(fresh or inst)}")
     try:
         r = ssh_pod(inst,
                     "echo ==HEALTH-INT==; curl -sm5 localhost:8000/health; echo; "
@@ -683,6 +781,8 @@ def diag(env, inst):
                     "echo ==INF==; tail -15 /root/unified-infinity.log 2>/dev/null; "
                     "df -h / | tail -1")
         if r is not None:
+            if r.returncode != 0:
+                log(f"DIAG SSH rc={r.returncode}: {(r.stderr or '').strip()[-500:]}")
             log("DIAG:\n" + (r.stdout or r.stderr)[-3000:])
     except Exception as e:
         log(f"DIAG falhou: {e}")
@@ -819,6 +919,14 @@ def cmd_start(env, resume_id=None):
     ports = {k: int(p[0]["HostPort"]) for k, p in inst["ports"].items()}
     log(f"running ip={ip} ports={ports}")
 
+    # quick 261007-ou0: disco pequeno falha AGORA (avoid), nao apos 30min
+    r = disk_shortfall_api(inst)
+    if r:
+        return fail(f"disco pequeno via API: {r}", inst)
+    why = disk_probe_verdict(disk_probe(inst))  # SSH costuma nao estar pronto aqui
+    if why:
+        return fail(f"disco real pequeno: {why}", inst)
+
     # freeze + guard ja vao BAKED no onstart (build_onstart) — sem scp/ssh aqui
     for _ in range(80):  # 20min (pip do infinity concorre por CPU no boot)
         if health(ip, ports["8000/tcp"]): break
@@ -831,8 +939,12 @@ def cmd_start(env, resume_id=None):
         if not install_model(ip, ports["8000/tcp"], m):
             return fail(f"install {m}", inst)
 
-    for _ in range(120):  # 30min (pip pinado + modelos HF ~5G)
+    for i in range(120):  # 30min (pip pinado + modelos HF ~5G)
         if health(ip, ports["7998/tcp"]): break
+        if i % 20 == 19:  # ~5min: probe de disco best-effort (encurta os 30min)
+            why = disk_probe_verdict(disk_probe(inst))
+            if why:
+                return fail(f"infinity sem disco: {why}", inst)
         time.sleep(15)
     else:
         return fail("infinity health timeout 30min", inst)
@@ -924,7 +1036,8 @@ def cmd_start(env, resume_id=None):
               pending_id=None, mode=pick["mode"], bid_price=pick["bid"],
               cost_total=round(cost["total"], 5),
               geolocation=offer.get("geolocation"),
-              wd_needs_pod=False, wd_fail_streak=0)
+              wd_needs_pod=False, wd_fail_streak=0,
+              start_last_ok=datetime.now(TZ).isoformat())
     st.pop("pending_mode", None)
     st.pop("pending_bid", None)
     save_state(st)
@@ -960,7 +1073,9 @@ def cmd_stop(env):
     if st.get("pending_id"):
         log(f"stop: limpando pending_id {st.get('pending_id')}")
         st["pending_id"] = None
-        save_state(st)
+    # quick 261007-ou0: stop zera intencionalmente o re-disparo por falha
+    st["last_stop"] = datetime.now(TZ).isoformat()
+    save_state(st)
 
 
 # ------------------------------------------------------------------ watchdog
@@ -979,6 +1094,13 @@ WINDOW_START_H = 7
 WINDOW_END_H = 20         # exclusivo: ultima checagem 19:59
 REPROVISION_CUTOFF_H = 18  # provisao leva ~1-2h; stop das 20:00 mataria o pod novo
 RETRIGGER_MIN = 30
+# quick 261007-ou0: re-disparo apos FALHA FINAL do start (3/3). Janela propria
+# 07:00-19:30 BRT por pedido explicito do Pedro (o cutoff de 18h acima segue
+# valendo so p/ preempcao). Trade-off aceito: provisao de 1-2h disparada perto
+# de 19:30 provavelmente morre no stop das 20h.
+START_RETRY_END = (19, 30)
+# teto anti-loop de custo: cada re-disparo cria ate 3 instancias
+MAX_START_RETRIES_DAY = 6
 HEALTH_PORTS = ("8000/tcp", "7998/tcp", "8021/tcp")
 START_UNIT = "vast-unified-start.service"
 
@@ -995,6 +1117,49 @@ def in_watchdog_window(dt):
 def reprovision_allowed(dt):
     """PURA. False a partir de 18:00 BRT."""
     return _brt(dt).hour < REPROVISION_CUTOFF_H
+
+
+def start_retry_allowed(dt):
+    """PURA. True antes de 19:30 BRT (fim do re-disparo por falha de start)."""
+    b = _brt(dt)
+    return (b.hour, b.minute) < START_RETRY_END
+
+
+def _parse_iso(iso):
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso)
+    except Exception:
+        return None
+
+
+def start_fail_needs_pod(st, now):
+    """PURA. True se a ultima falha final de start (start_last_fail) e' de HOJE
+    (BRT) e mais recente que o ultimo stop (last_stop) e o ultimo sucesso
+    (start_last_ok). ISO invalido -> False."""
+    f = _parse_iso(st.get("start_last_fail"))
+    if f is None:
+        return False
+    try:
+        if _brt(f).date() != _brt(now).date():
+            return False
+        for k in ("last_stop", "start_last_ok"):
+            other = _parse_iso(st.get(k))
+            if other is not None and other >= f:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def record_start_fail(now=None):
+    """Grava start_last_fail no state (falha FINAL do start: 3/3 ou resume)."""
+    now = now or datetime.now(TZ)
+    st = load_state()
+    st["start_last_fail"] = now.isoformat()
+    save_state(st)
+    log(f"start: falha final registrada em {now.isoformat()}")
 
 
 def is_terminal(inst):
@@ -1126,10 +1291,18 @@ def cmd_watchdog(env, now=None):
         vstate, inst = vast_get_state(env, iid)
         if vstate == "ok":
             hok = pod_health(inst)
+    preempt_needs = bool(st.get("wd_needs_pod"))
+    sf = start_fail_needs_pod(st, now)
+    mins = _minutes_since(st.get("wd_last_trigger"), now)
+    if sf:
+        # 30min contam a partir do evento MAIS RECENTE (trigger ou falha)
+        cands = [x for x in (mins, _minutes_since(st.get("start_last_fail"), now))
+                 if x is not None]
+        mins = min(cands) if cands else None
     action, streak = watchdog_decision(
         True, running, iid, vstate, inst, hok, st.get("wd_fail_streak", 0),
-        k=WATCHDOG_K, needs_pod=bool(st.get("wd_needs_pod")),
-        minutes_since_trigger=_minutes_since(st.get("wd_last_trigger"), now))
+        k=WATCHDOG_K, needs_pod=preempt_needs or sf,
+        minutes_since_trigger=mins)
     if st.get("wd_fail_streak", 0) != streak:
         st["wd_fail_streak"] = streak
         save_state(st)
@@ -1169,6 +1342,9 @@ def cmd_watchdog(env, now=None):
             v.notify(env, f"pod 3060 preemptado apos {REPROVISION_CUTOFF_H}h ({iid}, machine "
                           f"{machine}, {geo}) — sem reprovisao hoje, fallback ate amanha. "
                           f"Preempcoes hoje: {n}")
+    elif action == "retrigger" and not preempt_needs:
+        # origem: so falha final do start (quick 261007-ou0)
+        _retrigger_start_fail(env, st, now)
     elif action == "retrigger":
         if reprovision_allowed(now):
             st.update(wd_last_trigger=now.isoformat())
@@ -1182,6 +1358,38 @@ def cmd_watchdog(env, now=None):
     else:
         log(f"watchdog: {action} (instance={iid} pending={pending})")
     return action
+
+
+def _retrigger_start_fail(env, st, now):
+    """Re-disparo por falha final do start: cutoff 19:30, teto diario,
+    exatamente 1 notify por re-disparo (e 1 na desistencia pelo teto)."""
+    if not start_retry_allowed(now):
+        log("watchdog: retrigger por falha de start apos 19:30 — desistindo hoje")
+        return
+    today = today_brt()
+    if st.get("start_retry_day") != today:
+        st.update(start_retry_day=today, start_retry_count=0)
+    n = int(st.get("start_retry_count") or 0) + 1
+    if n > MAX_START_RETRIES_DAY:
+        log(f"watchdog: teto de {MAX_START_RETRIES_DAY} re-disparos por falha de "
+            "start atingido — desistindo hoje")
+        if st.get("start_retry_gaveup_day") != today:
+            st["start_retry_gaveup_day"] = today
+            save_state(st)
+            v.notify(env, f"pod 3060: start falhou de novo apos {MAX_START_RETRIES_DAY} "
+                          "re-disparos hoje — desistindo hoje; gateway nos fallbacks "
+                          "ate o start de amanha (verificar journal)")
+        return
+    st.update(start_retry_count=n, wd_last_trigger=now.isoformat())
+    save_state(st)
+    last = _parse_iso(st.get("start_last_fail"))
+    hhmm = f"{_brt(last):%H:%M}" if last else "?"
+    log(f"watchdog: start falhou (ultima falha {hhmm}) — re-disparando "
+        f"({n}/{MAX_START_RETRIES_DAY} hoje)")
+    trigger_start()
+    v.notify(env, f"pod 3060: start falhou (ultima falha {hhmm}) — re-disparando start "
+                  f"pelo watchdog (re-disparo {n}/{MAX_START_RETRIES_DAY} hoje); gateway "
+                  "nos fallbacks ate subir")
 
 
 def disk_pct(inst):
@@ -1241,7 +1449,12 @@ if __name__ == "__main__":
     if cmd == "start":
         resume = int(sys.argv[2]) if len(sys.argv) > 2 else None
         if resume:
-            cmd_start(e, resume)
+            try:
+                cmd_start(e, resume)
+            except SystemExit as ex:
+                if ex.code == 1:
+                    record_start_fail()
+                raise
         else:
             # ate 3 tentativas por manha: maquina ruim entra no avoid dentro
             # do fail() e a proxima tentativa pega outra (2026-09-08: boot
@@ -1255,6 +1468,11 @@ if __name__ == "__main__":
                     # exit 2 = flip ja feito com edge duvidoso — decisao
                     # humana, NAO re-provisionar por cima
                     if tent == 3 or ex.code != 1:
+                        # exit 0 = lock ocupado; exit 2 = edge duvidoso (humano)
+                        # -> nao registram falha. So exit 1 final arma o
+                        # re-disparo pelo watchdog (quick 261007-ou0).
+                        if ex.code == 1:
+                            record_start_fail()
                         raise
                     log(f"tentativa {tent} falhou (exit {ex.code}); re-tentando")
     elif cmd == "stop":
