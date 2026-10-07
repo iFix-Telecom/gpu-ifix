@@ -834,5 +834,103 @@ class RecordStartFailTest(unittest.TestCase):
         self.assertEqual(state["x"], 1)
 
 
+class DiskShortfallApiTest(unittest.TestCase):
+    def test_small(self):
+        r = u.disk_shortfall_api({"disk_space": 19.0})
+        self.assertIsNotNone(r)
+        self.assertIn("19", r)
+        self.assertIn("40", r)
+
+    def test_ok(self):
+        self.assertIsNone(u.disk_shortfall_api({"disk_space": 40}))
+        self.assertIsNone(u.disk_shortfall_api({"disk_space": 36.5}))
+        self.assertIsNone(u.disk_shortfall_api({"disk_space": 36}))
+
+    def test_no_data(self):
+        self.assertIsNone(u.disk_shortfall_api({}))
+        self.assertIsNone(u.disk_shortfall_api({"disk_space": None}))
+        self.assertIsNone(u.disk_shortfall_api({"disk_space": "abc"}))
+        self.assertIsNone(u.disk_shortfall_api(None))
+
+
+class DiskProbeParseTest(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(u.parse_disk_probe("==DF==\n19G 4G\n==NOSPACE==\n0\n"),
+                         {"size_gb": 19, "avail_gb": 4, "nospace": False})
+        self.assertEqual(u.parse_disk_probe("==DF==\n 19  4\n==NOSPACE==\n0\n"),
+                         {"size_gb": 19, "avail_gb": 4, "nospace": False})
+
+    def test_nospace(self):
+        r = u.parse_disk_probe("==DF==\n40G 30G\n==NOSPACE==\n2\n")
+        self.assertTrue(r["nospace"])
+
+    def test_garbage(self):
+        empty = {"size_gb": None, "avail_gb": None, "nospace": False}
+        self.assertEqual(u.parse_disk_probe(""), empty)
+        self.assertEqual(u.parse_disk_probe(None), empty)
+        self.assertEqual(u.parse_disk_probe("rm -rf /; ==DF==\nfoo bar\n"), empty)
+
+    def test_verdict(self):
+        self.assertIsNotNone(u.disk_probe_verdict(
+            {"size_gb": 19, "avail_gb": 4, "nospace": False}))
+        self.assertIsNotNone(u.disk_probe_verdict(
+            {"size_gb": 40, "avail_gb": 30, "nospace": True}))
+        self.assertIsNone(u.disk_probe_verdict(
+            {"size_gb": 40, "avail_gb": 30, "nospace": False}))
+        self.assertIsNone(u.disk_probe_verdict(
+            {"size_gb": None, "avail_gb": None, "nospace": False}))
+        self.assertIsNone(u.disk_probe_verdict(None))
+
+
+class InstSnapshotTest(unittest.TestCase):
+    def test_fields(self):
+        snap = u.inst_snapshot({"actual_status": "loading", "status_msg": "x" * 300,
+                                "disk_space": 40, "disk_usage": 3.2,
+                                "cur_state": "running", "intended_status": "running",
+                                "gpu_temp": 0})
+        self.assertNotIn("\n", snap)
+        for k in ("actual_status", "intended_status", "cur_state", "status_msg",
+                  "disk_space", "disk_usage", "gpu_temp"):
+            self.assertIn(k, snap)
+        self.assertIn("x" * 200, snap)
+        self.assertNotIn("x" * 201, snap)
+
+    def test_none(self):
+        self.assertEqual(u.inst_snapshot(None), "sem dados da API")
+
+
+class DiagApiLogTest(unittest.TestCase):
+    def test_logs_api_even_when_ssh_raises(self):
+        logs = []
+        orig = (u.log, u.vast_get, u.ssh_pod)
+
+        def boom(*a, **k):
+            raise RuntimeError("Connection refused")
+        try:
+            u.log = logs.append
+            u.vast_get = lambda env, iid: {"actual_status": "running", "disk_space": 19}
+            u.ssh_pod = boom
+            u.diag({}, {"id": 7})
+        finally:
+            u.log, u.vast_get, u.ssh_pod = orig
+        self.assertTrue(any(m.startswith("DIAG API:") and "19" in m for m in logs), logs)
+
+
+class DiskProbeTest(unittest.TestCase):
+    def test_ssh_unavailable_is_none(self):
+        orig = (u.log, u.ssh_pod)
+        try:
+            u.log = lambda m: None
+            u.ssh_pod = lambda inst, cmd, timeout=90: None
+            self.assertIsNone(u.disk_probe({}))
+
+            def boom(*a, **k):
+                raise RuntimeError("refused")
+            u.ssh_pod = boom
+            self.assertIsNone(u.disk_probe({}))
+        finally:
+            u.log, u.ssh_pod = orig
+
+
 if __name__ == "__main__":
     unittest.main()
