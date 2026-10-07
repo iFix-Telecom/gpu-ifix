@@ -56,7 +56,10 @@ func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (G
 }
 
 const listModelAliases = `-- name: ListModelAliases :many
-SELECT alias, upstream, target, upstream_name, provider_prefs FROM ai_gateway.model_aliases ORDER BY alias, upstream_name
+SELECT m.alias, m.upstream, m.target, m.upstream_name, m.provider_prefs
+FROM ai_gateway.model_aliases m
+LEFT JOIN ai_gateway.upstreams u ON u.name = m.upstream_name
+ORDER BY m.alias, u.tier NULLS LAST, u.tier_priority NULLS LAST, m.upstream_name
 `
 
 type ListModelAliasesRow struct {
@@ -67,6 +70,10 @@ type ListModelAliasesRow struct {
 	ProviderPrefs []byte `json:"provider_prefs"`
 }
 
+// quick 261007-gyq: rows of one alias come out in ROUTING order (the order the
+// gateway tries upstreams: tier, then tier_priority), not alphabetical. The
+// LEFT JOIN only feeds ORDER BY — returned columns are unchanged. Aliases whose
+// upstream_name has no upstreams row sort last within the alias.
 func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error) {
 	rows, err := q.db.Query(ctx, listModelAliases)
 	if err != nil {

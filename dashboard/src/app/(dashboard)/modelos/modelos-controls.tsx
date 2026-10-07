@@ -4,7 +4,10 @@
  * Client island for /modelos (quick 260830-o2j).
  *
  * (1) ALIASES — grouped by alias; each row = one (alias, upstream_name) with
- *     role / target / provider-prefs summary. Owner: "Novo alias", edit
+ *     tier / role / target / provider-prefs summary. Rows of an alias are in
+ *     ROUTING order (tier, tier_priority — the gateway's attempt order; quick
+ *     261007-gyq), re-sorted client-side in case an older API answers
+ *     alphabetically. Owner: "Novo alias", edit
  *     (dialog: target + ProviderPrefsEditor when upstream = openrouter-chat),
  *     delete (alert-dialog with impact copy).
  * (2) UPSTREAMS — every upstream with tier/role/probe; owner toggles
@@ -75,6 +78,7 @@ import {
   type ModelAliasRow,
   type UpstreamRow,
 } from "@/lib/gateway";
+import { buildTierIndex, sortAliasRowsByRouting } from "@/lib/alias-order";
 import {
   type ProviderPrefs,
   summarizeProviderPrefs,
@@ -123,15 +127,18 @@ export function ModelosControls({
   const [disabling, setDisabling] = useState<UpstreamRow | null>(null);
   const [togglingName, setTogglingName] = useState<string | null>(null);
 
+  const tierIndex = useMemo(() => buildTierIndex(upstreams), [upstreams]);
+
   const grouped = useMemo(() => {
     const m = new Map<string, ModelAliasRow[]>();
-    for (const r of aliases) {
+    // Routing order inside each alias (tier, tier_priority, name).
+    for (const r of sortAliasRowsByRouting(aliases, tierIndex)) {
       const arr = m.get(r.alias) ?? [];
       arr.push(r);
       m.set(r.alias, arr);
     }
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [aliases]);
+  }, [aliases, tierIndex]);
 
   async function refreshAliases() {
     try {
@@ -171,7 +178,8 @@ export function ModelosControls({
             <CardTitle className="text-[20px] font-semibold">Aliases de modelo</CardTitle>
             <CardDescription>
               Um alias com linhas fica <em>pinado</em> nos upstreams listados (ordem de
-              tier). Roteamento OpenRouter: prefs do <strong>tenant</strong> &gt; prefs do{" "}
+              tier). Dentro de cada alias, as linhas estão na <strong>ordem de tentativa</strong>{" "}
+              (tier, depois prioridade): a primeira é tentada primeiro. Roteamento OpenRouter: prefs do <strong>tenant</strong> &gt; prefs do{" "}
               <strong>alias</strong> (openrouter-chat) &gt; pin global do env.
             </CardDescription>
           </div>
@@ -188,6 +196,7 @@ export function ModelosControls({
               <TableRow>
                 <TableHead>Alias</TableHead>
                 <TableHead>Upstream</TableHead>
+                <TableHead>Tier</TableHead>
                 <TableHead>Role</TableHead>
                 <TableHead>Target</TableHead>
                 <TableHead>Provider prefs (OpenRouter)</TableHead>
@@ -197,7 +206,7 @@ export function ModelosControls({
             <TableBody>
               {grouped.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={isOwner ? 6 : 5} className="text-center text-muted-foreground">
+                  <TableCell colSpan={isOwner ? 7 : 6} className="text-center text-muted-foreground">
                     Nenhum alias cadastrado.
                   </TableCell>
                 </TableRow>
@@ -210,6 +219,18 @@ export function ModelosControls({
                           {i === 0 ? alias : ""}
                         </TableCell>
                         <TableCell className="font-mono text-[13px]">{r.upstream_name}</TableCell>
+                        <TableCell className="tabular-nums" data-testid="alias-tier">
+                          {(() => {
+                            const t = tierIndex.get(r.upstream_name);
+                            if (!t) return <span className="text-muted-foreground">—</span>;
+                            return (
+                              <>
+                                {t.tier}
+                                {t.tierPriority ? <span className="text-muted-foreground">.{t.tierPriority}</span> : null}
+                              </>
+                            );
+                          })()}
+                        </TableCell>
                         <TableCell>
                           <Badge variant="outline">{r.role}</Badge>
                         </TableCell>
