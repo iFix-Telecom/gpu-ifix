@@ -924,7 +924,8 @@ def cmd_start(env, resume_id=None):
               pending_id=None, mode=pick["mode"], bid_price=pick["bid"],
               cost_total=round(cost["total"], 5),
               geolocation=offer.get("geolocation"),
-              wd_needs_pod=False, wd_fail_streak=0)
+              wd_needs_pod=False, wd_fail_streak=0,
+              start_last_ok=datetime.now(TZ).isoformat())
     st.pop("pending_mode", None)
     st.pop("pending_bid", None)
     save_state(st)
@@ -960,7 +961,9 @@ def cmd_stop(env):
     if st.get("pending_id"):
         log(f"stop: limpando pending_id {st.get('pending_id')}")
         st["pending_id"] = None
-        save_state(st)
+    # quick 261007-ou0: stop zera intencionalmente o re-disparo por falha
+    st["last_stop"] = datetime.now(TZ).isoformat()
+    save_state(st)
 
 
 # ------------------------------------------------------------------ watchdog
@@ -979,6 +982,13 @@ WINDOW_START_H = 7
 WINDOW_END_H = 20         # exclusivo: ultima checagem 19:59
 REPROVISION_CUTOFF_H = 18  # provisao leva ~1-2h; stop das 20:00 mataria o pod novo
 RETRIGGER_MIN = 30
+# quick 261007-ou0: re-disparo apos FALHA FINAL do start (3/3). Janela propria
+# 07:00-19:30 BRT por pedido explicito do Pedro (o cutoff de 18h acima segue
+# valendo so p/ preempcao). Trade-off aceito: provisao de 1-2h disparada perto
+# de 19:30 provavelmente morre no stop das 20h.
+START_RETRY_END = (19, 30)
+# teto anti-loop de custo: cada re-disparo cria ate 3 instancias
+MAX_START_RETRIES_DAY = 6
 HEALTH_PORTS = ("8000/tcp", "7998/tcp", "8021/tcp")
 START_UNIT = "vast-unified-start.service"
 
@@ -995,6 +1005,49 @@ def in_watchdog_window(dt):
 def reprovision_allowed(dt):
     """PURA. False a partir de 18:00 BRT."""
     return _brt(dt).hour < REPROVISION_CUTOFF_H
+
+
+def start_retry_allowed(dt):
+    """PURA. True antes de 19:30 BRT (fim do re-disparo por falha de start)."""
+    b = _brt(dt)
+    return (b.hour, b.minute) < START_RETRY_END
+
+
+def _parse_iso(iso):
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso)
+    except Exception:
+        return None
+
+
+def start_fail_needs_pod(st, now):
+    """PURA. True se a ultima falha final de start (start_last_fail) e' de HOJE
+    (BRT) e mais recente que o ultimo stop (last_stop) e o ultimo sucesso
+    (start_last_ok). ISO invalido -> False."""
+    f = _parse_iso(st.get("start_last_fail"))
+    if f is None:
+        return False
+    try:
+        if _brt(f).date() != _brt(now).date():
+            return False
+        for k in ("last_stop", "start_last_ok"):
+            other = _parse_iso(st.get(k))
+            if other is not None and other >= f:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def record_start_fail(now=None):
+    """Grava start_last_fail no state (falha FINAL do start: 3/3 ou resume)."""
+    now = now or datetime.now(TZ)
+    st = load_state()
+    st["start_last_fail"] = now.isoformat()
+    save_state(st)
+    log(f"start: falha final registrada em {now.isoformat()}")
 
 
 def is_terminal(inst):
@@ -1126,10 +1179,18 @@ def cmd_watchdog(env, now=None):
         vstate, inst = vast_get_state(env, iid)
         if vstate == "ok":
             hok = pod_health(inst)
+    preempt_needs = bool(st.get("wd_needs_pod"))
+    sf = start_fail_needs_pod(st, now)
+    mins = _minutes_since(st.get("wd_last_trigger"), now)
+    if sf:
+        # 30min contam a partir do evento MAIS RECENTE (trigger ou falha)
+        cands = [x for x in (mins, _minutes_since(st.get("start_last_fail"), now))
+                 if x is not None]
+        mins = min(cands) if cands else None
     action, streak = watchdog_decision(
         True, running, iid, vstate, inst, hok, st.get("wd_fail_streak", 0),
-        k=WATCHDOG_K, needs_pod=bool(st.get("wd_needs_pod")),
-        minutes_since_trigger=_minutes_since(st.get("wd_last_trigger"), now))
+        k=WATCHDOG_K, needs_pod=preempt_needs or sf,
+        minutes_since_trigger=mins)
     if st.get("wd_fail_streak", 0) != streak:
         st["wd_fail_streak"] = streak
         save_state(st)
@@ -1169,6 +1230,9 @@ def cmd_watchdog(env, now=None):
             v.notify(env, f"pod 3060 preemptado apos {REPROVISION_CUTOFF_H}h ({iid}, machine "
                           f"{machine}, {geo}) — sem reprovisao hoje, fallback ate amanha. "
                           f"Preempcoes hoje: {n}")
+    elif action == "retrigger" and not preempt_needs:
+        # origem: so falha final do start (quick 261007-ou0)
+        _retrigger_start_fail(env, st, now)
     elif action == "retrigger":
         if reprovision_allowed(now):
             st.update(wd_last_trigger=now.isoformat())
@@ -1182,6 +1246,38 @@ def cmd_watchdog(env, now=None):
     else:
         log(f"watchdog: {action} (instance={iid} pending={pending})")
     return action
+
+
+def _retrigger_start_fail(env, st, now):
+    """Re-disparo por falha final do start: cutoff 19:30, teto diario,
+    exatamente 1 notify por re-disparo (e 1 na desistencia pelo teto)."""
+    if not start_retry_allowed(now):
+        log("watchdog: retrigger por falha de start apos 19:30 — desistindo hoje")
+        return
+    today = today_brt()
+    if st.get("start_retry_day") != today:
+        st.update(start_retry_day=today, start_retry_count=0)
+    n = int(st.get("start_retry_count") or 0) + 1
+    if n > MAX_START_RETRIES_DAY:
+        log(f"watchdog: teto de {MAX_START_RETRIES_DAY} re-disparos por falha de "
+            "start atingido — desistindo hoje")
+        if st.get("start_retry_gaveup_day") != today:
+            st["start_retry_gaveup_day"] = today
+            save_state(st)
+            v.notify(env, f"pod 3060: start falhou de novo apos {MAX_START_RETRIES_DAY} "
+                          "re-disparos hoje — desistindo hoje; gateway nos fallbacks "
+                          "ate o start de amanha (verificar journal)")
+        return
+    st.update(start_retry_count=n, wd_last_trigger=now.isoformat())
+    save_state(st)
+    last = _parse_iso(st.get("start_last_fail"))
+    hhmm = f"{_brt(last):%H:%M}" if last else "?"
+    log(f"watchdog: start falhou (ultima falha {hhmm}) — re-disparando "
+        f"({n}/{MAX_START_RETRIES_DAY} hoje)")
+    trigger_start()
+    v.notify(env, f"pod 3060: start falhou (ultima falha {hhmm}) — re-disparando start "
+                  f"pelo watchdog (re-disparo {n}/{MAX_START_RETRIES_DAY} hoje); gateway "
+                  "nos fallbacks ate subir")
 
 
 def disk_pct(inst):
@@ -1241,7 +1337,12 @@ if __name__ == "__main__":
     if cmd == "start":
         resume = int(sys.argv[2]) if len(sys.argv) > 2 else None
         if resume:
-            cmd_start(e, resume)
+            try:
+                cmd_start(e, resume)
+            except SystemExit as ex:
+                if ex.code == 1:
+                    record_start_fail()
+                raise
         else:
             # ate 3 tentativas por manha: maquina ruim entra no avoid dentro
             # do fail() e a proxima tentativa pega outra (2026-09-08: boot
@@ -1255,6 +1356,11 @@ if __name__ == "__main__":
                     # exit 2 = flip ja feito com edge duvidoso — decisao
                     # humana, NAO re-provisionar por cima
                     if tent == 3 or ex.code != 1:
+                        # exit 0 = lock ocupado; exit 2 = edge duvidoso (humano)
+                        # -> nao registram falha. So exit 1 final arma o
+                        # re-disparo pelo watchdog (quick 261007-ou0).
+                        if ex.code == 1:
+                            record_start_fail()
                         raise
                     log(f"tentativa {tent} falhou (exit {ex.code}); re-tentando")
     elif cmd == "stop":
