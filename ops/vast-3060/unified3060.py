@@ -872,6 +872,14 @@ def cmd_start(env, resume_id=None):
             {"Authorization": f"Bearer {env['VAST_API_KEY']}"}, body, timeout=60)
         new_id = resp.get("new_contract")
         if c != 200 or not new_id:
+            # oferta listada mas ja alugada (404/3603 no_such_ask): sem avoid,
+            # as 3 tentativas repetiam a MESMA oferta morta (2026-10-07 18:12)
+            if "no_such_ask" in str(resp):
+                bad = offer.get("machine_id")
+                if bad and bad not in st.get("machine_avoid", []):
+                    st.setdefault("machine_avoid", []).append(bad)
+                    save_state(st)
+                    log(f"oferta indisponivel: machine {bad} -> avoid")
             v.notify(env, f"pod 3060: create falhou HTTP {c}")
             log(f"create falhou {c}: {resp}"); sys.exit(1)
         log(f"criada {new_id} modo={pick['mode']} lance={pick['bid']}")

@@ -402,7 +402,7 @@ class _Stop(Exception):
 class CreatePayloadTest(unittest.TestCase):
     """cmd_start com I/O mockado: so ate o PUT de criacao (vast_get aborta)."""
 
-    def run_start(self, pick):
+    def run_start(self, pick, resp=(200, {"new_contract": 999}), expect=_Stop):
         calls, saved = [], []
 
         def boom(*a, **k):
@@ -422,12 +422,12 @@ class CreatePayloadTest(unittest.TestCase):
 
         def fake_http(method, url, headers=None, payload=None, timeout=30):
             calls.append((method, url, payload))
-            return 200, {"new_contract": 999}
+            return resp
         try:
             for k, f in patches.items():
                 setattr(u, k, f)
             u.v.http_json, u.time.sleep, u.v.notify = fake_http, lambda s: None, lambda *a: None
-            with self.assertRaises(_Stop):
+            with self.assertRaises(expect):
                 u.cmd_start({"VAST_API_KEY": "x"})
         finally:
             for k, f in orig.items():
@@ -448,6 +448,20 @@ class CreatePayloadTest(unittest.TestCase):
         self.assertEqual(put[2]["disk"], 40)
         self.assertEqual(saved[-1]["pending_id"], 999)
         self.assertEqual(saved[-1]["pending_mode"], "bid")
+
+    def test_no_such_ask_puts_machine_in_avoid(self):
+        # 2026-10-07 18:12: oferta listada ja alugada -> 3 tentativas na mesma
+        resp = (400, {"success": False, "error": "invalid_args",
+                      "msg": "error 404/3603: no_such_ask  Instance type by id 7 "
+                             "is not available."})
+        _, saved = self.run_start(self.pick("ondemand", None), resp=resp,
+                                  expect=SystemExit)
+        self.assertIn(1007, saved[-1]["machine_avoid"])
+
+    def test_other_create_error_keeps_avoid(self):
+        _, saved = self.run_start(self.pick("ondemand", None),
+                                  resp=(500, {"error": "boom"}), expect=SystemExit)
+        self.assertFalse(saved)
 
     def test_ondemand_has_no_price(self):
         calls, _ = self.run_start(self.pick("ondemand", None))
