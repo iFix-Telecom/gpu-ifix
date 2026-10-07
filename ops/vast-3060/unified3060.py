@@ -672,8 +672,106 @@ def flip_stack(env, ip, ports):
     return changed
 
 
+# ------------------------------------------------------------------ disco
+# quick 261007-ou0. Incidente 2026-10-07 (machine 145593): create com
+# disk=40 e o `df` do pod mostrou overlay de 19G; o infinity ficou 30min sem
+# subir ("Not enough free disk space" no log) ate o timeout.
+# HIPOTESE (nao verificada): a API Vast pode reportar disk_space=40 mesmo com
+# overlay real menor. Sem SSH NAO ha leitura confiavel do df real do container
+# (onstart nao expoe endpoint proprio; as portas sao speaches/infinity/xtts).
+# Por isso: checagem pela API (barata, pega quando a API ja mostra o problema)
+# + probe SSH best-effort (pega o caso real quando o SSH responde). SSH
+# indisponivel NUNCA causa falha.
+DISK_MIN_FRAC = 0.9
+# comando remoto FIXO (sem input externo)
+DISK_PROBE_CMD = ("echo ==DF==; df -BG --output=size,avail / | tail -1 | tr -d G; "
+                  "echo ==NOSPACE==; grep -c 'Not enough free disk space' "
+                  "/root/unified-infinity.log 2>/dev/null || echo 0")
+
+
+def disk_shortfall_api(inst, want=DISK_GB):
+    """PURA. Motivo (str) se disk_space da API < want*0.9; None se ok ou sem dado."""
+    try:
+        space = float((inst or {}).get("disk_space"))
+    except (TypeError, ValueError):
+        return None
+    if space < want * DISK_MIN_FRAC:
+        return f"disk_space API={space:g}G < {want * DISK_MIN_FRAC:g}G (pedido {want}G)"
+    return None
+
+
+def parse_disk_probe(out):
+    """PURA. Parse estrito da saida de DISK_PROBE_CMD. Lixo -> campos None/False.
+    Nada da saida vira comando."""
+    res = {"size_gb": None, "avail_gb": None, "nospace": False}
+    lines = [ln.strip() for ln in (out or "").splitlines()]
+    for i, ln in enumerate(lines):
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if ln == "==DF==":
+            parts = nxt.replace("G", " ").split()
+            if len(parts) == 2 and all(x.isdigit() for x in parts):
+                res["size_gb"], res["avail_gb"] = int(parts[0]), int(parts[1])
+        elif ln == "==NOSPACE==":
+            if nxt.isdigit() and int(nxt) > 0:
+                res["nospace"] = True
+    return res
+
+
+def disk_probe_verdict(probe, want=DISK_GB):
+    """PURA. Motivo se overlay real < want*0.9 ou infinity reclamou de disco."""
+    if not probe:
+        return None
+    size = probe.get("size_gb")
+    if size is not None and size < want * DISK_MIN_FRAC:
+        return f"df / = {size}G (livre {probe.get('avail_gb')}G) < {want * DISK_MIN_FRAC:g}G"
+    if probe.get("nospace"):
+        return "infinity log: 'Not enough free disk space'"
+    return None
+
+
+def inst_snapshot(inst):
+    """PURA. Linha unica com os campos da API Vast relevantes p/ diagnostico."""
+    if not inst:
+        return "sem dados da API"
+    msg = str(inst.get("status_msg") or "")[:200].replace("\n", " ")
+    return (f"actual_status={inst.get('actual_status')} "
+            f"intended_status={inst.get('intended_status')} "
+            f"cur_state={inst.get('cur_state')} "
+            f"disk_space={inst.get('disk_space')} disk_usage={inst.get('disk_usage')} "
+            f"gpu_temp={inst.get('gpu_temp')} status_msg={msg!r}")
+
+
+def disk_probe(inst):
+    """Best-effort: df real + grep no log do infinity via SSH. None se SSH
+    indisponivel/erro (NUNCA falha a provisao por isso)."""
+    try:
+        r = ssh_pod(inst, DISK_PROBE_CMD, timeout=40)
+    except Exception as e:
+        log(f"disk probe sem SSH ({e}) — seguindo")
+        return None
+    if r is None:
+        log("disk probe sem SSH (sem ssh_host/port) — seguindo")
+        return None
+    if r.returncode != 0:
+        log(f"disk probe sem SSH (rc={r.returncode} {(r.stderr or '').strip()[-200:]}) "
+            "— seguindo")
+        return None
+    probe = parse_disk_probe(r.stdout)
+    log(f"disk probe: {probe}")
+    return probe
+
+
 def diag(env, inst):
-    """Dump de logs do pod via ssh pro journal (falha NAO destroi evidencia)."""
+    """Dump de logs do pod via ssh pro journal (falha NAO destroi evidencia).
+    Snapshot da API Vast SEMPRE antes (evidencia mesmo com SSH recusado)."""
+    fresh = None
+    try:
+        iid = (inst or {}).get("id")
+        if iid:
+            fresh = vast_get(env, iid)
+    except Exception as e:
+        log(f"DIAG API: GET falhou ({e}) — usando instancia em memoria")
+    log(f"DIAG API: {inst_snapshot(fresh or inst)}")
     try:
         r = ssh_pod(inst,
                     "echo ==HEALTH-INT==; curl -sm5 localhost:8000/health; echo; "
@@ -683,6 +781,8 @@ def diag(env, inst):
                     "echo ==INF==; tail -15 /root/unified-infinity.log 2>/dev/null; "
                     "df -h / | tail -1")
         if r is not None:
+            if r.returncode != 0:
+                log(f"DIAG SSH rc={r.returncode}: {(r.stderr or '').strip()[-500:]}")
             log("DIAG:\n" + (r.stdout or r.stderr)[-3000:])
     except Exception as e:
         log(f"DIAG falhou: {e}")
@@ -819,6 +919,14 @@ def cmd_start(env, resume_id=None):
     ports = {k: int(p[0]["HostPort"]) for k, p in inst["ports"].items()}
     log(f"running ip={ip} ports={ports}")
 
+    # quick 261007-ou0: disco pequeno falha AGORA (avoid), nao apos 30min
+    r = disk_shortfall_api(inst)
+    if r:
+        return fail(f"disco pequeno via API: {r}", inst)
+    why = disk_probe_verdict(disk_probe(inst))  # SSH costuma nao estar pronto aqui
+    if why:
+        return fail(f"disco real pequeno: {why}", inst)
+
     # freeze + guard ja vao BAKED no onstart (build_onstart) — sem scp/ssh aqui
     for _ in range(80):  # 20min (pip do infinity concorre por CPU no boot)
         if health(ip, ports["8000/tcp"]): break
@@ -831,8 +939,12 @@ def cmd_start(env, resume_id=None):
         if not install_model(ip, ports["8000/tcp"], m):
             return fail(f"install {m}", inst)
 
-    for _ in range(120):  # 30min (pip pinado + modelos HF ~5G)
+    for i in range(120):  # 30min (pip pinado + modelos HF ~5G)
         if health(ip, ports["7998/tcp"]): break
+        if i % 20 == 19:  # ~5min: probe de disco best-effort (encurta os 30min)
+            why = disk_probe_verdict(disk_probe(inst))
+            if why:
+                return fail(f"infinity sem disco: {why}", inst)
         time.sleep(15)
     else:
         return fail("infinity health timeout 30min", inst)
