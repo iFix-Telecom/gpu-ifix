@@ -135,6 +135,8 @@ func upstreamForRoute(path string) string {
 		return "llm"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		return "tts" // quick-261007-t9f — mirrors audit.upstreamForRoute
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
 	default:

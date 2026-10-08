@@ -123,7 +123,11 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 					event.Response = extractLastSSEChunk(aw.buf.Bytes())
 				} else {
 					event.Response = append([]byte(nil), aw.buf.Bytes()...)
-					if len(event.Response) == 0 {
+					// quick-261007-t9f: audio routes can answer with binary
+					// audio (TTS) or text/plain (STT response_format=text).
+					// Non-JSON bytes in the JSONB column fail the WHOLE flush
+					// batch (SQLSTATE 22021 seen in prod) — keep JSON only.
+					if len(event.Response) == 0 || (isAudioRoute(r.URL.Path) && !json.Valid(event.Response)) {
 						event.Response = nil
 					}
 				}
@@ -187,6 +191,10 @@ func upstreamForRoute(path string) string {
 		return "llm"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		// quick-261007-t9f: TTS requests that never reached an upstream were
+		// labeled "stt" (the old /v1/audio default). Internal label only.
+		return "tts"
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
 	default:
@@ -197,7 +205,7 @@ func upstreamForRoute(path string) string {
 // UpstreamBlockedSensitive is written to audit_log.upstream when a
 // data_class=sensitive request is blocked from external fallback per
 // CONTEXT.md D-B3. Reserved value distinct from the route-derived
-// upstream defaults (llm/embed/stt) so dashboards can isolate sensitive-
+// upstream defaults (llm/embed/stt/tts) so dashboards can isolate sensitive-
 // blocked events without a join. Consistent with Phase 2 D-B2 — no
 // audit_log_content row is written for sensitive (no content ever
 // persists for sensitive tenants).

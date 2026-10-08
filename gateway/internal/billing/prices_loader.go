@@ -87,3 +87,16 @@ func (l *PricesLoader) Get(model, provider, unit string) (Price, bool) {
 	p, ok := s.byKey[PriceKey{Model: model, Provider: provider, Unit: unit}]
 	return p, ok
 }
+
+// NewStaticPricesLoader builds a loader over a fixed in-memory snapshot with
+// no Postgres backing (Refresh must NOT be called on it). Test seam so other
+// packages (proxy) can exercise cost attribution DB-free (quick-261007-t9f).
+func NewStaticPricesLoader(rows map[PriceKey]Price) *PricesLoader {
+	s := &pricesSnapshot{byKey: make(map[PriceKey]Price, len(rows))}
+	for k, v := range rows {
+		s.byKey[k] = v
+	}
+	l := &PricesLoader{log: slog.Default().With("module", "PRICES")}
+	l.snap.Store(s)
+	return l
+}
