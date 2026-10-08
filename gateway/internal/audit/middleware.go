@@ -187,6 +187,10 @@ func upstreamForRoute(path string) string {
 		return "llm"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		// quick-261007-t9f: TTS requests that never reached an upstream were
+		// labeled "stt" (the old /v1/audio default). Internal label only.
+		return "tts"
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
 	default:
@@ -197,7 +201,7 @@ func upstreamForRoute(path string) string {
 // UpstreamBlockedSensitive is written to audit_log.upstream when a
 // data_class=sensitive request is blocked from external fallback per
 // CONTEXT.md D-B3. Reserved value distinct from the route-derived
-// upstream defaults (llm/embed/stt) so dashboards can isolate sensitive-
+// upstream defaults (llm/embed/stt/tts) so dashboards can isolate sensitive-
 // blocked events without a join. Consistent with Phase 2 D-B2 — no
 // audit_log_content row is written for sensitive (no content ever
 // persists for sensitive tenants).

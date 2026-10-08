@@ -45,12 +45,19 @@ import (
 // per BL-01.
 type UsageInterceptor struct {
 	accountant    *billing.Accountant
-	flusher       *billing.Flusher
+	flusher       billingEnqueuer
 	prices        *billing.PricesLoader
 	fx            *billing.FXLoader
 	tenantsLoader *tenants.Loader
 	defaultUSDBRL float64
 	log           *slog.Logger
+}
+
+// billingEnqueuer is the slice of *billing.Flusher the interceptor uses.
+// Interface so in-package tests can capture the enqueued events DB-free
+// (quick-261007-t9f); production always supplies *billing.Flusher.
+type billingEnqueuer interface {
+	Enqueue(e billing.Event)
 }
 
 // Compile-time assertion that UsageInterceptor satisfies ProxyResponseInterceptor.
@@ -78,15 +85,20 @@ func NewUsageInterceptor(
 	if log == nil {
 		log = slog.Default()
 	}
-	return &UsageInterceptor{
+	ix := &UsageInterceptor{
 		accountant:    accountant,
-		flusher:       flusher,
 		prices:        prices,
 		fx:            fx,
 		tenantsLoader: tenantsLoader,
 		defaultUSDBRL: defaultUSDBRL,
 		log:           log.With("module", "USAGE_INTERCEPTOR"),
 	}
+	// Only assign a non-nil pointer: a typed-nil *billing.Flusher inside the
+	// interface would defeat the `u.flusher == nil` guard in FinalizeRequest.
+	if flusher != nil {
+		ix.flusher = flusher
+	}
+	return ix
 }
 
 // Intercept wraps the response body with a tee that either (a) scans SSE
@@ -249,19 +261,23 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 	}
 	model := usage.Model()
 
-	// Cost attribution:
-	//   - cost_external_brl: the upstream's real pricing when non-self-hosted.
-	//     0 when upstream is self-hosted (local-* / rerank-gpu / rerank-cpu /
-	//     embed-gpu — quick-260825-anq isSelfHostedUpstream gate).
-	//   - cost_local_phantom_brl: openrouter-fireworks reference pricing
-	//     regardless of the actual upstream (D-B4) so reports can answer
-	//     "how much did the GPU save us".
+	// Cost attribution (quick-261007-t9f — the two columns are mutually
+	// exclusive per upstream):
+	//   - cost_local_phantom_brl = SAVINGS: what the request would have cost
+	//     at the openrouter-fireworks reference price. Written ONLY for
+	//     traffic served by our own infra (isSelfHostedUpstream) — matching
+	//     the invariant documented in billing.sql SumBillingAllTenantsRange.
+	//     Paid external traffic is not savings; before this fix the phantom
+	//     ran for every upstream and inflated "Economia" with openrouter-chat.
+	//   - cost_external_brl: the upstream's real pricing, ONLY for
+	//     non-self-hosted upstreams (quick-260825-anq gate).
 	costExternal := 0.0
-	if !isSelfHostedUpstream(upstream) {
-		provider := providerForUpstream(upstream)
-		costExternal = priceTokens(u, model, provider, tokensIn, tokensOut, audioSeconds, embedsCount)
+	costPhantom := 0.0
+	if isSelfHostedUpstream(upstream) {
+		costPhantom = priceTokens(u, model, "openrouter-fireworks", tokensIn, tokensOut, audioSeconds, embedsCount)
+	} else {
+		costExternal = priceTokens(u, model, providerForUpstream(upstream), tokensIn, tokensOut, audioSeconds, embedsCount)
 	}
-	costPhantom := priceTokens(u, model, "openrouter-fireworks", tokensIn, tokensOut, audioSeconds, embedsCount)
 
 	ev := billing.Event{
 		TS:                  time.Now(),
@@ -309,11 +325,26 @@ func priceTokens(u *UsageInterceptor, model, provider string, tokensIn, tokensOu
 		total += billing.ComputeCostBRL(audioSeconds, model, provider, "audio_second",
 			u.prices, u.fx, u.defaultUSDBRL, u.log)
 	}
-	if embedsCount > 0 {
+	// quick-261007-t9f (D-P3): embed_request is OPTIONAL when the request
+	// already carries tokens — bge-m3 is priced per token and gatewayctl
+	// rejects usd=0, so an embed_request row cannot be seeded as "free".
+	// Without this every local embed WARNed + bumped gateway_prices_missing.
+	// When tokens_in == 0 embed_request is the only dimension, so a missing
+	// row still surfaces through ComputeCostBRL (WARN + metric).
+	if embedsCount > 0 && (tokensIn == 0 || hasPrice(u.prices, model, provider, "embed_request")) {
 		total += billing.ComputeCostBRL(float64(embedsCount), model, provider, "embed_request",
 			u.prices, u.fx, u.defaultUSDBRL, u.log)
 	}
 	return total
+}
+
+// hasPrice reports whether an active price row exists. Nil loader = no row.
+func hasPrice(prices *billing.PricesLoader, model, provider, unit string) bool {
+	if prices == nil {
+		return false
+	}
+	_, ok := prices.Get(model, provider, unit)
+	return ok
 }
 
 // providerForUpstream maps an upstream name ("openrouter-chat",
@@ -424,6 +455,11 @@ func routeToBillingRoute(path string) string {
 		return "chat"
 	case strings.HasPrefix(path, "/v1/embeddings"):
 		return "embed"
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		// quick-261007-t9f: TTS is its own route so it is priced by input
+		// characters (tokens_in, see ttsBillingModel) and never mixed with
+		// the STT audio_second dimension.
+		return "tts"
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
 	case strings.HasPrefix(path, "/v1/rerank"):
@@ -438,20 +474,28 @@ func routeToBillingRoute(path string) string {
 }
 
 // isSelfHostedUpstream reports whether an upstream is self-hosted (our own
-// pods/VMs) and therefore carries ZERO external cost by definition. Covers
-// the local-* naming convention plus the named self-hosted rows that do not
-// follow it (rerank-gpu/rerank-cpu from 0035, embed-gpu from 0036).
+// pods/VMs). It is THE gate of both cost columns in FinalizeRequest:
+// self-hosted → cost_local_phantom_brl (savings) and ZERO external cost;
+// otherwise → cost_external_brl and ZERO phantom (quick-261007-t9f).
 //
-// quick-260825-anq: without this gate FinalizeRequest ran priceTokens on the
-// cost_external path for these upstreams — every request hit a prices.Get
-// miss → WARN "price missing" + gateway_prices_missing.Inc() per request
-// (cost.go), polluting the ME-05 alert. costPhantom is intentionally NOT
-// gated (D-B4 reference pricing applies to every request).
+// Covers:
+//   - local-* naming convention (local-llm, local-embed, local-tts, ...)
+//   - emergency_pod_<role>: the name the loader gives tier-0 when the
+//     reconciler overrides it with the live pod URL (upstreams/loader.go)
+//   - rerank-gpu / rerank-cpu (0035), embed-gpu (0036)
+//   - kokoro-tts (TTS on the 3060 pod) and voice-api-piper (Piper on
+//     vps-ifix-vm; inert in prod, not metered — listed for completeness)
+//
+// quick-260825-anq: without the external gate every self-hosted request hit a
+// prices.Get miss → WARN "price missing" + gateway_prices_missing.Inc().
 func isSelfHostedUpstream(upstream string) bool {
 	return strings.HasPrefix(upstream, "local-") ||
+		strings.HasPrefix(upstream, "emergency_pod_") ||
 		upstream == "rerank-gpu" ||
 		upstream == "rerank-cpu" ||
-		upstream == "embed-gpu"
+		upstream == "embed-gpu" ||
+		upstream == "kokoro-tts" ||
+		upstream == "voice-api-piper"
 }
 
 // sseUsageFrame is the minimal shape we need from an SSE data frame. Both
