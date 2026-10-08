@@ -360,6 +360,7 @@ func TestRouteToBillingRouteRerank(t *testing.T) {
 		{"/v1/chat/completions", "chat"},
 		{"/v1/embeddings", "embed"},
 		{"/v1/audio/transcriptions", "stt"},
+		{"/v1/audio/speech", "tts"},
 		{"/something/else", "chat"},
 	}
 	for _, tc := range cases {
@@ -379,12 +380,22 @@ func TestIsSelfHostedUpstream(t *testing.T) {
 	}{
 		{"local-llm", true},
 		{"local-embed", true},
+		{"local-tts", true},
+		{"emergency_pod_llm", true},
+		{"emergency_pod_tts", true},
+		{"emergency_pod_embed", true},
 		{"rerank-gpu", true},
 		{"rerank-cpu", true},
 		{"embed-gpu", true},
+		{"kokoro-tts", true},
+		{"voice-api-piper", true},
 		{"openrouter-chat", false},
 		{"openai-embed", false},
+		{"openai-whisper", false},
 		{"gemini-stt", false},
+		{"groq-whisper", false},
+		{"unknown", false},
+		{"", false},
 	}
 	for _, tc := range cases {
 		if got := isSelfHostedUpstream(tc.upstream); got != tc.want {
