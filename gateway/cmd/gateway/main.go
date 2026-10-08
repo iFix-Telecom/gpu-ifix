@@ -710,6 +710,9 @@ func main() {
 	if ttsTier0URL == "" {
 		ttsTier0URL = "http://127.0.0.1:1"
 	}
+	if cfg.TTSResponseHeaderTimeoutS > 0 {
+		proxy.TTSResponseHeaderTimeout = time.Duration(cfg.TTSResponseHeaderTimeoutS) * time.Second
+	}
 	// quick-261007-t9f: usageInterceptor meters TTS (tokens_in = input chars).
 	ttsRP, err := proxy.NewTTSProxy(ttsTier0URL, log, usageInterceptor)
 	if err != nil {

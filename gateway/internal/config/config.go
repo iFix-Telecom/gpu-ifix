@@ -147,6 +147,10 @@ type Config struct {
 	WriteTimeoutChatS  int // GATEWAY_WRITE_TIMEOUT_CHAT_S  (default 0 — unlimited for SSE)
 	WriteTimeoutEmbedS int // GATEWAY_WRITE_TIMEOUT_EMBED_S (default 30)
 	WriteTimeoutAudioS int // GATEWAY_WRITE_TIMEOUT_AUDIO_S (default 120; Whisper multipart)
+	// TTSResponseHeaderTimeoutS limita a espera pelos headers da síntese nos
+	// proxies TTS (default 60). Kokoro CPU noturno sem stream só responde ao
+	// fim da síntese (RTF ~1,4 medido 2026-10-08) — texto longo passa de 60s.
+	TTSResponseHeaderTimeoutS int // TTS_RESPONSE_HEADER_TIMEOUT_SECONDS (default 60)
 
 	// Phase 6 — emergency-pod auto-provisioning (Vast.ai). All fifteen
 	// fields are read at boot; defaults match CONTEXT.md decisions
@@ -457,13 +461,14 @@ func Load() (Config, error) {
 		BootstrapTenantSlug: envOr("BOOTSTRAP_TENANT_SLUG", "converseai"),
 
 		// Phase 4 — admin bootstrap, fail policy, fx default, per-route write timeouts.
-		AdminKeyBootstrap:  envOr("AI_GATEWAY_ADMIN_KEY_BOOTSTRAP", ""),
-		RateLimitFailOpen:  boolOr(os.Getenv("AI_GATEWAY_RATE_LIMIT_FAIL_OPEN"), true),
-		QuotaFailOpen:      boolOr(os.Getenv("AI_GATEWAY_QUOTA_FAIL_OPEN"), false),
-		USDBRLDefault:      floatOr(os.Getenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT"), 5.10),
-		WriteTimeoutChatS:  atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_CHAT_S"), 0),
-		WriteTimeoutEmbedS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 30),
-		WriteTimeoutAudioS: atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S"), 120),
+		AdminKeyBootstrap:         envOr("AI_GATEWAY_ADMIN_KEY_BOOTSTRAP", ""),
+		RateLimitFailOpen:         boolOr(os.Getenv("AI_GATEWAY_RATE_LIMIT_FAIL_OPEN"), true),
+		QuotaFailOpen:             boolOr(os.Getenv("AI_GATEWAY_QUOTA_FAIL_OPEN"), false),
+		USDBRLDefault:             floatOr(os.Getenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT"), 5.10),
+		WriteTimeoutChatS:         atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_CHAT_S"), 0),
+		WriteTimeoutEmbedS:        atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 30),
+		WriteTimeoutAudioS:        atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S"), 120),
+		TTSResponseHeaderTimeoutS: atoiOr(os.Getenv("TTS_RESPONSE_HEADER_TIMEOUT_SECONDS"), 60),
 
 		// Phase 6 — emergency pod (CONTEXT.md D-A1..D-D4 + Strategy B
 		// Locked D-01-B..D-08-B + 06-WAVE0-GATES.md). All defaults

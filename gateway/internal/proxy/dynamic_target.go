@@ -164,7 +164,7 @@ func NewDynamicTTSTargetProxy(target TargetFunc, log *slog.Logger, interceptors 
 			MaxIdleConns:          20,
 			MaxIdleConnsPerHost:   4,
 			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
+			ResponseHeaderTimeout: TTSResponseHeaderTimeout,
 		}),
 		ErrorHandler:   ErrorHandler("tts", log),
 		ModifyResponse: ComposeInterceptors(interceptors...),

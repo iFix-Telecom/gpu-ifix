@@ -38,6 +38,11 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 )
 
+// TTSResponseHeaderTimeout é o ResponseHeaderTimeout dos proxies TTS
+// (local-tts, kokoro-tts, emergency_pod_tts). cmd/gateway sobrescreve a partir
+// de TTS_RESPONSE_HEADER_TIMEOUT_SECONDS ANTES de construir os proxies.
+var TTSResponseHeaderTimeout = 60 * time.Second
+
 // NewTTSProxy constructs the tier-0 reverse proxy for POST /v1/audio/speech.
 // It mirrors the CONSTRUCTOR structure of NewAudioProxy (Director=BuildDirector
 // strips client auth + sets the gateway's X-Request-ID, ErrorHandler emits an
@@ -79,7 +84,7 @@ func NewDynamicTTSProxy(overrideURL func() (string, bool), log *slog.Logger, int
 		MaxIdleConns:          20,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: TTSResponseHeaderTimeout,
 	}, log, interceptors...)
 }
 
