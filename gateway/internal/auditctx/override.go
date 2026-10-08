@@ -127,6 +127,28 @@ func RequestAudioSecondsFrom(ctx context.Context) float64 {
 	return 0
 }
 
+type requestTTSCharsKey struct{}
+
+// WithRequestTTSChars stashes the number of characters (runes) of the TTS
+// request `input` on the context (quick-261007-t9f). Stamped by
+// proxy.TTSRequestCharsMiddleware pre-proxy; read by the usage interceptor's
+// TTS branch, which records it as tokens_in on route "tts".
+func WithRequestTTSChars(parent context.Context, chars int64) context.Context {
+	return context.WithValue(parent, requestTTSCharsKey{}, chars)
+}
+
+// RequestTTSCharsFrom returns the stamped TTS input character count or 0 when
+// none was set. Safe on any (including nil) context.
+func RequestTTSCharsFrom(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	if v, ok := ctx.Value(requestTTSCharsKey{}).(int64); ok {
+		return v
+	}
+	return 0
+}
+
 // shedDecisionKey is a dedicated context key for the routing decision taken
 // by shed middleware (CONTEXT D-B4). Distinct from upstreamOverrideKey used
 // by schedule/dispatcher because audit needs BOTH signals — schedule routes

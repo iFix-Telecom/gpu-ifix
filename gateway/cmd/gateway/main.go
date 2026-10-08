@@ -710,7 +710,8 @@ func main() {
 	if ttsTier0URL == "" {
 		ttsTier0URL = "http://127.0.0.1:1"
 	}
-	ttsRP, err := proxy.NewTTSProxy(ttsTier0URL, log)
+	// quick-261007-t9f: usageInterceptor meters TTS (tokens_in = input chars).
+	ttsRP, err := proxy.NewTTSProxy(ttsTier0URL, log, usageInterceptor)
 	if err != nil {
 		log.Error("build tts proxy", "err", err)
 		os.Exit(2)
@@ -878,16 +879,20 @@ func main() {
 	// request (the pod URL changes per lifecycle). Without this the dispatcher
 	// 503s ("Upstream proxy not registered") on every pod-routed TTS request.
 	ttsRoleProxies["emergency_pod_tts"] = proxy.NewDynamicTTSProxy(
-		func() (string, bool) { return loader.Tier0OverrideURL("tts") }, log)
+		func() (string, bool) { return loader.Tier0OverrideURL("tts") }, log, usageInterceptor)
 	// kokoro-tts (Kokoro-FastAPI OpenAI-compat): passthrough (NOT the Piper
 	// adapter — Kokoro speaks OpenAI 1:1, base URL + inbound /v1/audio/speech
 	// resolves via BuildDirector). Quick 260930-uru: URL resolvida por request
 	// via loader (url_override > env UPSTREAM_TTS_KOKORO_URL); registrado
-	// sempre. Sem usageInterceptor (paridade com o wiring anterior).
+	// sempre. quick-261007-t9f: os 3 proxies TTS (local-tts, emergency_pod_tts,
+	// kokoro-tts) recebem usageInterceptor — cada síntese com sucesso grava 1
+	// billing_event route=tts model=tts-1 tokens_in=caracteres do input
+	// (carimbados por TTSRequestCharsMiddleware no ttsHandler).
 	ttsRoleProxies["kokoro-tts"] = proxy.NewDynamicTTSTargetProxy(
-		func() (*url.URL, bool) { return loader.TargetURL("kokoro-tts") }, log)
+		func() (*url.URL, bool) { return loader.TargetURL("kokoro-tts") }, log, usageInterceptor)
 	// DEPRECATED — voice-api-piper: dead Piper removed from vps-ifix-vm.
 	// Inert in prod (UPSTREAM_TTS_PIPER_URL unset); kept for old .env compat.
+	// NOT metered: it is its own http.Handler (no ReverseProxy/ModifyResponse).
 	if cfg.UpstreamTTSPiperURL != "" {
 		piperAdapter, perr := proxy.NewPiperTTSAdapter(cfg.UpstreamTTSPiperURL, log)
 		if perr != nil {
@@ -1430,7 +1435,9 @@ func main() {
 		cfg.WriteTimeoutAudioS,
 	)
 	// Phase 06.7 — TTS speech shares the audio write-timeout budget (long synth).
-	ttsHandler := wrapWithTimeout(ttsDispatcher, cfg.WriteTimeoutAudioS)
+	// quick-261007-t9f: TTSRequestCharsMiddleware INSIDE the timeout wrapper
+	// (same as STT) so the input-character count reaches the proxy ctx.
+	ttsHandler := wrapWithTimeout(proxy.TTSRequestCharsMiddleware(log)(ttsDispatcher), cfg.WriteTimeoutAudioS)
 	// quick 260825 — rerank shares the audio write-timeout budget: the CPU
 	// tier-1 can take ~20s on a 30-document pool, so the tighter embed budget
 	// would kill legitimate fallback requests mid-flight.

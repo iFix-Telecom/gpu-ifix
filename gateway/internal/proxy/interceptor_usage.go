@@ -118,6 +118,31 @@ func (u *UsageInterceptor) Intercept(resp *http.Response) error {
 	if reqID == "" {
 		return nil
 	}
+	// quick-261007-t9f: TTS responses are binary audio, so neither the SSE
+	// nor the JSON branch below sees them and TTS never produced a
+	// billing_events row. Meter from the request side instead: tokens_in =
+	// input characters stamped by TTSRequestCharsMiddleware (D-P1). Error
+	// responses (>= 400, typically JSON) and requests without a stamped
+	// count get no accountant slot at all.
+	if auditctx.BillingRouteFrom(resp.Request.Context()) == "tts" {
+		chars := auditctx.RequestTTSCharsFrom(resp.Request.Context())
+		if resp.StatusCode >= 400 || chars <= 0 {
+			return nil
+		}
+		usage := &billing.RequestUsage{}
+		usage.TokensIn.Store(chars)
+		usage.SetModel(ttsBillingModel)
+		u.accountant.Set(reqID, usage)
+		resp.Body = &usageTTSBody{
+			upstream: resp.Body,
+			reqCtx:   resp.Request.Context(),
+			reqPath:  resp.Request.URL.Path,
+			reqID:    reqID,
+			ix:       u,
+		}
+		return nil
+	}
+
 	contentType := resp.Header.Get("Content-Type")
 
 	switch {
@@ -362,6 +387,51 @@ func providerForUpstream(upstream string) string {
 	default:
 		return upstream
 	}
+}
+
+// ttsBillingModel is the fixed price-lookup model for route "tts"
+// (quick-261007-t9f, D-P1/D-P2). Reference key = OpenAI tts-1 (US$15 per 1M
+// characters), seeded as unit input_token where, on route tts, one "token" =
+// one input character. Fixed instead of the client's model string because the
+// client is free to send "tts-1", "kokoro", etc., which would break lookup.
+const ttsBillingModel = "tts-1"
+
+// usageTTSBody passes the binary TTS audio through untouched and finalizes
+// the billing event once on Close: source "final" when the upstream body was
+// read to EOF and closed cleanly, "partial" otherwise (client aborted or
+// upstream cut). The accountant slot was pre-filled by Intercept.
+type usageTTSBody struct {
+	upstream io.ReadCloser
+	reqCtx   context.Context
+	reqPath  string
+	reqID    string
+	ix       *UsageInterceptor
+	sawEOF   bool
+	closed   bool
+}
+
+func (b *usageTTSBody) Read(p []byte) (int, error) {
+	n, err := b.upstream.Read(p)
+	if err == io.EOF {
+		b.sawEOF = true
+	}
+	return n, err
+}
+
+func (b *usageTTSBody) Close() error {
+	closeErr := b.upstream.Close()
+	if b.closed {
+		return closeErr
+	}
+	b.closed = true
+	source := "partial"
+	if b.sawEOF && closeErr == nil {
+		source = "final"
+	}
+	if b.ix != nil && b.reqID != "" {
+		b.ix.FinalizeRequest(b.reqCtx, b.reqID, b.reqPath, source)
+	}
+	return closeErr
 }
 
 // sttBillingModel maps an STT upstream to the model string used as the price
