@@ -123,7 +123,11 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 					event.Response = extractLastSSEChunk(aw.buf.Bytes())
 				} else {
 					event.Response = append([]byte(nil), aw.buf.Bytes()...)
-					if len(event.Response) == 0 {
+					// quick-261007-t9f: audio routes can answer with binary
+					// audio (TTS) or text/plain (STT response_format=text).
+					// Non-JSON bytes in the JSONB column fail the WHOLE flush
+					// batch (SQLSTATE 22021 seen in prod) — keep JSON only.
+					if len(event.Response) == 0 || (isAudioRoute(r.URL.Path) && !json.Valid(event.Response)) {
 						event.Response = nil
 					}
 				}
