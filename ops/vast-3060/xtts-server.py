@@ -8,6 +8,8 @@ Vozes: ana/alma/luis/marcos (estudio XTTS) + aliases de compat com as vozes
 Kokoro que os clientes ja mandam (pm_alex/pf_dora/pm_santa). Velocidade
 default 1.15 (decisao Pedro 2026-09-07: 1.0 arrastado p/ atendimento).
 Idioma fixo pt. Formato fixo wav (response_format ignorado).
+Texto gerado frase a frase sem '.' final (XTTS le '.' como 'ponto'), R$ por
+extenso em reais/centavos e '8h' -> '8 horas' (A/B 2026-10-12, card 86aku8ute).
 Licenca XTTS = Coqui CPML (nao-comercial) — decisao Pedro 2026-09-07 de usar
 mesmo assim, registrada no SUMMARY da quick 260907-poc.
 """
@@ -96,6 +98,70 @@ def normaliza_ptbr(t):
     return re.sub(r"\s+", " ", t)
 
 
+_UNI = ["zero", "um", "dois", "três", "quatro", "cinco", "seis", "sete",
+        "oito", "nove", "dez", "onze", "doze", "treze", "quatorze", "quinze",
+        "dezesseis", "dezessete", "dezoito", "dezenove"]
+_DEZ = ["", "", "vinte", "trinta", "quarenta", "cinquenta", "sessenta",
+        "setenta", "oitenta", "noventa"]
+_CEN = ["", "cento", "duzentos", "trezentos", "quatrocentos", "quinhentos",
+        "seiscentos", "setecentos", "oitocentos", "novecentos"]
+
+
+def _ate_999(n):
+    if n == 100:
+        return "cem"
+    c, r = divmod(n, 100)
+    p = [_CEN[c]] if c else []
+    if r:
+        p.append(_UNI[r] if r < 20 else
+                 _DEZ[r // 10] + (" e " + _UNI[r % 10] if r % 10 else ""))
+    return " e ".join(p)
+
+
+def por_extenso(n):
+    """Inteiro 0..999.999.999 por extenso em pt-BR (sem dependencia externa:
+    o venv /opt/xtts nao garante num2words)."""
+    if n == 0:
+        return "zero"
+    mi, resto = divmod(n, 1_000_000)
+    mil, u = divmod(resto, 1000)
+    p = []
+    if mi:
+        p.append("um milhão" if mi == 1 else _ate_999(mi) + " milhões")
+    if mil:
+        p.append("mil" if mil == 1 else _ate_999(mil) + " mil")
+    if u:
+        p.append(_ate_999(u))
+    # 'e' antes do ultimo grupo so quando ele e' < 100 ou centena redonda:
+    # 'mil e duzentos', 'mil duzentos e cinquenta'
+    if len(p) > 1 and u and (u < 100 or u % 100 == 0):
+        return " ".join(p[:-1]) + " e " + p[-1]
+    return " ".join(p)
+
+
+def dinheiro(t):
+    """'R$ 1.250,90' -> 'mil duzentos e cinquenta reais e noventa centavos'.
+    Sem isso o XTTS le 'R$' como 'dolar'/nada e erra o valor (A/B 2026-10-12)."""
+    def rep(m):
+        inteiro = int(m.group(1).replace(".", ""))
+        cent = int((m.group(2) or "0").ljust(2, "0"))
+        p = []
+        if inteiro:
+            de = " de" if inteiro % 1_000_000 == 0 else ""
+            p.append(f"{por_extenso(inteiro)}{de} {'real' if inteiro == 1 else 'reais'}")
+        if cent:
+            p.append(f"{por_extenso(cent)} {'centavo' if cent == 1 else 'centavos'}")
+        return " e ".join(p) or "zero reais"
+    return re.sub(r"R\$\s?(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?(?!\d)", rep, t)
+
+
+def horas(t):
+    """'8h' -> '8 horas' (normaliza_ptbr so cobre 8h30/08:00; antes saia
+    'entre 8 e 12')."""
+    return re.sub(r"\b(\d{1,2})h\b",
+                  lambda m: m.group(1) + (" hora" if int(m.group(1)) == 1 else " horas"), t)
+
+
 def agrupa_numeros(t):
     """Numero grande (id/protocolo) lido em grupos de 3 digitos com pausa —
     '50.255.728' vira '502, 557, 28' em vez de 'cinquenta milhoes...'.
@@ -165,6 +231,26 @@ def em_chunks(t, cap=180):
         fechados.append(c)
     return fechados
 
+
+def em_frases(t):
+    """Uma frase por geracao, SEM o '.' final: o XTTS le '.' como 'ponto'.
+    A/B 2026-10-12 (15 amostras, transcricao literal): chunks com '.' = 9/15
+    falaram 'ponto'; so tirando o '.' do fim do chunk = 6/15 (os '.' do meio
+    ainda vazam); frase a frase sem '.' = 0/15, sem silaba alucinada no fim.
+    '!' e '?' ficam (entonacao)."""
+    out = []
+    for c in em_chunks(t):
+        for s in re.split(r"(?<=[.!?])\s+", c):
+            s = s.strip()
+            if s.endswith("."):
+                s = s[:-1].rstrip()
+            if s:
+                out.append(s)
+    return out
+
+
+PAUSA_FRASES_S = 0.15  # silencio entre frases geradas separadamente
+
 print("carregando XTTS-v2...", flush=True)
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
 try:
@@ -201,8 +287,9 @@ class H(BaseHTTPRequestHandler):
             voice = VOICES.get(raw_voice.lower()) or \
                 (raw_voice if raw_voice in KNOWN else "Ana Florence")
             speed = float(body.get("speed") or DEFAULT_SPEED)
-            text = agrupa_numeros(normaliza_ptbr(limpa_markdown(text)))
-            pedacos = em_chunks(text) or [text]
+            text = agrupa_numeros(horas(dinheiro(normaliza_ptbr(
+                limpa_markdown(text)))))
+            pedacos = em_frases(text) or [text]
             paths = []
             with lock:
                 for pd in pedacos:
@@ -221,9 +308,13 @@ class H(BaseHTTPRequestHandler):
                         frames.append(w.readframes(w.getnframes()))
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     outp = f.name
+                pausa = b"\x00" * (int(params.framerate * PAUSA_FRASES_S)
+                                   * params.sampwidth * params.nchannels)
                 with wave.open(outp, "wb") as w:
                     w.setparams(params)
-                    for fr in frames:
+                    for i, fr in enumerate(frames):
+                        if i:
+                            w.writeframes(pausa)
                         w.writeframes(fr)
                 data = open(outp, "rb").read()
                 paths.append(outp)
