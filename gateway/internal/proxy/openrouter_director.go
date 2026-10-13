@@ -163,6 +163,13 @@ func BuildOpenRouterDirector(
 		// did NOT set the option themselves.
 		patched = injectStreamOptionsIncludeUsage(patched)
 
+		// PASS 4 — prompt caching para alvos Anthropic (Phase 23, 2026-10-13).
+		// Anthropic só cacheia com breakpoint explícito: sem cache_control o
+		// prompt inteiro é cobrado cheio a cada chamada. Medido via OpenRouter
+		// (Haiku 5.5, prompt ~10k): leitura de cache custa ~10x menos que a
+		// entrada normal e o OpenRouter mantém o provedor (sticky).
+		patched = injectAnthropicCacheControl(patched)
+
 		r.Body = io.NopCloser(bytes.NewReader(patched))
 		r.ContentLength = int64(len(patched))
 		r.Header.Set("Content-Length", strconv.Itoa(len(patched)))
@@ -231,4 +238,97 @@ func resolveProviderPrefs(ctx context.Context, tenantPrefs TenantPrefsLookup, re
 		return nil
 	}
 	return resolver.ProviderPrefs(alias, upstreamName)
+}
+
+// injectAnthropicCacheControl marca dois breakpoints de prompt caching quando
+// o modelo (já reescrito) é Anthropic: o fim do último bloco de texto da
+// ÚLTIMA mensagem system (cacheia tools+system, reaproveitado entre conversas)
+// e o fim do último bloco de texto da última mensagem user/assistant (cacheia
+// o histórico, reaproveitado no turno seguinte da mesma conversa). Conteúdo
+// string vira [{type:text,text,cache_control}]. Cliente que já mandou algum
+// cache_control decide sozinho — não mexemos. Qualquer falha de parse devolve
+// o body intacto (best-effort, nunca quebra a requisição).
+func injectAnthropicCacheControl(body []byte) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	var model string
+	if err := json.Unmarshal(m["model"], &model); err != nil || !strings.HasPrefix(model, "anthropic/") {
+		return body
+	}
+	if bytes.Contains(body, []byte(`"cache_control"`)) {
+		return body
+	}
+	var msgs []map[string]json.RawMessage
+	if err := json.Unmarshal(m["messages"], &msgs); err != nil || len(msgs) == 0 {
+		return body
+	}
+	// De trás pra frente: a primeira system/developer e a primeira
+	// user/assistant com bloco de texto marcável (assistant só com
+	// tool_calls tem content null e é pulado).
+	changed, doneSystem, doneConv := false, false, false
+	for i := len(msgs) - 1; i >= 0 && !(doneSystem && doneConv); i-- {
+		var role string
+		_ = json.Unmarshal(msgs[i]["role"], &role)
+		isSystem := role == "system" || role == "developer"
+		isConv := role == "user" || role == "assistant"
+		if (isSystem && doneSystem) || (isConv && doneConv) || (!isSystem && !isConv) {
+			continue
+		}
+		c, ok := markLastTextBlock(msgs[i]["content"])
+		if !ok {
+			continue
+		}
+		msgs[i]["content"] = c
+		changed = true
+		if isSystem {
+			doneSystem = true
+		} else {
+			doneConv = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	mb, err := json.Marshal(msgs)
+	if err != nil {
+		return body
+	}
+	m["messages"] = mb
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// markLastTextBlock devolve o content com cache_control no último bloco de
+// texto. Aceita string (vira um bloco) ou array de blocos; qualquer outro
+// formato, string vazia ou array sem bloco de texto → ok=false.
+func markLastTextBlock(raw json.RawMessage) (json.RawMessage, bool) {
+	cc := json.RawMessage(`{"type":"ephemeral"}`)
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		if str == "" {
+			return nil, false
+		}
+		out, err := json.Marshal([]map[string]any{{"type": "text", "text": str, "cache_control": cc}})
+		return out, err == nil
+	}
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, false
+	}
+	for i := len(blocks) - 1; i >= 0; i-- {
+		var typ string
+		_ = json.Unmarshal(blocks[i]["type"], &typ)
+		if typ != "text" {
+			continue
+		}
+		blocks[i]["cache_control"] = cc
+		out, err := json.Marshal(blocks)
+		return out, err == nil
+	}
+	return nil, false
 }
