@@ -423,6 +423,18 @@ Plans:
 
 - [ ] 22-07-PLAN.md — MEASURE-01: query ROI mensal por upstream/tenant vs custo pod + cross-check GET /admin/economy (reuso Phase 15)
 
+### Phase 23: Haiku 5.5 como LLM externo principal do gateway - creditos Max
+
+**Goal:** Todo tráfego LLM que não roda no pod local passa a seguir a cadeia (decisão Pedro 2026-10-13, não rediscutir): **① Claude Haiku 5.5 na API direta da Anthropic** com os créditos mensais de API das 2–3 contas Claude Max (rodízio entre chaves; chave com saldo zerado — "Your credit balance is too low to access the Anthropic API" — é marcada esgotada até virar o mês e o gateway passa à próxima) → **② Haiku 5.5 no OpenRouter** (`anthropic/claude-haiku-5.5`, provedor de maior vazão) → **③ DeepSeek v4.1 Flash no OpenRouter** (padrão atual). Effort **high**. Depois de validado em prod: **desligar a 3090** (pod primário Qwen3-30B-A3B). Fonte: `.planning/debug/HANDOFF-gateway-haiku55-creditos-max.md`. Evidência: `RESULTADO-abc-haiku55-vs-30b-vs-deepseek.md` (commit 186b199) — Haiku high venceu juiz cego em 37 payloads reais; 3090 US$23–34/mês vs US$2–6/mês fora. ClickUp 86akuaa73.
+
+**Requirements:** HAIKU-01 (upstream Anthropic direto: adaptador OpenAI chat/completions → Anthropic Messages [SDK Go oficial vs endpoint OpenAI-compatível — decidir no research], remove `temperature`/`top_p`/`top_k`/penalties que dão 400, preserva tools + `tool_choice` forçado), HAIKU-02 (pool de 2–3 chaves com rodízio + detecção/marcação de chave esgotada até o reset mensal; armazenamento seguro das chaves), HAIKU-03 (cadeia de 3 passos no modelo aliases × upstreams × tiers; aliases do padrão DeepSeek apontam pra ela; `maestro-summary` intocado sem perguntar), HAIKU-04 (preço Haiku na tabela `prices` incl. degrau 5× acima de 100k tokens/request + cache read/write — billing e dashboard), HAIKU-05 (effort high por padrão, override por tenant se preciso; prompt caching p/ chat-ifix), HAIKU-06 (RES-08 preservado: sensitive nunca externo), HAIKU-07 (rollout em prod + validação + desligar 3090). Pendente do Pedro p/ passo ①: vincular org do Console em cada conta Max e gerar API keys — sem elas, desenvolver/testar com passo ②.
+**Depends on:** Phase 22
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd:plan-phase 23 to break down)
+
 ---
 
 ### Phase 20: Primary-pod provisioning resilience — coldstart fast-fail + auto-blocklist/allowlist (INSERTED, promoted from SEED-009)
@@ -472,11 +484,14 @@ gateway (state.json + systemd no ops-claude) e hoje só aparece indiretamente
 nos probes `local-stt`/`kokoro-tts`.
 
 **Escopo:**
+
 1. Script publica estado no gateway — endpoint admin POST ou chave Redis
    `gw:sttpod:state` (máquina, $/h, ip:porta, uptime, últimos provisions/falhas,
    machine_avoid).
+
 2. Dashboard: card "STT/TTS pod" na página de operação/saúde (tier-2, criada no
    quick 260625-v04) com histórico de provisions e custo/dia.
+
 3. Opcional: botões provision/destroy manuais via admin API.
 
 **Contexto:** modelo up→destroy decidido pelo Pedro 2026-07-25 (commit 2d2b925)
@@ -487,6 +502,7 @@ Docs: `.planning/quick/260724-ktg-3060-auto-migrate/` + memória
 **Plans:** 7 plans (3 waves)
 
 Plans:
+
 - [ ] 999.3-01-PLAN.md — gateway: handler POST /admin/sttpod/{state,command} + namespace redisx + testes
 - [ ] 999.3-02-PLAN.md — gateway: campo `sttpod` fail-soft no /admin/operations + wiring das rotas no main.go
 - [ ] 999.3-03-PLAN.md — script vast3060.py: publish, poll de comando, custo acumulado, eventos capped + pytest + units systemd
