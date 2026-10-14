@@ -494,7 +494,17 @@ func classifyAnthropicKeyError(status int, body []byte, h http.Header) (keyVerdi
 | A1 | Campo `disable_parallel_tool_use` e formato `output_config.format` exato | Padrão 1 | 400 em requests com `parallel_tool_calls:false` / `json_schema` |
 | A2 | Mapeamento `refusal`→`content_filter` | Padrão 1 | Cliente interpreta finish_reason diferente |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> Resolução registrada em 2026-10-14 (revisão do planner, iteração 1):
+> 1. RESOLVED — 23-CONTEXT.md (Prefill): o gateway anexa turno user neutro ("Prossiga.") só para alvos Anthropic, ① e ②; planos 23-01 e 23-08.
+> 2. RESOLVED — 23-CONTEXT.md (Chave esgotada): dia de renovação por chave + re-teste a cada 6 h, ordem fixa; plano 23-05.
+> 3. RESOLVED — 23-CONTEXT.md (Effort): a recomendação "cliente ignorado" deste research foi SUBSTITUÍDA — pedido explícito do cliente vence, depois o tenant, depois high; planos 23-09 e 23-12.
+> 4. RESOLVED — 23-CONTEXT.md (Painel): custo do ① a preço de lista marcado "coberto por créditos", caixa real = 0; planos 23-10, 23-11 e 23-13.
+> 5. RESOLVED — teste cego de voz com o Pedro no plano 23-17 (checkpoint:decision).
+> 6. RESOLVED — só daqui para frente, via POST /admin/aux-pod-lifecycles gravado pelo unified3060.py; planos 23-11 e 23-13.
+> 7. RESOLVED — gate humano no 23-18 task 1 (Pedro confirma os termos suplementares antes de ligar o ①).
+> 8. RESOLVED — gate humano no 23-18 task 1 (Pedro informa o tier de cada org no Console).
 
 1. **Texto do turno `user` sintético para o prefill (F5).**
    - Sabemos: Maestro manda transcrição terminando na fala do bot; Haiku rejeita.
