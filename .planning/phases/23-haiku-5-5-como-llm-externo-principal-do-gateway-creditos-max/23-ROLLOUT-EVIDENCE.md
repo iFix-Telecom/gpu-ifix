@@ -322,3 +322,12 @@ SQL
   1. achado 1.6, effort high truncando `max_tokens` baixo (`campanhas` e outros);
   2. escala NUMERIC dos preços de cache;
   3. ruído de WARN `row skipped`.
+
+## Correção pós-rollout — folga de max_tokens com effort (2026-10-15 06:36 UTC)
+
+- **Problema (FATO, medido no 23-16):** effort high por padrão consome o `max_tokens` do cliente no OpenRouter; com 300–516, 2 de 3 respostas cortadas; com 40, vazias. Exposto: `campanhas` (max_tokens 487–541), parte de `chat-ifix` e `converseai-*`.
+- **Fix:** commit `114d7ab` (`fix(23-09)`): soma `OpenRouterThinkingHeadroom` = 4096 a `max_tokens`/`max_completion_tokens` do cliente quando o effort não é off/low (mesma regra do passo ①). Teste `TestOpenRouterDirector_Effort_HeadroomNoMaxTokensDoCliente`.
+- **CI:** build-gateway em `7bbf9cb` — unit, sqlc, integração e build&push success (redeploy dev falhou, conhecido).
+- **Deploy:** snapshot `~/gw-phase23-rollout/stack38-*-pre-headroom-*.json` (600); `PUT /api/stacks/38?endpointId=6` às 06:36:16 UTC, só a linha `image:` → `develop-7bbf9cb@sha256:7f2da57cce6c853b6ded96ddbf50364a0898cfdd39c0dc2ae353f248b92d4708`, Env 88 inalterado. `/health`: 504 único às 06:36:54, 200 a partir de 06:36:59. Task `develop-7bbf9cb` Running; sem panic/fatal/ERROR no log.
+- **Smoke (tenant campanhas, alias deepseek-flash → Haiku 5.5):** `max_tokens:500` → `finish_reason:stop`, 97 chars; `max_tokens:40` → `finish_reason:stop`, 115 chars.
+- **Rollback:** PUT do stack 38 com `stack38-file-pre-headroom-*.json` (imagem `develop-99d73b2`).
