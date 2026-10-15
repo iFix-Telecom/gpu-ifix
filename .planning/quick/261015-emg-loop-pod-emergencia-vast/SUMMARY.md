@@ -34,3 +34,13 @@ Fatores que agravaram:
 
 - `go test ./internal/emerg/ ./internal/config/` passou, incluindo o novo `failure_streak_test.go`.
 - `go test -tags integration -run Emerg ./internal/integration_test/` passou (126 s).
+
+## Deploy prod (2026-10-15 14:41 UTC)
+
+- Snapshot: `~/gw-phase23-rollout/stack38{,-file}-pre-emerg-20261015T142942.json` (600).
+- `PUT /api/stacks/38?endpointId=6` → HTTP 200. Imagem `develop-7bbf9cb` → `develop-56cea8c@sha256:88389b74d35dca4239d82f5a80faf3e7083d2dd8fae4e10f501726b85ebe8d64`; compose +2 linhas; Env 88 → 90 (`EMERGENCY_PROVISIONING_ENABLED=false`, `EMERGENCY_MAX_CONSECUTIVE_FAILURES=3`).
+- `/health` 200; task Running healthy; log de boot `"auto_trigger_enabled":false,"max_consecutive_failures":3`; sem panic/fatal/ERROR.
+- Smoke `qwen` (uat10-test) → `anthropic/claude-haiku-5.5`, `finish_reason: stop`.
+- Vast: 0 instâncias, crédito US$ 8,78.
+- **Ao religar o 3090:** setar `EMERGENCY_PROVISIONING_ENABLED=true` no stack 38 (ou deixar false se a emergência não for desejada).
+- Rollback: PUT com o snapshot (imagem `develop-7bbf9cb`, Env 88).
