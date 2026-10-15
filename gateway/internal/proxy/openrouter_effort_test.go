@@ -98,3 +98,42 @@ func TestOpenRouterDirector_Effort_NaoAnthropicSemReasoningNaoInjeta(t *testing.
 		t.Errorf("reasoning não deveria ser injetado em alvo não-Anthropic")
 	}
 }
+
+// Thinking conta dentro de max_tokens: com effort que liga raciocínio, o
+// director soma OpenRouterThinkingHeadroom ao limite que o cliente mandou,
+// senão respostas com max_tokens baixo (campanhas ~500) saem cortadas.
+func TestOpenRouterDirector_Effort_HeadroomNoMaxTokensDoCliente(t *testing.T) {
+	cases := []struct {
+		name, body, key string
+		want            float64
+	}{
+		{"high default soma", `{"model":"qwen","messages":[{"role":"user","content":"oi"}],"max_tokens":500}`, "max_tokens", 500 + OpenRouterThinkingHeadroom},
+		{"max_completion_tokens soma", `{"model":"qwen","messages":[{"role":"user","content":"oi"}],"max_completion_tokens":300}`, "max_completion_tokens", 300 + OpenRouterThinkingHeadroom},
+		{"low não soma", `{"model":"qwen","messages":[{"role":"user","content":"oi"}],"max_tokens":500,"reasoning_effort":"low"}`, "max_tokens", 500},
+		{"off não soma", `{"model":"qwen","messages":[{"role":"user","content":"oi"}],"max_tokens":500,"reasoning":{"enabled":false}}`, "max_tokens", 500},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := runEffortDirector(t, "anthropic/claude-haiku-5.5", c.body, nil, context.Background())
+			var got float64
+			if err := json.Unmarshal(m[c.key], &got); err != nil {
+				t.Fatalf("%s ausente/inválido: %v", c.key, err)
+			}
+			if got != c.want {
+				t.Fatalf("%s = %v, want %v", c.key, got, c.want)
+			}
+		})
+	}
+	// Sem max_tokens do cliente: nada é injetado.
+	m := runEffortDirector(t, "anthropic/claude-haiku-5.5", `{"model":"qwen","messages":[{"role":"user","content":"oi"}]}`, nil, context.Background())
+	if _, ok := m["max_tokens"]; ok {
+		t.Fatalf("max_tokens não deveria ser injetado sem pedido do cliente")
+	}
+	// Alvo não-Anthropic: intacto.
+	m = runEffortDirector(t, "deepseek/deepseek-v4.1-flash:exacto", `{"model":"qwen","messages":[{"role":"user","content":"oi"}],"max_tokens":500}`, nil, context.Background())
+	var got float64
+	_ = json.Unmarshal(m["max_tokens"], &got)
+	if got != 500 {
+		t.Fatalf("deepseek max_tokens = %v, want 500", got)
+	}
+}

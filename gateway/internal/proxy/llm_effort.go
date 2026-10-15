@@ -16,6 +16,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 )
@@ -87,6 +88,11 @@ func clientLLMEffort(body map[string]json.RawMessage) (string, bool) {
 	return "", false
 }
 
+// OpenRouterThinkingHeadroom é a folga somada ao max_tokens do cliente
+// quando o raciocínio do Haiku pode rodar (mesmo valor do ThinkingHeadroom
+// do passo ①).
+const OpenRouterThinkingHeadroom = 4096
+
 // applyAnthropicEffort é o PASS 6 do director do OpenRouter: para alvo
 // Anthropic, troca os campos reasoning do cliente pelo `reasoning` resolvido
 // ({"enabled":false} para off, {"effort":<e>} nos demais). Alvo não-Anthropic
@@ -114,6 +120,18 @@ func applyAnthropicEffort(ctx context.Context, body []byte, lookup TenantEffortL
 	}
 	delete(m, "reasoning_effort")
 	m["reasoning"] = reasoning
+	// Thinking conta dentro do limite de saída: sem folga, um max_tokens
+	// baixo do cliente (campanhas ~500) é consumido pelo raciocínio e a
+	// resposta sai cortada ou vazia (medido em prod 2026-10-15). Mesma
+	// regra do passo ①: soma folga só quando o raciocínio pode rodar.
+	if effort != "off" && effort != "low" {
+		for _, k := range []string{"max_completion_tokens", "max_tokens"} {
+			var n int
+			if err := json.Unmarshal(m[k], &n); err == nil && n > 0 {
+				m[k] = json.RawMessage(strconv.Itoa(n + OpenRouterThinkingHeadroom))
+			}
+		}
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body, "", ""
