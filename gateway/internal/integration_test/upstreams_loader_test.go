@@ -28,8 +28,14 @@ func resetUpstreamsTable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	// remain (local-llm, openrouter-chat, openai-whisper, local-embed,
 	// openai-embed). The CASE arm for local-stt is harmless (no row matches)
 	// but documented as historical for clarity.
+	//
+	// Phase 23 (migration 0041): anthropic-haiku e openrouter-deepseek nascem
+	// enabled=false (habilitados só no rollout 23-16). O reset devolve o
+	// estado pós-migration, então eles ficam desabilitados aqui — senão
+	// Resolve("llm", 1) continuaria achando um tier-1 após o teste desligar
+	// o openrouter-chat.
 	if _, err := pool.Exec(ctx, `UPDATE ai_gateway.upstreams
-        SET enabled = TRUE,
+        SET enabled = (name NOT IN ('anthropic-haiku', 'openrouter-deepseek')),
             tier = CASE name
                 WHEN 'local-llm' THEN 0
                 WHEN 'openrouter-chat' THEN 1
