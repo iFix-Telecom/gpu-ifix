@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -149,6 +150,81 @@ func TestModelAliasUpsert_RejectsBeforeWrite(t *testing.T) {
 		}
 		if len(fake.upsertCalls) != 0 || ref.calls != 0 {
 			t.Errorf("%s: rejected request reached the DB/refresher", name)
+		}
+	}
+}
+
+// Phase 23-20 — openrouter-deepseek aceita prefs (passo ③); anthropic-haiku não.
+func TestModelAliasUpsert_OpenRouterDeepseekPrefsAccepted(t *testing.T) {
+	fake := newAliasFake()
+	fake.upstreams["openrouter-deepseek"] = "llm"
+	ref := &countingRefresher{}
+	h := newModelAliasAdminHandlerWithQueries(fake, ref, discardLog())
+	body := `{"alias":"deepseek-flash","upstream_name":"openrouter-deepseek","target":"deepseek/deepseek-v4.1-flash:exacto","provider_prefs":{"sort":"price","preferred_min_throughput":{"p90":100},"max_price":{"prompt":0.4},"quantizations":["fp8"],"data_collection":"deny"}}`
+	rec := httptest.NewRecorder()
+	h.Upsert(rec, httptest.NewRequest(http.MethodPut, "/admin/model-aliases", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if len(fake.upsertCalls) != 1 || fake.upsertCalls[0].UpstreamName != "openrouter-deepseek" || fake.upsertCalls[0].Upstream != "llm" {
+		t.Fatalf("upsert calls = %+v", fake.upsertCalls)
+	}
+	var prefs map[string]any
+	if err := json.Unmarshal(fake.upsertCalls[0].ProviderPrefs, &prefs); err != nil || prefs["sort"] != "price" {
+		t.Errorf("stored prefs = %s (err %v)", fake.upsertCalls[0].ProviderPrefs, err)
+	}
+	if ref.calls != 1 {
+		t.Errorf("refresh calls = %d, want 1", ref.calls)
+	}
+}
+
+func TestModelAliasUpsert_PrefsOnAnthropicHaikuRejected(t *testing.T) {
+	fake := newAliasFake()
+	fake.upstreams["anthropic-haiku"] = "llm"
+	h := newModelAliasAdminHandlerWithQueries(fake, nil, discardLog())
+	rec := httptest.NewRecorder()
+	h.Upsert(rec, httptest.NewRequest(http.MethodPut, "/admin/model-aliases",
+		strings.NewReader(`{"alias":"qwen","upstream_name":"anthropic-haiku","target":"claude-haiku-5-5","provider_prefs":{"zdr":true}}`)))
+	if rec.Code != 400 {
+		t.Fatalf("status %d want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "provider_prefs_not_supported") {
+		t.Errorf("body deve conter provider_prefs_not_supported: %s", rec.Body.String())
+	}
+	if len(fake.upsertCalls) != 0 {
+		t.Error("request recusada chegou ao DB")
+	}
+}
+
+func TestModelAliasUpsert_AnthropicHaikuNoPrefsAccepted(t *testing.T) {
+	fake := newAliasFake()
+	fake.upstreams["anthropic-haiku"] = "llm"
+	h := newModelAliasAdminHandlerWithQueries(fake, nil, discardLog())
+	rec := httptest.NewRecorder()
+	h.Upsert(rec, httptest.NewRequest(http.MethodPut, "/admin/model-aliases",
+		strings.NewReader(`{"alias":"qwen","upstream_name":"anthropic-haiku","target":"claude-haiku-5-5"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProviderPrefsUpstreams_ParityFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/provider_prefs_upstreams.json")
+	if err != nil {
+		t.Fatalf("ler fixture: %v", err)
+	}
+	var fx struct {
+		Upstreams []string `json:"provider_prefs_upstreams"`
+	}
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	if len(fx.Upstreams) != len(providerPrefsUpstreams) {
+		t.Fatalf("admin providerPrefsUpstreams tem %d itens, fixture %d (%v)", len(providerPrefsUpstreams), len(fx.Upstreams), fx.Upstreams)
+	}
+	for _, u := range fx.Upstreams {
+		if !providerPrefsUpstreams[u] {
+			t.Errorf("fixture lista %q mas o admin não aceita prefs nele", u)
 		}
 	}
 }
