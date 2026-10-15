@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // errRoundTripper returns a fixed (resp, err) pair so we can drive
@@ -227,5 +230,31 @@ func TestNewChatFallthroughTransport(t *testing.T) {
 	gotResp, gotErr := NewChatFallthroughTransport(errRoundTripper{resp: okResp}).RoundTrip(req)
 	if gotErr != nil || gotResp != okResp {
 		t.Fatalf("sucesso deveria passar direto, got resp=%v err=%v", gotResp, gotErr)
+	}
+}
+
+// TestNewChatFallthroughTransport_RealHTTP1HeaderTimeout: o errTimeout REAL do
+// net/http (HTTP/1) implementa Is(context.DeadlineExceeded); antes do 23-12 o
+// isPreByteTimeout o descartava como "deadline do chamador" e o timeout de
+// cabeçalho nunca cascateava (nem no STT). Usa socket de verdade.
+func TestNewChatFallthroughTransport_RealHTTP1HeaderTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	rt := NewChatFallthroughTransport(&http.Transport{ResponseHeaderTimeout: 100 * time.Millisecond})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("{}"))
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, errDialFailedFallthrough) {
+		t.Fatalf("timeout de cabeçalho real deveria cascatear, got %v", err)
 	}
 }
