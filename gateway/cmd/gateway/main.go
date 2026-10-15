@@ -140,6 +140,12 @@ type proxies struct {
 	adminUpstreamHandler       *admin.UpstreamAdminHandler
 	adminPrimaryControlHandler *admin.PrimaryControlHandler
 
+	// Phase 23-14 — GET /admin/anthropic/keys (estado do pool de chaves do
+	// ①, read-only) e POST /admin/aux-pod-lifecycles (ciclo de vida dos pods
+	// auxiliares para o painel Economia). Mesmo gate X-Admin-Key.
+	adminAnthropicKeysHandler   http.Handler
+	adminAuxPodLifecycleHandler http.Handler
+
 	// Phase 5 — shed middleware collaborators. nil disables the shed
 	// middleware mount; production main always supplies all four
 	// pointers after the Phase 5 wiring block runs.
@@ -766,11 +772,19 @@ func main() {
 				log, auditInterceptor, toolCallInterceptor, usageInterceptor),
 			toolCallInterceptor, "emergency_pod_llm", "/v1/chat/completions"),
 	}
+	// Phase 23-14 — timeout de cabeçalho dos upstreams LLM externos (①②③).
+	// Em ① e ② o estouro vira fallthrough pré-byte (NewChatFallthroughTransport).
+	llmExternalHeaderTimeout := time.Duration(cfg.LLMExternalHeaderTimeoutS) * time.Second
+	if llmExternalHeaderTimeout <= 0 {
+		llmExternalHeaderTimeout = 120 * time.Second
+	}
 	if u, ok := loader.Get("openrouter-chat"); ok && u.URL != "" {
 		// Phase 4: OpenRouter chat also gets the usageInterceptor so
 		// streaming usage chunks (Pitfall 5 — include_usage=true injected
 		// by the director) are captured for cost attribution.
-		orChatProxy, perr := buildOpenRouterChatProxy(u, cfg, log,
+		// Phase 23-14: ② não é final — status retryable e timeout de
+		// cabeçalho cascateiam para o ③.
+		orChatProxy, perr := buildOpenRouterChatProxy(u, "openrouter-chat", llmExternalHeaderTimeout, false, cfg, log,
 			auditInterceptor, toolCallInterceptor, usageInterceptor, resolver, tenantsLoader)
 		if perr != nil {
 			log.Warn("build openrouter-chat proxy", "err", perr)
@@ -779,6 +793,87 @@ func main() {
 				orChatProxy, toolCallInterceptor, "openrouter-chat", "/v1/chat/completions",
 			)
 		}
+	}
+	// Phase 23-14 — ③ openrouter-deepseek, salto FINAL (devolve o próprio
+	// erro). Registrado a partir do config (mesmos envs da linha, contrato da
+	// 0041) e NÃO do loader: a linha nasce enabled=false e o mapa de proxies
+	// só é montado no boot — habilitar depois não exigiria restart. Enquanto a
+	// linha estiver disabled o loader não a lista e o dispatcher não a escolhe.
+	// Limitação aceita: url_override via admin não vale para este proxy.
+	if cfg.UpstreamOpenRouterChatURL != "" {
+		dsUp := upstreams.UpstreamConfig{
+			Name:       "openrouter-deepseek",
+			Role:       "llm",
+			URL:        cfg.UpstreamOpenRouterChatURL,
+			AuthBearer: cfg.UpstreamOpenRouterChatAuthBearer,
+		}
+		dsProxy, perr := buildOpenRouterChatProxy(dsUp, "openrouter-deepseek", llmExternalHeaderTimeout, true, cfg, log,
+			auditInterceptor, toolCallInterceptor, usageInterceptor, resolver, tenantsLoader)
+		if perr != nil {
+			log.Warn("build openrouter-deepseek proxy", "err", perr)
+		} else {
+			llmRoleProxies["openrouter-deepseek"] = proxy.ToolCallTerminalGuard(
+				dsProxy, toolCallInterceptor, "openrouter-deepseek", "/v1/chat/completions",
+			)
+		}
+	}
+	// Phase 23-14 — ① anthropic-haiku (HAIKU-01/02). Ativa sozinho quando URL
+	// + chaves estão no env; sem chaves fica dormente (sem proxy registrado →
+	// o dispatcher pula o candidato sem WARN por request). Registrado pelo
+	// config pela mesma razão do ③ (linha nasce disabled na 0041). O pool de
+	// chaves usa o MESMO client Redis do breaker/force-override.
+	var anthropicPool *proxy.KeyPool
+	if cfg.UpstreamLLMAnthropicURL != "" {
+		anthropicKeys, kerr := proxy.ParseAnthropicKeys(cfg.UpstreamLLMAnthropicAPIKeys)
+		switch {
+		case kerr != nil:
+			// T-23-44: o erro do parse cita só o índice do item, nunca o valor.
+			log.Error("anthropic-haiku: UPSTREAM_LLM_ANTHROPIC_API_KEYS inválido; upstream sem proxy", "err", kerr)
+		case len(anthropicKeys) == 0:
+			log.Info("anthropic-haiku dormant (no keys)")
+		default:
+			anthropicURL, uerr := url.Parse(cfg.UpstreamLLMAnthropicURL)
+			if uerr != nil {
+				log.Error("anthropic-haiku: UPSTREAM_LLM_ANTHROPIC_URL inválida; upstream sem proxy", "err", uerr)
+				break
+			}
+			renewalLoc, lerr := time.LoadLocation(cfg.AnthropicKeyRenewalTZ)
+			if lerr != nil {
+				log.Warn("anthropic-haiku: ANTHROPIC_KEY_RENEWAL_TZ inválido; usando America/Sao_Paulo",
+					"tz", cfg.AnthropicKeyRenewalTZ, "err", lerr)
+				renewalLoc = location
+			}
+			anthropicPool = proxy.NewKeyPool(anthropicKeys, rdb, time.Now, renewalLoc, log)
+			anthropicRP, berr := proxy.BuildAnthropicProxy(proxy.AnthropicProxyConfig{
+				Upstream:      anthropicURL,
+				Pool:          anthropicPool,
+				Resolver:      resolver,
+				UpstreamName:  "anthropic-haiku",
+				Tenants:       tenantsLoader,
+				HeaderTimeout: llmExternalHeaderTimeout,
+				ToolLoopMode:  cfg.AnthropicToolLoopMode,
+				Interceptors: []proxy.ProxyResponseInterceptor{
+					auditInterceptor, toolCallInterceptor, usageInterceptor,
+				},
+				Log: log,
+			})
+			if berr != nil {
+				anthropicPool = nil
+				log.Error("anthropic-haiku: build proxy falhou; upstream sem proxy", "err", berr)
+				break
+			}
+			llmRoleProxies["anthropic-haiku"] = proxy.ToolCallTerminalGuard(
+				anthropicRP, toolCallInterceptor, "anthropic-haiku", "/v1/chat/completions",
+			)
+			labels := make([]string, 0, len(anthropicKeys))
+			for _, k := range anthropicKeys {
+				labels = append(labels, k.String()) // rótulo + fingerprint, nunca o segredo
+			}
+			log.Info("anthropic-haiku enabled", "keys", len(anthropicKeys), "labels", labels,
+				"tool_loop_mode", cfg.AnthropicToolLoopMode)
+		}
+	} else {
+		log.Info("anthropic-haiku dormant (no keys)", "reason", "UPSTREAM_LLM_ANTHROPIC_URL vazio")
 	}
 	// quick 260825-anq (migration 0036) — embed role tiers: embed-gpu (tier-0,
 	// pod Vast 3060 unificado, Infinity bge-m3 dims 1024) → local-embed (tier-1,
@@ -893,6 +988,34 @@ func main() {
 	// (carimbados por TTSRequestCharsMiddleware no ttsHandler).
 	ttsRoleProxies["kokoro-tts"] = proxy.NewDynamicTTSTargetProxy(
 		func() (*url.URL, bool) { return loader.TargetURL("kokoro-tts") }, log, usageInterceptor)
+	// Phase 23-14 (HAIKU-08) — openrouter-tts tier-1 (OpenRouter /v1/audio/speech).
+	// Registrado só quando a linha existe no loader com URL (url_env
+	// UPSTREAM_TTS_OPENROUTER_URL). TTS é não-streaming: status retryable
+	// (429/5xx) e timeout de cabeçalho viram fallthrough pré-byte para
+	// kokoro-tts/local-tts (pinados juntos ou via cascadeTier1); 400 não
+	// cascateia. Mesmo helper de composição do chat (ExternalChatInterceptors):
+	// o interceptor só exige o dispatchResult que dispatchTo instala para
+	// qualquer role.
+	if u, ok := loader.Get("openrouter-tts"); ok && u.URL != "" {
+		orTTSURL, perr := url.Parse(u.URL)
+		if perr != nil || orTTSURL.Scheme == "" || orTTSURL.Host == "" {
+			log.Warn("build openrouter-tts proxy: url inválida", "err", perr)
+		} else {
+			ttsRoleProxies["openrouter-tts"] = &httputil.ReverseProxy{
+				Director: proxy.BuildOpenRouterTTSDirector(orTTSURL, u.AuthBearer, resolver, "openrouter-tts",
+					cfg.OpenRouterTTSDefaultModel, cfg.OpenRouterTTSDefaultVoice,
+					proxy.ParseTTSVoiceMap(cfg.OpenRouterTTSVoiceMap), log),
+				Transport: proxy.NewChatFallthroughTransport(&http.Transport{
+					MaxIdleConns:          20,
+					MaxIdleConnsPerHost:   4,
+					IdleConnTimeout:       90 * time.Second,
+					ResponseHeaderTimeout: proxy.TTSResponseHeaderTimeout,
+				}),
+				ModifyResponse: proxy.ExternalChatInterceptors(false, usageInterceptor).Intercept,
+				ErrorHandler:   proxy.ErrorHandler("openrouter-tts", log),
+			}
+		}
+	}
 	// DEPRECATED — voice-api-piper: dead Piper removed from vps-ifix-vm.
 	// Inert in prod (UPSTREAM_TTS_PIPER_URL unset); kept for old .env compat.
 	// NOT metered: it is its own http.Handler (no ReverseProxy/ModifyResponse).
@@ -1537,6 +1660,9 @@ func main() {
 	adminModelAliasHandler := admin.NewModelAliasAdminHandler(gen.New(pool), resolver, log)
 	adminUpstreamHandler := admin.NewUpstreamAdminHandler(gen.New(pool), log)
 	adminPrimaryControlHandler := admin.NewPrimaryControlHandler(rdb, hostnameOrUnknown(), log)
+	// Phase 23-14 — pool nil (① dormente) → {"keys":[],"configured":false}.
+	adminAnthropicKeysHandler := admin.NewAnthropicKeysHandler(anthropicPool, log)
+	adminAuxPodLifecycleHandler := admin.NewAuxPodLifecycleHandler(gen.New(pool), cfg, log)
 
 	startedAt := time.Now()
 	r := buildRouter(log, startedAt, verifier, proxies{
@@ -1569,6 +1695,9 @@ func main() {
 		adminModelAliasHandler:     adminModelAliasHandler,
 		adminUpstreamHandler:       adminUpstreamHandler,
 		adminPrimaryControlHandler: adminPrimaryControlHandler,
+
+		adminAnthropicKeysHandler:   adminAnthropicKeysHandler,
+		adminAuxPodLifecycleHandler: adminAuxPodLifecycleHandler,
 
 		adminVerifier:     adminVerifier,
 		rdb:               rdb,
@@ -1801,6 +1930,14 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.adminEconomyHandler != nil {
 			adminRouter.Method(http.MethodGet, "/economy", px.adminEconomyHandler)
 		}
+		// Phase 23-14 — pool de chaves do anthropic-haiku (read-only) e ciclo
+		// de vida dos pods auxiliares. Mesmo gate X-Admin-Key (T-23-46).
+		if px.adminAnthropicKeysHandler != nil {
+			adminRouter.Method(http.MethodGet, "/anthropic/keys", px.adminAnthropicKeysHandler)
+		}
+		if px.adminAuxPodLifecycleHandler != nil {
+			adminRouter.Method(http.MethodPost, "/aux-pod-lifecycles", px.adminAuxPodLifecycleHandler)
+		}
 		// Phase 17 (POD-CFG-06/07/15) — pod-config control, same X-Admin-Key
 		// gate. GET /primary/lifecycle (live status) + GET /primary/config
 		// (current pod_config row, the editor/validation/audit read seam) +
@@ -1898,7 +2035,14 @@ var (
 // Wired with the same audit + tool-call interceptors as the local chat
 // proxy so SSE streams from OpenRouter get the same observability +
 // tool-call protection.
-func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log *slog.Logger,
+//
+// Phase 23-14: name parametriza o rótulo (openrouter-chat = ②,
+// openrouter-deepseek = ③); headerTimeout = UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS;
+// final=false compõe ChatRetryableStatusInterceptor primeiro e embrulha o
+// transporte em NewChatFallthroughTransport (timeout de cabeçalho cascateia);
+// final=true (③) usa transporte puro e devolve o próprio erro ao cliente.
+func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, name string, headerTimeout time.Duration, final bool,
+	cfg config.Config, log *slog.Logger,
 	auditInterceptor *audit.AuditInterceptor,
 	toolCallInterceptor *proxy.ToolCallInterceptor,
 	usageInterceptor *proxy.UsageInterceptor,
@@ -1911,22 +2055,26 @@ func buildOpenRouterChatProxy(u upstreams.UpstreamConfig, cfg config.Config, log
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("invalid openrouter url %q (missing scheme or host)", u.URL)
 	}
+	var transport http.RoundTripper = &http.Transport{
+		MaxIdleConns:          50,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
+	}
+	if !final {
+		transport = proxy.NewChatFallthroughTransport(transport)
+	}
 	rp := &httputil.ReverseProxy{
-		// Phase 06.9 — pass resolver + "openrouter-chat" name + log so the
+		// Phase 06.9 — pass resolver + upstream name + log so the
 		// director rewrites body.model via per-upstream lookup (env-override-wins
 		// per D-06 inherited transparently from Resolver.Resolve).
 		Director: proxy.BuildOpenRouterDirector(parsed, u.AuthBearer,
 			cfg.UpstreamOpenRouterProviderOrder, cfg.UpstreamOpenRouterAllowFallbacks,
-			resolver, "openrouter-chat", log, tenantPrefs),
-		FlushInterval: -1, // SSE streaming
-		Transport: &http.Transport{
-			MaxIdleConns:          50,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-		ErrorHandler:   proxy.ErrorHandler("openrouter-chat", log),
-		ModifyResponse: proxy.ComposeInterceptors(auditInterceptor, toolCallInterceptor, usageInterceptor),
+			resolver, name, log, tenantPrefs),
+		FlushInterval:  -1, // SSE streaming
+		Transport:      transport,
+		ErrorHandler:   proxy.ErrorHandler(name, log),
+		ModifyResponse: proxy.ExternalChatInterceptors(final, auditInterceptor, toolCallInterceptor, usageInterceptor).Intercept,
 	}
 	return rp, nil
 }
