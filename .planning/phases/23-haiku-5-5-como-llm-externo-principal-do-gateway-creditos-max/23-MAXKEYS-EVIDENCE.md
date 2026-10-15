@@ -92,3 +92,20 @@ Critérios de rollback: nenhum disparou. O ① está **mantido**.
 - Chaves: `max-pedro` e `max-financeiro` com `state=ok`.
   - No log, 0 eventos de cooldown, exhausted ou revoked.
 - Critérios de rollback: nenhum disparou. O ① continua **mantido**.
+
+## Verificação +2 h (2026-10-15 17:30 UTC)
+
+Janela: 15:29 → 17:30 UTC. Fonte: `ai_gateway.billing_events` (somente leitura), logs do gateway e `/admin/anthropic/keys`.
+
+| upstream | status | req | % |
+|---|---|---|---|
+| anthropic-haiku | 200 | 1598 | 99,9 |
+| openrouter-chat | 200 | 1 | 0,1 |
+
+- 4xx/5xx: 0.
+- Billing anthropic-haiku: 1600 eventos, `cost_source=price_table`, `tokens_cache_read` 7.978.191, R$ 4,2902.
+- Chaves: `max-pedro` e `max-financeiro` com `state=ok`, sem reason/until.
+- A única requisição no openrouter-chat (chat-ifix, 17:13:38 UTC, modelo `deepseek/deepseek-v4.1-flash`) foi despachada direto para o openrouter-chat: o log do request_id não mostra tentativa no anthropic-haiku nem cascata. HIPÓTESE: o cliente pediu esse modelo pelo nome; confirmaria com o corpo da requisição (não registrado).
+- O jq do script rodou na versão antiga (carregada antes da correção) e falhou; as chaves foram consultadas à mão.
+
+Critérios de rollback: nenhum disparou. O ① continua **mantido**.
