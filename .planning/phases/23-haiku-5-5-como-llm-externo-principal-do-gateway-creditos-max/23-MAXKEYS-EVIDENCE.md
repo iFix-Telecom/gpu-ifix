@@ -82,3 +82,13 @@ A HIPÓTESE H10 fica confirmada para este caso: com effort high, o turno 1 não 
 - `GET /admin/economy`: **`custo_creditos_haiku_brl` = 0,017424**, maior que 0.
 
 Critérios de rollback: nenhum disparou. O ① está **mantido**.
+
+## Verificação +30 min (2026-10-15 16:00 UTC)
+
+- Chat desde 15:29 UTC: **329 requisições, todas `anthropic-haiku` com status 200 (100%)**.
+  - Nenhum 4xx ou 5xx do ①.
+  - Nenhuma requisição caiu para o ② ou o ③.
+- Billing: 329 linhas com `cost_source=price_table`, `tokens_cache_read=1.675.176` e R$ 0,8236.
+- Chaves: `max-pedro` e `max-financeiro` com `state=ok`.
+  - No log, 0 eventos de cooldown, exhausted ou revoked.
+- Critérios de rollback: nenhum disparou. O ① continua **mantido**.
