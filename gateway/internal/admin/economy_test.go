@@ -3,14 +3,18 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
 )
 
 // fakeEconomyQueries is an in-memory economyQueries double — no pgxpool. It
@@ -22,6 +26,32 @@ type fakeEconomyQueries struct {
 	rangeRow gen.SumBillingAllTenantsRangeRow
 	lcRows   []gen.ListPrimaryLifecyclesInRangeRow
 	err      error
+
+	// Phase 23 (23-11): agregado de tokens/créditos e lifecycles da 3060.
+	tokensRow gen.SumEconomyTokensRangeRow
+	tokensErr error
+	auxRows   []gen.ListAuxPodLifecyclesInRangeRow
+	auxErr    error
+}
+
+func (f *fakeEconomyQueries) SumEconomyTokensRange(_ context.Context, _ gen.SumEconomyTokensRangeParams) (gen.SumEconomyTokensRangeRow, error) {
+	if f.err != nil {
+		return gen.SumEconomyTokensRangeRow{}, f.err
+	}
+	if f.tokensErr != nil {
+		return gen.SumEconomyTokensRangeRow{}, f.tokensErr
+	}
+	return f.tokensRow, nil
+}
+
+func (f *fakeEconomyQueries) ListAuxPodLifecyclesInRange(_ context.Context, _ gen.ListAuxPodLifecyclesInRangeParams) ([]gen.ListAuxPodLifecyclesInRangeRow, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.auxErr != nil {
+		return nil, f.auxErr
+	}
+	return f.auxRows, nil
 }
 
 func (f *fakeEconomyQueries) SumPhantomAllTenantsByDate(_ context.Context, _ gen.SumPhantomAllTenantsByDateParams) ([]gen.SumPhantomAllTenantsByDateRow, error) {
@@ -66,6 +96,11 @@ type econResponse struct {
 		CustoOpenRouterBRL float64  `json:"custo_openrouter_brl"`
 		PctServidoLocal    *float64 `json:"pct_servido_local"`
 		HorasPodUp         float64  `json:"horas_pod_up"`
+
+		PctServidoLocalTokens *float64 `json:"pct_servido_local_tokens"`
+		CustoCreditosHaikuBRL float64  `json:"custo_creditos_haiku_brl"`
+		CustoExternoCaixaBRL  float64  `json:"custo_externo_caixa_brl"`
+		Vast3060BRL           float64  `json:"vast_3060_brl"`
 	} `json:"summary"`
 	Series []struct {
 		Date        string  `json:"date"`
@@ -322,5 +357,152 @@ func TestEconomyHandler_BadDate(t *testing.T) {
 	rec, _ := doEconomyRequest(t, h, "from=not-a-date&to=2026-06-30")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Phase 23 (23-11, HAIKU-09): painel Economia fidedigno ---
+
+// TestEconomyHandler_PctServidoLocalTokens: % por tokens na mesma escala 0–1
+// do pct_servido_local (por requests); null quando total_tokens == 0.
+func TestEconomyHandler_PctServidoLocalTokens(t *testing.T) {
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(0), ExternalBrl: opNumeric(0), TotalRequests: 4, LocalRequests: 1},
+		tokensRow: gen.SumEconomyTokensRangeRow{LocalTokens: 1000, TotalTokens: 4000, CreditsCoveredBrl: opNumeric(0), ExternalCashBrl: opNumeric(0)},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, body := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if body.Summary.PctServidoLocalTokens == nil || *body.Summary.PctServidoLocalTokens != 0.25 {
+		t.Fatalf("pct_servido_local_tokens = %v, want 0.25", body.Summary.PctServidoLocalTokens)
+	}
+
+	fakeZero := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(0), ExternalBrl: opNumeric(0)},
+		tokensRow: gen.SumEconomyTokensRangeRow{CreditsCoveredBrl: opNumeric(0), ExternalCashBrl: opNumeric(0)},
+	}
+	_, bodyZero := doEconomyRequest(t, newEconomyHandlerWithQueries(fakeZero, opTestCfg(), discardLog()), econRange)
+	if bodyZero.Summary.PctServidoLocalTokens != nil {
+		t.Errorf("pct_servido_local_tokens = %v, want nil quando total_tokens == 0", *bodyZero.Summary.PctServidoLocalTokens)
+	}
+}
+
+// TestEconomyHandler_CreditosHaikuECaixa: passo ① (coberto por créditos)
+// separado do externo em caixa; custo_openrouter_brl segue = total externo.
+func TestEconomyHandler_CreditosHaikuECaixa(t *testing.T) {
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(0), ExternalBrl: opNumeric(15), TotalRequests: 3},
+		tokensRow: gen.SumEconomyTokensRangeRow{CreditsCoveredBrl: opNumeric(10), ExternalCashBrl: opNumeric(5), TotalTokens: 10},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, body := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if body.Summary.CustoCreditosHaikuBRL != 10 {
+		t.Errorf("custo_creditos_haiku_brl = %v, want 10", body.Summary.CustoCreditosHaikuBRL)
+	}
+	if body.Summary.CustoExternoCaixaBRL != 5 {
+		t.Errorf("custo_externo_caixa_brl = %v, want 5", body.Summary.CustoExternoCaixaBRL)
+	}
+	if body.Summary.CustoOpenRouterBRL != 15 {
+		t.Errorf("custo_openrouter_brl = %v, want 15 (total externo, compatível)", body.Summary.CustoOpenRouterBRL)
+	}
+}
+
+// TestEconomyHandler_Vast3060: lifecycle fechado (total_cost_usd 2) + aberto
+// (dph 0.1 há 10 h), USDToBRLRate 5 → vast_3060_brl = 10 + 5 = 15; vast_brl
+// = 3090 + 3060; economia_liquida_brl = phantom − vast_brl.
+func TestEconomyHandler_Vast3060(t *testing.T) {
+	now := time.Now()
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(100), ExternalBrl: opNumeric(0)},
+		tokensRow: gen.SumEconomyTokensRangeRow{CreditsCoveredBrl: opNumeric(0), ExternalCashBrl: opNumeric(0)},
+		lcRows: []gen.ListPrimaryLifecyclesInRangeRow{{
+			ID:           1,
+			StartedAt:    now.Add(-5 * time.Hour),
+			EndedAt:      opTimestamptz(now.Add(-2 * time.Hour)),
+			TotalCostBrl: opNumeric(5),
+		}},
+		auxRows: []gen.ListAuxPodLifecyclesInRangeRow{
+			{
+				ID:           1,
+				Pod:          "vast-3060",
+				StartedAt:    now.Add(-30 * time.Hour),
+				EndedAt:      opTimestamptz(now.Add(-20 * time.Hour)),
+				DphUsd:       opNumeric(0.1),
+				TotalCostUsd: opNumeric(2),
+				TotalCostBrl: opNumeric(10),
+			},
+			{
+				ID:        2,
+				Pod:       "vast-3060",
+				StartedAt: now.Add(-10 * time.Hour),
+				EndedAt:   pgtype.Timestamptz{Valid: false},
+				DphUsd:    opNumeric(0.1),
+			},
+		},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, body := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if d := body.Summary.Vast3060BRL - 15; d > 0.05 || d < -0.05 {
+		t.Errorf("vast_3060_brl = %v, want ~15", body.Summary.Vast3060BRL)
+	}
+	if d := body.Summary.VastBRL - 20; d > 0.05 || d < -0.05 {
+		t.Errorf("vast_brl = %v, want ~20 (3090 5 + 3060 15)", body.Summary.VastBRL)
+	}
+	if d := body.Summary.EconomiaLiquidaBRL - 80; d > 0.05 || d < -0.05 {
+		t.Errorf("economia_liquida_brl = %v, want ~80", body.Summary.EconomiaLiquidaBRL)
+	}
+	// horas_pod_up segue sendo só o primary (3090).
+	if d := body.Summary.HorasPodUp - 3; d > 0.05 || d < -0.05 {
+		t.Errorf("horas_pod_up = %v, want ~3 (só 3090)", body.Summary.HorasPodUp)
+	}
+	// A série diária também carrega a 3060 (soma das colunas vast = vast_brl).
+	var seriesVast float64
+	for _, r := range body.Series {
+		seriesVast += r.VastBrl
+	}
+	if d := seriesVast - body.Summary.VastBRL; d > 0.05 || d < -0.05 {
+		t.Errorf("soma vast da série = %v, want = vast_brl %v", seriesVast, body.Summary.VastBRL)
+	}
+}
+
+// TestEconomyHandler_TokensQueryError500: falha em SumEconomyTokensRange →
+// 500 billing_query_failed + métrica 5xx.
+func TestEconomyHandler_TokensQueryError500(t *testing.T) {
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(0), ExternalBrl: opNumeric(0)},
+		tokensErr: errors.New("boom"),
+	}
+	before := testutil.ToFloat64(obs.GatewayAdminRequests.WithLabelValues("/admin/economy", "5xx"))
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, _ := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "billing_query_failed") {
+		t.Errorf("body = %s, want billing_query_failed", rec.Body.String())
+	}
+	if after := testutil.ToFloat64(obs.GatewayAdminRequests.WithLabelValues("/admin/economy", "5xx")); after != before+1 {
+		t.Errorf("métrica 5xx = %v, want %v", after, before+1)
+	}
+}
+
+// TestEconomyHandler_AuxQueryError500: falha em ListAuxPodLifecyclesInRange → 500.
+func TestEconomyHandler_AuxQueryError500(t *testing.T) {
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(0), ExternalBrl: opNumeric(0)},
+		tokensRow: gen.SumEconomyTokensRangeRow{CreditsCoveredBrl: opNumeric(0), ExternalCashBrl: opNumeric(0)},
+		auxErr:    errors.New("boom"),
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, _ := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
