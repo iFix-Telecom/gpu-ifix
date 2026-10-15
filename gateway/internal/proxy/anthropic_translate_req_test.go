@@ -360,6 +360,13 @@ func TestAnthropicTranslateRequest(t *testing.T) {
 			t.Fatal("disable só vale na continuação")
 		}
 	})
+	t.Run("stop_becomes_stop_sequences", func(t *testing.T) {
+		m := trq(t, `{"messages":[{"role":"user","content":"a"}],"stop":["FIM"," "]}`, haikuOpts())
+		jsonEq(t, m["stop_sequences"], `["FIM"]`)
+		if _, ok := m["stop"]; ok {
+			t.Fatal("stop não existe na Messages API")
+		}
+	})
 	t.Run("invalid_json_errors", func(t *testing.T) {
 		if _, err := TranslateOpenAIToMessages([]byte(`{nope`), haikuOpts()); err == nil {
 			t.Fatal("JSON inválido deveria dar erro")
