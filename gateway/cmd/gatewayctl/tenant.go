@@ -31,7 +31,7 @@ import (
 // exit code.
 func runTenant(ctx context.Context, args []string, log *slog.Logger) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: gatewayctl tenant <create|set-mode|set-quota|set-shed-limits|set-provider-prefs> [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: gatewayctl tenant <create|set-mode|set-quota|set-shed-limits|set-provider-prefs|set-llm-effort> [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -44,6 +44,9 @@ func runTenant(ctx context.Context, args []string, log *slog.Logger) int {
 	case "set-provider-prefs":
 		// quick 260830-o2j — per-tenant OpenRouter provider routing.
 		return runTenantSetProviderPrefs(ctx, args[1:], log)
+	case "set-llm-effort":
+		// Phase 23 (HAIKU-05) — override de effort do LLM por tenant.
+		return runTenantSetLLMEffort(ctx, args[1:], log)
 	case "set-shed-limits":
 		// Phase 5 — partial UPDATE of per-tenant shed caps + priority tier
 		// (CONTEXT.md D-B1 / D-B2). Implemented in tenants_shed.go.
