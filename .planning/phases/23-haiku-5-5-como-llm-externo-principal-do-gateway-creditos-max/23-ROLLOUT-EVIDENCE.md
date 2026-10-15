@@ -344,3 +344,36 @@ Os 502 não são de chat:
 - 1 em `/v1/embeddings` (`converseai-contacts-embed`), às 06:36 BRT, durante o restart do deploy.
 
 Os 2 503 são 1 `blocked_sensitive` (telefonia, RES-08) e 1 do mesmo evento de embed. **NÃO SEI** a causa dos 502 de embed; eles cessaram às 05:52 BRT.
+
+## Migration 0043: escala de `prices.unit_cost_usd` (2026-10-15)
+
+Código: `ebdfac8` (0043 + `gatewayctl` sem `%.8f`) e `a008755` (donut do dashboard). Imagem alvo `develop-a008755`, gateway e dashboard.
+
+### O que será alterado em prod (registrado antes)
+
+1. Banco `bd_ai_gateway`: `ALTER TABLE ai_gateway.prices ALTER COLUMN unit_cost_usd TYPE NUMERIC(20,12)`, com drop e recriação idêntica do trigger `prices_update_notify` na mesma transação. Reescreve a tabela (663 linhas) sob lock ACCESS EXCLUSIVE. Aplicação: `gatewayctl migrate up` one-off com a imagem nova (mesma receita do §1.1).
+2. Stack 38 (gateway): imagem `develop-5ce151e` → `develop-a008755`. Env e compose sem mudança.
+3. Stack 40 (dashboard): imagem `develop-99d73b2` → `develop-a008755`.
+4. Preços: rodar o `gateway-price-sync.service` (o job diário) depois do deploy. Ele regrava os valores fixos do passo ① com o `gatewayctl` novo: `cache_write_token` 1.25e-7 e `:long` 6.25e-7 passam a ficar exatos. Linhas do OpenRouter seguem o fluxo normal do sync.
+5. Snapshots antes: `pg_dump` da tabela `ai_gateway.prices` e JSON dos stacks 38 e 40 em `~/gw-phase23-0043/` (600).
+
+Rollback: `gatewayctl migrate down` (volta a NUMERIC(12,8) e arredonda para 8 casas) + PUT dos snapshots.
+
+### Execução (2026-10-15 19:49–19:54 UTC)
+
+- Snapshots: `~/gw-phase23-0043/` → `prices-pre-20261015T194927.sql` (663 INSERTs, `pg_dump` 16.15), `stack{38,40}{,-file}-pre-20261015T194927.json`.
+- `migrate status` (imagem `develop-a008755`, env-file do container vivo em `/root/p0043`, apagado com `shred -u`): 0043 Pending.
+- `migrate up`: `OK 0043_prices_unit_cost_scale.sql (536.59ms)`, `goose: successfully migrated database to version: 43`. `/health` 200 logo depois (gateway antigo).
+- Coluna em prod: `numeric(20,12)`.
+- PUT stack 38 → 200, imagem `develop-a008755@sha256:a209724c…`; task nova healthy; `/health` deu um 404 durante a troca e depois 200 estável; log `anthropic-haiku enabled keys=2`.
+- PUT stack 40 → 200, imagem `develop-a008755@sha256:2da54daa…`; `/login` 200.
+- `gateway-price-sync.service` manual → `fx_updated=1 anthropic_updated=2 models_updated=6`, saída `usd=0.000000125` no `gatewayctl` novo.
+- Preços vigentes de cache_write: `claude-haiku-5-5` 0.000000125000, `claude-haiku-5-5:long` 0.000000625000, `anthropic/claude-haiku-5.5 @ openrouter-fireworks` 0.000000125000. **Resolvido o arredondamento.**
+- Billing pós-deploy: anthropic-haiku e gemini-stt com `cost_source=price_table`.
+
+### Regressão achada no pós-deploy: TTS do claude-wpp com 400
+
+FATO: `audit_log` 19:52 e 19:59 UTC, tenant claude-wpp, `/v1/audio/speech`, 400 do `openrouter-tts`. Corpo: ZodError `response_format` "expected one of mp3|pcm". O claude-wpp pede `"wav"` (`src/voice/gateway.ts` l.180) e converte com `ffmpeg -i pipe:0` (detecta o formato). O Director só trocava formato ausente/vazio. 400 não cascateia, então 2 respostas em voz do WhatsApp não saíram entre 19:20 e 20:08 UTC. Não é efeito da 0043; começou com a ativação do openrouter-tts (23-17 Task 3).
+
+Fix `b25fc3f`: formato fora de `mp3|pcm` vira `mp3` (resposta `audio/mpeg`). Teste: os flags do `ffmpeg` do claude-wpp convertem o MP3 do gateway em Ogg/Opus mono 48 kHz (exit 0).
+Deploy 20:08 UTC: stack 38 → `develop-b25fc3f@sha256:b9ec41c8…` (só a imagem; snapshot `stack38{,-file}-pre-ttsfmt-*.json`). Smoke `response_format:"wav"` → 200 `audio/mpeg` ID3, 5,1 s; `mp3` → 200, 1,7 s. Tráfego depois: 4/4 em 200.

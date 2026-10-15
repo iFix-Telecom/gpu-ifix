@@ -165,3 +165,7 @@ Chave sensível (telefonia) em `/v1/audio/speech` → HTTP 503 `upstream_unavail
 Alias canário `p23-canary-tts` impossível (CHECK da migration 0005). Ficou a opção (a): cascata openrouter-tts → local-tts provada em `TestHaikuChain_TTSStatusCascade` (23-14) + `local-tts` servindo TTS em prod até hoje. Sem force-open global (sem autorização do Pedro).
 
 Smoke LLM pós-redeploy (uat10-test, `qwen`) → `claude-haiku-5-5`, `finish_reason: stop`.
+
+## Correção pós-ativação: formato de resposta (2026-10-15 20:08 UTC)
+
+O OpenRouter só aceita `mp3|pcm`. O claude-wpp pede `wav` e teve 2 respostas em voz com 400 (19:52 e 19:59 UTC). Fix `b25fc3f` (formato fora de `mp3|pcm` vira `mp3`) em prod com `develop-b25fc3f`. Detalhes no 23-ROLLOUT-EVIDENCE, seção da migration 0043.
