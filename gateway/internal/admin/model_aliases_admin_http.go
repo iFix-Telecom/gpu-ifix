@@ -16,7 +16,8 @@
 // Validation mirrors gatewayctl R10 (no whitespace/control/NUL, length caps)
 // and adds: upstream_name must EXIST in ai_gateway.upstreams (role is taken
 // from that row — no hardcoded name→role map here), provider_prefs only
-// accepted for upstream_name=openrouter-chat and must pass
+// accepted for upstream_name in providerPrefsUpstreams (openrouter-chat,
+// openrouter-deepseek) and must pass
 // models.ValidateProviderPrefs.
 package admin
 
@@ -27,6 +28,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 	"unicode"
 
@@ -41,10 +44,27 @@ import (
 
 const modelAliasesRoute = "/admin/model-aliases"
 
-// providerPrefsUpstream is the only upstream whose director consumes
-// provider_prefs. Storing prefs on any other row would be silently inert, so
-// the API refuses it.
-const providerPrefsUpstream = "openrouter-chat"
+// providerPrefsUpstreams is the closed set of upstreams whose director
+// consumes provider_prefs (openrouter_director reads them by
+// (alias, upstreamName); Phase 23-20 added openrouter-deepseek, the passo ③
+// row). Storing prefs on any other row would be silently inert, so the API
+// refuses it. Copy of gatewayctl's providerPrefsUpstreams (the packages do
+// not import each other) and of the dashboard PROVIDER_PREFS_UPSTREAMS —
+// all three are pinned to testdata/provider_prefs_upstreams.json.
+var providerPrefsUpstreams = map[string]bool{
+	"openrouter-chat":     true,
+	"openrouter-deepseek": true,
+}
+
+// providerPrefsUpstreamsList renders the set sorted, for error messages.
+func providerPrefsUpstreamsList() string {
+	names := make([]string, 0, len(providerPrefsUpstreams))
+	for n := range providerPrefsUpstreams {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
 
 const (
 	modelAliasMaxAliasLen    = 64
@@ -153,9 +173,9 @@ func (h *ModelAliasAdminHandler) Upsert(w http.ResponseWriter, r *http.Request) 
 
 	var prefs []byte
 	if len(body.ProviderPrefs) > 0 && string(body.ProviderPrefs) != "null" {
-		if body.UpstreamName != providerPrefsUpstream {
+		if !providerPrefsUpstreams[body.UpstreamName] {
 			h.bad(w, "provider_prefs_not_supported",
-				fmt.Sprintf("provider_prefs só se aplica ao upstream %q", providerPrefsUpstream))
+				fmt.Sprintf("provider_prefs só se aplica aos upstreams %s", providerPrefsUpstreamsList()))
 			return
 		}
 		canon, err := models.ValidateProviderPrefs(body.ProviderPrefs)

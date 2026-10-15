@@ -6,7 +6,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 )
@@ -116,5 +118,99 @@ func TestModelAliasSet_MissingFlagsErrors(t *testing.T) {
 	// Missing --upstream.
 	if code := runModelAlias(ctx, []string{"set", "--alias", "qwen", "--target", "qwen/qwen3.5-27b"}, log); code != 2 {
 		t.Errorf("set with --alias+--target only: want 2; got %d", code)
+	}
+}
+
+// =====================================================================
+// Phase 23-20 — upstreams novos (anthropic-haiku, openrouter-deepseek,
+// openrouter-tts) + provider_prefs aceito em openrouter-chat E
+// openrouter-deepseek. Testes puros sobre validateModelAliasSet (sem DB).
+// =====================================================================
+
+const deepseekPrefsJSON = `{"sort":"price","preferred_min_throughput":{"p90":100},"max_price":{"prompt":0.4},"quantizations":["fp8"],"data_collection":"deny"}`
+
+func TestModelAliasSet_OpenRouterDeepseekWithPrefsAccepted(t *testing.T) {
+	role, prefs, err := validateModelAliasSet("deepseek-flash", "openrouter-deepseek", "deepseek/deepseek-v4.1-flash:exacto", deepseekPrefsJSON)
+	if err != nil {
+		t.Fatalf("openrouter-deepseek + prefs DeepSeek: err = %v; want nil", err)
+	}
+	if role != "llm" {
+		t.Errorf("role = %q; want llm", role)
+	}
+	if len(prefs) == 0 {
+		t.Errorf("prefs canônicas vazias; want bytes")
+	}
+}
+
+func TestModelAliasSet_AnthropicHaikuNoPrefsAccepted(t *testing.T) {
+	role, prefs, err := validateModelAliasSet("qwen", "anthropic-haiku", "claude-haiku-5-5", "")
+	if err != nil {
+		t.Fatalf("anthropic-haiku sem prefs: err = %v; want nil", err)
+	}
+	if role != "llm" || prefs != nil {
+		t.Errorf("role=%q prefs=%s; want llm + nil", role, prefs)
+	}
+}
+
+func TestModelAliasSet_OpenRouterTTSAcceptedAsTTS(t *testing.T) {
+	role, _, err := validateModelAliasSet("tts-1", "openrouter-tts", "openai/gpt-4o-mini-tts", "")
+	if err != nil {
+		t.Fatalf("openrouter-tts: err = %v; want nil", err)
+	}
+	if role != "tts" {
+		t.Errorf("role = %q; want tts", role)
+	}
+}
+
+func TestModelAliasSet_PrefsOnAnthropicHaikuRejected(t *testing.T) {
+	_, _, err := validateModelAliasSet("qwen", "anthropic-haiku", "claude-haiku-5-5", `{"zdr":true}`)
+	if err == nil {
+		t.Fatal("prefs em anthropic-haiku: want erro")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "openrouter-chat") || !strings.Contains(msg, "openrouter-deepseek") {
+		t.Errorf("mensagem deve listar openrouter-chat e openrouter-deepseek; got %q", msg)
+	}
+	// Superfície CLI: exit 2 antes de tocar o DB.
+	code := runModelAlias(context.Background(), []string{"set", "--alias", "qwen", "--upstream", "anthropic-haiku", "--target", "claude-haiku-5-5", "--provider-prefs", `{"zdr":true}`}, slog.Default())
+	if code != 2 {
+		t.Errorf("CLI exit = %d; want 2", code)
+	}
+}
+
+func TestModelAliasSet_OpenRouterChatPrefsStillAccepted(t *testing.T) {
+	if _, _, err := validateModelAliasSet("qwen", "openrouter-chat", "deepseek/deepseek-v4-flash", `{"order":["novita"]}`); err != nil {
+		t.Errorf("openrouter-chat + prefs: err = %v; want nil (regressão)", err)
+	}
+}
+
+func TestModelAliasSet_UnknownUpstreamStillExit2(t *testing.T) {
+	if _, _, err := validateModelAliasSet("qwen", "ghost-upstream", "x", ""); err == nil {
+		t.Error("upstream desconhecido: want erro")
+	}
+	code := runModelAlias(context.Background(), []string{"set", "--alias", "qwen", "--upstream", "ghost-upstream", "--target", "x"}, slog.Default())
+	if code != 2 {
+		t.Errorf("CLI exit = %d; want 2", code)
+	}
+}
+
+func TestModelAliasSet_ProviderPrefsUpstreams_ParityFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/admin/testdata/provider_prefs_upstreams.json")
+	if err != nil {
+		t.Fatalf("ler fixture: %v", err)
+	}
+	var fx struct {
+		Upstreams []string `json:"provider_prefs_upstreams"`
+	}
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	if len(fx.Upstreams) != len(providerPrefsUpstreams) {
+		t.Fatalf("gatewayctl providerPrefsUpstreams tem %d itens, fixture %d (%v)", len(providerPrefsUpstreams), len(fx.Upstreams), fx.Upstreams)
+	}
+	for _, u := range fx.Upstreams {
+		if !providerPrefsUpstreams[u] {
+			t.Errorf("fixture lista %q mas gatewayctl não aceita prefs nele", u)
+		}
 	}
 }

@@ -8,8 +8,23 @@
  * https://openrouter.ai/docs/features/provider-routing verbatim.
  *
  * Precedence at request time (decided 2026-08-30): tenant.provider_prefs >
- * model_aliases.provider_prefs (alias, openrouter-chat) > global env pin.
+ * model_aliases.provider_prefs (alias, openrouter-chat|openrouter-deepseek) >
+ * global env pin.
  */
+
+/**
+ * Closed set of upstreams whose director consumes provider_prefs (Phase 23-20
+ * added openrouter-deepseek — passo ③). Prefs on any other row would be
+ * silently inert, so the UI hides the editor and the server action refuses.
+ * Mirror of gatewayctl/admin `providerPrefsUpstreams`; all three are pinned to
+ * gateway/internal/admin/testdata/provider_prefs_upstreams.json (parity tests).
+ * Lives here (not in the server-only admin-actions-core) so the client
+ * /modelos editor shares the exact same set.
+ */
+export const PROVIDER_PREFS_UPSTREAMS: ReadonlySet<string> = new Set([
+  "openrouter-chat",
+  "openrouter-deepseek",
+]);
 
 export const PROVIDER_QUANTIZATIONS = [
   "int4",

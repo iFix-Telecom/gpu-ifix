@@ -54,6 +54,7 @@ import {
   gatewayAdminPut as realGatewayAdminPut,
 } from "@/lib/gateway-admin";
 import {
+  PROVIDER_PREFS_UPSTREAMS,
   type ProviderPrefs,
   validateProviderPrefs,
 } from "@/lib/provider-prefs";
@@ -934,12 +935,21 @@ function assertAliasField(name: string, val: string, max: number): string {
   return v;
 }
 
-/** The only upstream whose director consumes provider_prefs. */
-const PROVIDER_PREFS_UPSTREAM = "openrouter-chat";
+/**
+ * Upstreams whose director consumes provider_prefs — openrouter-chat and
+ * openrouter-deepseek (Phase 23-20). Defined in `@/lib/provider-prefs` (shared
+ * with the client editor) and re-exported here for the parity test.
+ */
+export { PROVIDER_PREFS_UPSTREAMS };
+
+function providerPrefsUpstreamsList(): string {
+  return [...PROVIDER_PREFS_UPSTREAMS].sort().join(", ");
+}
 
 /**
  * Create or update a model_aliases row (alias, upstream_name) with target and
- * optional OpenRouter provider_prefs (openrouter-chat only). Owner-gated;
+ * optional OpenRouter provider_prefs (openrouter-chat / openrouter-deepseek
+ * only). Owner-gated;
  * validated server-side; PUT /admin/model-aliases; one `model_alias.upsert`
  * audit row `{alias, upstream_name, target, has_provider_prefs}`.
  */
@@ -961,9 +971,9 @@ export async function upsertModelAliasCore(args: {
   const target = assertAliasField("target", args.target, 128);
   let prefs: ProviderPrefs | null = null;
   if (args.providerPrefs !== undefined && args.providerPrefs !== null) {
-    if (upstreamName !== PROVIDER_PREFS_UPSTREAM) {
+    if (!PROVIDER_PREFS_UPSTREAMS.has(upstreamName)) {
       throw new Error(
-        `provider_prefs só se aplica ao upstream ${PROVIDER_PREFS_UPSTREAM}.`,
+        `provider_prefs só se aplica aos upstreams ${providerPrefsUpstreamsList()}.`,
       );
     }
     prefs = validateProviderPrefs(args.providerPrefs);

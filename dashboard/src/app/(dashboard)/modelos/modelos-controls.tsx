@@ -8,7 +8,8 @@
  *     ROUTING order (tier, tier_priority — the gateway's attempt order; quick
  *     261007-gyq), re-sorted client-side in case an older API answers
  *     alphabetically. Owner: "Novo alias", edit
- *     (dialog: target + ProviderPrefsEditor when upstream = openrouter-chat),
+ *     (dialog: target + ProviderPrefsEditor when upstream is in
+ *     PROVIDER_PREFS_UPSTREAMS — openrouter-chat / openrouter-deepseek),
  *     delete (alert-dialog with impact copy).
  * (2) UPSTREAMS — every upstream with tier/role/probe; owner toggles
  *     `enabled` (Switch → confirm when disabling). The gateway refuses to
@@ -80,6 +81,7 @@ import {
 } from "@/lib/gateway";
 import { buildTierIndex, sortAliasRowsByRouting } from "@/lib/alias-order";
 import {
+  PROVIDER_PREFS_UPSTREAMS,
   type ProviderPrefs,
   summarizeProviderPrefs,
   validateProviderPrefs,
@@ -87,7 +89,9 @@ import {
 
 const GENERIC_ERROR =
   "Não foi possível concluir a ação agora. Tente novamente em alguns segundos.";
-const PREFS_UPSTREAM = "openrouter-chat";
+// Default upstream for a new alias. The prefs editor shows for every upstream
+// in PROVIDER_PREFS_UPSTREAMS (openrouter-chat, openrouter-deepseek — 23-20).
+const DEFAULT_ALIAS_UPSTREAM = "openrouter-chat";
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
@@ -180,7 +184,7 @@ export function ModelosControls({
               Um alias com linhas fica <em>pinado</em> nos upstreams listados (ordem de
               tier). Dentro de cada alias, as linhas estão na <strong>ordem de tentativa</strong>{" "}
               (tier, depois prioridade): a primeira é tentada primeiro. Roteamento OpenRouter: prefs do <strong>tenant</strong> &gt; prefs do{" "}
-              <strong>alias</strong> (openrouter-chat) &gt; pin global do env.
+              <strong>alias</strong> (openrouter-chat e openrouter-deepseek) &gt; pin global do env.
             </CardDescription>
           </div>
           {isOwner && (
@@ -236,7 +240,7 @@ export function ModelosControls({
                         </TableCell>
                         <TableCell className="font-mono text-[13px]">{r.target}</TableCell>
                         <TableCell className="max-w-[320px] truncate text-[12px] text-muted-foreground" title={r.provider_prefs ? JSON.stringify(r.provider_prefs) : undefined}>
-                          {r.upstream_name === PREFS_UPSTREAM ? summarizeProviderPrefs(r.provider_prefs) : <span className="opacity-50">n/a</span>}
+                          {PROVIDER_PREFS_UPSTREAMS.has(r.upstream_name) ? summarizeProviderPrefs(r.provider_prefs) : <span className="opacity-50">n/a</span>}
                         </TableCell>
                         {isOwner && (
                           <TableCell className="text-right">
@@ -395,7 +399,8 @@ export function ModelosControls({
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Alias create/edit dialog — target + (openrouter-chat only) provider prefs.
+// Alias create/edit dialog — target + provider prefs (only for upstreams in
+// PROVIDER_PREFS_UPSTREAMS: openrouter-chat / openrouter-deepseek).
 // ──────────────────────────────────────────────────────────────────────────
 
 function AliasDialog({
@@ -411,14 +416,14 @@ function AliasDialog({
 }) {
   const isEdit = row !== null;
   const [alias, setAlias] = useState(row?.alias ?? "");
-  const [upstreamName, setUpstreamName] = useState(row?.upstream_name ?? PREFS_UPSTREAM);
+  const [upstreamName, setUpstreamName] = useState(row?.upstream_name ?? DEFAULT_ALIAS_UPSTREAM);
   const [target, setTarget] = useState(row?.target ?? "");
   const [prefsEnabled, setPrefsEnabled] = useState(Boolean(row?.provider_prefs));
   const [prefs, setPrefs] = useState<ProviderPrefs>(row?.provider_prefs ?? {});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isOpenRouter = upstreamName === PREFS_UPSTREAM;
+  const isOpenRouter = PROVIDER_PREFS_UPSTREAMS.has(upstreamName);
 
   async function save() {
     setError(null);
@@ -453,7 +458,8 @@ function AliasDialog({
           <DialogTitle>{isEdit ? `Editar ${row.alias} → ${row.upstream_name}` : "Novo alias"}</DialogTitle>
           <DialogDescription>
             O alias é o nome que o cliente manda em <code>model</code>; o target é o que o
-            upstream recebe. Prefs de provedor valem só para <code>openrouter-chat</code>.
+            upstream recebe. Prefs de provedor valem para <code>openrouter-chat</code> e{" "}
+            <code>openrouter-deepseek</code>.
           </DialogDescription>
         </DialogHeader>
 
