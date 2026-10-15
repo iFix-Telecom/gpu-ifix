@@ -83,6 +83,9 @@ func BuildOpenRouterDirector(
 	tenantPrefs TenantPrefsLookup,
 ) func(*http.Request) {
 	base := BuildDirector(upstream)
+	// O *tenants.Loader implementa TenantPrefsLookup e TenantEffortLookup;
+	// assinatura inalterada (23-09). nil-safe: sem lookup → sem camada tenant.
+	effortLookup, _ := tenantPrefs.(TenantEffortLookup)
 	return func(r *http.Request) {
 		base(r) // strips client auth, propagates X-Request-ID, rewrites URL
 		if authBearer != "" {
@@ -183,6 +186,22 @@ func BuildOpenRouterDirector(
 		// que nunca volta, e o prefixo não seria reaproveitado. A remoção de
 		// sampling mexe só em campos top-level, sem efeito no PASS 4.
 		patched = normalizeAnthropicChatBody(patched)
+
+		// PASS 6 — effort (Phase 23, HAIKU-05). Só para alvo Anthropic:
+		// cliente explícito > tenants.llm_effort > DefaultLLMEffort ("high"),
+		// gravado como `reasoning` ({"effort":e} ou {"enabled":false} p/ off);
+		// `reasoning_effort` do cliente é removido. Campo top-level, não mexe
+		// no breakpoint do PASS 4 — o cache se preserva porque o VALOR do
+		// effort é constante na conversa (23-RESEARCH Padrão 5).
+		var effort, effortSource string
+		patched, effort, effortSource = applyAnthropicEffort(r.Context(), patched, effortLookup)
+		if effort != "" && log != nil {
+			log.Debug("openrouter_director effort resolved",
+				"effort", effort,
+				"effort_source", effortSource,
+				"upstream", upstreamName,
+			)
+		}
 
 		r.Body = io.NopCloser(bytes.NewReader(patched))
 		r.ContentLength = int64(len(patched))
