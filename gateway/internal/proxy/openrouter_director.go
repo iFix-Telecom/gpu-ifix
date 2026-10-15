@@ -170,6 +170,20 @@ func BuildOpenRouterDirector(
 		// entrada normal e o OpenRouter mantém o provedor (sticky).
 		patched = injectAnthropicCacheControl(patched)
 
+		// PASS 5 — normalização Anthropic (Phase 23, HAIKU-01). Só para alvo
+		// resolvido Anthropic (o `model` já foi reescrito no PASS 1):
+		//   - prefill: conversa terminando em assistant sem tool_calls dá 400
+		//     "does not support assistant message prefill" em produção (F5 do
+		//     23-RESEARCH) → anexa user neutro "Prossiga.";
+		//   - sampling: temperature/top_p/top_k/frequency_penalty/
+		//     presence_penalty dão 400 no Haiku 5.5 (migration guide) → removidos.
+		// Ordem DEPOIS do PASS 4 (revisão cross-AI 2026-10-14): o breakpoint de
+		// conversa cai no último turno real, que volta igual no request seguinte
+		// da mesma conversa; se rodasse antes, cairia no "Prossiga." sintético,
+		// que nunca volta, e o prefixo não seria reaproveitado. A remoção de
+		// sampling mexe só em campos top-level, sem efeito no PASS 4.
+		patched = normalizeAnthropicChatBody(patched)
+
 		r.Body = io.NopCloser(bytes.NewReader(patched))
 		r.ContentLength = int64(len(patched))
 		r.Header.Set("Content-Length", strconv.Itoa(len(patched)))
