@@ -946,5 +946,269 @@ class DiskProbeTest(unittest.TestCase):
             u.log, u.ssh_pod = orig
 
 
+# --------------------------------------------------------------------------
+# 23-13 (HAIKU-09): custo da 3060 gravado no gateway (best-effort)
+# --------------------------------------------------------------------------
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import json as _json  # noqa: E402
+from datetime import datetime as _dt, timedelta as _td  # noqa: E402
+from zoneinfo import ZoneInfo as _zi  # noqa: E402
+
+_GW_ENV = {"VAST_API_KEY": "vast-x", "GATEWAY_ADMIN_URL": "https://gw.example/",
+           "GATEWAY_ADMIN_KEY": "ifix_admin_SECRETO123"}
+
+
+class _HttpRec:
+    """Fake de v.http: grava chamadas e responde por metodo."""
+
+    def __init__(self, post=(200, b'{"id":1,"event":"start"}'), delete=(200, b"{}"),
+                 raise_post=None):
+        self.calls = []
+        self.post, self.delete, self.raise_post = post, delete, raise_post
+
+    def __call__(self, method, url, headers=None, body=None, timeout=30):
+        self.calls.append({"method": method, "url": url, "headers": headers or {},
+                           "body": body, "timeout": timeout})
+        if method == "POST":
+            if self.raise_post:
+                raise self.raise_post
+            return self.post
+        return self.delete
+
+    def posts(self):
+        return [c for c in self.calls if c["method"] == "POST"]
+
+
+class RecordAuxLifecycleTest(unittest.TestCase):
+    def run_rec(self, fake, env=_GW_ENV, *a, **k):
+        orig = u.v.http
+        err = io.StringIO()
+        try:
+            u.v.http = fake
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                ok = u.record_aux_lifecycle(env, *a, **k)
+        finally:
+            u.v.http = orig
+        return ok, err.getvalue()
+
+    def test_start_posts_with_admin_key_and_pod(self):
+        fake = _HttpRec()
+        ok, _ = self.run_rec(fake, _GW_ENV, "start", instance_id=7, dph_usd=0.12)
+        self.assertTrue(ok)
+        p = fake.posts()
+        self.assertEqual(len(p), 1)
+        self.assertEqual(p[0]["url"], "https://gw.example/admin/aux-pod-lifecycles")
+        self.assertEqual(p[0]["headers"]["X-Admin-Key"], "ifix_admin_SECRETO123")
+        self.assertEqual(p[0]["headers"]["Content-Type"], "application/json")
+        self.assertEqual(p[0]["timeout"], 10)
+        body = _json.loads(p[0]["body"])
+        self.assertEqual(body["pod"], "vast-3060")
+        self.assertEqual(body["event"], "start")
+        self.assertEqual(body["vast_instance_id"], 7)
+        self.assertEqual(body["dph_usd"], 0.12)
+        self.assertNotIn("total_cost_usd", body)
+
+    def test_at_is_rfc3339_seconds(self):
+        fake = _HttpRec()
+        at = _dt(2026, 10, 15, 7, 0, 1, 123456, tzinfo=_zi("America/Sao_Paulo"))
+        self.run_rec(fake, _GW_ENV, "start", instance_id=7, dph_usd=0.1, at=at)
+        body = _json.loads(fake.posts()[0]["body"])
+        self.assertEqual(body["at"], "2026-10-15T07:00:01-03:00")
+
+    def test_missing_url_or_key_no_http(self):
+        for env in ({"GATEWAY_ADMIN_KEY": "k"}, {"GATEWAY_ADMIN_URL": "https://gw"}, {}):
+            fake = _HttpRec()
+            ok, _ = self.run_rec(fake, env, "start", instance_id=7, dph_usd=0.1)
+            self.assertFalse(ok)
+            self.assertEqual(fake.calls, [])
+
+    def test_http_500_returns_false_and_never_logs_key(self):
+        fake = _HttpRec(post=(500, b"boom ifix_admin_SECRETO123"))
+        ok, err = self.run_rec(fake, _GW_ENV, "start", instance_id=7, dph_usd=0.1)
+        self.assertFalse(ok)
+        self.assertIn("500", err)
+        self.assertNotIn("ifix_admin_SECRETO123", err)
+
+    def test_http_exception_never_propagates(self):
+        fake = _HttpRec(raise_post=RuntimeError("dial ifix_admin_SECRETO123"))
+        ok, err = self.run_rec(fake, _GW_ENV, "stop", instance_id=7, dph_usd=None)
+        self.assertFalse(ok)
+        self.assertNotIn("ifix_admin_SECRETO123", err)
+
+    def test_stop_already_closed_is_true(self):
+        fake = _HttpRec(post=(200, b'{"id":1,"event":"stop","already_closed":true}'))
+        ok, _ = self.run_rec(fake, _GW_ENV, "stop", instance_id=7, dph_usd=None,
+                             total_cost_usd=1.5)
+        self.assertTrue(ok)
+        body = _json.loads(fake.posts()[0]["body"])
+        self.assertEqual(body["total_cost_usd"], 1.5)
+        self.assertNotIn("dph_usd", body)
+
+    def test_stop_404_is_false_without_exception(self):
+        fake = _HttpRec(post=(404, b'{"error":"aux_pod_lifecycle_not_found"}'))
+        ok, _ = self.run_rec(fake, _GW_ENV, "stop", instance_id=7, dph_usd=None)
+        self.assertFalse(ok)
+
+
+class VastDestroyRecordsStopTest(unittest.TestCase):
+    NOW = _dt(2026, 10, 15, 20, 0, 0, tzinfo=_zi("America/Sao_Paulo"))
+
+    def run_destroy(self, fake, state, iid=7):
+        orig = (u.v.http, u.load_state, u._now)
+        try:
+            u.v.http = fake
+            u.load_state = lambda: state
+            u._now = lambda: self.NOW
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                c = u.vast_destroy(_GW_ENV, iid)
+        finally:
+            u.v.http, u.load_state, u._now = orig
+        return c
+
+    def test_destroy_records_stop_with_total_from_state(self):
+        started = (self.NOW - _td(hours=13)).isoformat(timespec="seconds")
+        state = {"aux_lifecycles": {"7": {"started_at": started, "dph_usd": 0.1}}}
+        fake = _HttpRec()
+        c = self.run_destroy(fake, state)
+        self.assertEqual(c, 200)
+        self.assertEqual(fake.calls[0]["method"], "DELETE")
+        p = fake.posts()
+        self.assertEqual(len(p), 1)
+        body = _json.loads(p[0]["body"])
+        self.assertEqual(body["event"], "stop")
+        self.assertEqual(body["vast_instance_id"], 7)
+        self.assertAlmostEqual(body["total_cost_usd"], 1.3, places=6)
+        self.assertEqual(body["at"], "2026-10-15T20:00:00-03:00")
+
+    def test_destroy_without_state_entry_records_stop_without_total(self):
+        fake = _HttpRec()
+        self.run_destroy(fake, {"instance_id": 7})
+        body = _json.loads(fake.posts()[0]["body"])
+        self.assertEqual(body["event"], "stop")
+        self.assertNotIn("total_cost_usd", body)
+
+    def test_destroy_404_still_records_stop(self):
+        fake = _HttpRec(delete=(404, b"{}"))
+        self.run_destroy(fake, {})
+        self.assertEqual(len(fake.posts()), 1)
+
+    def test_destroy_failure_does_not_record_stop(self):
+        # destroy falhou = instancia segue viva e cobrando -> nao fechar o custo
+        fake = _HttpRec(delete=(500, b"{}"))
+        c = self.run_destroy(fake, {})
+        self.assertEqual(c, 500)
+        self.assertEqual(fake.posts(), [])
+
+    def test_gateway_down_never_breaks_destroy(self):
+        fake = _HttpRec(raise_post=RuntimeError("gateway fora"))
+        c = self.run_destroy(fake, {})
+        self.assertEqual(c, 200)
+
+    def test_corrupt_state_never_breaks_destroy(self):
+        fake = _HttpRec()
+        state = {"aux_lifecycles": {"7": {"started_at": "lixo", "dph_usd": "x"}}}
+        c = self.run_destroy(fake, state)
+        self.assertEqual(c, 200)
+        body = _json.loads(fake.posts()[0]["body"])
+        self.assertNotIn("total_cost_usd", body)
+
+    def test_sweep_records_one_stop_per_orphan(self):
+        fake = _HttpRec()
+        orig = (u.vast_list, u.v.http, u.load_state, u.v.notify)
+        try:
+            u.vast_list = lambda env: [{"id": 10, "label": u.LABEL},
+                                       {"id": 11, "label": u.LABEL},
+                                       {"id": 12, "label": "ifix-primary-lifecycle-5"}]
+            u.v.http = fake
+            u.load_state = lambda: {}
+            u.v.notify = lambda *a: None
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                killed = u.sweep_orphans(_GW_ENV, keep_id=None, context="stop")
+        finally:
+            u.vast_list, u.v.http, u.load_state, u.v.notify = orig
+        self.assertEqual(killed, [10, 11])
+        ids = [_json.loads(p["body"])["vast_instance_id"] for p in fake.posts()]
+        self.assertEqual(ids, [10, 11])
+
+
+class StartRecordsLifecycleTest(unittest.TestCase):
+    """cmd_start: start gravado logo depois do create, com o horario de ANTES do
+    create e antes da espera de boot (vast_get aborta o fluxo)."""
+
+    def test_start_recorded_after_create_before_boot_wait(self):
+        events, saved = [], []
+        clock = [_dt(2026, 10, 15, 7, 0, 0, tzinfo=_zi("America/Sao_Paulo"))]
+
+        def now():
+            t = clock[0]
+            clock[0] = t + _td(seconds=30)
+            return t
+
+        def fake_http_json(method, url, headers=None, payload=None, timeout=30):
+            events.append(("create", now()))
+            return 200, {"new_contract": 999}
+
+        def fake_record(env, event, instance_id, dph_usd=None, total_cost_usd=None,
+                        at=None):
+            events.append(("record", event, instance_id, dph_usd, at))
+            return True
+
+        def boom(*a, **k):
+            events.append(("boot_wait",))
+            raise _Stop()
+
+        o = _od(7, 0.05, 0.2)
+        pick = {"offer": o, "mode": "ondemand", "bid": None, "cap_mult": 1.0,
+                "cost": u.real_cost(o, "ondemand")}
+        patches = {
+            "acquire_start_lock": lambda *a, **k: True,
+            "load_state": lambda: {"instance_id": None, "machine_avoid": [],
+                                   "host_avoid": [], "pending_id": None},
+            "save_state": lambda st: saved.append(_json.loads(_json.dumps(st))),
+            "pick_offer": lambda *a, **k: pick,
+            "build_onstart": lambda: "echo hi",
+            "vast_get": boom,
+            "record_aux_lifecycle": fake_record,
+            "_now": now,
+        }
+        orig = {k: getattr(u, k) for k in patches}
+        orig_hj, orig_sleep, orig_notify = u.v.http_json, u.time.sleep, u.v.notify
+        try:
+            for k, f in patches.items():
+                setattr(u, k, f)
+            u.v.http_json, u.time.sleep, u.v.notify = (fake_http_json, lambda s: None,
+                                                       lambda *a: None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(_Stop):
+                    u.cmd_start(_GW_ENV)
+        finally:
+            for k, f in orig.items():
+                setattr(u, k, f)
+            u.v.http_json, u.time.sleep, u.v.notify = orig_hj, orig_sleep, orig_notify
+
+        kinds = [e[0] for e in events]
+        self.assertEqual(kinds[:3], ["create", "record", "boot_wait"])
+        create_t = events[0][1]
+        _, ev, iid, dph, at = events[1]
+        self.assertEqual((ev, iid), ("start", 999))
+        self.assertAlmostEqual(dph, pick["cost"]["total"], places=9)
+        self.assertLess(at, create_t)  # horario de ANTES do create
+        aux = saved[-1]["aux_lifecycles"]["999"]
+        self.assertAlmostEqual(aux["dph_usd"], pick["cost"]["total"], places=9)
+        self.assertEqual(aux["started_at"], at.isoformat(timespec="seconds"))
+
+    def test_prune_old_aux_entries(self):
+        now = _dt(2026, 10, 15, 7, 0, 0, tzinfo=_zi("America/Sao_Paulo"))
+        st = {"aux_lifecycles": {
+            "1": {"started_at": (now - _td(days=5)).isoformat(), "dph_usd": 0.1},
+            "2": {"started_at": (now - _td(hours=5)).isoformat(), "dph_usd": 0.1},
+            "3": {"started_at": "lixo", "dph_usd": 0.1}}}
+        u.prune_aux_lifecycles(st, now)
+        self.assertEqual(sorted(st["aux_lifecycles"]), ["2"])
+
+
 if __name__ == "__main__":
     unittest.main()
