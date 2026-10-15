@@ -45,6 +45,27 @@ func runPrices(ctx context.Context, args []string, log *slog.Logger) int {
 	}
 }
 
+// priceUnits lista as units aceitas por `prices set`, na ordem exibida.
+// Phase 23 (23-10): as 3 units de cache do passo ① (Anthropic direto) e do
+// OpenRouter — o CHECK de ai_gateway.prices aceita desde o 23-03.
+var priceUnits = []string{
+	"input_token", "output_token", "audio_second", "embed_request",
+	"cache_read_token", "cache_write_token", "cache_write_1h_token",
+}
+
+// validPriceUnit informa se unit é uma das priceUnits.
+func validPriceUnit(unit string) bool {
+	for _, u := range priceUnits {
+		if u == unit {
+			return true
+		}
+	}
+	return false
+}
+
+// priceUnitList devolve as units aceitas separadas por "|".
+func priceUnitList() string { return strings.Join(priceUnits, "|") }
+
 // runPricesSet implements
 //
 //	gatewayctl prices set --model X --provider Y --unit Z --usd N [--notes S]
@@ -56,7 +77,7 @@ func runPricesSet(ctx context.Context, args []string, log *slog.Logger) int {
 	fs := flag.NewFlagSet("prices set", flag.ExitOnError)
 	model := fs.String("model", "", "model name (required)")
 	provider := fs.String("provider", "", "provider name (required)")
-	unit := fs.String("unit", "", "input_token|output_token|audio_second|embed_request (required)")
+	unit := fs.String("unit", "", priceUnitList()+" (required)")
 	usd := fs.Float64("usd", 0, "unit cost USD, must be > 0 (required)")
 	notes := fs.String("notes", "", "free-form note stored with the row")
 	if err := fs.Parse(args); err != nil {
@@ -67,10 +88,8 @@ func runPricesSet(ctx context.Context, args []string, log *slog.Logger) int {
 		fs.Usage()
 		return 2
 	}
-	switch *unit {
-	case "input_token", "output_token", "audio_second", "embed_request":
-	default:
-		fmt.Fprintf(os.Stderr, "invalid --unit %q; expected input_token|output_token|audio_second|embed_request\n", *unit)
+	if !validPriceUnit(*unit) {
+		fmt.Fprintf(os.Stderr, "invalid --unit %q; expected %s\n", *unit, priceUnitList())
 		return 2
 	}
 

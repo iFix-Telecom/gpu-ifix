@@ -81,7 +81,7 @@ The dashboard `cost_local_phantom_brl` becomes non-zero on subsequent billed tra
 ## Auto-discovery (261007-gyq)
 
 Besides `MODEL_MAP`, every run discovers the chat models routed through OpenRouter
-(`upstream='openrouter-chat'`) in the last 7 days from `ai_gateway.billing_events`
+(`upstream IN ('openrouter-chat','openrouter-deepseek')`) in the last 7 days from `ai_gateway.billing_events`
 and prices each one whose name is an **exact** OpenRouter `/models` `.id`
 (provider `openrouter-fireworks`). A discovered model missing from OpenRouter is a
 WARN + `models_unmatched` counter (never fails the run); keys already in

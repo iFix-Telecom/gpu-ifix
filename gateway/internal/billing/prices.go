@@ -10,7 +10,9 @@ import "time"
 type PriceKey struct {
 	Model    string
 	Provider string
-	Unit     string // input_token | output_token | audio_second | embed_request
+	// Unit: input_token | output_token | audio_second | embed_request |
+	// cache_read_token | cache_write_token | cache_write_1h_token (Phase 23).
+	Unit string
 }
 
 // Price is the snapshot view; valid_to=NULL is implied (loader filters).
