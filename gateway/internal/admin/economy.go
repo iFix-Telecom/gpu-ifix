@@ -13,6 +13,14 @@
 //	pct_servido_local    = local_requests / total_requests (null when total == 0)
 //	horas_pod_up         = SUM over lifecycles of active hours
 //
+// Phase 23 (23-11, HAIKU-09) acrescenta os números do painel fidedigno:
+//
+//	% local por tokens   = local_tokens / total_tokens (null quando total == 0)
+//	créditos Haiku       = custo do passo ① (anthropic-haiku) a preço de lista
+//	caixa externo        = custo externo dos demais upstreams (caixa real)
+//	custo 3060           = custo dos pods auxiliares (aux_pod_lifecycles)
+//	vast_brl             = 3090 (primary_lifecycles) + 3060 (aux_pod_lifecycles)
+//
 // The gateway-wide phantom sum (no tenant filter) is the OBS-09 blocker fix:
 // operations.go left phantom_month_brl nil because no no-tenant-filter sqlc
 // query existed. The Vast cost + pod-up hours reuse the operations.go accrual.
@@ -25,6 +33,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
@@ -59,6 +69,20 @@ type EconomySummary struct {
 	CustoOpenRouterBRL float64  `json:"custo_openrouter_brl"`
 	PctServidoLocal    *float64 `json:"pct_servido_local"`
 	HorasPodUp         float64  `json:"horas_pod_up"`
+
+	// PctServidoLocalTokens é o % servido local por TOKENS (tokens_in +
+	// tokens_out), mesma escala 0–1 de PctServidoLocal; null quando o total de
+	// tokens do período é zero.
+	PctServidoLocalTokens *float64 `json:"pct_servido_local_tokens"`
+	// CustoCreditosHaikuBRL: coberto por créditos = custo do passo ①
+	// (anthropic-haiku) a preço de lista; caixa real = 0 (decisão CONTEXT).
+	CustoCreditosHaikuBRL float64 `json:"custo_creditos_haiku_brl"`
+	// CustoExternoCaixaBRL: custo externo pago em caixa — todos os upstreams
+	// externos EXCETO o passo ① coberto por créditos.
+	CustoExternoCaixaBRL float64 `json:"custo_externo_caixa_brl"`
+	// Vast3060BRL: custo dos pods Vast auxiliares (3060 unificada), já somado
+	// em VastBRL. Histórico só a partir da Phase 23.
+	Vast3060BRL float64 `json:"vast_3060_brl"`
 }
 
 // EconomyDayRow is one entry in the daily series (economia = phantom − vast
@@ -76,6 +100,8 @@ type economyQueries interface {
 	SumPhantomAllTenantsByDate(ctx context.Context, arg gen.SumPhantomAllTenantsByDateParams) ([]gen.SumPhantomAllTenantsByDateRow, error)
 	SumBillingAllTenantsRange(ctx context.Context, arg gen.SumBillingAllTenantsRangeParams) (gen.SumBillingAllTenantsRangeRow, error)
 	ListPrimaryLifecyclesInRange(ctx context.Context, arg gen.ListPrimaryLifecyclesInRangeParams) ([]gen.ListPrimaryLifecyclesInRangeRow, error)
+	SumEconomyTokensRange(ctx context.Context, arg gen.SumEconomyTokensRangeParams) (gen.SumEconomyTokensRangeRow, error)
+	ListAuxPodLifecyclesInRange(ctx context.Context, arg gen.ListAuxPodLifecyclesInRangeParams) ([]gen.ListAuxPodLifecyclesInRangeRow, error)
 }
 
 // EconomyHandler serves GET /admin/economy.
@@ -166,6 +192,19 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 23: tokens local/total + split créditos Haiku × caixa externo.
+	tokRow, err := h.q.SumEconomyTokensRange(ctx, gen.SumEconomyTokensRangeParams{
+		Ts:   fromT,
+		Ts_2: toT,
+	})
+	if err != nil {
+		h.log.Error("SumEconomyTokensRange failed", "err", err)
+		httpx.WriteOpenAIError(w, http.StatusInternalServerError,
+			"api_error", "billing_query_failed", "")
+		obs.GatewayAdminRequests.WithLabelValues("/admin/economy", "5xx").Inc()
+		return
+	}
+
 	// Gateway-wide per-day phantom series.
 	dayRows, err := h.q.SumPhantomAllTenantsByDate(ctx, gen.SumPhantomAllTenantsByDateParams{
 		Ts:   fromT,
@@ -192,37 +231,46 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Vast cost + pod-up hours reduction (operations.go:214-245 accrual,
-	// reusing numericPtr). A CLOSED row carries the billing-of-record
-	// total_cost_brl and ended−started hours; an OPEN row accrues
-	// accepted_dph × hours-since-started × USD→BRL and now−started hours.
-	// Each lifecycle's vast cost buckets into its started_at BRT date (one
-	// lifecycle = one BRT day, CONTEXT A1).
-	var vastTotal, horasPodUp float64
+	// Phase 23: lifecycles dos pods auxiliares (3060) no mesmo recorte.
+	auxRows, err := h.q.ListAuxPodLifecyclesInRange(ctx, gen.ListAuxPodLifecyclesInRangeParams{
+		FromTs: fromT,
+		ToTs:   toT,
+	})
+	if err != nil {
+		h.log.Error("ListAuxPodLifecyclesInRange failed", "err", err)
+		httpx.WriteOpenAIError(w, http.StatusInternalServerError,
+			"api_error", "lifecycles_query_failed", "")
+		obs.GatewayAdminRequests.WithLabelValues("/admin/economy", "5xx").Inc()
+		return
+	}
+
+	// Vast cost + pod-up hours reduction (operations.go:214-245 accrual, via
+	// lifecycleAccrual). Each lifecycle's vast cost buckets into its
+	// started_at BRT date (one lifecycle = one BRT day, CONTEXT A1).
+	// horas_pod_up counts only the primary (3090); the 3060 enters the cost.
+	var vastTotal, vast3060, horasPodUp float64
 	vastByDate := make(map[string]float64)
 	for _, row := range lcRows {
-		var cost, hours float64
-		if row.EndedAt.Valid {
-			hours = row.EndedAt.Time.Sub(row.StartedAt).Hours()
-			if hours < 0 {
-				hours = 0
-			}
-			if f := numericPtr(row.TotalCostBrl); f != nil {
-				cost = *f
-			}
-		} else {
-			hours = now.Sub(row.StartedAt).Hours()
-			if hours < 0 {
-				hours = 0
-			}
-			if dph := numericPtr(row.AcceptedDph); dph != nil {
-				cost = *dph * hours * h.cfg.USDToBRLRate
-			}
-		}
+		cost, hours := lifecycleAccrual(row.StartedAt, row.EndedAt, row.TotalCostBrl, row.AcceptedDph, now, h.cfg.USDToBRLRate)
 		vastTotal += cost
 		horasPodUp += hours
 		vastByDate[row.StartedAt.In(loc).Format("2006-01-02")] += cost
 	}
+	for _, row := range auxRows {
+		closedBRL := row.TotalCostBrl
+		if !closedBRL.Valid && row.EndedAt.Valid {
+			// Linha fechada sem BRL gravado: converte o USD de registro.
+			if usd := numericPtr(row.TotalCostUsd); usd != nil {
+				if n, cerr := toNumeric(*usd * h.cfg.USDToBRLRate); cerr == nil {
+					closedBRL = n
+				}
+			}
+		}
+		cost, _ := lifecycleAccrual(row.StartedAt, row.EndedAt, closedBRL, row.DphUsd, now, h.cfg.USDToBRLRate)
+		vast3060 += cost
+		vastByDate[row.StartedAt.In(loc).Format("2006-01-02")] += cost
+	}
+	vastTotal += vast3060
 
 	// Phantom series → map; merge with the per-day vast buckets.
 	phantomByDate := make(map[string]float64)
@@ -273,6 +321,14 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pctLocal = &p
 	}
 
+	var pctLocalTokens *float64
+	if tokRow.TotalTokens != 0 {
+		p := float64(tokRow.LocalTokens) / float64(tokRow.TotalTokens)
+		pctLocalTokens = &p
+	}
+	creditsF, _ := tokRow.CreditsCoveredBrl.Float64Value()
+	cashF, _ := tokRow.ExternalCashBrl.Float64Value()
+
 	resp := EconomyResponse{
 		Range: EconomyRange{
 			From:     from,
@@ -287,6 +343,11 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CustoOpenRouterBRL: custoOpenRouter,
 			PctServidoLocal:    pctLocal,
 			HorasPodUp:         horasPodUp,
+
+			PctServidoLocalTokens: pctLocalTokens,
+			CustoCreditosHaikuBRL: creditsF.Float64,
+			CustoExternoCaixaBRL:  cashF.Float64,
+			Vast3060BRL:           vast3060,
 		},
 		Series: series,
 	}
@@ -295,4 +356,29 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 	obs.GatewayAdminRequests.WithLabelValues("/admin/economy", "2xx").Inc()
+}
+
+// lifecycleAccrual devolve (custo BRL, horas ativas) de um lifecycle Vast — a
+// mesma regra para primary (3090) e auxiliares (3060). Fechado: custo de
+// registro closedBRL e ended−started horas. Aberto: dph (US$/h) × horas desde
+// started × USD→BRL e now−started horas. Horas negativas viram 0.
+func lifecycleAccrual(startedAt time.Time, endedAt pgtype.Timestamptz, closedBRL, dphUSD pgtype.Numeric, now time.Time, usdToBRL float64) (cost, hours float64) {
+	if endedAt.Valid {
+		hours = endedAt.Time.Sub(startedAt).Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		if f := numericPtr(closedBRL); f != nil {
+			cost = *f
+		}
+		return cost, hours
+	}
+	hours = now.Sub(startedAt).Hours()
+	if hours < 0 {
+		hours = 0
+	}
+	if dph := numericPtr(dphUSD); dph != nil {
+		cost = *dph * hours * usdToBRL
+	}
+	return cost, hours
 }

@@ -13,6 +13,9 @@ import (
 )
 
 type Querier interface {
+	// Fecha o lifecycle aberto. Guardado por `ended_at IS NULL`: um stop repetido
+	// (retry do publisher best-effort) afeta 0 linhas e NÃO sobrescreve o custo.
+	CloseAuxPodLifecycle(ctx context.Context, arg CloseAuxPodLifecycleParams) (int64, error)
 	// Called when lifecycle terminates (any shutdown_reason). Sets ended_at = NOW()
 	// which releases the partial unique index slot, allowing a future lifecycle to
 	// be inserted. Records final shutdown_reason + total_cost_brl + appends event.
@@ -76,6 +79,10 @@ type Querier interface {
 	// Hot-path verify: PK-style fetch via SHA-256 lookup hash, then bcrypt verify
 	// happens at the application layer (Phase 2 D-A2 pattern).
 	GetAdminKeyByLookupHash(ctx context.Context, keyLookupHash []byte) (AiGatewayAdminKey, error)
+	// Distingue "já fechado" (ended_at NOT NULL → 200 already_closed) de "nunca
+	// aberto" (pgx.ErrNoRows → 404) no stop, e fornece started_at + dph_usd para
+	// o cálculo do custo quando o stop não traz total_cost_usd.
+	GetAuxPodLifecycle(ctx context.Context, arg GetAuxPodLifecycleParams) (GetAuxPodLifecycleRow, error)
 	// Returns the currently-active fx rate for a pair (e.g., 'USD/BRL').
 	GetCurrentFX(ctx context.Context, currencyPair string) (AiGatewayFxRate, error)
 	GetModelAlias(ctx context.Context, arg GetModelAliasParams) (GetModelAliasRow, error)
@@ -196,6 +203,10 @@ type Querier interface {
 	// into SQL (threat T-15-05). The metadata-only column list is PRESERVED —
 	// audit_log_content (prompts/responses) is NEVER selected (threat T-07-09).
 	ListAuditStateChanges(ctx context.Context, arg ListAuditStateChangesParams) ([]ListAuditStateChangesRow, error)
+	// Leitura para GET /admin/economy (custo da 3060). Mesmo formato de
+	// ListPrimaryLifecyclesInRange: filtra pelo started_at dentro de [from, to)
+	// (um lifecycle = um dia BRT — a 3060 sobe e é destruída no mesmo dia).
+	ListAuxPodLifecyclesInRange(ctx context.Context, arg ListAuxPodLifecyclesInRangeParams) ([]ListAuxPodLifecyclesInRangeRow, error)
 	// Used by `gatewayctl emerg lifecycles --since N --limit M`. Excludes the
 	// events JSONB column (callers fetch via id when needed) so the listing is
 	// compact for tabwriter rendering.
@@ -274,6 +285,12 @@ type Querier interface {
 	// Dispara NOTIFY upstreams_changed via trigger 0038 (só quando o valor muda:
 	// IS DISTINCT FROM); o LISTEN recarrega o snapshot sem restart.
 	SetUpstreamURLOverride(ctx context.Context, arg SetUpstreamURLOverrideParams) error
+	// Phase 23 (23-11, HAIKU-09): registra o início de um pod Vast auxiliar
+	// (hoje a 3060 unificada, publicado pelo unified3060.py via
+	// POST /admin/aux-pod-lifecycles). Idempotente por (pod, vast_instance_id):
+	// start repetido devolve o MESMO id, mantém o started_at mais antigo informado
+	// e só sobrescreve dph_usd quando o retry traz um valor.
+	StartAuxPodLifecycle(ctx context.Context, arg StartAuxPodLifecycleParams) (int64, error)
 	// GATEWAY-WIDE summary aggregate for GET /admin/economy (OBS-09). No tenant
 	// filter -- sums phantom + real external spend across all tenants. The
 	// INVARIANT (CONTEXT): cost_local_phantom_brl is written ONLY when a request
@@ -284,6 +301,13 @@ type Querier interface {
 	SumBillingEventsByDate(ctx context.Context, arg SumBillingEventsByDateParams) ([]SumBillingEventsByDateRow, error)
 	// Aggregate over the entire range -- for the `summary` field.
 	SumBillingEventsRange(ctx context.Context, arg SumBillingEventsRangeParams) (SumBillingEventsRangeRow, error)
+	// Phase 23 (23-11, HAIKU-09): agregado gateway-wide (sem tenant) para o
+	// painel Economia fidedigno. local_tokens usa o mesmo INVARIANT de
+	// SumBillingAllTenantsRange (servido local sse cost_local_phantom_brl > 0).
+	// credits_covered_brl = custo do passo ① (anthropic-haiku) a preço de lista,
+	// coberto por créditos (caixa real = 0); external_cash_brl = demais upstreams
+	// externos, pagos em caixa.
+	SumEconomyTokensRange(ctx context.Context, arg SumEconomyTokensRangeParams) (SumEconomyTokensRangeRow, error)
 	// GATEWAY-WIDE phantom series for GET /admin/economy (OBS-09). The deliberate
 	// omission of `WHERE tenant_id = $1` is the OBS-09 blocker fix: operations.go
 	// could not populate phantom_month_brl because no no-tenant-filter sum existed.
