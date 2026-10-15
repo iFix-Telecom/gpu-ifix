@@ -17,7 +17,7 @@ As chaves foram coladas no chat da sessão. Pela recomendação do plano (T-23-6
 
 ### Formato das chaves (FATO, medido 2026-10-15 ~12:05 BRT)
 
-As duas chaves têm o formato `sk-ant-usr-` e não são presas a um workspace.
+As duas chaves têm o formato de chave de usuário (prefixo `usr`) e não são presas a um workspace.
 - `GET /v1/models` sem o header `anthropic-workspace-id` responde 400: "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header".
 - Com o header, responde 200 e lista `claude-haiku-5-5`.
 
