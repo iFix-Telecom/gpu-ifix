@@ -281,6 +281,10 @@ describe("fetchEconomy", () => {
         custo_openrouter_brl: 12.34,
         pct_servido_local: 0.87,
         horas_pod_up: 56.5,
+        pct_servido_local_tokens: 0.62,
+        custo_creditos_haiku_brl: 10,
+        custo_externo_caixa_brl: 2.34,
+        vast_3060_brl: 4.5,
       },
       series: [
         {
@@ -306,6 +310,11 @@ describe("fetchEconomy", () => {
     expect(result.summary.pct_servido_local).toBe(0.87);
     expect(result.summary.horas_pod_up).toBe(56.5);
     expect(result.series[0].economia_brl).toBe(7.5);
+    // 23-11 fields: Haiku credits × cash, % local by tokens, 3060 Vast cost.
+    expect(result.summary.pct_servido_local_tokens).toBe(0.62);
+    expect(result.summary.custo_creditos_haiku_brl).toBe(10);
+    expect(result.summary.custo_externo_caixa_brl).toBe(2.34);
+    expect(result.summary.vast_3060_brl).toBe(4.5);
   });
 
   it("round-trips a fixture with roi_multiplier AND pct_servido_local null", async () => {
@@ -322,6 +331,10 @@ describe("fetchEconomy", () => {
         custo_openrouter_brl: 0,
         pct_servido_local: null,
         horas_pod_up: 0,
+        pct_servido_local_tokens: null,
+        custo_creditos_haiku_brl: 0,
+        custo_externo_caixa_brl: 0,
+        vast_3060_brl: 0,
       },
       series: [],
     };
@@ -332,6 +345,7 @@ describe("fetchEconomy", () => {
 
     expect(result.summary.roi_multiplier).toBeNull();
     expect(result.summary.pct_servido_local).toBeNull();
+    expect(result.summary.pct_servido_local_tokens).toBeNull();
     expect(result.series).toHaveLength(0);
   });
 });
