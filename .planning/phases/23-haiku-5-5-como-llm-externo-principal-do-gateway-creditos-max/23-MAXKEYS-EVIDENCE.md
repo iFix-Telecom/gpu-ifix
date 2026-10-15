@@ -118,3 +118,18 @@ Pedro informou: `max-pedro` (pe.araujo…) dia **19**, `max-financeiro` (finance
 
 - Termos suplementares dos créditos: resposta literal "confirmado". Uso pela empresa aceito.
 - Rotação das chaves coladas no chat: resposta literal "não vou rotacionar". Risco aceito pelo Pedro; chaves seguem só no segredo root 600 e no Env do stack 38.
+
+## Checkpoint — Task 3: Pedro confirma ① em produção
+
+**2026-10-15 ~20:40 BRT — resposta do Pedro: "approved".**
+
+Conferência que embasou a resposta (Console + painel Economia, período = hoje):
+
+| Fonte | Valor |
+|---|---|
+| Console Anthropic (Pedro) | Custo total US$ 2,26 |
+| Painel Economia | Haiku (coberto por créditos) R$ 12,67 · Externo (caixa) R$ 21,07 |
+| `billing_events` após 15:29 UTC | `anthropic-haiku` 4.798 eventos, R$ 12,72 (≈ US$ 2,26) |
+| `billing_events` antes de 15:29 UTC | `openrouter-chat` 5.146 eventos, R$ 19,26 (caixa do Haiku via OpenRouter, antes do passo ①) |
+| Caixa após 15:29 UTC | R$ 1,45 (gemini-stt 0,42 · groq-whisper 0,35 · openrouter-tts 0,61 · openrouter-chat 0,07) |
+| `audit_log` chat desde 15:29 UTC | anthropic-haiku 4.706 (99,9 %, 0 erros) · openrouter-chat 6 · openrouter-deepseek 0 |
