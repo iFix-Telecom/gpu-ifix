@@ -331,3 +331,16 @@ SQL
 - **Deploy:** snapshot `~/gw-phase23-rollout/stack38-*-pre-headroom-*.json` (600); `PUT /api/stacks/38?endpointId=6` às 06:36:16 UTC, só a linha `image:` → `develop-7bbf9cb@sha256:7f2da57cce6c853b6ded96ddbf50364a0898cfdd39c0dc2ae353f248b92d4708`, Env 88 inalterado. `/health`: 504 único às 06:36:54, 200 a partir de 06:36:59. Task `develop-7bbf9cb` Running; sem panic/fatal/ERROR no log.
 - **Smoke (tenant campanhas, alias deepseek-flash → Haiku 5.5):** `max_tokens:500` → `finish_reason:stop`, 97 chars; `max_tokens:40` → `finish_reason:stop`, 115 chars.
 - **Rollback:** PUT do stack 38 com `stack38-file-pre-headroom-*.json` (imagem `develop-99d73b2`).
+
+## Recontagem do 400 de prefill (2026-10-15 12:17 BRT)
+
+Query read-only em `bd_ai_gateway`, mesma do §4 do 23-02-HOTFIX-EVIDENCE, com janela desde o hotfix (05:50 UTC):
+- **prefill_400 = 0.** O baseline era 37 em 24 h.
+- O total de 400 na janela também é 0.
+- Status no período: 200 = 4851, 502 = 96, 503 = 2.
+
+Os 502 não são de chat:
+- 96 em `/v1/embeddings` (`local-embed`, tenant chat-ifix), entre 03:00 e 05:52 BRT;
+- 1 em `/v1/embeddings` (`converseai-contacts-embed`), às 06:36 BRT, durante o restart do deploy.
+
+Os 2 503 são 1 `blocked_sensitive` (telefonia, RES-08) e 1 do mesmo evento de embed. **NÃO SEI** a causa dos 502 de embed; eles cessaram às 05:52 BRT.
