@@ -1,0 +1,25 @@
+{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-5-5",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "O usuário cumprimentou; responder curto.",
+      "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds"
+    },
+    {
+      "type": "text",
+      "text": "Olá"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 100,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 900,
+    "output_tokens": 20
+  }
+}
