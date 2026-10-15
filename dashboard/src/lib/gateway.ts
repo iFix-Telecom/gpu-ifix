@@ -324,6 +324,15 @@ export interface EconomyResponse {
     pct_servido_local: number | null;
     /** Total pod-up hours in the period. */
     horas_pod_up: number;
+    // --- 23-11 (HAIKU-09): mirror of the new admin.EconomySummary fields ---
+    /** local_tokens / total_tokens (0–1 scale) — null when total == 0. */
+    pct_servido_local_tokens: number | null;
+    /** Haiku step ① cost — covered by Max credits (real cash = 0). */
+    custo_creditos_haiku_brl: number;
+    /** Real external cash spend (external total minus the Haiku step ①). */
+    custo_externo_caixa_brl: number;
+    /** 3060 aux pod Vast cost (already included in vast_brl). */
+    vast_3060_brl: number;
   };
   series: EconomyDayRow[];
 }

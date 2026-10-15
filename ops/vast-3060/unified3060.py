@@ -42,11 +42,15 @@ State:   /var/lib/vast-3060/state.json (compartilhado com o legado vast3060:
 Secrets: /etc/onboard/secrets/vast-3060.env (VAST_API_KEY, PORTAINER_API_KEY,
          DINASTIA_BASE_URL, DINASTIA_TOKEN, NOTIFY_PHONE, GW_STT_KEY, GW_TTS_KEY)
          PORTAINER_API_KEY so e necessario para o flip-stack-legacy.
+         Opcionais (23-13, custo da 3060 no painel Economia):
+         GATEWAY_ADMIN_URL (ex.: https://ai-gateway.converse-ai.app) e
+         GATEWAY_ADMIN_KEY (X-Admin-Key). Sem elas o start/stop do lifecycle
+         em POST /admin/aux-pod-lifecycles e' pulado; com elas e' best-effort.
 Arquivos irmaos (deployados em /opt/vast-3060/): onstart-unified.sh,
          infinity-freeze.txt, vast3060.py (helpers reutilizados).
 """
 import base64, copy, fcntl, json, os, shlex, subprocess, sys, time, urllib.parse, urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -131,9 +135,120 @@ def vast_get(env, iid):
     return json.loads(raw).get("instances")
 
 def vast_destroy(env, iid):
+    """DESTROI a instancia e (23-13) grava o stop do custo no gateway.
+
+    Ponto UNICO de destroy: sweep de orfas, pending, boot falho (fail()),
+    anterior pos-flip, stop noturno e watchdog passam todos por aqui — entao o
+    stop do lifecycle nunca depende de lembrar cada caminho. Stop so e' gravado
+    quando a instancia de fato saiu (200) ou ja nao existia (404); destroy que
+    falhou = instancia segue cobrando, custo continua aberto. Best-effort: o
+    gateway fora do ar NUNCA muda o retorno do destroy.
+    """
     c, _ = v.http("DELETE", f"{VAST}/instances/{iid}/",
                   {"Authorization": f"Bearer {env['VAST_API_KEY']}"}, timeout=40)
+    if c in (200, 404):
+        _record_stop(env, iid)
     return c
+
+
+# ------------------------------------------------ custo no gateway (23-13)
+# HAIKU-09: o painel Economia soma o custo Vast da 3060 a partir de
+# ai_gateway.aux_pod_lifecycles, alimentada por POST /admin/aux-pod-lifecycles.
+# Envs novas no arquivo de segredos lido por v.load_env() (SECRETS_PATH,
+# root-600; instalacao e valor no 23-16):
+#   GATEWAY_ADMIN_URL  ex.: https://ai-gateway.converse-ai.app
+#   GATEWAY_ADMIN_KEY  admin key do gateway (header X-Admin-Key; NUNCA logada)
+# Sem as duas envs a gravacao e' simplesmente pulada.
+# start: gravado logo depois do create, com `at` = horario de ANTES do create
+# (o provisionamento entra no custo). stop: dentro de vast_destroy.
+# O state guarda {instance_id: {started_at, dph_usd}} em aux_lifecycles para o
+# stop mandar total_cost_usd = horas x dph; sem isso o gateway calcula sozinho.
+AUX_POD = "vast-3060"
+AUX_TIMEOUT = 10
+AUX_KEEP_DAYS = 3
+
+
+def _now():
+    return datetime.now(TZ)
+
+
+def _redact(text, secret):
+    text = str(text)
+    return text.replace(secret, "***") if secret else text
+
+
+def record_aux_lifecycle(env, event, instance_id, dph_usd=None, total_cost_usd=None,
+                         at=None) -> bool:
+    """POST /admin/aux-pod-lifecycles. BEST-EFFORT: nunca levanta.
+
+    True = gateway respondeu 200 (inclui stop repetido `already_closed`).
+    False = sem config, HTTP != 200 (404 = stop sem start) ou excecao. A chave
+    nunca aparece no log (redigida mesmo se ecoada no corpo/erro)."""
+    key = ""
+    try:
+        url = (env.get("GATEWAY_ADMIN_URL") or "").strip().rstrip("/")
+        key = (env.get("GATEWAY_ADMIN_KEY") or "").strip()
+        if not url or not key:
+            log(f"aux-lifecycle {event} {instance_id}: GATEWAY_ADMIN_URL/KEY ausentes "
+                f"— custo da 3060 nao gravado")
+            return False
+        body = {"pod": AUX_POD, "event": event, "vast_instance_id": int(instance_id)}
+        if dph_usd is not None:
+            body["dph_usd"] = float(dph_usd)
+        if total_cost_usd is not None:
+            body["total_cost_usd"] = float(total_cost_usd)
+        if at is not None:
+            body["at"] = at.isoformat(timespec="seconds")
+        c, raw = v.http("POST", f"{url}/admin/aux-pod-lifecycles",
+                        {"X-Admin-Key": key, "Content-Type": "application/json"},
+                        json.dumps(body).encode(), timeout=AUX_TIMEOUT)
+        if c == 200:
+            log(f"aux-lifecycle {event} {instance_id}: gravado")
+            return True
+        if isinstance(raw, bytes):
+            raw = raw.decode(errors="replace")
+        print(f"[unified3060] aux-lifecycle {event} {instance_id}: HTTP {c} "
+              f"{_redact(raw, key)[:200]}", file=sys.stderr, flush=True)
+        return False
+    except Exception as e:
+        print(f"[unified3060] aux-lifecycle {event} {instance_id}: excecao "
+              f"{type(e).__name__}: {_redact(e, key)[:200]}", file=sys.stderr, flush=True)
+        return False
+
+
+def _record_stop(env, iid):
+    """Stop do lifecycle de `iid` com total = horas x dph do state (se houver)."""
+    try:
+        now = _now()
+        total = None
+        try:
+            entry = (load_state().get("aux_lifecycles") or {}).get(str(iid)) or {}
+            if entry:
+                started = datetime.fromisoformat(entry["started_at"])
+                hours = (now - started).total_seconds() / 3600
+                if hours >= 0:
+                    total = round(hours * float(entry["dph_usd"]), 6)
+        except Exception:
+            total = None  # state ruim: o gateway calcula dph x horas sozinho
+        record_aux_lifecycle(env, "stop", iid, total_cost_usd=total, at=now)
+    except Exception as e:
+        print(f"[unified3060] aux-lifecycle stop {iid}: excecao {type(e).__name__}",
+              file=sys.stderr, flush=True)
+
+
+def prune_aux_lifecycles(st, now):
+    """PURA sobre o dict: tira de aux_lifecycles as entradas com mais de
+    AUX_KEEP_DAYS dias ou com started_at ilegivel (o state nao cresce)."""
+    aux = st.get("aux_lifecycles") or {}
+    keep = {}
+    for k, e in aux.items():
+        try:
+            if now - datetime.fromisoformat(e["started_at"]) <= timedelta(days=AUX_KEEP_DAYS):
+                keep[k] = e
+        except Exception:
+            continue
+    st["aux_lifecycles"] = keep
+    return st
 
 
 def vast_list(env):
@@ -845,7 +960,23 @@ def cmd_start(env, resume_id=None):
                          "total": float(rinst.get("dph_total") or 0),
                          "src": "resume-dph_total"}}
         st["pending_id"] = new_id
+        # 23-13: re-envia o start (idempotente no gateway: LEAST(started_at))
+        # — cobre o caso do start original ter falhado com o gateway fora.
+        aux = (st.get("aux_lifecycles") or {}).get(str(new_id))
+        r_at, r_dph = None, float(rinst.get("dph_total") or 0) or None
+        if aux:
+            try:
+                r_at = datetime.fromisoformat(aux["started_at"])
+                r_dph = float(aux["dph_usd"])
+            except Exception:
+                r_at = None
+        if r_at is None:
+            r_at = _now()
+            prune_aux_lifecycles(st, r_at)
+            st["aux_lifecycles"][str(new_id)] = {
+                "started_at": r_at.isoformat(timespec="seconds"), "dph_usd": r_dph or 0.0}
         save_state(st)
+        record_aux_lifecycle(env, "start", new_id, dph_usd=r_dph, at=r_at)
     else:
         pick = pick_offer(env, avoid, host_avoid, mode=mode, margin=conf["margin"])
         if pick is None:
@@ -867,6 +998,9 @@ def cmd_start(env, resume_id=None):
             # interruptivel: chave `price` (US$/h) no PUT /asks/{id}/ (vast-cli
             # build_create_instance_payload). Sem ela nasce on-demand.
             body["price"] = pick["bid"]
+        # 23-13: horario de ANTES do create = inicio do custo (provisionamento
+        # entra na conta, nao so o pod de pe)
+        created_at = _now()
         c, resp = v.http_json(
             "PUT", f"{VAST}/asks/{offer['id']}/",
             {"Authorization": f"Bearer {env['VAST_API_KEY']}"}, body, timeout=60)
@@ -888,7 +1022,14 @@ def cmd_start(env, resume_id=None):
         st["pending_id"] = new_id
         st["pending_mode"] = pick["mode"]
         st["pending_bid"] = pick["bid"]
+        # 23-13: guarda inicio + dph p/ o stop (em vast_destroy) mandar o total
+        dph = float(pick["cost"]["total"])
+        prune_aux_lifecycles(st, created_at)
+        st["aux_lifecycles"][str(new_id)] = {
+            "started_at": created_at.isoformat(timespec="seconds"), "dph_usd": dph}
         save_state(st)
+        # start JA (antes da espera de boot/health); best-effort, nunca falha
+        record_aux_lifecycle(env, "start", new_id, dph_usd=dph, at=created_at)
 
     def fail(step, inst=None):
         """Falha de provision: diagnostica via journal e SEMPRE destroi a nova
