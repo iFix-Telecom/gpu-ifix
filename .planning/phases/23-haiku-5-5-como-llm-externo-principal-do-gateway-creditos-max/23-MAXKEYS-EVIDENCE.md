@@ -109,3 +109,7 @@ Janela: 15:29 → 17:30 UTC. Fonte: `ai_gateway.billing_events` (somente leitura
 - O jq do script rodou na versão antiga (carregada antes da correção) e falhou; as chaves foram consultadas à mão.
 
 Critérios de rollback: nenhum disparou. O ① continua **mantido**.
+
+## Dias de renovação (2026-10-15 19:20 UTC)
+
+Pedro informou: `max-pedro` (pe.araujo…) dia **19**, `max-financeiro` (financeiro.ifix…) dia **13**. Arquivo de segredo atualizado (backup `.bak-20261015-dias`) e aplicado no mesmo PUT do 23-17 Task 3 (`rotulo=…#workspace@dia`). Log de boot: `anthropic-haiku enabled keys=2`; `/admin/anthropic/keys` com as duas em `state=ok`; smoke LLM 200.

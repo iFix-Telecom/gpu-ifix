@@ -69,7 +69,36 @@ US$ 0,32 a US$ 15/M.
 
 ## Gabarito
 
-(fica vazio até o Pedro escolher; a revelação acontece depois do checkpoint da Task 2)
+Revelado em 2026-10-15 ~16:20 BRT, depois da escolha.
+
+| Letra | Modelo | Voz | Latência média (s) | US$/char |
+|---|---|---|---|---|
+| **A (escolhida)** | `elevenlabs/eleven-v3` | `eric` | 3,20 | 0,000040 |
+| B | `x-ai/grok-voice-tts-1.0` | `rex` | 1,67 | 0,000015 |
+| C | `microsoft/mai-voice-2.1` | `pt-BR-Rafael:MAI-Voice-2.1` | 1,69 | 0,000022 |
+| D (controle) | `tts-1` Kokoro CPU via gateway | `pm_alex` | 17,04 | 0 |
+| E | `elevenlabs/eleven-multilingual-v2` | `eric` | 1,57 | 0,000040 |
+| F | `elevenlabs/eleven-v4` | `eric` | 2,64 | 0,000040 |
+
+FATO: a letra escolhida é a de maior latência média entre os externos (3,2 s; 4,66 s na frase longa) e está no maior preço (US$ 40/M chars). No volume do research (21.013 chars/30 dias) o mês fica em ~US$ 0,84.
+
+## Checkpoint — Task 2: Pedro escolhe a voz no teste cego
+
+- 2026-10-15 ~16:15 BRT, resposta literal do Pedro: "voz a".
+- Decisão: `elevenlabs/eleven-v3`, voz `eric`.
+
+## Task 3: o que será alterado em prod (registrado antes da mudança)
+
+Snapshot: `~/gw-phase23-tts/stack38{,-file}-pre-20261015T191956.json` (600). Env 93 itens, imagem `develop-5ce151e` (sem troca de imagem).
+
+1. Compose do stack 38: +3 linhas `UPSTREAM_TTS_OPENROUTER_URL`, `OPENROUTER_TTS_DEFAULT_MODEL`, `OPENROUTER_TTS_DEFAULT_VOICE`.
+2. Env do stack 38: +3 valores `https://openrouter.ai/api`, `elevenlabs/eleven-v3`, `eric`. Sem `OPENROUTER_TTS_VOICE_MAP`: o Director usa a voz default para qualquer voz do cliente que não esteja no mapa (`openrouter_tts_director.go`), então `pm_alex`, `alloy` etc. viram `eric`.
+3. Auth: `openrouter-tts` já lê `UPSTREAM_LLM_OPENROUTER_AUTH_BEARER` (coluna `auth_bearer_env`), presente no Env. Nada novo.
+4. Preço: `gatewayctl prices set -model tts-1 -provider openrouter -unit input_token -usd 0.00004` (billing mapeia `openrouter-tts` → provider `openrouter`, `interceptor_usage.go` l.505-508). A linha `(tts-1, openrouter-fireworks)` (phantom do Kokoro) não é tocada.
+5. Alias: nenhum. `model_aliases.upstream` tem CHECK `('llm','stt','embed')` (migration 0005), então não há linha TTS possível; a ordem vem do tier/prioridade (tier 0 `kokoro-tts` com breaker OPEN → tier 1 `openrouter-tts` prio 0 → `local-tts` prio 10).
+6. No mesmo PUT: `UPSTREAM_LLM_ANTHROPIC_API_KEYS` ganha os dias de renovação informados pelo Pedro (`max-pedro` dia 19, `max-financeiro` dia 13); ver 23-MAXKEYS-EVIDENCE.
+
+Rollback: PUT com o snapshot acima.
 
 ## Ajustes necessários para a Task 3 (registrados antes da execução)
 
@@ -109,3 +138,30 @@ Estado de prod lido em 2026-10-15 via `GET /admin/upstreams` (somente leitura), 
    escopo do plano.
 5. Se a letra escolhida for o controle (Kokoro), o openrouter-tts **não** é ligado e só se
    registra a decisão.
+
+## Task 3: execução (2026-10-15 19:20 UTC)
+
+- `PUT /api/stacks/38?endpointId=6` → HTTP 200. Imagem mantida (`develop-5ce151e`). Compose +3 linhas; Env 93 → 96.
+- Task nova `healthy`, `/health` 200. Container com `UPSTREAM_TTS_OPENROUTER_URL=https://openrouter.ai/api`, `OPENROUTER_TTS_DEFAULT_MODEL=elevenlabs/eleven-v3`, `OPENROUTER_TTS_DEFAULT_VOICE=eric`. Sem panic/fatal/ERROR no boot.
+- Preço: `prices` id `bb8f94d5…` (`tts-1`, `openrouter`, `input_token`, US$ 0,00004).
+
+### Smoke (tenant claude-tts, `{model:"tts-1",voice:"pm_alex"}`, sem response_format)
+
+| request_id | HTTP | Content-Type | Latência cliente | Cabeçalho | upstream (billing) | tokens_in | cost_external_brl |
+|---|---|---|---|---|---|---|---|
+| 01a14103-89d1… | 200 | audio/mpeg | 2,20 s | `ID3` v2.4, MPEG layer III 128 kbps 44,1 kHz | openrouter-tts | 34 | 0,006848 |
+| 01a14103-92ff… | 200 | audio/mpeg | 1,79 s | `ID3` | openrouter-tts | 34 | 0,006848 |
+| 01a14103-9a05… | 200 | audio/mpeg | 1,77 s | `ID3` | openrouter-tts | 34 | 0,006848 |
+
+- `cost_source=price_table`; 34 chars × US$ 0,00004 = US$ 0,00136.
+- Log do dispatcher: `role=tts upstream=openrouter-tts` direto, sem tentativa no `kokoro-tts` (tier 0, breaker OPEN). O item 3 dos ajustes (dial-fail no tier 0 morto) não ocorreu nas 3 chamadas.
+
+### RES-08
+
+Chave sensível (telefonia) em `/v1/audio/speech` → HTTP 503 `upstream_unavailable_for_sensitive_tenant`.
+
+### Fallback
+
+Alias canário `p23-canary-tts` impossível (CHECK da migration 0005). Ficou a opção (a): cascata openrouter-tts → local-tts provada em `TestHaikuChain_TTSStatusCascade` (23-14) + `local-tts` servindo TTS em prod até hoje. Sem force-open global (sem autorização do Pedro).
+
+Smoke LLM pós-redeploy (uat10-test, `qwen`) → `claude-haiku-5-5`, `finish_reason: stop`.
