@@ -107,3 +107,19 @@ SELECT
 FROM ai_gateway.billing_events
 WHERE ts >= $1
   AND ts <  $2;
+
+-- name: SumEconomyTokensRange :one
+-- Phase 23 (23-11, HAIKU-09): agregado gateway-wide (sem tenant) para o
+-- painel Economia fidedigno. local_tokens usa o mesmo INVARIANT de
+-- SumBillingAllTenantsRange (servido local sse cost_local_phantom_brl > 0).
+-- credits_covered_brl = custo do passo ① (anthropic-haiku) a preço de lista,
+-- coberto por créditos (caixa real = 0); external_cash_brl = demais upstreams
+-- externos, pagos em caixa.
+SELECT
+    COALESCE(SUM(tokens_in + tokens_out) FILTER (WHERE cost_local_phantom_brl > 0), 0)::bigint AS local_tokens,
+    COALESCE(SUM(tokens_in + tokens_out), 0)::bigint                                          AS total_tokens,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::numeric(20,6)  AS credits_covered_brl,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream <> 'anthropic-haiku'), 0)::numeric(20,6) AS external_cash_brl
+FROM ai_gateway.billing_events
+WHERE ts >= $1
+  AND ts <  $2;
