@@ -914,6 +914,71 @@ describe("admin-actions — quick 260830-o2j controle total (aliases / prefs / u
     expect(db.adminAuditLog.length).toBe(0);
   });
 
+  it("upsertModelAlias (23-20): openrouter-deepseek + prefs DeepSeek → 1 PUT + 1 audit row", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.upsertModelAliasCore as Core;
+    const db = freshDb();
+    gatewayAdminPutMock.mockResolvedValue({});
+    await fn({
+      actor: owner,
+      db,
+      alias: "deepseek-flash",
+      upstreamName: "openrouter-deepseek",
+      target: "deepseek/deepseek-v4.1-flash:exacto",
+      providerPrefs: {
+        sort: "price",
+        preferred_min_throughput: { p90: 100 },
+        max_price: { prompt: 0.4 },
+        quantizations: ["fp8"],
+        data_collection: "deny",
+      },
+    });
+    expect(gatewayAdminPutMock).toHaveBeenCalledTimes(1);
+    const [path, body] = gatewayAdminPutMock.mock.calls[0];
+    expect(path).toBe("model-aliases");
+    expect(body).toMatchObject({
+      alias: "deepseek-flash",
+      upstream_name: "openrouter-deepseek",
+      provider_prefs: { sort: "price", quantizations: ["fp8"], data_collection: "deny" },
+    });
+    expect(db.adminAuditLog.length).toBe(1);
+    expect(db.adminAuditLog[0].metadata).toMatchObject({
+      upstream_name: "openrouter-deepseek",
+      has_provider_prefs: true,
+    });
+  });
+
+  it("upsertModelAlias (23-20): anthropic-haiku + prefs → erro sem chamar o gateway", async () => {
+    const mod = await importAdminActions();
+    const fn = mod?.upsertModelAliasCore as Core;
+    const db = freshDb();
+    await expect(
+      fn({
+        actor: owner,
+        db,
+        alias: "qwen",
+        upstreamName: "anthropic-haiku",
+        target: "claude-haiku-5-5",
+        providerPrefs: { zdr: true },
+      }),
+    ).rejects.toThrow(/openrouter-deepseek/);
+    expect(gatewayAdminPutMock).not.toHaveBeenCalled();
+    expect(db.adminAuditLog.length).toBe(0);
+  });
+
+  it("PROVIDER_PREFS_UPSTREAMS (23-20): paridade com o fixture do gateway", async () => {
+    const mod = await importAdminActions();
+    const set = mod?.PROVIDER_PREFS_UPSTREAMS as Set<string>;
+    expect(set).toBeInstanceOf(Set);
+    const fs = await import("node:fs");
+    const raw = fs.readFileSync(
+      "../gateway/internal/admin/testdata/provider_prefs_upstreams.json",
+      "utf8",
+    );
+    const fx = JSON.parse(raw) as { provider_prefs_upstreams: string[] };
+    expect([...set].sort()).toEqual([...fx.provider_prefs_upstreams].sort());
+  });
+
   it("deleteModelAlias: owner success — DELETE model-aliases/{alias}/{upstream} + one audit row", async () => {
     const mod = await importAdminActions();
     const fn = mod?.deleteModelAliasCore as Core;
