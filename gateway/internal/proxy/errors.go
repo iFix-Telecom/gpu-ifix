@@ -110,6 +110,16 @@ func ErrorHandler(upstreamName string, log *slog.Logger) func(http.ResponseWrite
 		// rather than leave the client with a bare 200.
 		if errors.Is(err, errDialFailedFallthrough) || errors.Is(err, errUpstreamRetryable) {
 			if res := dispatchResultFrom(r.Context()); res != nil {
+				// Phase 23-04: a chat status fallthrough carries the
+				// upstream's real status/body so the dispatcher can return
+				// the LAST real error when the whole chain is exhausted
+				// (instead of the generic 503 envelope).
+				var statusErr *chatUpstreamStatusError
+				if errors.As(err, &statusErr) {
+					res.lastStatus = statusErr.Status()
+					res.lastBody = statusErr.Body()
+					res.lastContentType = statusErr.ContentType()
+				}
 				res.fallthrough_ = true
 				res.wrote = false
 				res.err = err
