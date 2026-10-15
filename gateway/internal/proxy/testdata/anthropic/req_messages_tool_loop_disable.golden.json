@@ -1,0 +1,33 @@
+{
+  "cache_control": {"type": "ephemeral"},
+  "max_tokens": 1000,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "Qual o clima em Goiânia e em Brasília?"}]},
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Goiânia"}},
+        {"type": "tool_use", "id": "call_2", "name": "get_weather", "input": {"city": "Brasília"}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "32°C, sol"},
+        {"type": "tool_result", "tool_use_id": "call_2", "content": "28°C, nublado"}
+      ]
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "stream": true,
+  "system": [{"type": "text", "text": "Você é o assistente da iFix.", "cache_control": {"type": "ephemeral"}}],
+  "thinking": {"type": "disabled"},
+  "tool_choice": {"type": "auto"},
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Clima atual de uma cidade",
+      "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+    }
+  ]
+}

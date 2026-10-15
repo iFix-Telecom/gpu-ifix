@@ -1,0 +1,36 @@
+{
+  "model": "deepseek-flash",
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "temperature": 0.2,
+  "top_p": 1,
+  "reasoning_effort": "high",
+  "provider": {"order": ["anthropic"]},
+  "user": "tenant-user-1",
+  "max_tokens": 1000,
+  "messages": [
+    {"role": "system", "content": "Você é o assistente da iFix."},
+    {"role": "user", "content": "Qual o clima em Goiânia e em Brasília?"},
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Goiânia\"}"}},
+        {"id": "call_2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Brasília\"}"}}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "32°C, sol"},
+    {"role": "tool", "tool_call_id": "call_2", "content": "28°C, nublado"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Clima atual de uma cidade",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
