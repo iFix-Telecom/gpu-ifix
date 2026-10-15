@@ -41,6 +41,11 @@ type Event struct {
 	CostLocalPhantomBRL float64
 	CostExternalBRL     float64
 	Source              string // "final" | "partial"
+	// Phase 23 (HAIKU-04): tokens de prompt cache reportados pelo provedor
+	// (subconjunto de TokensIn) e origem do custo externo.
+	TokensCacheRead  int
+	TokensCacheWrite int
+	CostSource       string // "provider_reported" | "price_table" | "" (NULL)
 }
 
 // flusher abstracts the DB writer so tests can inject a fake. Production

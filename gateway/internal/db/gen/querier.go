@@ -381,6 +381,11 @@ type Querier interface {
 	// offer_id, instance_id, and accepted dph price; appends an event to the JSONB
 	// timeline. event_json is a single object {ts, from_state, to_state, reason, payload}.
 	UpdatePrimaryLifecycleVastIDs(ctx context.Context, arg UpdatePrimaryLifecycleVastIDsParams) error
+	// Phase 23 (HAIKU-05): override de effort/thinking do LLM por tenant (NULL limpa).
+	// A CHECK da coluna (0041) rejeita valores fora de off/low/medium/high/xhigh/max.
+	// Dispara o trigger tenants_update_notify (0041 inclui llm_effort no WHEN), então
+	// o tenants.Loader de cada réplica recarrega.
+	UpdateTenantLLMEffort(ctx context.Context, arg UpdateTenantLLMEffortParams) (int64, error)
 	// Used by `gatewayctl tenant set-mode`. CHECK constraint chk_sensitive_no_peak
 	// rejects sensitive+peak at the DB layer (D-C1 path 2). The CLI also rejects
 	// pre-DB (path 1) for a clearer error message.

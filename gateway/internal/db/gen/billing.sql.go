@@ -19,12 +19,14 @@ WITH inserted AS (
         (request_id, ts, tenant_id, api_key_id, route, upstream, model,
          tokens_in, tokens_out, audio_seconds, embeds_count,
          cost_local_brl, cost_local_phantom_brl, cost_external_brl,
-         currency, source)
+         currency, source,
+         tokens_cache_read, tokens_cache_write, cost_source)
     VALUES
         ($1, $2, $3, $4, $5, $6, $7,
          $8, $9, $10, $11,
          0, $12, $13,
-         'BRL', $14)
+         'BRL', $14,
+         $15, $16, $17)
     ON CONFLICT (request_id, ts) DO NOTHING
     RETURNING tenant_id, tokens_in, tokens_out, audio_seconds, embeds_count,
               cost_local_phantom_brl, cost_external_brl
@@ -62,6 +64,9 @@ type InsertBillingEventParams struct {
 	CostLocalPhantomBrl pgtype.Numeric `json:"cost_local_phantom_brl"`
 	CostExternalBrl     pgtype.Numeric `json:"cost_external_brl"`
 	Source              string         `json:"source"`
+	TokensCacheRead     int32          `json:"tokens_cache_read"`
+	TokensCacheWrite    int32          `json:"tokens_cache_write"`
+	CostSource          pgtype.Text    `json:"cost_source"`
 }
 
 // Atomic insert into billing_events + UPSERT delta into usage_counters in a
@@ -89,6 +94,9 @@ func (q *Queries) InsertBillingEvent(ctx context.Context, arg InsertBillingEvent
 		arg.CostLocalPhantomBrl,
 		arg.CostExternalBrl,
 		arg.Source,
+		arg.TokensCacheRead,
+		arg.TokensCacheWrite,
+		arg.CostSource,
 	)
 	return err
 }

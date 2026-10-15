@@ -7,7 +7,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier, provider_prefs,
+       priority_tier, provider_prefs, llm_effort,
        created_at, updated_at
 FROM ai_gateway.tenants
 WHERE id = $1;
@@ -21,7 +21,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier, provider_prefs
+       priority_tier, provider_prefs, llm_effort
 FROM ai_gateway.tenants
 WHERE status = 'active'
 ORDER BY slug;
@@ -34,6 +34,16 @@ UPDATE ai_gateway.tenants
 SET provider_prefs = $2,
     updated_at = now()
 WHERE slug = $1;
+
+-- name: UpdateTenantLLMEffort :execrows
+-- Phase 23 (HAIKU-05): override de effort/thinking do LLM por tenant (NULL limpa).
+-- A CHECK da coluna (0041) rejeita valores fora de off/low/medium/high/xhigh/max.
+-- Dispara o trigger tenants_update_notify (0041 inclui llm_effort no WHEN), então
+-- o tenants.Loader de cada réplica recarrega.
+UPDATE ai_gateway.tenants
+SET llm_effort = sqlc.narg('llm_effort'),
+    updated_at = now()
+WHERE slug = sqlc.arg('slug');
 
 -- name: UpdateTenantMode :exec
 -- Used by `gatewayctl tenant set-mode`. CHECK constraint chk_sensitive_no_peak

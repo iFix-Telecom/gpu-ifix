@@ -50,6 +50,10 @@ type TenantConfig struct {
 	// Validated at write time (models.ValidateProviderPrefs); nil = unset.
 	ProviderPrefs []byte
 
+	// LLMEffort (Phase 23, HAIKU-05) — override de effort/thinking do LLM
+	// por tenant (tenants.llm_effort). "" = sem override (NULL no banco).
+	LLMEffort string
+
 	// Phase 5 — fairness per-tenant hard caps (D-B1 / D-B2). Zero value
 	// means "no cap configured"; the shed middleware treats that as
 	// default-cap-for-role (see shed.middleware.defaultCapForRole).

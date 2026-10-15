@@ -210,3 +210,53 @@ func TestCoerceDataClass(t *testing.T) {
 		}
 	}
 }
+
+// Phase 23 (HAIKU-05): override de effort por tenant.
+func TestLLMEffortByTenantID(t *testing.T) {
+	low := uuid.New()
+	unset := uuid.New()
+	q := &fakeLoaderQueries{rows: []gen.ListTenantsForLoaderRow{
+		{ID: low, Slug: "low", Status: "active", LlmEffort: pgtype.Text{String: "low", Valid: true}},
+		{ID: unset, Slug: "unset", Status: "active"},
+	}}
+	l := &Loader{q: q, log: silentLog(), defaultTZ: time.UTC}
+	if err := l.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := l.LLMEffortByTenantID(low.String()); got != "low" {
+		t.Errorf("low: got %q", got)
+	}
+	if got := l.LLMEffortByTenantID(unset.String()); got != "" {
+		t.Errorf("NULL: got %q, want \"\"", got)
+	}
+	if got := l.LLMEffortByTenantID("nao-e-uuid"); got != "" {
+		t.Errorf("id inválido: got %q", got)
+	}
+	if got := l.LLMEffortByTenantID(uuid.New().String()); got != "" {
+		t.Errorf("id desconhecido: got %q", got)
+	}
+	if got := l.LLMEffortByTenantID(""); got != "" {
+		t.Errorf("id vazio: got %q", got)
+	}
+	var nilLoader *Loader
+	if got := nilLoader.LLMEffortByTenantID(low.String()); got != "" {
+		t.Errorf("loader nil: got %q", got)
+	}
+	// Loader sem snapshot (nunca fez Refresh) também devolve "".
+	if got := (&Loader{log: silentLog()}).LLMEffortByTenantID(low.String()); got != "" {
+		t.Errorf("snapshot nil: got %q", got)
+	}
+
+	// Hot-reload: novo Refresh com o valor alterado.
+	q.rows[0].LlmEffort = pgtype.Text{String: "max", Valid: true}
+	q.rows[1].LlmEffort = pgtype.Text{String: "off", Valid: true}
+	if err := l.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh 2: %v", err)
+	}
+	if got := l.LLMEffortByTenantID(low.String()); got != "max" {
+		t.Errorf("após reload: got %q, want max", got)
+	}
+	if got := l.LLMEffortByTenantID(unset.String()); got != "off" {
+		t.Errorf("após reload: got %q, want off", got)
+	}
+}
