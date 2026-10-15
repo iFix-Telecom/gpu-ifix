@@ -288,8 +288,19 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			// upstream name. If its breaker is OPEN we emit the D-D1
 			// envelope (all_chat_upstreams_saturated + Retry-After: 30)
 			// instead of the schedule-derived off-hours envelope.
+			//
+			// Phase 23-04: with 3 tier-1 rows, Resolve(llm,1) — the override
+			// shed writes — is ①; ① OPEN no longer means "secondary
+			// unavailable". When the override is a tier-1 of this role, D-D1
+			// fires only when NO tier-1 is usable (allTier1Unavailable);
+			// otherwise dispatchOverrideCascade below serves from ②/③.
+			overrideIsTier1 := cfg.isRoleTier1(override)
 			if auditctx.ShedDecisionFromContext(r.Context()) == auditctx.UpstreamShedSaturatedValue {
-				if cfg.Breaker.EffectiveState(override) == gobreaker.StateOpen {
+				saturated := cfg.Breaker.EffectiveState(override) == gobreaker.StateOpen
+				if overrideIsTier1 {
+					saturated = cfg.allTier1Unavailable()
+				}
+				if saturated {
 					// Re-stamp ctx for audit (D-D4) so the audit row
 					// reads upstream=shed_tier1_unavailable rather
 					// than the openrouter-chat upstream name that
@@ -303,6 +314,26 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 						"Primary saturated and secondary unavailable.")
 					return
 				}
+			}
+			// Phase 23-04: the override path also walks the ①→②→③ chain
+			// (only externals — the override exists to bypass the GPU).
+			// RES-08 needs no new gate here: schedule (middleware.go
+			// l.79-100 + CHECK chk_sensitive_no_peak) and shed (ramo 10a,
+			// l.214-233) never stamp an upstream-name override on a
+			// sensitive tenant; dispatchPinned keeps its own RES-08 skip.
+			if cfg.Pins != nil {
+				if body, berr := readAndRestoreBody(r); berr == nil && len(body) > 0 {
+					if model := extractModelName(body); model != "" {
+						if pinned := cfg.Pins.PinnedUpstreams(model); len(pinned) > 0 {
+							cfg.dispatchPinned(w, r, ac.DataClass == auth.DataClassSensitive, model, pinned, log, overridePinnedOpts)
+							return
+						}
+					}
+				}
+			}
+			if overrideIsTier1 {
+				cfg.dispatchOverrideCascade(w, r, log)
+				return
 			}
 			cfg.dispatchOverride(w, r, override, log)
 			return
@@ -319,7 +350,7 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 			if body, berr := readAndRestoreBody(r); berr == nil && len(body) > 0 {
 				if model := extractModelName(body); model != "" {
 					if pinned := cfg.Pins.PinnedUpstreams(model); len(pinned) > 0 {
-						cfg.dispatchPinned(w, r, ac.DataClass == auth.DataClassSensitive, model, pinned, log)
+						cfg.dispatchPinned(w, r, ac.DataClass == auth.DataClassSensitive, model, pinned, log, pinnedOpts{})
 						return
 					}
 				}
@@ -568,7 +599,13 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 // dial failures record the candidate's breaker failure and advance.
 // Exhaustion writes a dedicated 503 so operators can tell "pinned roster
 // unavailable" apart from the generic cascade exhaustion.
-func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Request, sensitive bool, model string, pinned []string, log *slog.Logger) {
+//
+// Phase 23-04: opts selects the override mode (schedule/shed). With
+// opts.skipTier0 the tier-0 candidate is never added (the override exists to
+// bypass the GPU) and exhaustion without a recorded upstream status writes
+// opts.exhaustedCode/Msg (off_hours_upstream_unavailable) instead of
+// pinned_upstreams_unavailable. The zero value keeps the plain pinned path.
+func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Request, sensitive bool, model string, pinned []string, log *slog.Logger, opts pinnedOpts) {
 	pinSet := make(map[string]struct{}, len(pinned))
 	for _, n := range pinned {
 		pinSet[n] = struct{}{}
@@ -579,7 +616,7 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 		external bool // tier>=1 → RES-08 applies for sensitive tenants
 	}
 	var candidates []pinnedCand
-	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok {
+	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok && !opts.skipTier0 {
 		_, direct := pinSet[t0.Name]
 		matched := direct
 		if !matched && t0.IsEmergency {
@@ -668,9 +705,114 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 	if writeLastUpstreamError(w, lastErr) {
 		return
 	}
+	code, msg := "pinned_upstreams_unavailable", "No pinned upstream is available for this model."
+	if opts.exhaustedCode != "" {
+		code, msg = opts.exhaustedCode, opts.exhaustedMsg
+	}
+	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable, "service_unavailable", code, msg)
+}
+
+// pinnedOpts parametrises dispatchPinned for the schedule/shed override path
+// (Phase 23-04). Zero value = plain model-pinned routing.
+type pinnedOpts struct {
+	skipTier0     bool   // never dispatch to the tier-0 candidate (GPU bypass)
+	exhaustedCode string // envelope code on exhaustion without upstream status
+	exhaustedMsg  string // envelope message paired with exhaustedCode
+}
+
+// Envelope written when the schedule/shed override path is exhausted with no
+// real upstream error to return — the D-C2 contract the integration tests
+// (off_hours_external_down_test.go) pin.
+const (
+	offHoursUnavailableCode = "off_hours_upstream_unavailable"
+	offHoursUnavailableMsg  = "Tenant in peak mode and off-hours external upstream unavailable."
+)
+
+// overridePinnedOpts is the dispatchPinned mode for an override request whose
+// model is pinned: only externals, off-hours envelope on exhaustion.
+var overridePinnedOpts = pinnedOpts{
+	skipTier0:     true,
+	exhaustedCode: offHoursUnavailableCode,
+	exhaustedMsg:  offHoursUnavailableMsg,
+}
+
+// isRoleTier1 reports whether name is one of this role's enabled tier-1
+// upstreams (the set dispatchOverrideCascade walks).
+func (cfg DispatcherConfig) isRoleTier1(name string) bool {
+	for _, u := range cfg.Loader.ResolveAllTier1(cfg.Role) {
+		if u.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// allTier1Unavailable reports whether NO tier-1 of this role can take traffic
+// (every one is OPEN, operator force-open included). Replaces the single
+// "override breaker OPEN" check of the D-D1 shed envelope: with 3 tier-1, the
+// override (Resolve(llm,1) = ①) being OPEN no longer means the secondary is
+// unavailable. HALF_OPEN counts as usable, mirroring dispatchOverride's
+// historical "dispatch unless OPEN" rule.
+func (cfg DispatcherConfig) allTier1Unavailable() bool {
+	for _, u := range cfg.Loader.ResolveAllTier1(cfg.Role) {
+		if cfg.Breaker.EffectiveState(u.Name) != gobreaker.StateOpen {
+			return false
+		}
+	}
+	return true
+}
+
+// dispatchOverrideCascade serves a schedule/shed override whose target is a
+// tier-1 of this role, for a model WITHOUT pinned rows (Phase 23-04). It walks
+// every tier-1 in tier_priority order (①→②→③) instead of being stuck on the
+// single override upstream: with ① active, a 429/529/credit-too-low from ①
+// would otherwise reach peak-mode tenants verbatim.
+//
+// Per candidate: skip when OPEN (HALF_OPEN dispatches, same as the historical
+// dispatchOverride), skip when no proxy is registered, replay the body, and go
+// through dispatchTo (installs dispatchResult, so status/dial cascade applies).
+// Breaker penalty follows countsAsBreakerFailure. Exhaustion writes the last
+// real upstream error, or the off_hours_upstream_unavailable envelope.
+//
+// RES-08: no gate here by design — schedule and shed never stamp an
+// upstream-name override on a sensitive tenant (see handler comment).
+func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
+	streaming := IsStreamingRequest(r)
+	restoreBody, _ := prepareReplayBody(r)
+	var lastErr *dispatchResult
+	for _, t1 := range cfg.Loader.ResolveAllTier1(cfg.Role) {
+		if cfg.Breaker.EffectiveState(t1.Name) == gobreaker.StateOpen {
+			continue
+		}
+		if _, ok := cfg.Proxies[t1.Name]; !ok {
+			log.Warn("override cascade candidate has no registered proxy; skipping",
+				"upstream", t1.Name,
+				"request_id", httpx.RequestIDFrom(r.Context()))
+			continue
+		}
+		if restoreBody != nil {
+			restoreBody()
+		}
+		res := cfg.dispatchTo(w, r, t1.Name, streaming, log)
+		if res.fallthrough_ && !res.wrote {
+			if countsAsBreakerFailure(res.err) {
+				cfg.recordFallthroughFailure(r, t1.Name, res.err, log)
+			}
+			if res.lastStatus != 0 {
+				last := res
+				lastErr = &last
+			}
+			continue
+		}
+		return
+	}
+	if writeLastUpstreamError(w, lastErr) {
+		return
+	}
+	log.Warn("off-hours external chain unavailable; fail-fast",
+		"request_id", httpx.RequestIDFrom(r.Context()))
 	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
-		"service_unavailable", "pinned_upstreams_unavailable",
-		"No pinned upstream is available for this model.")
+		"service_unavailable", offHoursUnavailableCode, offHoursUnavailableMsg)
 }
 
 // cascadeTier1 dispatches to the first CLOSED tier-1 candidate (tier_priority
@@ -755,6 +897,13 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 //   - skips token-count + streaming detection done by the normal path
 //     — the override target (OpenRouter) enforces its own context cap
 //     and the streaming flag is carried in the body regardless.
+//
+// Phase 23-04: this single-upstream path is now the LAST resort of the
+// override block. A pinned model goes through dispatchPinned (override mode,
+// externals only) and an override naming one of this role's tier-1 upstreams
+// goes through dispatchOverrideCascade (①→②→③). dispatchOverride is still
+// used only when the override names an upstream outside this role's tier-1
+// set (e.g. a tier-2 row or another role) — behaviour unchanged there.
 func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Request, name string, log *slog.Logger) {
 	// Check the override target's breaker. If CLOSED or HALF_OPEN we
 	// dispatch; if OPEN the tenant is peak-mode off-hours and has no
