@@ -14,9 +14,11 @@
 //   - voice: voiceMap[voz do cliente] quando mapeada; senão, se defaultVoice
 //     != "", defaultVoice (cobre voz ausente/vazia e vozes de outros engines,
 //     ex. pm_alex do Kokoro); senão a voz do cliente segue intacta.
-//   - response_format: "mp3" só quando ausente/vazio (Pitfall 13 — o
-//     OpenRouter devolve PCM por padrão). Valor explícito do cliente é
-//     respeitado.
+//   - response_format: o OpenRouter só aceita "mp3" e "pcm" (qualquer outro
+//     valor dá 400 ZodError — visto em prod 2026-10-15 com o "wav" do
+//     claude-wpp). Ausente/vazio (Pitfall 13: o default dele é PCM) ou fora
+//     desse conjunto vira "mp3"; a resposta sai com Content-Type audio/mpeg,
+//     então o cliente vê o formato real pelo cabeçalho. "mp3"/"pcm" seguem.
 //
 // Cascata por status/timeout NÃO é responsabilidade deste Director — o 23-14
 // compõe ChatRetryableStatusInterceptor no ModifyResponse do proxy TTS.
@@ -144,12 +146,14 @@ func openrouterTTSRewrite(
 		m["voice"] = b
 	}
 
-	// response_format — força mp3 só quando ausente/vazio (Pitfall 13).
+	// response_format — o OpenRouter só aceita mp3|pcm; o resto vira mp3.
 	var format string
 	if raw, ok := m["response_format"]; ok {
 		_ = json.Unmarshal(raw, &format)
 	}
-	if strings.TrimSpace(format) == "" {
+	switch strings.TrimSpace(format) {
+	case "mp3", "pcm":
+	default:
 		m["response_format"] = json.RawMessage(`"mp3"`)
 	}
 

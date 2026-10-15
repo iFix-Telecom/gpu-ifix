@@ -53,13 +53,30 @@ func TestOpenRouterTTSDirector_RewritesModelVoiceAndForcesMP3(t *testing.T) {
 	}
 }
 
-func TestOpenRouterTTSDirector_KeepsExplicitResponseFormat(t *testing.T) {
-	upstream, _ := url.Parse("https://openrouter.ai/api")
-	d := BuildOpenRouterTTSDirector(upstream, "sk", ttsTestResolver(), "openrouter-tts", "", "", nil, discardLogger())
-	body := []byte(`{"model":"tts-1","input":"x","voice":"pm_alex","response_format":"wav"}`)
-	_, out := applyDirector(t, d, http.MethodPost, "/v1/audio/speech", "application/json", body, nil, nil)
-	if got := decodeTTSBody(t, out)["response_format"]; got != "wav" {
-		t.Errorf("response_format = %v, want wav", got)
+// O OpenRouter só aceita mp3|pcm (400 ZodError em prod, 2026-10-15, para o
+// "wav" do claude-wpp). Formato fora desse conjunto vira mp3; a resposta sai
+// com Content-Type audio/mpeg e o cliente vê o formato real pelo cabeçalho.
+func TestOpenRouterTTSDirector_UnsupportedResponseFormatBecomesMP3(t *testing.T) {
+	for _, f := range []string{"wav", "opus", "aac", "flac", "WAV"} {
+		upstream, _ := url.Parse("https://openrouter.ai/api")
+		d := BuildOpenRouterTTSDirector(upstream, "sk", ttsTestResolver(), "openrouter-tts", "", "", nil, discardLogger())
+		body := []byte(`{"model":"tts-1","input":"x","voice":"pm_alex","response_format":"` + f + `"}`)
+		_, out := applyDirector(t, d, http.MethodPost, "/v1/audio/speech", "application/json", body, nil, nil)
+		if got := decodeTTSBody(t, out)["response_format"]; got != "mp3" {
+			t.Errorf("response_format %q → %v, want mp3", f, got)
+		}
+	}
+}
+
+func TestOpenRouterTTSDirector_KeepsSupportedResponseFormat(t *testing.T) {
+	for _, f := range []string{"mp3", "pcm"} {
+		upstream, _ := url.Parse("https://openrouter.ai/api")
+		d := BuildOpenRouterTTSDirector(upstream, "sk", ttsTestResolver(), "openrouter-tts", "", "", nil, discardLogger())
+		body := []byte(`{"model":"tts-1","input":"x","response_format":"` + f + `"}`)
+		_, out := applyDirector(t, d, http.MethodPost, "/v1/audio/speech", "application/json", body, nil, nil)
+		if got := decodeTTSBody(t, out)["response_format"]; got != f {
+			t.Errorf("response_format = %v, want %s", got, f)
+		}
 	}
 }
 
