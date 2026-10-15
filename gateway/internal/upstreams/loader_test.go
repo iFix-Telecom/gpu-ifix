@@ -7,10 +7,14 @@
 package upstreams
 
 import (
+	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 )
 
 // newOverrideFixture builds a Loader with two upstreams: tier-0 local-llm
@@ -664,5 +668,61 @@ func TestResolveTier0Roles_IncludesRerank(t *testing.T) {
 	}
 	if got.Overridden {
 		t.Errorf("rerank tier-0 Overridden = true, want false (no emergency slot for rerank)")
+	}
+}
+
+// Phase 23-04 (Padrão 6): with 3 tier-1 rows for llm, Resolve("llm",1) — used
+// by the schedule/shed override — must point at the LOWEST tier_priority,
+// independent of the order the rows were read.
+func threeTier1(order []int) []UpstreamConfig {
+	all := []UpstreamConfig{
+		{Name: "openrouter-deepseek", Role: "llm", Tier: 1, TierPriority: 20, URL: "https://or.example/v1", Enabled: true},
+		{Name: "anthropic-haiku", Role: "llm", Tier: 1, TierPriority: 0, URL: "https://api.anthropic.example/v1", Enabled: true},
+		{Name: "openrouter-chat", Role: "llm", Tier: 1, TierPriority: 10, URL: "https://or.example/v1", Enabled: true},
+	}
+	out := []UpstreamConfig{{Name: "local-llm", Role: "llm", Tier: 0, URL: "http://primary:8000", Enabled: true}}
+	for _, i := range order {
+		out = append(out, all[i])
+	}
+	return out
+}
+
+func TestResolveTier1_LowestTierPriorityWins(t *testing.T) {
+	for _, order := range [][]int{{0, 1, 2}, {2, 1, 0}, {1, 0, 2}, {0, 2, 1}} {
+		l := NewLoaderForTest(threeTier1(order)...)
+		u, ok := l.Resolve("llm", 1)
+		if !ok || u.Name != "anthropic-haiku" {
+			t.Fatalf("order %v: Resolve(llm,1) = %q (ok=%v), want anthropic-haiku", order, u.Name, ok)
+		}
+		t0, ok := l.Resolve("llm", 0)
+		if !ok || t0.Name != "local-llm" {
+			t.Fatalf("order %v: Resolve(llm,0) = %q, want local-llm (unchanged)", order, t0.Name)
+		}
+	}
+}
+
+// Same invariant through Refresh (DB path), rows deliberately NOT in
+// tier_priority order.
+func TestRefresh_Tier1LowestTierPriorityWins(t *testing.T) {
+	t.Setenv("T2304_URL", "https://h.example/v1")
+	mk := func(name string, tier int32, prio int32) gen.ListEnabledUpstreamsRow {
+		r := row(name, "llm", "T2304_URL", nil)
+		r.Tier = tier
+		r.TierPriority = prio
+		return r
+	}
+	for _, rows := range [][]gen.ListEnabledUpstreamsRow{
+		{mk("local-llm", 0, 0), mk("openrouter-deepseek", 1, 20), mk("anthropic-haiku", 1, 0), mk("openrouter-chat", 1, 10)},
+		{mk("openrouter-chat", 1, 10), mk("anthropic-haiku", 1, 0), mk("openrouter-deepseek", 1, 20), mk("local-llm", 0, 0)},
+	} {
+		q := &stubLoaderQueries{}
+		q.set(rows...)
+		l, _ := newStubLoader(t, q, slog.LevelError)
+		if err := l.Refresh(context.Background()); err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if u, ok := l.Resolve("llm", 1); !ok || u.Name != "anthropic-haiku" {
+			t.Fatalf("Resolve(llm,1) = %q, want anthropic-haiku", u.Name)
+		}
 	}
 }

@@ -237,3 +237,22 @@ func TestDispatchPinned_StatusCascadeSensitiveStillBlocked(t *testing.T) {
 		t.Fatalf("external hits = %d, want 0", f.hit("a")+f.hit("b"))
 	}
 }
+
+// Phase 23-04 Task 2: a tier-1 candidate without a registered proxy (dormant
+// upstream) is skipped by cascadeTier1 instead of committing a terminal 503.
+func TestCascadeTier1_SkipsCandidateWithoutProxy(t *testing.T) {
+	f := newStatusCascadeFixture(t, nil,
+		upSpec{name: "local", tier: 0, prio: 0, status: 200, body: `{}`},
+		upSpec{name: "x", tier: 1, prio: 0, status: 200, body: `{"upstream":"x"}`, noProxy: true},
+		upSpec{name: "y", tier: 1, prio: 10, status: 200, body: `{"upstream":"y"}`},
+	)
+	tripBreaker(t, f.bs, "local")
+	rw := httptest.NewRecorder()
+	f.mux.ServeHTTP(rw, makeRequest(t, `{"model":"any"}`, auth.DataClassNormal))
+	if rw.Code != 200 || !strings.Contains(rw.Body.String(), `"y"`) {
+		t.Fatalf("got %d %s, want 200 from y", rw.Code, rw.Body.String())
+	}
+	if f.hit("x") != 0 {
+		t.Fatalf("x hits = %d, want 0", f.hit("x"))
+	}
+}
