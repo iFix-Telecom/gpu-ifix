@@ -76,6 +76,24 @@ type Config struct {
 	UpstreamOpenAIEmbedURL           string   // UPSTREAM_EMBED_OPENAI_URL
 	UpstreamOpenAIEmbedAuthBearer    string   // UPSTREAM_EMBED_OPENAI_AUTH_BEARER
 
+	// Phase 23 (HAIKU-01/02/03/08) — cadeia externa ① anthropic-haiku →
+	// ② openrouter-chat → ③ openrouter-deepseek + openrouter-tts.
+	//
+	// ① e ③ são registrados no boot a partir DESTES campos (não do loader):
+	// a migration 0041 cria as linhas com enabled=false e o loader só carrega
+	// linhas habilitadas; o roteamento continua governado pela linha.
+	UpstreamLLMAnthropicURL     string // UPSTREAM_LLM_ANTHROPIC_URL (sem default no código; o stack usa https://api.anthropic.com)
+	UpstreamLLMAnthropicAPIKeys string // UPSTREAM_LLM_ANTHROPIC_API_KEYS (formato do 23-05: label=key@dia,...; NUNCA logado)
+	// LLMExternalHeaderTimeoutS é o ResponseHeaderTimeout de ①②③. Em ① e ②
+	// o estouro vira fallthrough pré-byte para o próximo passo.
+	LLMExternalHeaderTimeoutS int    // UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS (default 120)
+	AnthropicKeyRenewalTZ     string // ANTHROPIC_KEY_RENEWAL_TZ (default America/Sao_Paulo)
+	AnthropicToolLoopMode     string // ANTHROPIC_TOOL_LOOP_MODE (omit|disable|skip; default omit; inválido → omit + WARN)
+	UpstreamTTSOpenRouterURL  string // UPSTREAM_TTS_OPENROUTER_URL (ex.: https://openrouter.ai/api)
+	OpenRouterTTSDefaultModel string // OPENROUTER_TTS_DEFAULT_MODEL
+	OpenRouterTTSDefaultVoice string // OPENROUTER_TTS_DEFAULT_VOICE
+	OpenRouterTTSVoiceMap     string // OPENROUTER_TTS_VOICE_MAP (cru; parse em proxy.ParseTTSVoiceMap)
+
 	// Phase 11.2 — STT tier-1 cascade slots (D-B7 + D-B8). Slot-named so the
 	// operator can swap provider without renaming envs. Current assignment:
 	//   slot 1 = Gemini 2.5 Flash Lite (https://generativelanguage.googleapis.com/v1beta)
@@ -426,6 +444,17 @@ func Load() (Config, error) {
 		UpstreamOpenAIWhisperAuthBearer:  os.Getenv("UPSTREAM_STT_OPENAI_AUTH_BEARER"),
 		UpstreamOpenAIEmbedURL:           os.Getenv("UPSTREAM_EMBED_OPENAI_URL"),
 		UpstreamOpenAIEmbedAuthBearer:    os.Getenv("UPSTREAM_EMBED_OPENAI_AUTH_BEARER"),
+
+		// Phase 23 — cadeia externa Haiku (ver struct).
+		UpstreamLLMAnthropicURL:     os.Getenv("UPSTREAM_LLM_ANTHROPIC_URL"),
+		UpstreamLLMAnthropicAPIKeys: os.Getenv("UPSTREAM_LLM_ANTHROPIC_API_KEYS"),
+		LLMExternalHeaderTimeoutS:   atoiOr(os.Getenv("UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS"), 120),
+		AnthropicKeyRenewalTZ:       strOr(os.Getenv("ANTHROPIC_KEY_RENEWAL_TZ"), "America/Sao_Paulo"),
+		AnthropicToolLoopMode:       anthropicToolLoopModeOr(os.Getenv("ANTHROPIC_TOOL_LOOP_MODE")),
+		UpstreamTTSOpenRouterURL:    os.Getenv("UPSTREAM_TTS_OPENROUTER_URL"),
+		OpenRouterTTSDefaultModel:   os.Getenv("OPENROUTER_TTS_DEFAULT_MODEL"),
+		OpenRouterTTSDefaultVoice:   os.Getenv("OPENROUTER_TTS_DEFAULT_VOICE"),
+		OpenRouterTTSVoiceMap:       os.Getenv("OPENROUTER_TTS_VOICE_MAP"),
 
 		// Phase 11.2 D-B7 + D-B8 — STT tier-1 cascade slots (slot 1 = Gemini,
 		// slot 2 = Groq Whisper). Bearer fields read straight from env (no
@@ -784,6 +813,23 @@ func strOr(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// anthropicToolLoopModeOr normaliza ANTHROPIC_TOOL_LOOP_MODE (Phase 23,
+// contrato do 23-08/23-12): omit|disable|skip. Vazio → omit; valor inválido →
+// omit + WARN via slog.Default() (config.Load roda antes do logger do main).
+func anthropicToolLoopModeOr(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "":
+		return "omit"
+	case "omit", "disable", "skip":
+		return v
+	default:
+		slog.Warn("ANTHROPIC_TOOL_LOOP_MODE inválido; usando omit",
+			"value", raw, "allowed", "omit|disable|skip")
+		return "omit"
+	}
 }
 
 // csvOr parses a comma-separated string into []string, trimming whitespace

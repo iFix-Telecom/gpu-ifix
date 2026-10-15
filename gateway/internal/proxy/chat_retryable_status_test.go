@@ -116,3 +116,45 @@ func TestChatRetryableStatus_BoundedPeek(t *testing.T) {
 		t.Fatalf("restored len = %d, want %d", len(got), len(big))
 	}
 }
+
+// countingInterceptor registra quantas vezes rodou (prova de ordem/curto-circuito).
+type countingInterceptor struct{ n int }
+
+func (c *countingInterceptor) Intercept(*http.Response) error { c.n++; return nil }
+
+// Phase 23-14 — ExternalChatInterceptors é o helper ÚNICO de composição usado
+// pelo main (②, ③, openrouter-tts) e pelo teste de integração.
+func TestExternalChatInterceptors_NonFinal429Cascades(t *testing.T) {
+	rest := &countingInterceptor{}
+	err := ExternalChatInterceptors(false, rest).Intercept(newChatStatusResp(t, 429, `{"error":{}}`, true))
+	if !errors.Is(err, errUpstreamRetryable) {
+		t.Fatalf("não-final 429: want errUpstreamRetryable, got %v", err)
+	}
+	if rest.n != 0 {
+		t.Fatalf("interceptors seguintes rodaram %d vez(es) após o erro retryable (deviam ser pulados)", rest.n)
+	}
+}
+
+func TestExternalChatInterceptors_Final429PassesThrough(t *testing.T) {
+	rest := &countingInterceptor{}
+	resp := newChatStatusResp(t, 429, `{"error":{"message":"x"}}`, true)
+	if err := ExternalChatInterceptors(true, rest).Intercept(resp); err != nil {
+		t.Fatalf("final 429: want nil (status segue ao cliente), got %v", err)
+	}
+	if resp.StatusCode != 429 {
+		t.Fatalf("status alterado: %d", resp.StatusCode)
+	}
+	if rest.n != 1 {
+		t.Fatalf("interceptors do final rodaram %d vez(es), want 1", rest.n)
+	}
+}
+
+func TestExternalChatInterceptors_Non200OKRunsRest(t *testing.T) {
+	rest := &countingInterceptor{}
+	if err := ExternalChatInterceptors(false, rest, nil).Intercept(newChatStatusResp(t, 200, `{}`, true)); err != nil {
+		t.Fatalf("200: want nil, got %v", err)
+	}
+	if rest.n != 1 {
+		t.Fatalf("rest rodou %d vez(es), want 1", rest.n)
+	}
+}

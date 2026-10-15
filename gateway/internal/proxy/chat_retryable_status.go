@@ -70,6 +70,40 @@ func ChatRetryableStatusInterceptor() ProxyResponseInterceptor {
 	return chatRetryableStatusInterceptor{}
 }
 
+// composedInterceptor adapta a função de ComposeInterceptors ao contrato
+// ProxyResponseInterceptor (para ser usada como ModifyResponse via .Intercept
+// ou passada adiante como interceptor).
+type composedInterceptor func(*http.Response) error
+
+func (f composedInterceptor) Intercept(resp *http.Response) error { return f(resp) }
+
+// ExternalChatInterceptors é o helper ÚNICO de composição dos interceptors dos
+// upstreams externos (Phase 23-14): o main (② openrouter-chat, ③
+// openrouter-deepseek, openrouter-tts) e o teste de integração usam este
+// mesmo construtor, então o teste prova a composição de produção.
+//
+//   - final=false (passo com próximo salto): ChatRetryableStatusInterceptor
+//     PRIMEIRO, depois rest — status retryable vira fallthrough antes de
+//     qualquer contabilização.
+//   - final=true (último salto, ③): só rest — o erro real do upstream segue
+//     ao cliente.
+//
+// O ① (anthropic-haiku) não usa este helper: o BuildAnthropicProxy (23-12)
+// já compõe tradução Anthropic→OpenAI e só então o mesmo interceptor de
+// status. Entradas nil em rest são ignoradas.
+func ExternalChatInterceptors(final bool, rest ...ProxyResponseInterceptor) ProxyResponseInterceptor {
+	ics := make([]ProxyResponseInterceptor, 0, len(rest)+1)
+	if !final {
+		ics = append(ics, ChatRetryableStatusInterceptor())
+	}
+	for _, ic := range rest {
+		if ic != nil {
+			ics = append(ics, ic)
+		}
+	}
+	return composedInterceptor(ComposeInterceptors(ics...))
+}
+
 // Intercept aplica os gates do mais barato ao mais caro e só toca o corpo
 // quando a resposta vai de fato cascatear.
 func (chatRetryableStatusInterceptor) Intercept(resp *http.Response) error {
