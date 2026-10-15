@@ -13,7 +13,7 @@
 #        unit=input_token|output_token) turns GPU-saved-cost reporting back on.
 #
 # DISCOVERY (261007-gyq): besides the fixed MODEL_MAP, the script auto-discovers
-#        the chat models actually routed through OpenRouter (upstream=openrouter-chat)
+#        the chat models actually routed through OpenRouter (upstream=openrouter-chat|openrouter-deepseek)
 #        in the last 7 days, read from ai_gateway.billing_events, and prices every one
 #        whose name matches an OpenRouter `/models` `.id` EXACTLY (provider
 #        openrouter-fireworks = providerForUpstream("openrouter-chat")). A discovered
@@ -35,9 +35,17 @@
 #        (Was `ssh n8n-ia-vm 'docker exec ifix-ai-gateway ...'` before 19-06 decommission.)
 #        The container has NO shell — the binary is called directly (no `sh -c`).
 #
-# LIVE:  Pricing AND forex are fetched live every run. NO USD value is hardcoded.
-#        OpenRouter model slugs move and the seeded fx (5.10) is stale, so both are
-#        pulled fresh and every value is gated by a strict positive-number guard.
+# LIVE:  Pricing AND forex are fetched live every run. NO OpenRouter USD value is
+#        hardcoded. OpenRouter model slugs move and the seeded fx (5.10) is stale, so
+#        both are pulled fresh and every value is gated by a strict positive-number guard.
+#        EXCEPTION (Phase 23, 23-10): the direct-Anthropic rows of step ① (provider
+#        anthropic, models claude-haiku-5-5 and claude-haiku-5-5:long) are FIXED values
+#        from the official price table — Anthropic has no public pricing API. See
+#        sync_anthropic_direct.
+#
+# CACHE UNITS (23-10): when an OpenRouter model exposes pricing.input_cache_read /
+#        pricing.input_cache_write, price_model also writes cache_read_token /
+#        cache_write_token rows for it (e.g. anthropic/claude-haiku-5.5).
 #
 # FAIL-SAFE: A failed or garbled OpenRouter/forex fetch never overwrites a good
 #        existing row — the affected write is skipped (warn + continue), the prior
@@ -69,6 +77,7 @@ MODELS_UPDATED=0
 MODELS_SKIPPED=0
 MODELS_DISCOVERED=0
 MODELS_UNMATCHED=0
+ANTHROPIC_UPDATED=0
 
 # --- logging helpers ---------------------------------------------------------
 # Append all output to the log AND echo to the terminal (oneshot service captures
@@ -115,6 +124,9 @@ declare -A MODEL_MAP=(
   ["deepseek/deepseek-v4-flash-20260423"]="deepseek/deepseek-v4-flash"
   ["qwen/qwen3.5-27b-20260224"]="qwen/qwen3.5-27b"
   ["meta-llama/llama-3.1-8b-instruct"]="meta-llama/llama-3.1-8b-instruct"
+  # Phase 23 (23-10): reference key of the self-hosted chat phantom
+  # (interceptor_usage.go haikuPhantomModel) — economia a preço Haiku.
+  ["anthropic/claude-haiku-5.5"]="anthropic/claude-haiku-5.5"
 )
 
 # --- discovery: OpenRouter chat models seen in billing ------------------------
@@ -122,7 +134,7 @@ declare -A MODEL_MAP=(
 # 7 days). Read-only, so it also runs under DRY_RUN (nothing is mutated).
 # The remote script reads the DSN from the gateway container env and passes it to
 # psql only through container env vars (D, Q) — the DSN never reaches argv/disk/log.
-DISCOVERY_SQL="SELECT DISTINCT model FROM ai_gateway.billing_events WHERE upstream='openrouter-chat' AND ts > now() - interval '7 days' AND model <> '' ORDER BY 1"
+DISCOVERY_SQL="SELECT DISTINCT model FROM ai_gateway.billing_events WHERE upstream IN ('openrouter-chat','openrouter-deepseek') AND ts > now() - interval '7 days' AND model <> '' ORDER BY 1"
 
 discover_models() {
   # The heredoc is quoted: every $-expansion below happens on the REMOTE shell.
@@ -163,6 +175,43 @@ sync_forex() {
   log "forex: USD/BRL=$brl → prices set-fx"
   gatewayctl prices set-fx -usd-brl "$brl"
   FX_UPDATED=1
+}
+
+# --- direct Anthropic (step ①) — FIXED official prices ------------------------
+# Source: https://platform.claude.com/docs/en/about-claude/pricing (read 2026-10-14).
+# Anthropic has no public pricing API, so these values are fixed here and must be
+# updated by hand when the price table changes. US$ per token.
+# claude-haiku-5-5       = input <= 100k tokens (prompt incl. cache read + write)
+# claude-haiku-5-5:long  = input  > 100k tokens (5x)
+# Unit order: input_token cache_write_token cache_write_1h_token cache_read_token output_token
+ANTHROPIC_PROVIDER="anthropic"
+declare -A ANTHROPIC_PRICES=(
+  ["claude-haiku-5-5"]="0.0000001 0.000000125 0.0000002 0.00000001 0.0000005"
+  ["claude-haiku-5-5:long"]="0.0000005 0.000000625 0.000001 0.00000005 0.0000025"
+)
+ANTHROPIC_UNITS=(input_token cache_write_token cache_write_1h_token cache_read_token output_token)
+
+sync_anthropic_direct() {
+  local model i
+  local -a vals
+  for model in "${!ANTHROPIC_PRICES[@]}"; do
+    read -r -a vals <<< "${ANTHROPIC_PRICES[$model]}"
+    if (( ${#vals[@]} != ${#ANTHROPIC_UNITS[@]} )); then
+      warn "anthropic: $model has ${#vals[@]} values, want ${#ANTHROPIC_UNITS[@]} — skipping"
+      continue
+    fi
+    for i in "${!ANTHROPIC_UNITS[@]}"; do
+      if ! is_pos_number "${vals[$i]}"; then
+        warn "anthropic: $model ${ANTHROPIC_UNITS[$i]} invalid '${vals[$i]}' — skipping unit"
+        continue
+      fi
+      gatewayctl prices set -model "$model" -provider "$ANTHROPIC_PROVIDER" \
+        -unit "${ANTHROPIC_UNITS[$i]}" -usd "${vals[$i]}" \
+        -notes "anthropic list price 2026-10-14, $NOTES_TAG"
+    done
+    (( ANTHROPIC_UPDATED++ )) || true
+    log "anthropic: $model priced (${#ANTHROPIC_UNITS[@]} units)"
+  done
 }
 
 # --- pricing sync (independent, guarded) -------------------------------------
@@ -240,6 +289,19 @@ price_model() {
     -unit input_token -usd "$prompt" -notes "phantom=$or_slug, $NOTES_TAG"
   gatewayctl prices set -model "$gw_key" -provider "$PHANTOM_PROVIDER" \
     -unit output_token -usd "$completion" -notes "phantom=$or_slug, $NOTES_TAG"
+
+  # Cache units (23-10): only when OpenRouter exposes them for this model.
+  local cache_read cache_write
+  cache_read="$(jq -r --arg id "$or_slug" 'first(.data[] | select(.id==$id) | .pricing.input_cache_read // empty)' "$tmp" 2>/dev/null || true)"
+  cache_write="$(jq -r --arg id "$or_slug" 'first(.data[] | select(.id==$id) | .pricing.input_cache_write // empty)' "$tmp" 2>/dev/null || true)"
+  if is_pos_number "$cache_read"; then
+    gatewayctl prices set -model "$gw_key" -provider "$PHANTOM_PROVIDER" \
+      -unit cache_read_token -usd "$cache_read" -notes "phantom=$or_slug, $NOTES_TAG"
+  fi
+  if is_pos_number "$cache_write"; then
+    gatewayctl prices set -model "$gw_key" -provider "$PHANTOM_PROVIDER" \
+      -unit cache_write_token -usd "$cache_write" -notes "phantom=$or_slug, $NOTES_TAG"
+  fi
   (( MODELS_UPDATED++ )) || true
 }
 
@@ -247,8 +309,9 @@ price_model() {
 main() {
   log "=== gateway-price-sync start (DRY_RUN=$DRY_RUN, token=$([[ -n "$OPENROUTER_TOKEN" ]] && echo set || echo unset)) ==="
   sync_forex
+  sync_anthropic_direct
   sync_pricing
-  log "=== gateway-price-sync done: fx_updated=$FX_UPDATED models_updated=$MODELS_UPDATED models_skipped=$MODELS_SKIPPED models_discovered=$MODELS_DISCOVERED models_unmatched=$MODELS_UNMATCHED ==="
+  log "=== gateway-price-sync done: fx_updated=$FX_UPDATED anthropic_updated=$ANTHROPIC_UPDATED models_updated=$MODELS_UPDATED models_skipped=$MODELS_SKIPPED models_discovered=$MODELS_DISCOVERED models_unmatched=$MODELS_UNMATCHED ==="
 }
 
 main "$@"
