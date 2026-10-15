@@ -286,6 +286,25 @@ func TestParseAnthropicKeys(t *testing.T) {
 		}
 	})
 
+	t.Run("workspace_suffix", func(t *testing.T) {
+		keys, err := ParseAnthropicKeys("max-a=sk-a#wrkspc_01@17,max-b=sk-b#wrkspc_02,max-c=sk-c")
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if keys[0].workspace != "wrkspc_01" || keys[0].RenewalDay != 17 || keys[0].Fingerprint != testFP("sk-a") {
+			t.Fatalf("keys[0] = %+v", keys[0])
+		}
+		if keys[1].workspace != "wrkspc_02" || keys[1].Fingerprint != testFP("sk-b") {
+			t.Fatalf("keys[1] = %+v", keys[1])
+		}
+		if keys[2].workspace != "" {
+			t.Fatalf("keys[2].workspace = %q", keys[2].workspace)
+		}
+		if _, err := ParseAnthropicKeys("max-a=sk-secretvalue#@3"); err == nil || strings.Contains(err.Error(), "secretvalue") {
+			t.Fatalf("workspace vazio: err = %v", err)
+		}
+	})
+
 	t.Run("empty_is_nil_nil", func(t *testing.T) {
 		keys, err := ParseAnthropicKeys("  ")
 		if err != nil || keys != nil {
@@ -544,6 +563,23 @@ func TestKeyPool(t *testing.T) {
 		}
 		if h.Get("x-api-key") != testKeyA || h.Get("anthropic-version") != "2023-06-01" {
 			t.Fatalf("headers = %v", h)
+		}
+	})
+
+	t.Run("workspace_header_per_key", func(t *testing.T) {
+		e := newKPEnv(t, "max-a="+testKeyA+"#wrkspc_a,max-b="+testKeyB)
+		e.fake.set(testKeyA, replyCreditLow)
+		e.fake.set(testKeyB, replyOK)
+		e.mustDo()
+		calls := e.fake.takeCalls()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		if got := calls[0].header.Get("anthropic-workspace-id"); got != "wrkspc_a" {
+			t.Fatalf("chave A: anthropic-workspace-id = %q", got)
+		}
+		if got := calls[1].header.Get("anthropic-workspace-id"); got != "" {
+			t.Fatalf("chave B sem workspace não pode herdar o header: %q", got)
 		}
 	})
 

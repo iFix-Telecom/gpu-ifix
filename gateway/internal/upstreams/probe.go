@@ -278,7 +278,7 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 			// Sem chave utilizável: não envia request; 4xx sintético → status
 			// "config" e o breaker trata como sucesso (D-A4). A mensagem nunca
 			// carrega o valor do env.
-			key := firstAnthropicKeySecret(u.AuthBearer)
+			key, workspace := firstAnthropicKey(u.AuthBearer)
 			if key == "" {
 				return nil, &breaker.HTTPError{Status: http.StatusUnauthorized, Msg: "probe anthropic-haiku: nenhuma chave utilizável em UPSTREAM_LLM_ANTHROPIC_API_KEYS"}
 			}
@@ -287,6 +287,9 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 				return nil, err
 			}
 			req.Header.Set("x-api-key", key)
+			if workspace != "" {
+				req.Header.Set("anthropic-workspace-id", workspace)
+			}
 			req.Header.Set("anthropic-version", "2023-06-01")
 			skipBearer = true
 			break
@@ -401,20 +404,20 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 	return resp, nil
 }
 
-// firstAnthropicKeySecret extrai o segredo do 1º item de
-// UPSTREAM_LLM_ANTHROPIC_API_KEYS (`rotulo=<chave>@<dia>,...`, formato do
-// 23-05). Parse mínimo local para não importar o pacote proxy (ciclo
-// upstreams→proxy). Rótulo ou chave vazios → "".
-func firstAnthropicKeySecret(raw string) string {
+// firstAnthropicKey extrai segredo e workspace do 1º item de
+// UPSTREAM_LLM_ANTHROPIC_API_KEYS (`rotulo=<chave>[#<workspace>][@<dia>],...`,
+// formato do 23-05 + workspace). Parse mínimo local para não importar o
+// pacote proxy (ciclo upstreams→proxy). Rótulo ou chave vazios → "".
+func firstAnthropicKey(raw string) (secret, workspace string) {
 	item := raw
 	if i := strings.Index(item, ","); i >= 0 {
 		item = item[:i]
 	}
 	eq := strings.Index(item, "=")
 	if eq < 0 || strings.TrimSpace(item[:eq]) == "" {
-		return ""
+		return "", ""
 	}
-	secret := strings.TrimSpace(item[eq+1:])
+	secret = strings.TrimSpace(item[eq+1:])
 	if at := strings.LastIndex(secret, "@"); at >= 0 {
 		if suffix := secret[at+1:]; suffix != "" {
 			if _, err := strconv.Atoi(suffix); err == nil {
@@ -422,7 +425,11 @@ func firstAnthropicKeySecret(raw string) string {
 			}
 		}
 	}
-	return secret
+	if h := strings.Index(secret, "#"); h >= 0 {
+		workspace = strings.TrimSpace(secret[h+1:])
+		secret = strings.TrimSpace(secret[:h])
+	}
+	return secret, workspace
 }
 
 // enqueueUpdate pushes a DB writeback event onto the buffered channel.

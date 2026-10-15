@@ -161,20 +161,44 @@ func TestProbe_OpenRouterTTS_ListsSpeechModels(t *testing.T) {
 
 func TestFirstAnthropicKeySecret(t *testing.T) {
 	cases := map[string]string{
-		"a=k1@5,b=k2":     "k1",
-		"a=k1":            "k1",
-		"a=k@x@12":        "k@x",
-		"a=k@notnum":      "k@notnum",
-		"":                "",
-		"semigual":        "",
-		"=k":              "",
-		"a=":              "",
-		"a=@5":            "",
-		" a = k1 @3 , b=": "k1",
+		"a=k1#wrkspc_x@5,b=k2": "k1",
+		"a=k1#wrkspc_x":        "k1",
+		"a=k1@5,b=k2":          "k1",
+		"a=k1":                 "k1",
+		"a=k@x@12":             "k@x",
+		"a=k@notnum":           "k@notnum",
+		"":                     "",
+		"semigual":             "",
+		"=k":                   "",
+		"a=":                   "",
+		"a=@5":                 "",
+		" a = k1 @3 , b=":      "k1",
 	}
 	for in, want := range cases {
-		if got := firstAnthropicKeySecret(in); got != want {
-			t.Errorf("firstAnthropicKeySecret(%q) = %q, want %q", in, got, want)
+		if got, _ := firstAnthropicKey(in); got != want {
+			t.Errorf("firstAnthropicKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+	if _, ws := firstAnthropicKey("a=k1#wrkspc_x@5,b=k2"); ws != "wrkspc_x" {
+		t.Errorf("workspace = %q, want wrkspc_x", ws)
+	}
+	if _, ws := firstAnthropicKey("a=k1@5"); ws != "" {
+		t.Errorf("workspace = %q, want vazio", ws)
+	}
+}
+
+func TestProbe_AnthropicHaiku_WorkspaceHeader(t *testing.T) {
+	srv, c := newCaptureServer(t, http.StatusOK)
+	u := UpstreamConfig{Name: "anthropic-haiku", Role: "llm", Tier: 1, URL: srv.URL, Enabled: true,
+		AuthBearer: "pedro=" + probeSecret1 + "#wrkspc_abc@5"}
+	p := newTTSProbe(u.Name, u)
+	if _, err := p.dispatch(context.Background(), u); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if got := c.header.Get("x-api-key"); got != probeSecret1 {
+		t.Errorf("x-api-key = %q, want %q", got, probeSecret1)
+	}
+	if got := c.header.Get("anthropic-workspace-id"); got != "wrkspc_abc" {
+		t.Errorf("anthropic-workspace-id = %q, want wrkspc_abc", got)
 	}
 }

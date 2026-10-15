@@ -79,6 +79,9 @@ type AnthropicKey struct {
 	Label       string
 	Fingerprint string
 	secret      string
+	// workspace é o anthropic-workspace-id exigido por chave de usuário
+	// (sk-ant-usr-) que não é presa a um workspace; "" = não envia o header.
+	workspace string
 	// RenewalDay é o dia (1–31) de renovação do ciclo da conta; 0 = desconhecido
 	// (esgotada fica marcada só até o próximo re-teste).
 	RenewalDay int
@@ -95,9 +98,10 @@ func anthropicFingerprint(secret string) string {
 }
 
 // ParseAnthropicKeys lê o env UPSTREAM_LLM_ANTHROPIC_API_KEYS no formato
-// `rotulo=<chave>@<dia>,rotulo2=<chave>` (ordem = ordem de uso; `@<dia>`
-// opcional, 1–31). Vazio → (nil, nil). Erros citam só o índice do item, nunca
-// o conteúdo.
+// `rotulo=<chave>[#<workspace>][@<dia>],rotulo2=<chave>` (ordem = ordem de
+// uso; `@<dia>` opcional, 1–31; `#<workspace>` opcional, vira o header
+// anthropic-workspace-id — obrigatório para chave não presa a workspace).
+// Vazio → (nil, nil). Erros citam só o índice do item, nunca o conteúdo.
 func ParseAnthropicKeys(raw string) ([]AnthropicKey, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -128,6 +132,14 @@ func ParseAnthropicKeys(raw string) ([]AnthropicKey, error) {
 				secret = strings.TrimSpace(secret[:at])
 			}
 		}
+		workspace := ""
+		if h := strings.Index(secret, "#"); h >= 0 {
+			workspace = strings.TrimSpace(secret[h+1:])
+			secret = strings.TrimSpace(secret[:h])
+			if workspace == "" {
+				return nil, fmt.Errorf("UPSTREAM_LLM_ANTHROPIC_API_KEYS: item %d com workspace vazio após '#'", i+1)
+			}
+		}
 		if label == "" || secret == "" {
 			return nil, fmt.Errorf("UPSTREAM_LLM_ANTHROPIC_API_KEYS: item %d malformado (rótulo ou chave vazios)", i+1)
 		}
@@ -139,6 +151,7 @@ func ParseAnthropicKeys(raw string) ([]AnthropicKey, error) {
 			Label:       label,
 			Fingerprint: anthropicFingerprint(secret),
 			secret:      secret,
+			workspace:   workspace,
 			RenewalDay:  day,
 		})
 	}
@@ -725,6 +738,9 @@ func (t *anthropicKeyPoolTransport) RoundTrip(r *http.Request) (*http.Response, 
 		}
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", c.key.secret)
+		if c.key.workspace != "" {
+			req.Header.Set("anthropic-workspace-id", c.key.workspace)
+		}
 		if req.Header.Get("anthropic-version") == "" {
 			req.Header.Set("anthropic-version", anthropicAPIVersion)
 		}
