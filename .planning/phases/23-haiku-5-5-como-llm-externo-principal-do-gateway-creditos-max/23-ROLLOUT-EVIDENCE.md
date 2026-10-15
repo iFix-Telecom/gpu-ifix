@@ -256,3 +256,69 @@ Retornou HTTP 200 (range 2026-10-01 → 2026-10-15, America/Sao_Paulo). Os campo
 - `vast_3060_brl` = 0
 
 Os campos antigos (`phantom_brl`, `vast_brl`, `custo_openrouter_brl`, `pct_servido_local`, `series[]`) continuam lá.
+
+---
+
+## Task 3 — validação imediata (cerca de 30 min depois do deploy)
+
+Janela: deploy às 05:50:37 UTC, consulta às 06:21:20 UTC (~31 min). `/health` 200 às 06:21. Às 03h BRT o tráfego de clientes é baixo, então esta janela **não substitui** a recontagem de 24 h.
+
+| # | Medida, desde 05:50:37 UTC | Resultado |
+|---|---|---|
+| 1 | 400 com `prefill`/`temperature`/`top_p` em `audit_log_content.response` | **0**; 400 no total: **0** |
+| 2 | 4xx/5xx por upstream | `blocked_sensitive` 503 ×1 (smoke RES-08 proposital); `local-embed` 502 ×15 |
+| 3 | % do chat por upstream | openrouter-chat 32 (94,1%); openrouter-deepseek 1 (2,9%, só o canário); blocked_sensitive 1 (2,9%) |
+| 4 | billing por upstream | openrouter-chat 32 `provider_reported` (cache_read 19.599, cache_write 20.433); openrouter-deepseek 1 `provider_reported`; gemini-stt 3 `price_table`; local-embed 24 |
+| 5 | chat 200 **sem** billing_events | **0** |
+| 6 | tráfego real de clientes | `analise-transcr-voip` chat 3× 200 via openrouter-chat (com cache_read: 19.599 − 19.021 do smoke = 578 tokens de cliente); `transcricao-voip` STT 3× 200; `chat-ifix` embeddings 23× 200 / 15× 502 |
+
+**`local-embed` 502 não é novo.** FATO: nas 6 h anteriores ao deploy (23:50–05:50 UTC), a mesma consulta deu `local-embed 502 ×66` e 200 ×57. O log mostra `upstream error … embed … timeout awaiting response headers`, igual ao container antigo (`ERROR upstream error` ×12 nos últimos 20 min dele). O embed não é tocado pela fase 23.
+
+**Logs do gateway novo (WARN/ERROR desde 05:50:30, contagem por mensagem), comparados com o container antigo (`c27f77128e46`, 05:30–05:50):**
+
+| mensagem | novo (~31 min) | antigo (~20 min) |
+|---|---|---|
+| `upstream url env var missing; row skipped` | 38 | 6 |
+| `auth rejected` (request sem chave) | 34 | 35 |
+| `tokencount /tokenize non-200` (404) | 23 | 35 |
+| `ERROR upstream error` (embed timeout) | 8 | 12 |
+| `probe UPDATE failed` / `pgxlisten error` / `listener exited` | 0 | 10 / 4 / 4 |
+
+- **Achado menor (FATO):** `row skipped` agora aparece **2× por minuto**, uma para `anthropic-haiku` e outra para `openrouter-tts`, a cada refresh do loader. O 23-14 previa "1 WARN por upstream e Debug depois" para o caminho de dormência do director. O WARN do **loader de upstreams** (`UPSTREAMS … missing_url_env`) é outro caminho e se repete. Não afeta o tráfego: é ruído de log até o 23-17/23-18 setarem os envs. Alternativas: desabilitar `anthropic-haiku` até o 23-18, opção prevista na seção (b2), ou rebaixar o log para Debug.
+- Nenhum panic ou fatal. O container antigo tinha erros de listener e probe que não aparecem no novo.
+
+## Checkpoint — Task 3: Pedro confirma o rollout após 24 h
+
+- **Status: AGUARDANDO confirmação de 24 h.** Ainda não há resposta do Pedro. Por instrução do orquestrador, o executor não esperou 24 h e registrou só a validação imediata acima.
+- **Registrado em:** 2026-10-15 03:21 BRT (06:21 UTC).
+- **Force-open global de breaker: NÃO executado.** Era o item opcional, e não houve autorização escrita do Pedro.
+- **Recontagem de 24 h**, a partir de 2026-10-16 02:51 BRT (05:51 UTC). É uma consulta só de leitura em `bd_ai_gateway`, rodada no worker-vm com o DSN do container vivo:
+
+```bash
+ssh worker-vm 'C=$(docker ps -q -f name=ai-gateway-prod_gateway|head -1); DSN=$(docker inspect --format "{{range .Config.Env}}{{println .}}{{end}}" $C | sed -n "s/^AI_GATEWAY_PG_DSN=//p"); docker run --rm -i -e PGDSN="$DSN" --entrypoint sh postgres:16-alpine -c "psql \"\$PGDSN\" -X -P pager=off"' <<'SQL'
+SET default_transaction_read_only = on;
+-- (1) 400 de prefill/sampling (esperado 0)
+select count(*) from ai_gateway.audit_log a join ai_gateway.audit_log_content c using (request_id)
+ where a.ts > '2026-10-15 05:50:37+00' and c.ts > '2026-10-15 05:50:37+00' and a.status_code = 400
+   and (c.response::text ilike '%prefill%' or c.response::text ilike '%temperature%' or c.response::text ilike '%top_p%');
+-- (2) 5xx/4xx por upstream
+select upstream, status_code, count(*) from ai_gateway.audit_log
+ where ts > '2026-10-15 05:50:37+00' and status_code >= 400 group by 1,2 order by 1,2;
+-- (3) % do chat servido por openrouter-deepseek (cascata)
+select upstream, count(*), round(100.0*count(*)/sum(count(*)) over (),2) pct from ai_gateway.audit_log
+ where ts > '2026-10-15 05:50:37+00' and route like '%chat%' group by 1 order by 2 desc;
+-- (4) billing: openrouter-* com price_table (esperado ≈ 0)
+select upstream, cost_source, count(*), sum(tokens_cache_read) from ai_gateway.billing_events
+ where ts > '2026-10-15 05:50:37+00' group by 1,2 order by 1,2;
+-- (5) finish truncado por effort high (achado 1.6): chat 200 com finish_reason=length por tenant
+select t.slug, count(*) filter (where c.response::text like '%"finish_reason": "length"%' or c.response::text like '%"finish_reason":"length"%') n_length, count(*) n
+ from ai_gateway.audit_log a join ai_gateway.audit_log_content c using (request_id) left join ai_gateway.tenants t on t.id=a.tenant_id
+ where a.ts > '2026-10-15 05:50:37+00' and c.ts > '2026-10-15 05:50:37+00' and a.route like '%chat%' and a.status_code=200 group by 1 order by 2 desc;
+SQL
+```
+
+- O que o Pedro confere na UI está no plano, Task 3 itens 2 e 3: `https://ai-dashboard.converse-ai.app/economia`, com os cards "Haiku (coberto por créditos)" e "Custo externo (caixa)", comparados com `openrouter.ai/activity`. Também precisa confirmar que chat-ifix e Maestro não tiveram erro novo.
+- **Pontos para a decisão do Pedro junto da confirmação:**
+  1. achado 1.6, effort high truncando `max_tokens` baixo (`campanhas` e outros);
+  2. escala NUMERIC dos preços de cache;
+  3. ruído de WARN `row skipped`.
