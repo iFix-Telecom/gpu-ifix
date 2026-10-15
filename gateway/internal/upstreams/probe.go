@@ -267,8 +267,30 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 		req *http.Request
 		err error
 	)
+	// skipBearer: o anthropic-haiku guarda a LISTA de chaves no AuthBearer
+	// (formato do 23-05) e autentica por x-api-key — o Authorization genérico
+	// mandaria a lista inteira para a Anthropic (T-23-48).
+	skipBearer := false
 	switch u.Role {
 	case "llm":
+		if u.Name == "anthropic-haiku" {
+			// Phase 23-14 — GET /v1/models (sem custo, T-23-47) com a 1ª chave.
+			// Sem chave utilizável: não envia request; 4xx sintético → status
+			// "config" e o breaker trata como sucesso (D-A4). A mensagem nunca
+			// carrega o valor do env.
+			key := firstAnthropicKeySecret(u.AuthBearer)
+			if key == "" {
+				return nil, &breaker.HTTPError{Status: http.StatusUnauthorized, Msg: "probe anthropic-haiku: nenhuma chave utilizável em UPSTREAM_LLM_ANTHROPIC_API_KEYS"}
+			}
+			req, err = http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(u.URL, "/")+"/v1/models", nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("x-api-key", key)
+			req.Header.Set("anthropic-version", "2023-06-01")
+			skipBearer = true
+			break
+		}
 		body := []byte(`{"model":"qwen","messages":[{"role":"user","content":"ping"}],"max_tokens":1,"temperature":0}`)
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, u.URL+"/v1/chat/completions", bytes.NewReader(body))
 		if err != nil {
@@ -296,7 +318,15 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 		//     speaker-embedding resolution.
 		// A 2xx is success either way; 5xx is a breaker failure via the shared
 		// classification below.
-		if u.Name == "voice-api-piper" {
+		if u.Name == "openrouter-tts" {
+			// Phase 23-14 — lista modelos de fala (GET, sem síntese paga,
+			// T-23-47). Bearer genérico abaixo.
+			req, err = http.NewRequestWithContext(ctx, http.MethodGet,
+				strings.TrimRight(u.URL, "/")+"/v1/models?output_modalities=speech", nil)
+			if err != nil {
+				return nil, err
+			}
+		} else if u.Name == "voice-api-piper" {
 			base := strings.TrimRight(u.URL, "/")
 			body := []byte(`{"text":"ping"}`)
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, base+"/tts", bytes.NewReader(body))
@@ -347,7 +377,7 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 	default:
 		return nil, fmt.Errorf("probe: unknown role %q", u.Role)
 	}
-	if u.AuthBearer != "" {
+	if u.AuthBearer != "" && !skipBearer {
 		req.Header.Set("Authorization", "Bearer "+u.AuthBearer)
 	}
 	resp, err := p.client.Do(req)
@@ -369,6 +399,30 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 		return nil, &breaker.HTTPError{Status: resp.StatusCode, Msg: "probe 4xx: " + strconv.Itoa(resp.StatusCode)}
 	}
 	return resp, nil
+}
+
+// firstAnthropicKeySecret extrai o segredo do 1º item de
+// UPSTREAM_LLM_ANTHROPIC_API_KEYS (`rotulo=<chave>@<dia>,...`, formato do
+// 23-05). Parse mínimo local para não importar o pacote proxy (ciclo
+// upstreams→proxy). Rótulo ou chave vazios → "".
+func firstAnthropicKeySecret(raw string) string {
+	item := raw
+	if i := strings.Index(item, ","); i >= 0 {
+		item = item[:i]
+	}
+	eq := strings.Index(item, "=")
+	if eq < 0 || strings.TrimSpace(item[:eq]) == "" {
+		return ""
+	}
+	secret := strings.TrimSpace(item[eq+1:])
+	if at := strings.LastIndex(secret, "@"); at >= 0 {
+		if suffix := secret[at+1:]; suffix != "" {
+			if _, err := strconv.Atoi(suffix); err == nil {
+				secret = strings.TrimSpace(secret[:at])
+			}
+		}
+	}
+	return secret
 }
 
 // enqueueUpdate pushes a DB writeback event onto the buffered channel.

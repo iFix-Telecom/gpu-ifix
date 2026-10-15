@@ -1839,3 +1839,113 @@ func TestConfig_Defaults_Phase112_EnvOverride(t *testing.T) {
 		t.Errorf("UpstreamSTTFallback2Model override: got %q", cfg.UpstreamSTTFallback2Model)
 	}
 }
+
+// Phase 23-14 — envs da cadeia externa Haiku (①②③ + openrouter-tts).
+var haikuEnvVars = []string{
+	"UPSTREAM_LLM_ANTHROPIC_URL",
+	"UPSTREAM_LLM_ANTHROPIC_API_KEYS",
+	"UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS",
+	"ANTHROPIC_KEY_RENEWAL_TZ",
+	"ANTHROPIC_TOOL_LOOP_MODE",
+	"UPSTREAM_TTS_OPENROUTER_URL",
+	"OPENROUTER_TTS_DEFAULT_MODEL",
+	"OPENROUTER_TTS_DEFAULT_VOICE",
+	"OPENROUTER_TTS_VOICE_MAP",
+}
+
+func clearHaiku(t *testing.T) {
+	t.Helper()
+	for _, v := range haikuEnvVars {
+		t.Setenv(v, "")
+	}
+}
+
+func TestLoad_HaikuDefaults(t *testing.T) {
+	clearAll(t)
+	clearHaiku(t)
+	unsetLegacyPrimary(t)
+	setAllRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMExternalHeaderTimeoutS != 120 {
+		t.Errorf("LLMExternalHeaderTimeoutS = %d, want 120", cfg.LLMExternalHeaderTimeoutS)
+	}
+	if cfg.AnthropicKeyRenewalTZ != "America/Sao_Paulo" {
+		t.Errorf("AnthropicKeyRenewalTZ = %q", cfg.AnthropicKeyRenewalTZ)
+	}
+	if cfg.AnthropicToolLoopMode != "omit" {
+		t.Errorf("AnthropicToolLoopMode = %q, want omit", cfg.AnthropicToolLoopMode)
+	}
+	if cfg.UpstreamLLMAnthropicURL != "" || cfg.UpstreamLLMAnthropicAPIKeys != "" {
+		t.Errorf("anthropic url/keys devem ser vazios sem env")
+	}
+}
+
+func TestLoad_HaikuOverrides(t *testing.T) {
+	clearAll(t)
+	clearHaiku(t)
+	unsetLegacyPrimary(t)
+	setAllRequired(t)
+	const secret = "sk-ant-oat01-SEGREDO-NAO-LOGAR"
+	t.Setenv("UPSTREAM_LLM_ANTHROPIC_URL", "https://api.anthropic.com")
+	t.Setenv("UPSTREAM_LLM_ANTHROPIC_API_KEYS", "pedro="+secret+"@5")
+	t.Setenv("UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS", "90")
+	t.Setenv("ANTHROPIC_KEY_RENEWAL_TZ", "UTC")
+	t.Setenv("ANTHROPIC_TOOL_LOOP_MODE", "skip")
+	t.Setenv("UPSTREAM_TTS_OPENROUTER_URL", "https://openrouter.ai/api")
+	t.Setenv("OPENROUTER_TTS_DEFAULT_MODEL", "openai/gpt-4o-mini-tts")
+	t.Setenv("OPENROUTER_TTS_DEFAULT_VOICE", "nova")
+	t.Setenv("OPENROUTER_TTS_VOICE_MAP", "pm_alex=onyx")
+	buf := captureDefaultLog(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.UpstreamLLMAnthropicURL != "https://api.anthropic.com" {
+		t.Errorf("UpstreamLLMAnthropicURL = %q", cfg.UpstreamLLMAnthropicURL)
+	}
+	if cfg.UpstreamLLMAnthropicAPIKeys != "pedro="+secret+"@5" {
+		t.Errorf("UpstreamLLMAnthropicAPIKeys não foi lido cru")
+	}
+	if cfg.LLMExternalHeaderTimeoutS != 90 {
+		t.Errorf("LLMExternalHeaderTimeoutS = %d, want 90", cfg.LLMExternalHeaderTimeoutS)
+	}
+	if cfg.AnthropicKeyRenewalTZ != "UTC" {
+		t.Errorf("AnthropicKeyRenewalTZ = %q", cfg.AnthropicKeyRenewalTZ)
+	}
+	if cfg.AnthropicToolLoopMode != "skip" {
+		t.Errorf("AnthropicToolLoopMode = %q, want skip", cfg.AnthropicToolLoopMode)
+	}
+	if cfg.UpstreamTTSOpenRouterURL != "https://openrouter.ai/api" ||
+		cfg.OpenRouterTTSDefaultModel != "openai/gpt-4o-mini-tts" ||
+		cfg.OpenRouterTTSDefaultVoice != "nova" ||
+		cfg.OpenRouterTTSVoiceMap != "pm_alex=onyx" {
+		t.Errorf("envs TTS não lidas: url=%q model=%q voice=%q map=%q",
+			cfg.UpstreamTTSOpenRouterURL, cfg.OpenRouterTTSDefaultModel,
+			cfg.OpenRouterTTSDefaultVoice, cfg.OpenRouterTTSVoiceMap)
+	}
+	if strings.Contains(buf.String(), secret) {
+		t.Fatalf("config.Load ecoou a chave Anthropic no log")
+	}
+}
+
+func TestLoad_HaikuToolLoopModeInvalid(t *testing.T) {
+	clearAll(t)
+	clearHaiku(t)
+	unsetLegacyPrimary(t)
+	setAllRequired(t)
+	t.Setenv("ANTHROPIC_TOOL_LOOP_MODE", "bogus")
+	buf := captureDefaultLog(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AnthropicToolLoopMode != "omit" {
+		t.Errorf("AnthropicToolLoopMode = %q, want omit", cfg.AnthropicToolLoopMode)
+	}
+	if !strings.Contains(buf.String(), "ANTHROPIC_TOOL_LOOP_MODE") {
+		t.Errorf("esperava WARN citando ANTHROPIC_TOOL_LOOP_MODE, log=%q", buf.String())
+	}
+}
