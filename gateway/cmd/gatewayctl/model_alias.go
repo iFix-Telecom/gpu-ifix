@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"unicode"
@@ -106,6 +107,58 @@ var upstreamNameRole = map[string]string{
 	"rerank-cpu":        "rerank",
 	"kokoro-tts":        "tts",
 	"local-tts":         "tts",
+	// Phase 23 — Haiku 5.5 como LLM externo principal: passo ① (Anthropic
+	// direto), passo ③ (OpenRouter DeepSeek) e TTS via OpenRouter.
+	"anthropic-haiku":     "llm",
+	"openrouter-deepseek": "llm",
+	"openrouter-tts":      "tts",
+}
+
+// providerPrefsUpstreams is the closed set of upstreams whose director
+// consumes provider_prefs (openrouter_director reads them by
+// (alias, upstreamName)). Prefs on any other row would be silently inert,
+// so they are refused. Mirror of internal/admin.providerPrefsUpstreams and
+// of the dashboard PROVIDER_PREFS_UPSTREAMS — all three are checked against
+// gateway/internal/admin/testdata/provider_prefs_upstreams.json.
+var providerPrefsUpstreams = map[string]bool{
+	"openrouter-chat":     true,
+	"openrouter-deepseek": true,
+}
+
+// providerPrefsUpstreamsList renders the set sorted, for error messages.
+func providerPrefsUpstreamsList() string {
+	names := make([]string, 0, len(providerPrefsUpstreams))
+	for n := range providerPrefsUpstreams {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// validateModelAliasSet runs every pre-DB check of `model-alias set`
+// (prefs scope + schema, R10 input shape, canonical upstream role) and
+// returns the role plus the canonical prefs bytes (nil when no prefs).
+// Pure function — no DB — so it is unit-testable.
+func validateModelAliasSet(alias, upstream, target, providerPrefs string) (string, []byte, error) {
+	var prefsBytes []byte
+	if providerPrefs != "" {
+		if !providerPrefsUpstreams[upstream] {
+			return "", nil, fmt.Errorf("--provider-prefs only applies to --upstream %s", providerPrefsUpstreamsList())
+		}
+		canon, err := models.ValidateProviderPrefs([]byte(providerPrefs))
+		if err != nil {
+			return "", nil, err
+		}
+		prefsBytes = canon
+	}
+	if err := validateModelAliasInput(alias, upstream, target); err != nil {
+		return "", nil, err
+	}
+	role, ok := upstreamNameRole[upstream]
+	if !ok {
+		return "", nil, fmt.Errorf("upstream %q is not a known canonical upstream (extend upstreamNameRole when adding a new tier-1 provider)", upstream)
+	}
+	return role, prefsBytes, nil
 }
 
 // runModelAlias dispatches `gatewayctl model-alias <subcommand>`.
@@ -142,8 +195,9 @@ Subcommands:
   list                                         Tab-separated table of all rows.
   get    --alias X --upstream Y                Single-row JSON output.
   set    --alias X --upstream Y --target Z     Upsert row via composite PK.
-         [--provider-prefs JSON]               (openrouter-chat only) per-model
-                                               OpenRouter provider object —
+         [--provider-prefs JSON]               (openrouter-chat / openrouter-deepseek
+                                               only) per-model OpenRouter
+                                               provider object —
                                                only/order/ignore/allow_fallbacks/
                                                quantizations/max_price/
                                                preferred_min_throughput/
@@ -321,7 +375,7 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 	alias := fs.String("alias", "", "alias (required)")
 	upstream := fs.String("upstream", "", "upstream name (required); must exist in ai_gateway.upstreams")
 	target := fs.String("target", "", "target slug to rewrite to (required)")
-	providerPrefs := fs.String("provider-prefs", "", "openrouter-chat only: JSON provider object (see usage)")
+	providerPrefs := fs.String("provider-prefs", "", "openrouter-chat / openrouter-deepseek only: JSON provider object (see usage)")
 	clearPrefs := fs.Bool("clear-provider-prefs", false, "drop the stored provider_prefs (NULL)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -334,32 +388,15 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 		fmt.Fprintln(os.Stderr, "error: --provider-prefs and --clear-provider-prefs are mutually exclusive")
 		return 2
 	}
-	// quick 260830-o2j — validate prefs BEFORE touching the DB. Only the
-	// openrouter-chat director consumes them; refusing other upstreams
-	// prevents silently-inert rows.
-	var prefsBytes []byte
-	if *providerPrefs != "" {
-		if *upstream != "openrouter-chat" {
-			fmt.Fprintln(os.Stderr, "error: --provider-prefs only applies to --upstream openrouter-chat")
-			return 2
-		}
-		canon, err := models.ValidateProviderPrefs([]byte(*providerPrefs))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			return 2
-		}
-		prefsBytes = canon
-	}
-	// R10 input validation — rejected inputs return exit 2 (usage error)
-	// because the operator can fix the typed input + retry; this is NOT
-	// a transient operational error worth exit 1.
-	if err := validateModelAliasInput(*alias, *upstream, *target); err != nil {
+	// quick 260830-o2j / Phase 23-20 — validate prefs BEFORE touching the
+	// DB. Only the OpenRouter directors (providerPrefsUpstreams) consume
+	// them; refusing other upstreams prevents silently-inert rows. R10
+	// input validation + role lookup follow. Rejected inputs return exit 2
+	// (usage error) because the operator can fix the typed input + retry;
+	// this is NOT a transient operational error worth exit 1.
+	role, prefsBytes, err := validateModelAliasSet(*alias, *upstream, *target, *providerPrefs)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 2
-	}
-	role, ok := upstreamNameRole[*upstream]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "error: upstream %q is not a known canonical upstream (extend upstreamNameRole when adding a new tier-1 provider)\n", *upstream)
 		return 2
 	}
 
