@@ -113,3 +113,8 @@ Critérios de rollback: nenhum disparou. O ① continua **mantido**.
 ## Dias de renovação (2026-10-15 19:20 UTC)
 
 Pedro informou: `max-pedro` (pe.araujo…) dia **19**, `max-financeiro` (financeiro.ifix…) dia **13**. Arquivo de segredo atualizado (backup `.bak-20261015-dias`) e aplicado no mesmo PUT do 23-17 Task 3 (`rotulo=…#workspace@dia`). Log de boot: `anthropic-haiku enabled keys=2`; `/admin/anthropic/keys` com as duas em `state=ok`; smoke LLM 200.
+
+## Decisões do Pedro (2026-10-15 ~16:30 BRT)
+
+- Termos suplementares dos créditos: resposta literal "confirmado". Uso pela empresa aceito.
+- Rotação das chaves coladas no chat: resposta literal "não vou rotacionar". Risco aceito pelo Pedro; chaves seguem só no segredo root 600 e no Env do stack 38.
