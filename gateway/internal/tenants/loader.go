@@ -109,6 +109,8 @@ func (l *Loader) Refresh(ctx context.Context) error {
 			LocalInflightMaxEmbed: int(r.LocalInflightMaxEmbed),
 			PriorityTier:          r.PriorityTier,
 			ProviderPrefs:         r.ProviderPrefs,
+			// Phase 23 (HAIKU-05): NULL vira "" (sem override).
+			LLMEffort: r.LlmEffort.String,
 		}
 		s.byID[r.ID] = cfg
 		s.bySlug[r.Slug] = cfg
@@ -225,4 +227,23 @@ func (l *Loader) ProviderPrefsByTenantID(tenantID string) []byte {
 	out := make([]byte, len(cfg.ProviderPrefs))
 	copy(out, cfg.ProviderPrefs)
 	return out
+}
+
+// LLMEffortByTenantID returns the tenant's LLM effort override (Phase 23,
+// HAIKU-05: tenants.llm_effort) or "" when the id is unparseable / unknown
+// or the column is NULL. Lock-free snapshot read; same guards as
+// ProviderPrefsByTenantID.
+func (l *Loader) LLMEffortByTenantID(tenantID string) string {
+	if l == nil || tenantID == "" {
+		return ""
+	}
+	id, err := uuid.Parse(tenantID)
+	if err != nil {
+		return ""
+	}
+	cfg, err := l.Get(id)
+	if err != nil {
+		return ""
+	}
+	return cfg.LLMEffort
 }
