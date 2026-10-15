@@ -94,3 +94,10 @@ Resultado em 2026-10-15 03:25:58 UTC:
 **Rollback:**
 - rápido: `ssh worker-vm docker service update --rollback ai-gateway-prod_gateway`
 - durável: PUT do stack 38 com o `stack38-file-20261015T002445.json` do snapshot, voltando para a imagem `develop-f06681f@sha256:3cc6fa18…`
+
+## Checkpoint — Task 2: Pedro aprova o deploy do hotfix de prefill
+
+- **Decisão:** `deploy-now` (Deploy agora)
+- **Origem:** pré-aprovação repassada pelo orquestrador `/gsd:execute-phase` no prompt deste executor: _"O usuário (Pedro) instruiu explicitamente nesta sessão: 'execute, seja autônomo'. O checkpoint:decision da Task 2 (aprovação do deploy do hotfix de prefill) está RESOLVIDO como 'Deploy agora'."_ Pedro não respondeu diretamente a este agente. A aprovação chegou pelo orquestrador.
+- **Registrado em:** 2026-10-15 00:53 BRT
+- **Condição imposta junto:** se build, smoke ou 5xx novo saírem do esperado, fazer rollback para `develop-f06681f@sha256:3cc6fa18…` e relatar.
