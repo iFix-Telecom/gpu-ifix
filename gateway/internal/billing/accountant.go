@@ -26,12 +26,41 @@ import (
 // slots older than the TTL in case the interceptor Close path never
 // ran (client abort pre-header, upstream cut without teardown, etc.).
 type RequestUsage struct {
-	TokensIn          atomic.Int64
-	TokensOut         atomic.Int64
-	AudioSecondsMs10  atomic.Int64
-	EmbedsCount       atomic.Int64
+	TokensIn         atomic.Int64
+	TokensOut        atomic.Int64
+	AudioSecondsMs10 atomic.Int64
+	EmbedsCount      atomic.Int64
+	// Phase 23 (23-10): prompt_tokens_details.cached_tokens /
+	// cache_write_tokens do usage OpenAI-shaped (passo ① traduzido e
+	// OpenRouter). Subconjuntos de TokensIn, gravados em
+	// billing_events.tokens_cache_read / tokens_cache_write.
+	TokensCacheRead  atomic.Int64
+	TokensCacheWrite atomic.Int64
+	// reportedCostUSD é o usage.cost (US$) que o OpenRouter devolve por
+	// request; nil quando o upstream não reportou custo.
+	reportedCostUSD   atomic.Pointer[float64]
 	model             atomic.Value // string
 	createdAtUnixNano atomic.Int64
+}
+
+// SetReportedCostUSD guarda o custo reportado pelo provedor (usage.cost).
+func (u *RequestUsage) SetReportedCostUSD(v float64) {
+	if u == nil {
+		return
+	}
+	u.reportedCostUSD.Store(&v)
+}
+
+// ReportedCostUSD devolve o custo reportado pelo provedor e se ele existe.
+func (u *RequestUsage) ReportedCostUSD() (float64, bool) {
+	if u == nil {
+		return 0, false
+	}
+	p := u.reportedCostUSD.Load()
+	if p == nil {
+		return 0, false
+	}
+	return *p, true
 }
 
 // Model returns the cached model name, or "" when none was set.

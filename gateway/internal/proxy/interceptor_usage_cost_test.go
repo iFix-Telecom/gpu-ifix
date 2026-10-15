@@ -82,11 +82,14 @@ func TestFinalizeExternalUpstreamHasNoPhantom(t *testing.T) {
 }
 
 // Our own pod (override name emergency_pod_llm) → only phantom; external 0.
+// Phase 23 (23-10): chat self-hosted é precificado a preço Haiku
+// (anthropic/claude-haiku-5.5 @ openrouter-fireworks), não pelo model real.
 func TestFinalizeEmergencyPodIsSavings(t *testing.T) {
 	ix, capt := newCostInterceptor(map[billing.PriceKey]billing.Price{
-		key("qwen", "openrouter-fireworks", "input_token"):  price(1e-6),
-		key("qwen", "openrouter-fireworks", "output_token"): price(2e-6),
-		key("qwen", "emergency_pod_llm", "input_token"):     price(9e-6), // must be ignored
+		key("anthropic/claude-haiku-5.5", "openrouter-fireworks", "input_token"):  price(1e-6),
+		key("anthropic/claude-haiku-5.5", "openrouter-fireworks", "output_token"): price(2e-6),
+		key("qwen", "openrouter-fireworks", "input_token"):                        price(7e-6), // must be ignored (pré-23-10)
+		key("qwen", "emergency_pod_llm", "input_token"):                           price(9e-6), // must be ignored
 	})
 	ev := finalizeOne(t, ix, capt, "emergency_pod_llm", "chat", "qwen", 100, 50, 0)
 	if ev.CostExternalBRL != 0 {

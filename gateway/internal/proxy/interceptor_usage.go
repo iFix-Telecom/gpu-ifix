@@ -199,8 +199,7 @@ func (u *UsageInterceptor) ExtractFromBody(reqID string, body []byte) {
 		usage = &billing.RequestUsage{}
 		u.accountant.Set(reqID, usage)
 	}
-	usage.TokensIn.Store(int64(f.Usage.PromptTokens))
-	usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+	applyUsageFrame(usage, &f)
 	if f.Model != "" {
 		usage.SetModel(f.Model)
 	}
@@ -296,12 +295,45 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 	//     ran for every upstream and inflated "Economia" with openrouter-chat.
 	//   - cost_external_brl: the upstream's real pricing, ONLY for
 	//     non-self-hosted upstreams (quick-260825-anq gate).
+	//
+	// Phase 23 (23-10) no ramo externo, em ordem:
+	//   1. usage.cost reportado pelo provedor (OpenRouter) dentro da faixa
+	//      [0, maxReportedCostUSD) → cost_source=provider_reported;
+	//   2. anthropic-haiku (passo ①) → preço de lista cache-aware com degrau
+	//      >100k (priceAnthropicDirect) → cost_source=price_table;
+	//   3. demais → priceTokens → cost_source=price_table.
+	// No ramo self-hosted de chat o phantom passa a ser a preço Haiku
+	// (decisão HAIKU-09: economia medida contra o externo principal). Só vale
+	// para tráfego novo — o histórico de billing_events não é recalculado.
+	cacheRead := usage.TokensCacheRead.Load()
+	cacheWrite := usage.TokensCacheWrite.Load()
 	costExternal := 0.0
 	costPhantom := 0.0
+	costSource := ""
 	if isSelfHostedUpstream(upstream) {
-		costPhantom = priceTokens(u, model, "openrouter-fireworks", tokensIn, tokensOut, audioSeconds, embedsCount)
+		phantomModel := model
+		if routeName == "chat" {
+			phantomModel = haikuPhantomModel
+		}
+		costPhantom = priceTokens(u, phantomModel, "openrouter-fireworks", tokensIn, tokensOut, audioSeconds, embedsCount)
 	} else {
-		costExternal = priceTokens(u, model, providerForUpstream(upstream), tokensIn, tokensOut, audioSeconds, embedsCount)
+		reported, hasReported := usage.ReportedCostUSD()
+		if hasReported && (reported < 0 || reported >= maxReportedCostUSD) {
+			u.log.Warn("usage_cost_out_of_range",
+				"upstream", upstream, "cost_usd", reported, "request_id", reqID)
+			hasReported = false
+		}
+		switch {
+		case hasReported:
+			costExternal = reported * u.usdToBRL()
+			costSource = "provider_reported"
+		case upstream == "anthropic-haiku":
+			costExternal = priceAnthropicDirect(u, tokensIn, cacheRead, cacheWrite, tokensOut)
+			costSource = "price_table"
+		default:
+			costExternal = priceTokens(u, model, providerForUpstream(upstream), tokensIn, tokensOut, audioSeconds, embedsCount)
+			costSource = "price_table"
+		}
 	}
 
 	ev := billing.Event{
@@ -314,6 +346,9 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		Model:               model,
 		TokensIn:            int(tokensIn),
 		TokensOut:           int(tokensOut),
+		TokensCacheRead:     int(cacheRead),
+		TokensCacheWrite:    int(cacheWrite),
+		CostSource:          costSource,
 		AudioSeconds:        audioSeconds,
 		EmbedsCount:         int(embedsCount),
 		CostLocalBRL:        0, // D-B4 — GPU is fixed-cost
@@ -331,6 +366,91 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		"tokens_out", tokensOut,
 		"source", source,
 	)
+}
+
+// maxReportedCostUSD é o teto (exclusivo) aceito para usage.cost reportado por
+// request (T-23-31). É guarda contra valor corrompido, não limite de negócio:
+// o request mais caro possível fica perto de US$ 1 (Haiku :long com 1M de
+// tokens de entrada × US$ 5e-7 = US$ 0,50 + 128k de saída × US$ 2,5e-6 =
+// US$ 0,32 — HIPÓTESE: contexto máximo de 1M do Haiku 5.5; DeepSeek é mais
+// barato), então 100 dá margem de ~100× e não rejeita uso legítimo. Não é
+// configurável por env por falta de caso de uso (decisão da revisão
+// cross-AI). Valor fora de [0, maxReportedCostUSD) → WARN
+// usage_cost_out_of_range e cálculo pela tabela de preços. Requests sem
+// usage.cost ficam auditáveis por billing_events.cost_source='price_table'.
+const maxReportedCostUSD = 100.0
+
+// haikuPhantomModel é a chave de preço (provider openrouter-fireworks,
+// gravada pelo timer de price-sync) usada no phantom de chat self-hosted.
+const haikuPhantomModel = "anthropic/claude-haiku-5.5"
+
+// Chaves de preço do passo ① (provider anthropic). A linha :long vale quando
+// a entrada total (não-cacheado + cache read + cache write = prompt_tokens)
+// passa de anthropicLongContextThreshold tokens.
+const (
+	anthropicHaikuPriceModel      = "claude-haiku-5-5"
+	anthropicHaikuLongPriceModel  = "claude-haiku-5-5:long"
+	anthropicLongContextThreshold = 100000
+)
+
+// usdToBRL resolve a taxa USD→BRL com a mesma regra de billing.ComputeCostBRL:
+// linha USD/BRL do FXLoader, senão defaultUSDBRL.
+func (u *UsageInterceptor) usdToBRL() float64 {
+	rate := u.defaultUSDBRL
+	if u.fx != nil {
+		if row, ok := u.fx.Get("USD/BRL"); ok {
+			rate = row.Rate
+		}
+	}
+	if rate <= 0 {
+		return 0
+	}
+	return rate
+}
+
+// priceAnthropicDirect calcula o custo em BRL do passo ① a preço de lista:
+//
+//	uncached = prompt − cache_read − cache_write
+//	custo    = uncached×input + cache_read×cache_read_token
+//	         + cache_write×cache_write_token + completion×output
+//
+// com o model de preço claude-haiku-5-5:long quando prompt > 100k. Sem linha
+// de cache_read_token / cache_write_token, os tokens correspondentes são
+// cobrados como input_token (fallback conservador), e o WARN + métrica
+// gateway_prices_missing existentes de ComputeCostBRL denunciam a lacuna.
+func priceAnthropicDirect(u *UsageInterceptor, prompt, cacheRead, cacheWrite, completion int64) float64 {
+	const provider = "anthropic"
+	model := anthropicHaikuPriceModel
+	if prompt > anthropicLongContextThreshold {
+		model = anthropicHaikuLongPriceModel
+	}
+	uncached := prompt - cacheRead - cacheWrite
+	if uncached < 0 {
+		uncached = 0
+	}
+	cost := func(qty int64, unit string) float64 {
+		return billing.ComputeCostBRL(float64(qty), model, provider, unit,
+			u.prices, u.fx, u.defaultUSDBRL, u.log)
+	}
+	inputLike := uncached
+	var total float64
+	for _, c := range []struct {
+		qty  int64
+		unit string
+	}{{cacheRead, "cache_read_token"}, {cacheWrite, "cache_write_token"}} {
+		if c.qty <= 0 {
+			continue
+		}
+		if hasPrice(u.prices, model, provider, c.unit) {
+			total += cost(c.qty, c.unit)
+		} else {
+			_ = cost(c.qty, c.unit) // WARN + gateway_prices_missing
+			inputLike += c.qty
+		}
+	}
+	total += cost(inputLike, "input_token")
+	total += cost(completion, "output_token")
+	return total
 }
 
 // priceTokens resolves unit prices for the given (model, provider) tuple
@@ -378,8 +498,14 @@ func hasPrice(prices *billing.PricesLoader, model, provider, unit string) bool {
 // pricing by commercial vendor.
 func providerForUpstream(upstream string) string {
 	switch upstream {
-	case "openrouter-chat":
+	case "openrouter-chat", "openrouter-deepseek":
 		return "openrouter-fireworks"
+	case "anthropic-haiku":
+		return "anthropic"
+	case "openrouter-tts":
+		// Chave (tts-1, openrouter, input_token) — não colide com o phantom
+		// de TTS self-hosted (tts-1, openrouter-fireworks).
+		return "openrouter"
 	case "openai-embed":
 		return "openai"
 	case "openai-whisper":
@@ -579,7 +705,33 @@ type sseUsageFrame struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// Cost é o usage.cost (US$) que o OpenRouter acrescenta (23-10).
+		Cost *float64 `json:"cost"`
+		// PromptTokensDetails vem do OpenRouter e do passo ① traduzido
+		// (anthropic_translate_resp.go): subconjuntos de prompt_tokens.
+		PromptTokensDetails *struct {
+			CachedTokens     int `json:"cached_tokens"`
+			CacheWriteTokens int `json:"cache_write_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage,omitempty"`
+}
+
+// applyUsageFrame grava o usage de um frame (SSE ou JSON) no slot do
+// accountant: tokens, colunas de cache e o custo reportado. Único ponto de
+// escrita para os 3 consumidores (ExtractFromBody, scanFrames, JSON Close).
+func applyUsageFrame(usage *billing.RequestUsage, f *sseUsageFrame) {
+	if usage == nil || f == nil || f.Usage == nil {
+		return
+	}
+	usage.TokensIn.Store(int64(f.Usage.PromptTokens))
+	usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+	if d := f.Usage.PromptTokensDetails; d != nil {
+		usage.TokensCacheRead.Store(int64(d.CachedTokens))
+		usage.TokensCacheWrite.Store(int64(d.CacheWriteTokens))
+	}
+	if f.Usage.Cost != nil {
+		usage.SetReportedCostUSD(*f.Usage.Cost)
+	}
 }
 
 // usageTeeReader is an io.ReadCloser wrapper that forwards reads to the
@@ -677,8 +829,7 @@ func (r *usageTeeReader) scanFrames() {
 			if f.Usage == nil {
 				continue
 			}
-			r.usage.TokensIn.Store(int64(f.Usage.PromptTokens))
-			r.usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+			applyUsageFrame(r.usage, &f)
 			if r.log != nil {
 				r.log.Debug("usage extracted from SSE",
 					"prompt", f.Usage.PromptTokens,
@@ -753,8 +904,7 @@ func (b *usageJSONBuffer) Close() error {
 				b.usage.SetModel(f.Model)
 			}
 			if f.Usage != nil && b.usage != nil {
-				b.usage.TokensIn.Store(int64(f.Usage.PromptTokens))
-				b.usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+				applyUsageFrame(b.usage, &f)
 				if b.log != nil {
 					b.log.Debug("usage extracted from JSON",
 						"prompt", f.Usage.PromptTokens,
