@@ -324,3 +324,13 @@ O update é stop-first. O gap de health fica em **≈60 s por stack**: o gateway
 | (b) nenhum tenant com provider_prefs que quebre o ③ | **OK**: nenhum tenant tem provider_prefs (0d) |
 | (c) nada inesperado no estado de prod (upstreams llm/tts e o que a 0041 espera) | **OK** (0b). Achados não bloqueantes: escala NUMERIC(12,8) dos preços de cache write e o `ai-gateway-dev_gateway` com 0 réplicas, os dois registrados acima |
 
+## Checkpoint — Task 2: Pedro aprova a lista de mudanças de produção
+
+- **Decisão:** `approve` (Aprovar como está)
+- **Origem:** pré-aprovação condicional repassada pelo orquestrador `/gsd:execute-phase` no prompt deste executor: _"O usuário (Pedro) instruiu nesta sessão: 'execute, seja autônomo'. O checkpoint:decision da Task 2 (aprovar a lista de mudanças) fica PRÉ-APROVADO como 'Aprovar como está' SOMENTE se TODAS as condições valerem: (a) … (b) … (c) …"_. As três condições foram conferidas na tabela acima e valem. Pedro não respondeu diretamente a este agente; a aprovação chegou pelo orquestrador.
+- **Registrado em:** 2026-10-15 02:46 BRT
+- **Escopo aprovado:** exatamente as seções (a)–(i) deste arquivo. As envs de (c) podem ser omitidas sem mudança de comportamento, já que são iguais aos defaults. Os ajustes ficam em aberto para o Pedro no 23-16.
+- **Pendências que NÃO entram neste rollout:**
+  - escala de `prices.unit_cost_usd` (antes do 23-18);
+  - alias de TTS exige ampliar o CHECK da 0005 (23-17, só se for desejado);
+  - religar a 3060 e a 3090 (decisão separada).
