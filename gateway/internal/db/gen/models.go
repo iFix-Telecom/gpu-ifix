@@ -72,6 +72,19 @@ type AiGatewayAuditLogContent struct {
 	Response  []byte    `json:"response"`
 }
 
+// Phase 23: custo de pods Vast auxiliares fora do reconciler — 3060 unificado; gravado via POST /admin/aux-pod-lifecycles pelo unified3060.py; historico so a partir da Phase 23.
+type AiGatewayAuxPodLifecycle struct {
+	ID             int64              `json:"id"`
+	Pod            string             `json:"pod"`
+	VastInstanceID pgtype.Int8        `json:"vast_instance_id"`
+	StartedAt      time.Time          `json:"started_at"`
+	EndedAt        pgtype.Timestamptz `json:"ended_at"`
+	DphUsd         pgtype.Numeric     `json:"dph_usd"`
+	TotalCostUsd   pgtype.Numeric     `json:"total_cost_usd"`
+	TotalCostBrl   pgtype.Numeric     `json:"total_cost_brl"`
+	Notes          pgtype.Text        `json:"notes"`
+}
+
 // Append-only billing events; one row per completed request. PK includes ts (partition key). Idempotent INSERT via ON CONFLICT (request_id, ts) DO NOTHING.
 type AiGatewayBillingEvent struct {
 	RequestID           uuid.UUID      `json:"request_id"`
@@ -91,6 +104,9 @@ type AiGatewayBillingEvent struct {
 	Currency            string         `json:"currency"`
 	Source              string         `json:"source"`
 	CreatedAt           time.Time      `json:"created_at"`
+	TokensCacheRead     int32          `json:"tokens_cache_read"`
+	TokensCacheWrite    int32          `json:"tokens_cache_write"`
+	CostSource          pgtype.Text    `json:"cost_source"`
 }
 
 // Audit trail for Vast.ai emergency pod lifecycles (Phase 6 PRV-10). One row per provision attempt; events JSONB captures full timeline.
@@ -243,6 +259,8 @@ type AiGatewayTenant struct {
 	PriorityTier             string      `json:"priority_tier"`
 	// quick 260830-o2j: optional OpenRouter `provider` routing object applied to EVERY openrouter-chat call of this tenant (precedence over model_aliases.provider_prefs). NULL = fall through.
 	ProviderPrefs []byte `json:"provider_prefs"`
+	// Phase 23: override de effort/thinking do LLM por tenant. Precedencia: valor explicito do cliente > tenants.llm_effort > padrao high. NULL = sem override.
+	LlmEffort pgtype.Text `json:"llm_effort"`
 }
 
 // Runtime source-of-truth for multi-upstream dispatcher (Phase 3 D-D2). Hot-reloaded via LISTEN upstreams_changed.

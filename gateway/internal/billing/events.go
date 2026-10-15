@@ -19,7 +19,17 @@ import (
 // (D-B4: local GPU is fixed-cost, per-request cost is always 0); the Event
 // carries the field for symmetry but the column is set in SQL, not bound.
 func insertOne(ctx context.Context, q *gen.Queries, e Event) error {
-	params := gen.InsertBillingEventParams{
+	if err := q.InsertBillingEvent(ctx, insertParams(e)); err != nil {
+		return fmt.Errorf("%w: insert: %v", ErrFlushFailed, err)
+	}
+	return nil
+}
+
+// insertParams é o mapeamento puro Event → InsertBillingEventParams.
+// CostSource "" vira NULL (cost_source é TEXT NULL; só valores fixos do
+// código chegam aqui — T-23-67).
+func insertParams(e Event) gen.InsertBillingEventParams {
+	return gen.InsertBillingEventParams{
 		RequestID:           e.RequestID,
 		Ts:                  e.TS,
 		TenantID:            e.TenantID,
@@ -34,11 +44,10 @@ func insertOne(ctx context.Context, q *gen.Queries, e Event) error {
 		CostLocalPhantomBrl: numericFromFloat(e.CostLocalPhantomBRL),
 		CostExternalBrl:     numericFromFloat(e.CostExternalBRL),
 		Source:              e.Source,
+		TokensCacheRead:     int32(e.TokensCacheRead),
+		TokensCacheWrite:    int32(e.TokensCacheWrite),
+		CostSource:          pgtype.Text{String: e.CostSource, Valid: e.CostSource != ""},
 	}
-	if err := q.InsertBillingEvent(ctx, params); err != nil {
-		return fmt.Errorf("%w: insert: %v", ErrFlushFailed, err)
-	}
-	return nil
 }
 
 // nullableUUIDForPG converts a Go uuid.UUID to pgtype.UUID; zero UUID maps

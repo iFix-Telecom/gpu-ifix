@@ -36,7 +36,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier, provider_prefs,
+       priority_tier, provider_prefs, llm_effort,
        created_at, updated_at
 FROM ai_gateway.tenants
 WHERE id = $1
@@ -65,6 +65,7 @@ type GetTenantConfigRow struct {
 	LocalInflightMaxEmbed    int32       `json:"local_inflight_max_embed"`
 	PriorityTier             string      `json:"priority_tier"`
 	ProviderPrefs            []byte      `json:"provider_prefs"`
+	LlmEffort                pgtype.Text `json:"llm_effort"`
 	CreatedAt                time.Time   `json:"created_at"`
 	UpdatedAt                time.Time   `json:"updated_at"`
 }
@@ -96,6 +97,7 @@ func (q *Queries) GetTenantConfig(ctx context.Context, id uuid.UUID) (GetTenantC
 		&i.LocalInflightMaxEmbed,
 		&i.PriorityTier,
 		&i.ProviderPrefs,
+		&i.LlmEffort,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -110,7 +112,7 @@ SELECT id, slug, name, data_class, status, mode,
        daily_quota_embeds, monthly_quota_embeds,
        rps_limit, rpm_limit,
        local_inflight_max_llm, local_inflight_max_stt, local_inflight_max_embed,
-       priority_tier, provider_prefs
+       priority_tier, provider_prefs, llm_effort
 FROM ai_gateway.tenants
 WHERE status = 'active'
 ORDER BY slug
@@ -139,6 +141,7 @@ type ListTenantsForLoaderRow struct {
 	LocalInflightMaxEmbed    int32       `json:"local_inflight_max_embed"`
 	PriorityTier             string      `json:"priority_tier"`
 	ProviderPrefs            []byte      `json:"provider_prefs"`
+	LlmEffort                pgtype.Text `json:"llm_effort"`
 }
 
 // Bulk load at boot + on NOTIFY tenants_changed. Same columns as GetTenantConfig.
@@ -174,6 +177,7 @@ func (q *Queries) ListTenantsForLoader(ctx context.Context) ([]ListTenantsForLoa
 			&i.LocalInflightMaxEmbed,
 			&i.PriorityTier,
 			&i.ProviderPrefs,
+			&i.LlmEffort,
 		); err != nil {
 			return nil, err
 		}
@@ -183,6 +187,30 @@ func (q *Queries) ListTenantsForLoader(ctx context.Context) ([]ListTenantsForLoa
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateTenantLLMEffort = `-- name: UpdateTenantLLMEffort :execrows
+UPDATE ai_gateway.tenants
+SET llm_effort = $1,
+    updated_at = now()
+WHERE slug = $2
+`
+
+type UpdateTenantLLMEffortParams struct {
+	LlmEffort pgtype.Text `json:"llm_effort"`
+	Slug      string      `json:"slug"`
+}
+
+// Phase 23 (HAIKU-05): override de effort/thinking do LLM por tenant (NULL limpa).
+// A CHECK da coluna (0041) rejeita valores fora de off/low/medium/high/xhigh/max.
+// Dispara o trigger tenants_update_notify (0041 inclui llm_effort no WHEN), então
+// o tenants.Loader de cada réplica recarrega.
+func (q *Queries) UpdateTenantLLMEffort(ctx context.Context, arg UpdateTenantLLMEffortParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantLLMEffort, arg.LlmEffort, arg.Slug)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateTenantMode = `-- name: UpdateTenantMode :exec
