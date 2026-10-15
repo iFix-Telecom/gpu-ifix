@@ -1,0 +1,26 @@
+{
+  "id": "msg_01Aq9w938a90dw8q",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-5-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "Vou consultar."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_1",
+      "name": "get_x",
+      "input": {"a": 1}
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 300,
+    "cache_creation_input_tokens": 1200,
+    "cache_read_input_tokens": 0,
+    "output_tokens": 45
+  }
+}
