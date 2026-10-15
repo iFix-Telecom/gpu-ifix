@@ -277,7 +277,9 @@ func (anthropicTranslateInterceptor) Intercept(resp *http.Response) error {
 
 	switch {
 	case strings.HasPrefix(ct, "text/event-stream"):
-		// Tradução SSE ligada na Task 2 (NewAnthropicSSETranslator).
+		resp.Body = NewAnthropicSSETranslator(resp.Body)
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = -1
 		return nil
 	case strings.HasPrefix(ct, "application/json"):
 		body, err := io.ReadAll(io.LimitReader(resp.Body, anthJSONBodyCap+1))
