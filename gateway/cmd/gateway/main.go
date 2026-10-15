@@ -1145,6 +1145,8 @@ func main() {
 			"idle_grace_seconds", cfg.ProvisionIdleGraceSeconds,
 			"coldstart_budget_seconds", cfg.ProvisionColdStartBudgetSeconds,
 			"monthly_budget_brl", cfg.MonthlyEmergencyBudgetBRL,
+			"auto_trigger_enabled", !cfg.EmergencyProvisioningDisabled,
+			"max_consecutive_failures", cfg.EmergencyMaxConsecutiveFailures,
 		)
 	}
 

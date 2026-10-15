@@ -190,6 +190,8 @@ type Config struct {
 	EmergencyLlamaArgs                []string // EMERGENCY_LLAMA_ARGS (CSV; D-07-B; empty → nil → lifecycle.go uses hardcoded const; override only if production needs different llama-server flags)
 	PodDebugSSHPublicKey              string   // POD_DEBUG_SSH_PUBLIC_KEY (optional; when non-empty, onstart installs+starts sshd inside the pod with this key in /root/.ssh/authorized_keys and Vast maps -p 22:22/tcp; intended for operator debug during UAT; leave empty in production for least-privilege)
 	MonthlyEmergencyBudgetBRL         float64  // MONTHLY_EMERGENCY_BUDGET_BRL (default 200.0; D-D2 — Sentry alert only, no auto-block)
+	EmergencyProvisioningDisabled     bool     // !EMERGENCY_PROVISIONING_ENABLED (env default true; ENABLED=false = o gatilho automático nunca arma — usar quando o primário está desligado de propósito, senão o breaker local-llm OPEN aluga pod na Vast. force_provision manual continua funcionando)
+	EmergencyMaxConsecutiveFailures   int      // EMERGENCY_MAX_CONSECUTIVE_FAILURES (default 3; após N provisionamentos seguidos sem health_pass o gatilho automático trava até o local-llm fechar de novo ou um force_provision. 0 = sem limite. Incidente 2026-10-14: 967 pods sem health em 16h)
 	PrimaryHostID                     int64    // PRIMARY_HOST_ID (default 0 = unknown; D-A2 host_id != filter only applied if known)
 	ProvisionColdStartBudgetSeconds   int      // PROVISION_COLDSTART_BUDGET_SECONDS (default 600; D-A4 — /health poll budget)
 	ProvisionFailureCooldownSeconds   int      // PROVISION_FAILURE_COOLDOWN_SECONDS (default 60 — after a provisioning failure e.g. offer_race_lost, hold the FSM in Cooldown this long before re-arming the trigger; MUST exceed one 2+4+8≈14s attempt cycle so a single failed cycle actually backs off instead of hammer-looping the Vast.ai spot market)
@@ -515,6 +517,8 @@ func Load() (Config, error) {
 		EmergencyLlamaArgs:                csvOr(os.Getenv("EMERGENCY_LLAMA_ARGS"), nil),
 		PodDebugSSHPublicKey:              envOr("POD_DEBUG_SSH_PUBLIC_KEY", ""),
 		MonthlyEmergencyBudgetBRL:         floatOr(os.Getenv("MONTHLY_EMERGENCY_BUDGET_BRL"), 200.0),
+		EmergencyProvisioningDisabled:     !boolOr(os.Getenv("EMERGENCY_PROVISIONING_ENABLED"), true),
+		EmergencyMaxConsecutiveFailures:   atoiOr(os.Getenv("EMERGENCY_MAX_CONSECUTIVE_FAILURES"), 3),
 		PrimaryHostID:                     int64(atoiOr(os.Getenv("PRIMARY_HOST_ID"), 0)),
 		ProvisionColdStartBudgetSeconds:   atoiOr(os.Getenv("PROVISION_COLDSTART_BUDGET_SECONDS"), 600),
 		ProvisionFailureCooldownSeconds:   atoiOr(os.Getenv("PROVISION_FAILURE_COOLDOWN_SECONDS"), 60),

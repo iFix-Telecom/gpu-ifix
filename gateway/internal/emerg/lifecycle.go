@@ -194,12 +194,20 @@ func (r *Reconciler) spawnProvisionGoroutine(parentCtx context.Context, id int64
 			// backoff does not model. The lifecycle row already records
 			// the precise shutdown_reason via closeLifecycle regardless of
 			// the FSM target state.
-			if errors.Is(err, ErrOfferRaceLost) {
-				r.enterCooldown(StateEmergencyProvisioning, time.Now(),
-					"provision_failure:"+reason, true)
-			} else {
+			//
+			// Incidente 2026-10-14: health_timeout / instance_terminal_state
+			// também voltavam direto para Healthy e, com o breaker ainda
+			// OPEN (primário desligado de propósito), o gatilho rearmava no
+			// tick seguinte — 967 pods alugados e destruídos em 16h. Agora
+			// toda falha que não seja cancelamento passa pelo Cooldown de
+			// falha e conta para o limite de falhas seguidas.
+			if errors.Is(err, context.Canceled) {
 				r.deps.FSM.Transition(StateEmergencyProvisioning, StateHealthy,
 					time.Now(), "provision_error:"+reason)
+			} else {
+				r.recordProvisionFailure(reason)
+				r.enterCooldown(StateEmergencyProvisioning, time.Now(),
+					"provision_failure:"+reason, true)
 			}
 		}
 	}()
@@ -461,6 +469,7 @@ func (r *Reconciler) markHealthy(ctx context.Context, lifecycleID int64, healthU
 	vastutil.CaptureBreadcrumb("emerg.health_pass", map[string]any{
 		"lifecycle_id": lifecycleID, "health_url": healthURL,
 	})
+	r.resetFailureStreak()
 	r.deps.FSM.Transition(StateEmergencyProvisioning, StateEmergencyActive, time.Now(), "health_passed")
 	return nil
 }

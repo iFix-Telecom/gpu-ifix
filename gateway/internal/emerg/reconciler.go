@@ -182,6 +182,15 @@ type Reconciler struct {
 	// Healthy after the applicable hold window (see cooldownFromFailure).
 	cooldownEnteredAt atomic.Int64
 
+	// consecutiveFailures conta provisionamentos seguidos que terminaram
+	// sem health_pass (qualquer erro exceto cancelamento). Ao atingir
+	// Cfg.EmergencyMaxConsecutiveFailures o gatilho automático trava
+	// (triggerHalted) até o local-llm fechar de novo ou um force_provision.
+	// Zera em markHealthy. Incidente 2026-10-14: com o primário desligado
+	// de propósito, 967 pods foram alugados e destruídos em 16h.
+	consecutiveFailures atomic.Int64
+	triggerHalted       atomic.Bool
+
 	// cooldownFromFailure records WHY the FSM most recently entered
 	// Cooldown. true  → Cooldown was entered from a provisioning FAILURE
 	// (e.g. offer_race_lost abort in startProvisioning's goroutine); the
@@ -762,6 +771,20 @@ func (r *Reconciler) evaluateEmergencyProvisioning(ctx context.Context, now time
 // trigger fires whenever sustained ≥ threshold; the provisioning path
 // lands in Plan 06-06 and is responsible for the lifecycle INSERT).
 func (r *Reconciler) evaluateHealthy(ctx context.Context, now time.Time, log *slog.Logger) {
+	if r.deps.Cfg.EmergencyProvisioningDisabled {
+		return
+	}
+	if r.triggerHalted.Load() {
+		// Só um local-llm de volta (CLOSED observado) rearma o gatilho;
+		// force_provision também zera (handleForceProvision).
+		if r.tracker.State() == "closed" && r.tracker.SustainedClosedSeconds() > 0 {
+			log.Info("local-llm closed again; re-arming emergency trigger",
+				"consecutive_failures", r.consecutiveFailures.Load())
+			r.resetFailureStreak()
+		} else {
+			return
+		}
+	}
 	sustained := r.tracker.SustainedFailedOverSeconds()
 	if sustained < int64(r.deps.Cfg.ProvisionTriggerFailedOverSeconds) {
 		return
@@ -856,6 +879,7 @@ func (r *Reconciler) applyEmergCommand(ctx context.Context, ev redisx.EmergEvent
 // Plan 06-06 evaluateEmergencyProvisioning will pick up the new state on
 // the next tick and drive the Vast.ai provisioning path.
 func (r *Reconciler) handleForceProvision(ctx context.Context, ev redisx.EmergEvent, log *slog.Logger) {
+	r.resetFailureStreak()
 	if r.q == nil {
 		log.Error("force-provision rejected: no DB pool wired (test misconfiguration)",
 			"by_replica", ev.ReplicaID)
@@ -1016,4 +1040,28 @@ func (r *Reconciler) destroyAndCloseLifecycle(ctx context.Context, lc *ActiveLif
 		"total_cost_brl":   cost,
 	})
 	return nil
+}
+
+// resetFailureStreak zera a contagem de falhas seguidas e destrava o
+// gatilho automático.
+func (r *Reconciler) resetFailureStreak() {
+	r.consecutiveFailures.Store(0)
+	r.triggerHalted.Store(false)
+}
+
+// recordProvisionFailure conta uma falha de provisionamento e trava o
+// gatilho automático quando a sequência atinge
+// Cfg.EmergencyMaxConsecutiveFailures (0 = sem limite).
+func (r *Reconciler) recordProvisionFailure(reason string) {
+	n := r.consecutiveFailures.Add(1)
+	limit := int64(r.deps.Cfg.EmergencyMaxConsecutiveFailures)
+	if limit <= 0 || n < limit || r.triggerHalted.Load() {
+		return
+	}
+	r.triggerHalted.Store(true)
+	r.deps.Log.Error("emergency trigger HALTED: consecutive provisioning failures",
+		"consecutive_failures", n, "limit", limit, "last_reason", reason)
+	r.captureTerminalSentry(0, "trigger_halted_consecutive_failures", map[string]any{
+		"consecutive_failures": n, "limit": limit, "last_reason": reason,
+	})
 }
