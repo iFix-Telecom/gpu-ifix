@@ -4,8 +4,14 @@
  * "Local vs externo" — the share of traffic the own GPU served, as a donut
  * (mockup: two stroked circles with dasharray/dashoffset).
  *
- * HONESTY RULE: `pct_servido_local` is `*float64` server-side and comes back
- * `null` when the denominator (total requests) is zero — the gateway refuses
+ * Phase 23: the share is by TOKENS (`pct_servido_local_tokens`, same metric
+ * as the Economia panel) and the external side is split into the Haiku step ①
+ * (covered by Max credits, real cash R$ 0) and real external cash
+ * (`custo_externo_caixa_brl`). `custo_openrouter_brl` is the sum of both and
+ * is no longer shown as "pagos".
+ *
+ * HONESTY RULE: `pct_servido_local_tokens` is `*float64` server-side and comes
+ * back `null` when the denominator (total tokens) is zero — the gateway refuses
  * to emit Inf/NaN. When it is null there is NOTHING to slice, so this renders
  * the empty state and NO donut. Coercing null to 0 would draw a full purple
  * ring reading "0% local / 100% external", which is a factual claim about a
@@ -24,7 +30,7 @@ export interface LocalVsExternalDonutProps {
 }
 
 export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
-  const pct = summary.pct_servido_local;
+  const pct = summary.pct_servido_local_tokens;
 
   if (pct === null) {
     return (
@@ -43,7 +49,7 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
     <div className="flex flex-wrap items-center gap-6 py-2">
       <svg viewBox="0 0 120 120" width={120} height={120} role="img">
         <title>
-          {`${(local * 100).toFixed(1)}% das requisições servidas pelo pod local`}
+          {`${(local * 100).toFixed(1)}% dos tokens servidos pelo pod local`}
         </title>
         {/* Track. */}
         <circle
@@ -120,10 +126,25 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
               aria-hidden="true"
               className="size-2.5 rounded-[3px] bg-chart-ext"
             />
-            OpenRouter (externo)
+            Haiku (créditos)
           </dt>
           <dd className="mt-0.5 font-mono text-[15px] font-semibold tabular-nums">
-            {formatBrl(summary.custo_openrouter_brl)}{" "}
+            {formatBrl(summary.custo_creditos_haiku_brl)}{" "}
+            <span className="text-[12px] font-medium text-muted-foreground">
+              coberto por créditos
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt className="flex items-center gap-2 text-muted-foreground">
+            <span
+              aria-hidden="true"
+              className="size-2.5 rounded-[3px] bg-chart-ext"
+            />
+            Externo (caixa)
+          </dt>
+          <dd className="mt-0.5 font-mono text-[15px] font-semibold tabular-nums">
+            {formatBrl(summary.custo_externo_caixa_brl)}{" "}
             <span className="text-[12px] font-medium text-muted-foreground">
               pagos
             </span>
