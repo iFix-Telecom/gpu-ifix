@@ -169,3 +169,17 @@ Smoke LLM pós-redeploy (uat10-test, `qwen`) → `claude-haiku-5-5`, `finish_rea
 ## Correção pós-ativação: formato de resposta (2026-10-15 20:08 UTC)
 
 O OpenRouter só aceita `mp3|pcm`. O claude-wpp pede `wav` e teve 2 respostas em voz com 400 (19:52 e 19:59 UTC). Fix `b25fc3f` (formato fora de `mp3|pcm` vira `mp3`) em prod com `develop-b25fc3f`. Detalhes no 23-ROLLOUT-EVIDENCE, seção da migration 0043.
+
+## Latência do TTS do claude-wpp (hipótese do timeout de 10 s) — 2026-10-15 ~19:57 BRT
+
+Consulta somente leitura em `ai_gateway.audit_log` (rota speech, desde 19:20 UTC):
+
+| Tenant | Chamadas 200 | p50 | p95 | Máx | Acima de 10 s |
+|---|---|---|---|---|---|
+| claude-wpp | 5 | 9,3 s | 11,1 s | 11,3 s | 2 |
+| claude-tts | 5 | 1,6 s | 4,0 s | 4,5 s | 0 |
+
+- O timeout de TTS do claude-wpp é **120 s**, não 10 s: `TTS_TIMEOUT_MS = 120_000` em `/opt/claude-wpp/src/voice/gateway.ts:40` (código em execução, alterado em e379072, 2026-07-23).
+- Journal `claude-wpp` desde 16:00 BRT: só os 2 `tts_fail reason:http` de 16:52 e 16:59 (o 400 do `wav`, corrigido em b25fc3f). Nenhum `tts_fail` por timeout depois do fix, inclusive nas chamadas de 11,3 s e 10,2 s.
+- **Hipótese REFUTADA.** Respostas longas do claude-wpp levam 9–11 s no eleven-v3, dentro do limite.
+- O único 503 de TTS no período (`telefonia`, 16:22:16) é o teste RES-08 registrado acima (chave sensível → `upstream_unavailable_for_sensitive_tenant`).
