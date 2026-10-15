@@ -41,11 +41,28 @@ func newSnapshot(cfgs []UpstreamConfig) *snapshot {
 	}
 	for _, u := range cfgs {
 		s.byName[u.Name] = u
-		s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
+		s.putRoleTier(u)
 		s.ordered = append(s.ordered, u)
 		s.addParsed(u)
 	}
 	return s
+}
+
+// putRoleTier grava u em byRoleTier só quando a chave (role, tier) ainda não
+// existe OU u tem tier_priority MENOR que o atual — o resultado independe da
+// ordem de leitura das rows (Phase 23-04, Padrão 6).
+//
+// Risco que isto fecha: o override de schedule/shed (dispatchOverride) e o
+// shed usam Resolve(role, 1). Com 3 tier-1 de llm (anthropic-haiku prio 0,
+// openrouter-chat prio 10, openrouter-deepseek prio 20) o snapshot em memória
+// ficava com o ÚLTIMO escrito (openrouter-deepseek), e o Refresh dependia do
+// ORDER BY da query — o override desviava do ① sem ninguém ver. Empate de
+// prioridade mantém o primeiro escrito (comportamento anterior do Refresh).
+func (s *snapshot) putRoleTier(u UpstreamConfig) {
+	rt := RoleTier{Role: u.Role, Tier: u.Tier}
+	if cur, exists := s.byRoleTier[rt]; !exists || u.TierPriority < cur.TierPriority {
+		s.byRoleTier[rt] = u
+	}
 }
 
 // addParsed registra a URL parseada de u quando ela é válida.
@@ -268,14 +285,12 @@ func (l *Loader) Refresh(ctx context.Context) error {
 		s.byName[u.Name] = u
 		s.addParsed(u)
 		// Phase 11.2 (D-B5′): when multiple rows share (role, tier), the
-		// lowest tier_priority wins in byRoleTier (rows are loaded in
-		// ASC tier_priority order; first writer wins). This preserves
-		// single-tier-1 backward-compat for llm/embed/tts (only one row
-		// per (role, tier)) while STT's multi-tier-1 cascade is exposed
-		// via ResolveAllTier1.
-		if _, exists := s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}]; !exists {
-			s.byRoleTier[RoleTier{Role: u.Role, Tier: u.Tier}] = u
-		}
+		// lowest tier_priority wins in byRoleTier. Phase 23-04: enforced by
+		// comparing TierPriority < (putRoleTier) instead of trusting the
+		// query's row order — the schedule/shed override resolves (role, 1)
+		// and must land on the lowest-priority tier-1 (①) with 3 tier-1 rows.
+		// The multi-tier-1 cascade itself is exposed via ResolveAllTier1.
+		s.putRoleTier(u)
 		s.ordered = append(s.ordered, u)
 	}
 	// Stable order for All() — by (role, tier, tier_priority) so callers
