@@ -88,6 +88,53 @@ type dispatchResult struct {
 	fallthrough_ bool  // pre-byte dial failure observed (sentinel suppressed)
 	wrote        bool  // a response was committed to the ResponseWriter
 	err          error // the underlying error (sentinel or upstream)
+
+	// Phase 23-04: populated by the ErrorHandler when the fallthrough was a
+	// chat status error (chatUpstreamStatusError). lastStatus == 0 means the
+	// fallthrough carried no upstream status (dial failure, over-context...).
+	lastStatus      int
+	lastBody        []byte
+	lastContentType string
+}
+
+// breakerSkipper is the contract for "cascade, but do not count toward the
+// breaker": any error in the chain whose SkipBreaker() returns true (e.g. the
+// 23-05 key-pool "all keys exhausted" error — the upstream is healthy, our
+// quota is not) advances the cascade without a breaker penalty.
+type breakerSkipper interface {
+	SkipBreaker() bool
+}
+
+// countsAsBreakerFailure reports whether a pre-byte fallthrough error must be
+// recorded on the candidate's breaker. False for over-context (T-ucv-05: the
+// request did not FIT, the upstream is not degraded) and for any error whose
+// chain carries SkipBreaker() == true.
+func countsAsBreakerFailure(err error) bool {
+	if errors.Is(err, errOverContextFallthrough) {
+		return false
+	}
+	var sk breakerSkipper
+	if errors.As(err, &sk) && sk.SkipBreaker() {
+		return false
+	}
+	return true
+}
+
+// writeLastUpstreamError writes the last real upstream error recorded on res
+// (status + body as received, bounded to chatErrorPeekMax). Returns false
+// when res carries no upstream status, so the caller writes its own envelope.
+func writeLastUpstreamError(w http.ResponseWriter, res *dispatchResult) bool {
+	if res == nil || res.lastStatus == 0 {
+		return false
+	}
+	ct := res.lastContentType
+	if ct == "" {
+		ct = "application/json"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(res.lastStatus)
+	_, _ = w.Write(res.lastBody)
+	return true
 }
 
 // dispatchResultCtxKey is the unexported context key for *dispatchResult.
@@ -557,6 +604,7 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 	streaming := IsStreamingRequest(r)
 	restoreBody, _ := prepareReplayBody(r)
 	skippedSensitive := false
+	var lastErr *dispatchResult // last fallthrough carrying a real upstream status
 
 	for _, c := range candidates {
 		if sensitive && c.external {
@@ -593,8 +641,12 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 		}
 		res := cfg.dispatchTo(w, r, c.u.Name, streaming, log)
 		if res.fallthrough_ && !res.wrote {
-			if !errors.Is(res.err, errOverContextFallthrough) {
+			if countsAsBreakerFailure(res.err) {
 				cfg.recordFallthroughFailure(r, c.u.Name, res.err, log)
+			}
+			if res.lastStatus != 0 {
+				last := res
+				lastErr = &last
 			}
 			continue
 		}
@@ -609,6 +661,13 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 	log.Warn("pinned upstream roster exhausted",
 		"model", model, "pinned", pinned,
 		"request_id", httpx.RequestIDFrom(r.Context()))
+	// Phase 23-04: every candidate failed and at least one failed with a
+	// real upstream status → return the LAST real error (status + body as
+	// received) instead of the generic envelope, so the client sees the
+	// provider's diagnostic (e.g. 429 rate limit) rather than an opaque 503.
+	if writeLastUpstreamError(w, lastErr) {
+		return
+	}
 	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 		"service_unavailable", "pinned_upstreams_unavailable",
 		"No pinned upstream is available for this model.")
@@ -635,8 +694,19 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 			"Primary upstream unavailable and no fallback configured for role.")
 		return false
 	}
+	var lastErr *dispatchResult // last fallthrough carrying a real upstream status
 	for _, t1 := range candidates {
 		if cfg.Breaker.EffectiveState(t1.Name) != gobreaker.StateClosed {
+			continue
+		}
+		// Phase 23-04: a dormant tier-1 (row enabled, proxy not wired — e.g.
+		// the Haiku upstream before its key is configured) must be skipped,
+		// not answered with the terminal "proxy not registered" 503 that
+		// dispatchTo would commit — that would kill the rest of the cascade.
+		if _, ok := cfg.Proxies[t1.Name]; !ok {
+			log.Warn("tier-1 candidate has no registered proxy; skipping",
+				"upstream", t1.Name,
+				"request_id", httpx.RequestIDFrom(r.Context()))
 			continue
 		}
 		if restoreBody != nil {
@@ -649,14 +719,23 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 			//
 			// T-ucv-05: same exception as the tier-0 loop — an over-context
 			// fallthrough says the request did not FIT, not that the upstream
-			// is degraded, so it must not push the breaker toward OPEN.
-			if !errors.Is(res.err, errOverContextFallthrough) {
+			// is degraded, so it must not push the breaker toward OPEN. Phase
+			// 23-04: SkipBreaker() errors (key pool exhausted) are exempt too.
+			if countsAsBreakerFailure(res.err) {
 				cfg.recordFallthroughFailure(r, t1.Name, res.err, log)
+			}
+			if res.lastStatus != 0 {
+				last := res
+				lastErr = &last
 			}
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
 		return true
+	}
+	// Phase 23-04: return the last real upstream error when there is one.
+	if writeLastUpstreamError(w, lastErr) {
+		return false
 	}
 	// Chain exhausted: every CLOSED candidate dial-failed (or none CLOSED).
 	httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
