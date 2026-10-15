@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -120,8 +121,10 @@ func runPricesSet(ctx context.Context, args []string, log *slog.Logger) int {
 		return 1
 	}
 
+	// Representação decimal exata do float (sem arredondar para 8 casas):
+	// 1.25e-7 vira "0.000000125". A coluna é NUMERIC(20,12) desde a 0043.
 	var usdNum pgtype.Numeric
-	if err := usdNum.Scan(fmt.Sprintf("%.8f", *usd)); err != nil {
+	if err := usdNum.Scan(formatUSD(*usd)); err != nil {
 		fmt.Fprintf(os.Stderr, "encode usd: %v\n", err)
 		return 1
 	}
@@ -154,8 +157,8 @@ func runPricesSet(ctx context.Context, args []string, log *slog.Logger) int {
 		"unit", *unit,
 		"usd", *usd,
 	)
-	fmt.Printf("price set: id=%s model=%s provider=%s unit=%s usd=%.8f\n",
-		ins.ID.String(), *model, *provider, *unit, *usd)
+	fmt.Printf("price set: id=%s model=%s provider=%s unit=%s usd=%s\n",
+		ins.ID.String(), *model, *provider, *unit, formatUSD(*usd))
 	return 0
 }
 
@@ -203,8 +206,8 @@ func runPricesList(ctx context.Context, args []string, log *slog.Logger) int {
 		if r.Notes.Valid {
 			notes = r.Notes.String
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%.8f\t%s\t%s\t%s\n",
-			r.Model, r.Provider, r.Unit, cost,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.Model, r.Provider, r.Unit, formatUSD(cost),
 			r.ValidFrom.UTC().Format(time.RFC3339), vt, notes)
 	}
 	if err := tw.Flush(); err != nil {
@@ -268,4 +271,10 @@ func runPricesSetFX(ctx context.Context, args []string, log *slog.Logger) int {
 	log.Info("USD/BRL fx updated", "fx_id", ins.ID.String(), "rate", *usdBrl)
 	fmt.Printf("fx set: id=%s pair=USD/BRL rate=%.6f\n", ins.ID.String(), *usdBrl)
 	return 0
+}
+
+// formatUSD devolve o menor decimal que representa v exatamente como
+// float64, sem notação científica (ex.: 1.25e-7 → "0.000000125").
+func formatUSD(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

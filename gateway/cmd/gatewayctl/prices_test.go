@@ -48,3 +48,21 @@ func TestPricesSetRejectsBogusUnit(t *testing.T) {
 		t.Errorf("runPricesSet bogus unit: rc=%d, want 2", rc)
 	}
 }
+
+// TestFormatUSDKeepsSubEightDecimalPrecision — 0043: o set não pode mais
+// arredondar para 8 casas (1.25e-7 virava 1.2e-7 no banco).
+func TestFormatUSDKeepsSubEightDecimalPrecision(t *testing.T) {
+	cases := map[float64]string{
+		0.000000125: "0.000000125",
+		0.000000625: "0.000000625",
+		0.00000001:  "0.00000001",
+		0.00004:     "0.00004",
+		0.195e-6:    "0.000000195",
+		1.5:         "1.5",
+	}
+	for in, want := range cases {
+		if got := formatUSD(in); got != want {
+			t.Errorf("formatUSD(%g) = %q, want %q", in, got, want)
+		}
+	}
+}

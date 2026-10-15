@@ -107,8 +107,9 @@ func TestIntegration_Migration0038_DownUp(t *testing.T) {
 	// landed on HEAD — Down(2) peels 0039 then 0038.
 	// quick-261007-sjo HEAD bump: Down(2)→Down(3) when 0040 landed.
 	// Phase 23 HEAD bump: Down(3)→Down(5) when 0041+0042 landed.
-	if err := db.Down(ctx, pool, 5); err != nil {
-		t.Fatalf("db.Down(5) revert 0042+0041+0040+0039+0038: %v", err)
+	// 0043 (prices scale) HEAD bump: Down(5)→Down(6).
+	if err := db.Down(ctx, pool, 6); err != nil {
+		t.Fatalf("db.Down(6) revert 0043+0042+0041+0040+0039+0038: %v", err)
 	}
 	if colExists() {
 		t.Fatal("url_override still present after 0038 Down")

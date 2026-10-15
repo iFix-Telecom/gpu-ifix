@@ -83,13 +83,13 @@ func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table st
 	return ok
 }
 
-// at0040 leva o banco ao estado anterior à 0041 e registra a volta ao HEAD.
+// at0040 leva o banco ao estado anterior à 0041 (Down(3) desde a 0043) e registra a volta ao HEAD.
 // cleanupSQL roda antes do db.Up do cleanup (desfaz a preparação do teste).
 func at0040(t *testing.T, ctx context.Context, cleanupSQL ...string) *pgxpool.Pool {
 	t.Helper()
 	pool, _ := freshSchema(t, ctx)
-	if err := db.Down(ctx, pool, 2); err != nil {
-		t.Fatalf("db.Down(2) revert 0042+0041: %v", err)
+	if err := db.Down(ctx, pool, 3); err != nil {
+		t.Fatalf("db.Down(3) revert 0043+0042+0041: %v", err)
 	}
 	t.Cleanup(func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -231,8 +231,8 @@ func TestMigration0041_UpDown(t *testing.T) {
 	}
 
 	// Down(2) → estado 0040.
-	if err := db.Down(ctx, pool, 2); err != nil {
-		t.Fatalf("db.Down(2): %v", err)
+	if err := db.Down(ctx, pool, 3); err != nil {
+		t.Fatalf("db.Down(3): %v", err)
 	}
 	pool.Reset()
 	chat, _ := upstreamRow(t, ctx, pool, "openrouter-chat")
@@ -325,8 +325,8 @@ func TestMigration0041_TTSDivergentPriorities(t *testing.T) {
 	}
 
 	// Down restaura as prioridades divergentes originais.
-	if err := db.Down(ctx, pool, 2); err != nil {
-		t.Fatalf("db.Down(2): %v", err)
+	if err := db.Down(ctx, pool, 3); err != nil {
+		t.Fatalf("db.Down(3): %v", err)
 	}
 	got := ttsTier1(t, ctx, pool)
 	if got["kokoro-tts"] != 0 || got["local-tts"] != 5 || len(got) != 2 {
