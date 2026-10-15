@@ -131,3 +131,128 @@ local-tts            tts     1     true     UPSTREAM_TTS_URL              …
 ### 1.7 Rollback
 
 Não foi necessário: nenhuma das condições de falha ocorreu (migrate OK, `/health` 200, imagem certa, sem erros no boot).
+
+---
+
+## Task 2 — aliases, preços, enable, smokes e 3090
+
+### 2.1 Snapshot dos aliases
+
+O snapshot é o `admin-model-aliases-pre-20261015T024935.json` (seção 1.0): `GET /admin/model-aliases`, 28 linhas, root-600 em `~/gw-phase23-rollout/`.
+
+### 2.2 Linhas de alias (passo 2), via `gatewayctl model-alias set` (docker exec no container novo)
+
+Rodaram de **05:56:0x a 05:57:05** as 27 linhas da seção (b) do 23-ROLLOUT-CHANGES: 9 aliases × {`anthropic-haiku` → `claude-haiku-5-5`, `openrouter-chat` → `anthropic/claude-haiku-5.5` + HAIKU_PREFS, `openrouter-deepseek` → `deepseek/deepseek-v4.1-flash:exacto` + DS_PREFS}. **`CFG_FAIL=0`.**
+
+O diff de `GET /admin/model-aliases` contra o snapshot, conferido logo depois, dá **28 → 48 linhas: 20 adicionadas, 0 removidas, 0 alteradas**.
+- Adicionadas: `anthropic-haiku` e `openrouter-deepseek` nos 9 aliases (18 linhas), mais `openrouter-chat` nos aliases novos `anthropic/claude-haiku-5.5` e `claude-haiku-5-5` (2 linhas).
+- As 7 linhas `openrouter-chat` que já existiam ficaram idênticas. As linhas `local-llm`, stt e embed não foram tocadas.
+- **`maestro-summary` está idêntico ao snapshot**: `openrouter-chat` → `deepseek/deepseek-v4.1-flash:nitro`, prefs `{"order":["BaseTen"],"quantizations":["fp8"],"allow_fallbacks":true,"data_collection":"deny"}`.
+- Prefs por tenant (item 4d): nenhuma ação, porque 0 tenants têm `provider_prefs`.
+
+### 2.3 Habilitação de ③ e ① (passo 2b), DEPOIS das linhas de alias
+
+| Horário (UTC) | Comando | Resultado |
+|---|---|---|
+| 05:57:05 | (última linha de alias gravada) | — |
+| 05:57:26 → 05:57:29 | `gatewayctl upstreams enable --name=openrouter-deepseek` | `upstream "openrouter-deepseek" enabled=true` |
+| 05:57:29 → 05:57:31 | `gatewayctl upstreams enable --name=anthropic-haiku` | `upstream "anthropic-haiku" enabled=true` |
+
+`gatewayctl upstreams list` às 05:57:3x:
+
+```
+local-llm            llm     0     false
+anthropic-haiku      llm     1     true     UPSTREAM_LLM_ANTHROPIC_URL   (sem probe: dormente, sem env)
+openrouter-chat      llm     1     true     … config 23ms
+openrouter-deepseek  llm     1     true     … config 23ms
+```
+
+O `anthropic-haiku` segue dormente até o 23-18, porque não há `UPSTREAM_LLM_ANTHROPIC_URL`/`_API_KEYS` no stack. Todos os smokes abaixo, feitos depois do enable, saíram por `openrouter-chat`, então ① não interceptou tráfego.
+
+### 2.4 Preços (passo 3), `gatewayctl prices set -provider anthropic`, de 05:57:47 a 05:58:13
+
+Foram gravadas 10 linhas, com **`PRICE_FAIL=0`**. `gatewayctl prices list` mostra todas `active`:
+
+| model | input | cache_write | cache_write_1h | cache_read | output |
+|---|---|---|---|---|---|
+| `claude-haiku-5-5` | 0.00000010 | **0.00000012** | 0.00000020 | 0.00000001 | 0.00000050 |
+| `claude-haiku-5-5:long` | 0.00000050 | **0.00000063** | 0.00000100 | 0.00000005 | 0.00000250 |
+
+Os valores em negrito confirmam em prod a perda de precisão prevista (`NUMERIC(12,8)`): 1.25e-7 virou 1.2e-7 e 6.25e-7 virou 6.3e-7. É **pendência antes do 23-18**, com migration de escala. `anthropic/claude-haiku-5.5 @ openrouter-fireworks` (1e-7 / 5e-7) não mudou.
+
+### 2.5 Smokes (passo 4)
+
+Feitos com uma chave real de tenant normal (`uat10-test`), entre 05:58:28 e 05:59:xx, mais de 70 s depois da última linha de alias. O upstream de cada request vem de `audit_log.upstream` pelo `request_id`.
+
+**Não-stream, com mensagem final do assistant + `temperature:0`, 9 de 9 aliases → 200, todos servidos por `openrouter-chat`:**
+
+| alias | HTTP | `audit_log.upstream` | `billing_events.cost_source` | max_tokens 40 | max_tokens 2000 |
+|---|---|---|---|---|---|
+| `qwen` | 200 | openrouter-chat | provider_reported | finish=length, content vazio | finish=stop, content ok |
+| `deepseek-flash` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `deepseek-v4-flash` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `gpt-4o` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `gpt-5.4-mini` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `gpt-5.4-mini-2026-03-17` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `ia-kanban` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `anthropic/claude-haiku-5.5` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+| `claude-haiku-5-5` | 200 | openrouter-chat | provider_reported | idem | stop, ok |
+
+- Nenhum 400 de prefill ou sampling, que era o objetivo do HAIKU-04.
+- O conteúdo vazio com `max_tokens` 40 é o mesmo achado da seção 1.6: o effort high padrão do ② consome o orçamento.
+- **Stream** (`deepseek-flash`, `stream:true`): 200, e o SSE termina em `data: [DONE]`. `audit_log.stream=t`, upstream openrouter-chat, `provider_reported`.
+- **tool_choice forçado** (`qwen`, `get_weather`): 200, `finish_reason=tool_calls`, 1 `tool_calls` `get_weather:{"city": "Goiania"}`.
+- **Cache e billing** (HAIKU-06): mandei 2 requests seguidos com o mesmo system de ~19k tokens no alias `qwen`. O gateway injeta o `cache_control` (PASS do `openrouter_director.go`).
+
+| request | `usage.prompt_tokens_details` | `billing_events` |
+|---|---|---|
+| 1º | cache_write_tokens 19021 | `tokens_cache_write=19021`, `tokens_cache_read=0`, `provider_reported`, R$ 0,012108 |
+| 2º | cached_tokens 19021 | **`tokens_cache_read=19021`**, `provider_reported`, R$ 0,001138 |
+
+### 2.6 Passo ③ ao vivo por alias canário (passo 5), sem force-open de breaker
+
+- (5a) às 05:59:56 → 05:59:59: `gatewayctl model-alias set -alias p23-canary-step3 -upstream openrouter-deepseek -target deepseek/deepseek-v4.1-flash:exacto -provider-prefs <DS_PREFS>`.
+- Às 06:01:13, mais de 70 s depois, um POST chat com `model:"p23-canary-step3"` (tenant normal) deu **200**. Detalhes:
+  - resposta com `"model":"deepseek/deepseek-v4.1-flash"` e `"provider":"Morph"`;
+  - `audit_log.upstream = openrouter-deepseek`;
+  - `billing_events`: `upstream=openrouter-deepseek`, `model=deepseek/deepseek-v4.1-flash`, `cost_source=provider_reported`, 40 in / 8 out, R$ 0,000027.
+  - Isso prova que proxy, alias, prefs e billing do ③ estão vivos.
+- Observação: o conteúdo devolvido pelo DeepSeek foi `"/no_think\n\nOk."`. O gateway não injeta `/no_think`: `grep` em `gateway/internal` e `gateway/cmd` não encontra nada. HIPÓTESE: é eco do próprio modelo ou do provider Morph para um prompt curto com prefill. Para tirar a dúvida, seria preciso repetir com outro prompt ou provider.
+- (5b) a cascata ②→③ por status e por timeout de cabeçalho está coberta pelo 23-14 (`ExternalChatInterceptors`, `NewChatFallthroughTransport`) e pela integração do 23-15 (`TestHaikuChain_*`).
+- (5c) às 06:01:35: `gatewayctl model-alias delete -alias p23-canary-step3 -upstream openrouter-deepseek`. Depois disso, `GET /admin/model-aliases` voltou a 48 linhas, o diff contra o snapshot segue em 20 adicionadas, 0 removidas e 0 alteradas, e **o canário sumiu**.
+- **Nenhum force-open de breaker foi executado.**
+
+### 2.7 RES-08 (passo 6)
+
+Com a chave `telefonia` (sensitive), um POST chat `deepseek-flash` às 06:00:03 deu **HTTP 503** `{"code":"upstream_unavailable_for_sensitive_tenant"}`, com `audit_log.upstream=blocked_sensitive`. Não houve billing.
+
+### 2.8 maestro-summary (passo 7)
+
+A linha está idêntica ao snapshot (seção 2.2), conferida de novo depois da remoção do canário: `maestro identical: True`.
+
+### 2.9 Billing desde o deploy (passo 8), `ts > 2026-10-15 05:50:37+00`, consultado às ~06:02
+
+| upstream | cost_source | requests |
+|---|---|---|
+| openrouter-chat | provider_reported | 27 |
+| openrouter-deepseek | provider_reported | 1 |
+| local-embed | (NULL, local) | 8 |
+
+`openrouter-*` com `price_table` deu **0**: todas as requests do OpenRouter trouxeram `usage.cost`.
+
+### 2.10 3090 desligada formalmente (passo 9, HAIKU-07)
+
+- `SELECT schedule_disabled FROM ai_gateway.pod_config` retornou **`t`** (`updated_at 2026-10-14 11:15:42 UTC`). O log de boot do gateway novo também mostra `schedule_disabled=true` e `fsm_state=asleep`.
+- A API da Vast (`GET /api/v0/instances/?owner=me`) às 06:00:19 retornou `{"instances_found": 0, "instances": []}`: **0 instâncias** e 0 `ifix-primary-*`/`ifix-emerg-*`. O orphan sweep do boot também listou 0.
+- `local-llm` está com enabled=false.
+- **3090 desligada formalmente (HAIKU-07).**
+
+### 2.11 `GET /admin/economy` (passo 10)
+
+Retornou HTTP 200 (range 2026-10-01 → 2026-10-15, America/Sao_Paulo). Os campos novos estão presentes:
+- `pct_servido_local_tokens` = 0.125
+- `custo_creditos_haiku_brl` = 0
+- `custo_externo_caixa_brl` = 288.57
+- `vast_3060_brl` = 0
+
+Os campos antigos (`phantom_brl`, `vast_brl`, `custo_openrouter_brl`, `pct_servido_local`, `series[]`) continuam lá.
