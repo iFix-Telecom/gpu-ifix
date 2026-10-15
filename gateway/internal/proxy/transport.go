@@ -35,9 +35,31 @@ type fallthroughRoundTripper struct {
 	base http.RoundTripper
 
 	// preByteTimeout widens the classification to include a response-header
-	// timeout. It is opt-in and MUST only be enabled for non-streaming roles
-	// (STT today). See NewSTTFallthroughTransport for why that is pre-byte-safe.
+	// timeout. It is opt-in: STT (NewSTTFallthroughTransport) and the tier-1
+	// chat upstreams (NewChatFallthroughTransport, Phase 23-12). Both
+	// constructors document why it is pre-byte-safe.
 	preByteTimeout bool
+}
+
+// NewChatFallthroughTransport envolve base para os upstreams de chat tier-1
+// (passo ① anthropic-haiku no 23-12; ② e openrouter-tts no wiring do 23-14):
+// timeout de cabeçalho também vira errDialFailedFallthrough e a cascata segue
+// para o próximo candidato.
+//
+// Por que é pré-byte também com SSE: RoundTrip só devolve erro ANTES de
+// receber qualquer header de resposta; o httputil.ReverseProxy ainda não
+// escreveu nada ao cliente (o stream só abre depois do 200 com headers). O
+// "timeouts não cascateiam" do D-06 vale para falha DEPOIS dos headers (leitura
+// do corpo no meio do stream), que este wrapper não toca. Cancelamento do
+// próprio cliente nunca cascateia (isPreByteTimeout).
+//
+// Decisão sobre o timeout de 120 s (MEDIUM do Gemini na revisão cross-AI):
+// hoje o openrouter-chat usa http.Transport puro, então um ResponseHeaderTimeout
+// estourado vira 502 terminal e a cascata nem acontece. Mantém-se 120 s
+// (resposta não-streaming com effort high pode demorar) e passa-se a cascatear
+// quando estoura. Pior caso documentado: ① e ② presos 120 s cada antes do ③.
+func NewChatFallthroughTransport(base http.RoundTripper) http.RoundTripper {
+	return fallthroughRoundTripper{base: base, preByteTimeout: true}
 }
 
 // NewSTTFallthroughTransport wraps base for the STT role, where a
@@ -124,13 +146,17 @@ func isPreByteTimeout(ctx context.Context, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return false
-	}
 	// net/http and x/net/http2 both report the header wait with this phrase and
 	// neither exports the error value, so the string is the only stable handle.
+	// Checked BEFORE the context sentinels (23-12): net/http's HTTP/1 errTimeout
+	// implements Is(context.DeadlineExceeded) == true, so the sentinel check
+	// below would wrongly classify a real ResponseHeaderTimeout as a caller
+	// deadline. The caller's own deadline is already excluded by ctx.Err().
 	if strings.Contains(err.Error(), "timeout awaiting response headers") {
 		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {

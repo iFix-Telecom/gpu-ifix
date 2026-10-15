@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // errRoundTripper returns a fixed (resp, err) pair so we can drive
@@ -189,5 +192,69 @@ func TestSTTFallthroughTransport_HeaderTimeoutCascades(t *testing.T) {
 	gotResp, gotErr := NewSTTFallthroughTransport(errRoundTripper{resp: okResp}).RoundTrip(req)
 	if gotErr != nil || gotResp != okResp {
 		t.Fatalf("successful RoundTrip should pass through, got resp=%v err=%v", gotResp, gotErr)
+	}
+}
+
+// TestNewChatFallthroughTransport (23-12): no chat tier-1 um timeout de
+// cabeçalho também cascateia — RoundTrip só falha antes de qualquer header,
+// então nada chegou ao cliente, nem em SSE. Cancelamento do próprio cliente
+// NÃO cascateia (ninguém vai ler a resposta).
+func TestNewChatFallthroughTransport(t *testing.T) {
+	hung := errors.New("net/http: timeout awaiting response headers")
+	req := (&http.Request{}).WithContext(context.Background())
+
+	resp, err := NewChatFallthroughTransport(errRoundTripper{err: hung}).RoundTrip(req)
+	if !errors.Is(err, errDialFailedFallthrough) || resp != nil {
+		t.Fatalf("timeout de cabeçalho deveria cascatear, got resp=%v err=%v", resp, err)
+	}
+
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	if _, dErr := NewChatFallthroughTransport(errRoundTripper{err: dialErr}).RoundTrip(req); !errors.Is(dErr, errDialFailedFallthrough) {
+		t.Fatalf("falha de dial deveria cascatear, got %v", dErr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceledReq := (&http.Request{}).WithContext(ctx)
+	_, cErr := NewChatFallthroughTransport(errRoundTripper{err: context.Canceled}).RoundTrip(canceledReq)
+	if errors.Is(cErr, errDialFailedFallthrough) || !errors.Is(cErr, context.Canceled) {
+		t.Fatalf("cancelamento do cliente deve devolver o erro original, got %v", cErr)
+	}
+	// Mesmo com mensagem de timeout, ctx do cliente já encerrado não cascateia.
+	_, c2Err := NewChatFallthroughTransport(errRoundTripper{err: hung}).RoundTrip(canceledReq)
+	if errors.Is(c2Err, errDialFailedFallthrough) {
+		t.Fatalf("ctx cancelado não pode cascatear, got %v", c2Err)
+	}
+
+	okResp := &http.Response{StatusCode: 200}
+	gotResp, gotErr := NewChatFallthroughTransport(errRoundTripper{resp: okResp}).RoundTrip(req)
+	if gotErr != nil || gotResp != okResp {
+		t.Fatalf("sucesso deveria passar direto, got resp=%v err=%v", gotResp, gotErr)
+	}
+}
+
+// TestNewChatFallthroughTransport_RealHTTP1HeaderTimeout: o errTimeout REAL do
+// net/http (HTTP/1) implementa Is(context.DeadlineExceeded); antes do 23-12 o
+// isPreByteTimeout o descartava como "deadline do chamador" e o timeout de
+// cabeçalho nunca cascateava (nem no STT). Usa socket de verdade.
+func TestNewChatFallthroughTransport_RealHTTP1HeaderTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	rt := NewChatFallthroughTransport(&http.Transport{ResponseHeaderTimeout: 100 * time.Millisecond})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("{}"))
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, errDialFailedFallthrough) {
+		t.Fatalf("timeout de cabeçalho real deveria cascatear, got %v", err)
 	}
 }
