@@ -429,11 +429,11 @@ Plans:
 
 **Requirements:** HAIKU-01 (upstream Anthropic direto: adaptador OpenAI chat/completions → Anthropic Messages [SDK Go oficial vs endpoint OpenAI-compatível — decidir no research], remove `temperature`/`top_p`/`top_k`/penalties que dão 400, preserva tools + `tool_choice` forçado), HAIKU-02 (pool de 2–3 chaves com rodízio + detecção/marcação de chave esgotada até o reset mensal; armazenamento seguro das chaves), HAIKU-03 (cadeia de 3 passos no modelo aliases × upstreams × tiers; aliases do padrão DeepSeek apontam pra ela; `maestro-summary` intocado sem perguntar), HAIKU-04 (preço Haiku na tabela `prices` incl. degrau 5× acima de 100k tokens/request + cache read/write — billing e dashboard), HAIKU-05 (effort high por padrão, override por tenant se preciso; prompt caching p/ chat-ifix), HAIKU-06 (RES-08 preservado: sensitive nunca externo), HAIKU-07 (rollout em prod + validação + desligar 3090). HAIKU-08 (**geração de áudio sem pod** — pedido Pedro 2026-10-14 ao desligar 3090+3060: TTS PT-BR hoje cai no Kokoro CPU `local-tts` (voz pior, ~10s/frase); avaliar provedor externo de TTS com voz PT-BR natural [ex.: OpenAI gpt-4o-mini-tts, Gemini TTS, ElevenLabs, Fish Audio] vs custo, ligar como upstream TTS do gateway com billing por caractere; consumidores: claude-tts, claude-wpp, chat-ifix), HAIKU-09 (**painel Economia fidedigno** — custo OpenRouter real via API (com cache) em vez de estimativa da tabela `prices`, custo da 3060 somado ao Vast, economia calculada a preço Haiku, % servido local por tokens). **2026-10-14: 3090 E 3060 DESLIGADAS** (pod_config.schedule_disabled=true + timers vast-unified-* disabled; 0 instâncias Vast). Pendente do Pedro p/ passo ①: vincular org do Console em cada conta Max e gerar API keys — sem elas, desenvolver/testar com passo ②.
 **Depends on:** Phase 22
-**Plans:** 20 plans
+**Plans:** 1/20 plans executed
 
 Plans:
 
-- [ ] 23-01-PLAN.md — normalização de prefill/sampling p/ alvos Anthropic no openrouter-chat (PASS 5) — wave 1
+- [x] 23-01-PLAN.md — normalização de prefill/sampling p/ alvos Anthropic no openrouter-chat (PASS 5) — wave 1
 - [ ] 23-02-PLAN.md — hotfix isolado do prefill em prod (stack 38) com aprovação — wave 2
 - [ ] 23-03-PLAN.md — migrations 0041 (cadeia, llm_effort, units de cache, colunas de billing; guardas de posição) + 0042 (aux_pod_lifecycles) + testes — wave 2
 - [ ] 23-04-PLAN.md — cascata por status HTTP + último erro real + loader por prioridade + override pela cascata pinada — wave 2
