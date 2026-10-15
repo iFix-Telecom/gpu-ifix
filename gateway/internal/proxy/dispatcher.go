@@ -36,6 +36,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/sony/gobreaker/v2"
 
@@ -95,6 +96,23 @@ type dispatchResult struct {
 	lastStatus      int
 	lastBody        []byte
 	lastContentType string
+}
+
+// dormantSkipWarned guarda quais upstreams já tiveram o WARN de "candidato sem
+// proxy registrado" emitido (Phase 23-14). Um upstream dormente — linha
+// habilitada, proxy não montado no boot (ex.: anthropic-haiku sem chaves) — é
+// pulado em TODO request; o WARN sai uma vez por upstream por processo e as
+// repetições descem para Debug, para não inundar o log por request.
+var dormantSkipWarned sync.Map
+
+// logNoProxySkip registra o pulo de um candidato sem proxy registrado.
+func logNoProxySkip(log *slog.Logger, msg, upstream string, args ...any) {
+	args = append([]any{"upstream", upstream}, args...)
+	if _, seen := dormantSkipWarned.LoadOrStore(upstream, struct{}{}); seen {
+		log.Debug(msg, args...)
+		return
+	}
+	log.Warn(msg+" (repetições deste upstream em Debug)", args...)
 }
 
 // breakerSkipper is the contract for "cascade, but do not count toward the
@@ -652,8 +670,8 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if _, ok := cfg.Proxies[c.u.Name]; !ok {
-			log.Warn("pinned candidate has no registered proxy; skipping",
-				"upstream", c.u.Name, "model", model,
+			logNoProxySkip(log, "pinned candidate has no registered proxy; skipping",
+				c.u.Name, "model", model,
 				"request_id", httpx.RequestIDFrom(r.Context()))
 			continue
 		}
@@ -785,9 +803,8 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 			continue
 		}
 		if _, ok := cfg.Proxies[t1.Name]; !ok {
-			log.Warn("override cascade candidate has no registered proxy; skipping",
-				"upstream", t1.Name,
-				"request_id", httpx.RequestIDFrom(r.Context()))
+			logNoProxySkip(log, "override cascade candidate has no registered proxy; skipping",
+				t1.Name, "request_id", httpx.RequestIDFrom(r.Context()))
 			continue
 		}
 		if restoreBody != nil {
@@ -846,9 +863,8 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 		// not answered with the terminal "proxy not registered" 503 that
 		// dispatchTo would commit — that would kill the rest of the cascade.
 		if _, ok := cfg.Proxies[t1.Name]; !ok {
-			log.Warn("tier-1 candidate has no registered proxy; skipping",
-				"upstream", t1.Name,
-				"request_id", httpx.RequestIDFrom(r.Context()))
+			logNoProxySkip(log, "tier-1 candidate has no registered proxy; skipping",
+				t1.Name, "request_id", httpx.RequestIDFrom(r.Context()))
 			continue
 		}
 		if restoreBody != nil {
