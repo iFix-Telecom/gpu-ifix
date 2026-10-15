@@ -101,3 +101,43 @@ Resultado em 2026-10-15 03:25:58 UTC:
 - **Origem:** pré-aprovação repassada pelo orquestrador `/gsd:execute-phase` no prompt deste executor: _"O usuário (Pedro) instruiu explicitamente nesta sessão: 'execute, seja autônomo'. O checkpoint:decision da Task 2 (aprovação do deploy do hotfix de prefill) está RESOLVIDO como 'Deploy agora'."_ Pedro não respondeu diretamente a este agente. A aprovação chegou pelo orquestrador.
 - **Registrado em:** 2026-10-15 00:53 BRT
 - **Condição imposta junto:** se build, smoke ou 5xx novo saírem do esperado, fazer rollback para `develop-f06681f@sha256:3cc6fa18…` e relatar.
+
+## 6. Deploy (Task 3)
+
+- **deploy_at:** 2026-10-15 00:53:58 BRT (03:53:58 UTC)
+- **recontagem_apos:** 2026-10-15 02:53:58 BRT (deploy_at + 2 h)
+- Pré-condições checadas antes do PUT:
+  - health 200
+  - `gatewayctl primary lifecycles` sem lifecycle aberto (todos com ENDED; pods desligados)
+  - guarda no script: Env e StackFileContent relidos e iguais (`cmp`) ao snapshot 20261015T002445
+- `PUT /api/stacks/38?endpointId=6` com `{StackFileContent, Env, Prune:false, PullImage:true}` deu OK. O diff do StackFileContent foi de **uma linha só** (linha 4, `image:` do gateway):
+  ```
+  < image: ghcr.io/ifixtelecom/ifix-ai-gateway:develop-f06681f@sha256:3cc6fa18…
+  > image: ghcr.io/ifixtelecom/ifix-ai-gateway:develop-2886a7a@sha256:3ee34afc6dfd19496d6dc11d2e6743f93675728dbc812dc5474577de9fbf5185
+  ```
+- **Env vars: 86 antes, 86 depois**
+- O payload do PUT e os GETs pré-PUT estão salvos em `~/gw-phase23-hotfix/` (modo 600)
+
+## 7. Validação pós-deploy (FATO)
+
+- `docker service inspect`: `ghcr.io/ifixtelecom/ifix-ai-gateway:develop-2886a7a@sha256:3ee34afc6dfd19496d6dc11d2e6743f93675728dbc812dc5474577de9fbf5185`. É o mesmo digest da seção 3b.
+- `docker service ps` às 00:54:41: task nova Running "29 seconds ago" (≈00:54:12), a antiga (`develop-f06681f`) em Shutdown "35 seconds ago" (≈00:54:06). O log de boot marca `starting gateway` às 00:54:08. Pelos timestamps, a janela sem backend ficou em poucos segundos, mas não medi o gap de health com precisão. Health 200 confirmado às 00:54:41.
+- Log de boot: `"msg":"starting gateway" ... "version":"develop-2886a7a"`, LISTEN tenants/upstreams ativos. **0** linhas com panic/fatal e 0 `level=ERROR` nos primeiros minutos.
+- **Smoke de prefill** (tenant chat-ifix; mensagens system + user + assistant, com a última `assistant` sem tool_calls; `temperature:0`; `max_tokens:60`):
+
+  | model pedido | HTTP | model devolvido | conteúdo |
+  |--------------|------|-----------------|----------|
+  | `deepseek-flash` | **200** | `anthropic/claude-haiku-5.5` | "Brasília. …" (finish=length) |
+  | `gpt-5.4-mini-2026-03-17` (alias do Maestro) | **200** | `anthropic/claude-haiku-5.5` | "Brasília. …" (finish=length) |
+
+  Antes do hotfix, essa mesma forma de conversa (terminando em assistant) com alvo Anthropic gerava o 400 `does not support assistant message prefill` (37 casos nas 24 h anteriores).
+- Status desde o deploy (`audit_log`, read-only, de 03:53:58 a 03:55:21 UTC): **200 × 18 (openrouter-chat)**. Zero 4xx e zero 5xx.
+- 400 de prefill desde o deploy (mesma query da seção 4, com `a.ts >= '2026-10-15 03:53:58+00'`), às 03:55:11 UTC: **0**.
+
+## 8. Recontagem ≥ 2 h: PENDENTE
+
+A janela de ≥ 2 h ainda não fechou quando esta execução terminou (deploy às 00:53 BRT). Ao retomar, rode **só** a query da seção 4 com `a.ts >= '2026-10-15 03:53:58+00'` e anexe o resultado aqui. Não repita deploy nem smoke.
+
+Observação: no baseline, os 37 casos ficaram entre 09:36 e 23:31 UTC (06:36 a 20:31 BRT), que é horário comercial. Uma recontagem só de madrugada é evidência fraca. O ideal é recontar depois das ~12:00 BRT de 2026-10-15, para a janela cobrir horário com tráfego do Maestro.
+
+Rollback, se necessário: `ssh worker-vm docker service update --rollback ai-gateway-prod_gateway` (volta para `develop-f06681f`). O rollback durável é um PUT do stack 38 com `~/gw-phase23-hotfix/stack38-file-20261015T002445.json`.
