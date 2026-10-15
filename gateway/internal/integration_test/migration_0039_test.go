@@ -57,8 +57,9 @@ func TestIntegration_Migration0039_DefaultsAndDownUp(t *testing.T) {
 	}
 
 	// quick-261007-sjo HEAD bump: Down(1)→Down(2) when 0040 (drop audit_log.cost_brl) landed.
-	if err := db.Down(ctx, pool, 2); err != nil {
-		t.Fatalf("db.Down(2) revert 0040+0039: %v", err)
+	// Phase 23 HEAD bump: Down(2)→Down(4) when 0041+0042 landed.
+	if err := db.Down(ctx, pool, 4); err != nil {
+		t.Fatalf("db.Down(4) revert 0042+0041+0040+0039: %v", err)
 	}
 	if got := colCount(); got != 0 {
 		t.Fatalf("0039 columns after Down = %d, want 0", got)
