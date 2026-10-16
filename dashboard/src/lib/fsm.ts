@@ -48,10 +48,21 @@ export const WARNING_FSM_STATES = [
   "COOLDOWN",
 ] as const;
 
+/**
+ * The gateway reports the canonical LOWERCASE name (`emerg.State.String()`:
+ * "healthy", "failed_over"…) while the tables above are keyed UPPERCASE.
+ * Without this every lookup missed: raw label, neutral tier, and the critical
+ * banner never fired (e.g. the 14–15/10/2026 failed_over loop).
+ */
+function normalizeState(state: string | undefined | null): string | null {
+  return state ? state.toUpperCase() : null;
+}
+
 /** Resolve an FSM state string to its label + tier, with a neutral fallback. */
 export function fsmMeta(state: string | undefined | null): FsmStateMeta {
-  if (state && state in FSM_STATE_META) {
-    return FSM_STATE_META[state];
+  const key = normalizeState(state);
+  if (key && key in FSM_STATE_META) {
+    return FSM_STATE_META[key];
   }
   return { label: state ?? "Desconhecido", tier: "neutral" };
 }
@@ -60,14 +71,15 @@ export function fsmMeta(state: string | undefined | null): FsmStateMeta {
 export function isCriticalFsmState(state: string | undefined | null): boolean {
   return (
     !!state &&
-    (CRITICAL_FSM_STATES as readonly string[]).includes(state)
+    (CRITICAL_FSM_STATES as readonly string[]).includes(normalizeState(state)!)
   );
 }
 
 /** True when the state should raise the amber warning banner. */
 export function isWarningFsmState(state: string | undefined | null): boolean {
   return (
-    !!state && (WARNING_FSM_STATES as readonly string[]).includes(state)
+    !!state &&
+    (WARNING_FSM_STATES as readonly string[]).includes(normalizeState(state)!)
   );
 }
 
