@@ -161,15 +161,15 @@ dashboard = proxy server-only + server actions owner-gated auditadas (padrão Ph
 
 Cadeia decidida pelo Pedro em 2026-10-13: ① Haiku 5.5 direto na Anthropic (créditos das contas Max) → ② `anthropic/claude-haiku-5.5` no OpenRouter → ③ DeepSeek v4.1 Flash no OpenRouter. Texto derivado da seção Phase 23 do ROADMAP; decisões travadas em 23-CONTEXT.md.
 
-- [ ] **HAIKU-01**: Upstream Anthropic direto: adaptador OpenAI chat/completions → Anthropic Messages, que remove `temperature`/`top_p`/`top_k`/penalties (dão 400) e preserva tools e `tool_choice` forçado; prefill normalizado para alvos Anthropic (① e ②)
-- [ ] **HAIKU-02**: Pool de 2–3 chaves das contas Max em ordem fixa; chave sem saldo fica marcada como esgotada até o dia de renovação da conta, com re-teste periódico; chaves guardadas com segurança e nunca expostas
-- [ ] **HAIKU-03**: Cadeia de 3 passos no modelo aliases × upstreams × tiers, com os aliases do padrão DeepSeek apontando para ela e cascata entre os passos; `maestro-summary` intocado
-- [ ] **HAIKU-04**: Preço do Haiku na tabela `prices` — inclui o degrau 5× acima de 100k tokens/request e cache read/write — refletido no billing e no dashboard
-- [ ] **HAIKU-05**: Effort high por padrão; pedido explícito do cliente respeitado; override por tenant; prompt caching (chat-ifix)
-- [ ] **HAIKU-06**: RES-08 preservado — tenant sensível nunca vai para upstream externo
+- [x] **HAIKU-01**: Upstream Anthropic direto: adaptador OpenAI chat/completions → Anthropic Messages, que remove `temperature`/`top_p`/`top_k`/penalties (dão 400) e preserva tools e `tool_choice` forçado; prefill normalizado para alvos Anthropic (① e ②)
+- [x] **HAIKU-02**: Pool de 2–3 chaves das contas Max em ordem fixa; chave sem saldo fica marcada como esgotada até o dia de renovação da conta, com re-teste periódico; chaves guardadas com segurança e nunca expostas
+- [x] **HAIKU-03**: Cadeia de 3 passos no modelo aliases × upstreams × tiers, com os aliases do padrão DeepSeek apontando para ela e cascata entre os passos; `maestro-summary` intocado
+- [x] **HAIKU-04**: Preço do Haiku na tabela `prices` — inclui o degrau 5× acima de 100k tokens/request e cache read/write — refletido no billing e no dashboard
+- [x] **HAIKU-05**: Effort high por padrão; pedido explícito do cliente respeitado; override por tenant; prompt caching (chat-ifix)
+- [x] **HAIKU-06**: RES-08 preservado — tenant sensível nunca vai para upstream externo
 - [ ] **HAIKU-07**: Rollout em prod com validação e desligamento formal da 3090 (pod primário)
-- [ ] **HAIKU-08**: Geração de áudio sem pod: upstream TTS externo com voz PT-BR natural, escolhida por teste cego, billing por caractere; consumidores claude-tts, claude-wpp, chat-ifix
-- [ ] **HAIKU-09**: Painel Economia fidedigno: custo OpenRouter real (com cache), custo do ① marcado como "coberto por créditos", custo da 3060 somado ao Vast, economia a preço Haiku, % servido local por tokens
+- [x] **HAIKU-08**: Geração de áudio sem pod: upstream TTS externo com voz PT-BR natural, escolhida por teste cego, billing por caractere; consumidores claude-tts, claude-wpp, chat-ifix
+- [x] **HAIKU-09**: Painel Economia fidedigno: custo OpenRouter real (com cache), custo do ① marcado como "coberto por créditos", custo da 3060 somado ao Vast, economia a preço Haiku, % servido local por tokens
 
 ## v2 Requirements
 
@@ -306,15 +306,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UM-08 | Phase 13: dashboard-user-management | Complete |
 | UM-09 | Phase 13: dashboard-user-management | Complete |
 | UM-10 | Phase 13: dashboard-user-management | Complete |
-| HAIKU-01 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-02 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-03 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-04 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-05 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-06 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-07 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-08 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
-| HAIKU-09 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Pending |
+| HAIKU-01 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-02 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-03 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-04 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-05 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-06 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-07 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Partial (24 h pendente) |
+| HAIKU-08 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
+| HAIKU-09 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 
 <!-- 2026-05-26: Phase 10 plan-phase per D-16 split PRD-01/02/03/05/06 from Phase 10 → Phase 11; PRD-04 split into partial (Phase 10 RUNBOOK-DEPLOY.md) + full (Phase 11 incident runbook). -->
 
