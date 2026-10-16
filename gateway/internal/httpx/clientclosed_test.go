@@ -50,3 +50,16 @@ func TestRewriteClientClosed_TimeoutHandler(t *testing.T) {
 		}
 	})
 }
+
+// O wrapper fica na cadeia do /v1 inteiro: não pode esconder http.Flusher do
+// streaming SSE do chat.
+func TestRewriteClientClosed_KeepsFlusher(t *testing.T) {
+	var ok bool
+	h := RewriteClientClosed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, ok = w.(http.Flusher)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	if !ok {
+		t.Fatal("ResponseWriter perdeu http.Flusher")
+	}
+}

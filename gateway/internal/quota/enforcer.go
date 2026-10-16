@@ -223,14 +223,14 @@ func QuotaMiddleware(
 				MonthlyEmbeds:       cfg.MonthlyQuotaEmbeds,
 			}
 			if qerr := checker.CheckQuotaToday(r.Context(), tenantID, lim); qerr != nil {
-				if handleQuotaError(w, cfg.Slug, qerr, "daily", failOpen, log) {
+				if handleQuotaError(w, r, cfg.Slug, qerr, "daily", failOpen, log) {
 					next.ServeHTTP(w, r)
 					return
 				}
 				return
 			}
 			if qerr := checker.CheckQuotaMonth(r.Context(), tenantID, lim); qerr != nil {
-				if handleQuotaError(w, cfg.Slug, qerr, "monthly", failOpen, log) {
+				if handleQuotaError(w, r, cfg.Slug, qerr, "monthly", failOpen, log) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -248,10 +248,17 @@ func QuotaMiddleware(
 //
 // Returns true when the caller should invoke next.ServeHTTP(w, r) (fail-
 // open emergency path). false means the response was already written.
-func handleQuotaError(w http.ResponseWriter, tenantSlug string, err error, period string, failOpen bool, log *slog.Logger) bool {
+func handleQuotaError(w http.ResponseWriter, r *http.Request, tenantSlug string, err error, period string, failOpen bool, log *slog.Logger) bool {
 	// ErrQuotaCheckUnavailable: fail-closed 503 OR fail-open pass-through
 	// per cfg.QuotaFailOpen (ME-01 fix).
 	if err == ErrQuotaCheckUnavailable {
+		// The lookup failed because the CLIENT went away (its context was
+		// canceled mid-query): not a quota-store outage. Record 499 and do
+		// not count it as a check failure.
+		if httpx.ClientClosed(r) {
+			w.WriteHeader(httpx.StatusClientClosedRequest)
+			return false
+		}
 		obs.GatewayQuotaCheckFailures.WithLabelValues(period).Inc()
 		if failOpen {
 			if log != nil {

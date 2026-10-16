@@ -46,5 +46,13 @@ func (w *clientClosedWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Flush keeps SSE streaming working through the wrapper (code that
+// type-asserts http.Flusher instead of using http.ResponseController).
+func (w *clientClosedWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *clientClosedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

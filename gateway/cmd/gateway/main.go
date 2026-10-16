@@ -1810,6 +1810,10 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		if px.auditWriter != nil {
 			pg.Use(audit.Middleware(px.auditWriter, log))
 		}
+		// Client-gone 503s (rate-limit/quota lookups, TimeoutHandler,
+		// dispatch) are recorded as 499 by the audit/metrics/log layers
+		// above — a client that gave up is not an upstream outage.
+		pg.Use(httpx.RewriteClientClosed)
 		// Phase 4 — rate-limit + quota + schedule (D-D1 chain order).
 		// All three are mounted at the group level so every /v1/* route
 		// inherits them. idempotency stays per-handler (chat only) per
