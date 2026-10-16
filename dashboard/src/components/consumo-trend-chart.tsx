@@ -33,6 +33,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { formatCompact } from "@/lib/format";
 import type { DailyGapRow } from "@/lib/consumo";
 
 /** tokens/dia + custo R$/dia → categorical palette (kind of thing, not status). */
@@ -67,6 +68,8 @@ export function ConsumoTrendChart({ rows }: ConsumoTrendChartProps) {
           axisLine={false}
           tickMargin={8}
           width={56}
+          // 80000000 does not fit in 56px — "80 mi" does.
+          tickFormatter={(v: number) => formatCompact(v)}
           className="font-mono text-[11px] tabular-nums"
         />
         <YAxis

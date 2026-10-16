@@ -182,7 +182,7 @@ export function PodOverviewPanel({
         <Metric label="Custo hoje">{formatBrl(vast_cost.today_brl)}</Metric>
         <Metric label="Custo mês">
           {formatBrl(vast_cost.month_brl)}{" "}
-          <small className="font-medium text-muted-foreground">
+          <small className="block font-medium text-muted-foreground">
             {formatPercent(vast_cost.budget_pct_used)} do budget
           </small>
         </Metric>
