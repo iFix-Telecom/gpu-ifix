@@ -377,3 +377,38 @@ FATO: `audit_log` 19:52 e 19:59 UTC, tenant claude-wpp, `/v1/audio/speech`, 400 
 
 Fix `b25fc3f`: formato fora de `mp3|pcm` vira `mp3` (resposta `audio/mpeg`). Teste: os flags do `ffmpeg` do claude-wpp convertem o MP3 do gateway em Ogg/Opus mono 48 kHz (exit 0).
 Deploy 20:08 UTC: stack 38 → `develop-b25fc3f@sha256:b9ec41c8…` (só a imagem; snapshot `stack38{,-file}-pre-ttsfmt-*.json`). Smoke `response_format:"wav"` → 200 `audio/mpeg` ID3, 5,1 s; `mp3` → 200, 1,7 s. Tráfego depois: 4/4 em 200.
+
+## Validação 24 h (2026-10-16 02:57 BRT)
+
+Query do "Checkpoint — Task 3" (somente leitura, `bd_ai_gateway`), janela fechada em 24 h exatas: 2026-10-15 05:50:37 UTC → 2026-10-16 05:50:37 UTC.
+
+**(1) 400 de prefill/sampling: 0.** Baseline antes do hotfix: 37 em 24 h.
+
+**Status de todas as rotas:** 200 = 12.504 · 400 = 2 · 499 = 5 · 502 = 162 · 503 = 28.
+
+**(2) ≥ 400 por upstream:**
+
+| Upstream | Status | Qtde | Causa (FATO) |
+|---|---|---|---|
+| local-embed | 502 | 162 | chat-ifix, job noturno (ver achado abaixo) — não é chat |
+| rerank-cpu | 503 | 22 | converseai cancelando em 4 s antes da troca para mmarco (quick 261016-rrk) |
+| rerank-cpu / (nenhum) | 499 | 5 | testes de cancelamento após o fix `3f75de2`/`1bc143c` |
+| openrouter-tts | 400 | 2 | `response_format: wav` do claude-wpp antes do fix `b25fc3f` |
+| openrouter-tts | 503 | 1 | claude-tts cancelou em 1,8 s (`context canceled`) |
+| (nenhum) | 503 | 2 | uat10-test, meus testes de cancelamento antes do `1bc143c` (quota_check com contexto cancelado) |
+| blocked_sensitive / tts / embed | 503 | 1 cada | telefonia RES-08 (esperado, 2 casos) e restart do deploy de 06:36 |
+
+Nenhum 5xx de chat na janela.
+
+**(3) Chat por upstream:** 24 h inteiras: anthropic-haiku 5.679 (62,1 %), openrouter-chat 3.468 (37,9 %, antes da ativação do ① às 15:29 UTC), openrouter-deepseek 1, blocked_sensitive 1. **Desde a ativação do ①:** anthropic-haiku 5.679 (99,89 %, 0 erros), openrouter-chat 6 (0,11 %, 0 erros), openrouter-deepseek 0.
+
+**(4) Billing:** `openrouter-chat` 3.472 eventos e `openrouter-deepseek` 1, todos `provider_reported` (nenhum `price_table`). `anthropic-haiku` 5.722 em `price_table` (R$ 14,13 a preço de lista, coberto por créditos; 23,65 M tokens de cache lidos). `openrouter-tts` 66 eventos, R$ 4,83 (`price_table`, preço por caractere).
+
+**(5) finish_reason=length em chat 200:** 0 em chat-ifix (6.641), campanhas (29), converseai (121), ia-kanban (159) e demais. Casos: uat10-test 12/33 (meus smokes com `max_tokens` 20) e analise-transcr-voip 10/2.135 (0,5 %; 4 no ①, 6 no ② antes da ativação).
+HIPÓTESE: os 10 da analise-transcr-voip são `max_tokens` do próprio workflow n8n abaixo do tamanho da análise. Resolve: ler o `max_tokens` enviado nesses request_ids em `audit_log_content`.
+
+### Achado fora da Phase 23 — embeddings noturnos do chat-ifix (FATO)
+
+- `local-embed` (bge-m3 em CPU, stack 39) devolve 502 em ~10,3 s para o chat-ifix, só entre 01h e 05h BRT: 162 na janela, 119–165 por dia desde pelo menos 2026-10-09 (anterior à Phase 23).
+- O job manda 4 textos por chamada (~2.550 tokens); os que passam levam 6–10 s; os que falham param em ~10,3 s.
+- HIPÓTESE: o corte de ~10 s é o timeout de resposta do proxy de embed (o `WRITE_TIMEOUT_EMBED_SECONDS` do stack é 30). Resolve: ler o timeout de header do transporte do `local-embed` no código e o log de um request_id desses 502.

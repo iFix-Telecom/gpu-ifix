@@ -3,7 +3,7 @@ phase: 23-haiku-5-5-como-llm-externo-principal-do-gateway-creditos-max
 verified: 2026-10-16T00:45:00Z
 status: human_needed
 overall: passed_partial
-score: 8/9 requisitos verificados; 1 (HAIKU-07) com item dependente de tempo pendente
+score: 8/9 requisitos verificados; HAIKU-07 com recontagem de 24 h OK e confirmação do Pedro do 23-16 pendente
 overrides_applied: 0
 gaps: []
 time_gated:
@@ -94,7 +94,7 @@ Método: leitura de código, `gofmt`/`go vet`/`go test ./...` local, vitest e py
 | HAIKU-04 | Preço Haiku com degrau 5× > 100k e cache read/write, refletido em billing e dashboard | ✓ VERIFICADO | preços exatos após 0043 (SQL); ① com `price_table` e cache gravado (SQL); dashboard com card de créditos (código + vitest). O degrau 100k só tem prova por teste unitário: nenhum request real passou de 100k |
 | HAIKU-05 | Effort high por padrão, cliente respeitado, override por tenant, prompt caching (chat-ifix) | ✓ VERIFICADO | código `llm_effort.go`; CLI `set-llm-effort`; cache_read 22,5 M tokens no ① (SQL) e 1585/1589 no smoke de cache (23-MAXKEYS-EVIDENCE) |
 | HAIKU-06 | Tenant sensível nunca vai para upstream externo | ✓ VERIFICADO | tráfego sensível só em `local-embed` ou bloqueado com 503; 0 billing externo de tráfego sensível (SQL); `dispatcher.go:665` |
-| HAIKU-07 | Rollout em prod com validação e 3090 desligada formalmente | ⏳ PARCIAL — dependente de tempo | rollout e ① ativos (SQL: goose 43, upstreams, 4854 × 200); 3090 off (`schedule_disabled=t`, `local-llm` disabled); Pedro "approved" no 23-18 Task 3 (23-MAXKEYS-EVIDENCE, ~20:40 BRT). **Falta:** recontagem de 24 h e confirmação do 23-16 Task 3 |
+| HAIKU-07 | Rollout em prod com validação e 3090 desligada formalmente | ⏳ PARCIAL — falta só a confirmação do 23-16 | rollout e ① ativos (SQL: goose 43, upstreams, 4854 × 200); 3090 off (`schedule_disabled=t`, `local-llm` disabled); Pedro "approved" no 23-18 Task 3 (23-MAXKEYS-EVIDENCE, ~20:40 BRT). **Recontagem de 24 h feita em 2026-10-16 02:57 BRT (23-ROLLOUT-EVIDENCE §Validação 24 h): 0 × 400 de prefill, 0 × 5xx de chat, ① = 99,89 % do chat desde 15:29 UTC sem erro, openrouter-* 100 % `provider_reported`.** Falta: confirmação do Pedro do 23-16 Task 3 |
 | HAIKU-08 | TTS externo com voz PT-BR escolhida por teste cego, billing por caractere, consumidores claude-tts/claude-wpp/chat-ifix | ✓ VERIFICADO (com 1 alerta) | teste cego, escolha "voz a" = `elevenlabs/eleven-v3`/`eric` (23-TTS-EVIDENCE); `openrouter-tts` 33 × 200 com billing `price_table` a US$ 4e-5/char (SQL); claude-wpp 200 após o fix `b25fc3f`. **Alerta:** 1 resposta 503 do `openrouter-tts` sem cascata para `local-tts` (ver HIPÓTESES) |
 | HAIKU-09 | Painel Economia: custo OpenRouter real com cache, ① como "coberto por créditos", 3060 somada ao Vast, economia a preço Haiku, % local por tokens | ✓ VERIFICADO | campos no `/admin/economy` e no painel (código, vitest 21/21); OpenRouter com `provider_reported` (SQL); conferência Console × painel feita pelo Pedro (23-MAXKEYS-EVIDENCE, Checkpoint Task 3). O caminho da 3060 está cabeado e testado (pytest 134), mas sem dado real: `aux_pod_lifecycles` = 0 porque a 3060 está desligada |
 
@@ -104,7 +104,7 @@ Método: leitura de código, `gofmt`/`go vet`/`go test ./...` local, vitest e py
 
 | # | Item | Liberado a partir de | Comando |
 |---|---|---|---|
-| 1 | Recontagem de 24 h pós-rollout | 2026-10-16 02:51 BRT (05:51 UTC) | query de 5 blocos em 23-ROLLOUT-EVIDENCE.md, seção "Checkpoint — Task 3" |
+| 1 | ✅ Recontagem de 24 h pós-rollout — FEITA 2026-10-16 02:57 BRT, sem regressão | 2026-10-16 02:51 BRT (05:51 UTC) | query de 5 blocos em 23-ROLLOUT-EVIDENCE.md, seção "Checkpoint — Task 3" |
 | 2 | Confirmação do Pedro do rollout após 24 h (23-16 Task 3) | após o item 1 | UI `/economia` × `openrouter.ai/activity`; chat-ifix e Maestro sem erro novo |
 
 Observação: a recontagem parcial feita pelo verificador já cobre cerca de 21 h desde o hotfix (03:53 UTC) com 0 erros 400 de prefill e 0 respostas ≥ 400 no chat desde a ativação do ①.
