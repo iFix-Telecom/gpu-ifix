@@ -167,7 +167,7 @@ Cadeia decidida pelo Pedro em 2026-10-13: ① Haiku 5.5 direto na Anthropic (cr�
 - [x] **HAIKU-04**: Preço do Haiku na tabela `prices` — inclui o degrau 5× acima de 100k tokens/request e cache read/write — refletido no billing e no dashboard
 - [x] **HAIKU-05**: Effort high por padrão; pedido explícito do cliente respeitado; override por tenant; prompt caching (chat-ifix)
 - [x] **HAIKU-06**: RES-08 preservado — tenant sensível nunca vai para upstream externo
-- [ ] **HAIKU-07**: Rollout em prod com validação e desligamento formal da 3090 (pod primário)
+- [x] **HAIKU-07**: Rollout em prod com validação e desligamento formal da 3090 (pod primário)
 - [x] **HAIKU-08**: Geração de áudio sem pod: upstream TTS externo com voz PT-BR natural, escolhida por teste cego, billing por caractere; consumidores claude-tts, claude-wpp, chat-ifix
 - [x] **HAIKU-09**: Painel Economia fidedigno: custo OpenRouter real (com cache), custo do ① marcado como "coberto por créditos", custo da 3060 somado ao Vast, economia a preço Haiku, % servido local por tokens
 
@@ -312,7 +312,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HAIKU-04 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 | HAIKU-05 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 | HAIKU-06 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
-| HAIKU-07 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Partial (24 h pendente) |
+| HAIKU-07 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 | HAIKU-08 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 | HAIKU-09 | Phase 23: Haiku 5.5 como LLM externo principal do gateway - créditos Max | Complete |
 

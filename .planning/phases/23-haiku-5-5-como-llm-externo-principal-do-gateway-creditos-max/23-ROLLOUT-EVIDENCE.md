@@ -412,3 +412,7 @@ HIPÓTESE: os 10 da analise-transcr-voip são `max_tokens` do próprio workflow 
 - `local-embed` (bge-m3 em CPU, stack 39) devolve 502 em ~10,3 s para o chat-ifix, só entre 01h e 05h BRT: 162 na janela, 119–165 por dia desde pelo menos 2026-10-09 (anterior à Phase 23).
 - O job manda 4 textos por chamada (~2.550 tokens); os que passam levam 6–10 s; os que falham param em ~10,3 s.
 - HIPÓTESE: o corte de ~10 s é o timeout de resposta do proxy de embed (o `WRITE_TIMEOUT_EMBED_SECONDS` do stack é 30). Resolve: ler o timeout de header do transporte do `local-embed` no código e o log de um request_id desses 502.
+
+## Checkpoint — Task 3: Pedro confirma o rollout após 24 h — RESPOSTA
+
+**2026-10-16 ~03:10 BRT — resposta do Pedro: "Ok."**, dada sobre o relatório da seção "Validação 24 h" (0 × 400 de prefill, 0 × 5xx de chat, ① = 99,89 % do chat sem erro). Force-open global de breaker não executado (não autorizado).

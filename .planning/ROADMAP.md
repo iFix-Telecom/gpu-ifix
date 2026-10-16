@@ -423,7 +423,7 @@ Plans:
 
 - [ ] 22-07-PLAN.md — MEASURE-01: query ROI mensal por upstream/tenant vs custo pod + cross-check GET /admin/economy (reuso Phase 15)
 
-### Phase 23: Haiku 5.5 como LLM externo principal do gateway - creditos Max
+### Phase 23: Haiku 5.5 como LLM externo principal do gateway - creditos Max ✅ COMPLETE 2026-10-16
 
 **Goal:** Todo tráfego LLM que não roda no pod local passa a seguir a cadeia (decisão Pedro 2026-10-13, não rediscutir): **① Claude Haiku 5.5 na API direta da Anthropic** com os créditos mensais de API das 2–3 contas Claude Max (rodízio entre chaves; chave com saldo zerado — "Your credit balance is too low to access the Anthropic API" — é marcada esgotada até virar o mês e o gateway passa à próxima) → **② Haiku 5.5 no OpenRouter** (`anthropic/claude-haiku-5.5`, provedor de maior vazão) → **③ DeepSeek v4.1 Flash no OpenRouter** (padrão atual). Effort **high**. Depois de validado em prod: **desligar a 3090** (pod primário Qwen3-30B-A3B). Fonte: `.planning/debug/HANDOFF-gateway-haiku55-creditos-max.md`. Evidência: `RESULTADO-abc-haiku55-vs-30b-vs-deepseek.md` (commit 186b199) — Haiku high venceu juiz cego em 37 payloads reais; 3090 US$23–34/mês vs US$2–6/mês fora. ClickUp 86akuaa73.
 
