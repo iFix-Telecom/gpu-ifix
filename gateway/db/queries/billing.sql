@@ -85,9 +85,13 @@ WHERE tenant_id = $1
 -- Drives the daily chart series (economia_liquida per day = phantom - vast).
 -- Keep the `(ts AT TIME ZONE 'America/Sao_Paulo')::date` idiom verbatim --
 -- CURRENT_DATE + tz is invalid SQL (RESEARCH Anti-Patterns).
+-- credits_covered_brl / external_cash_brl: mesmo split de SumEconomyTokensRange,
+-- por dia, para o gráfico de tendência mostrar Haiku (créditos) e caixa.
 SELECT
     (ts AT TIME ZONE 'America/Sao_Paulo')::date AS date,
-    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl
+    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::numeric(20,6)  AS credits_covered_brl,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream <> 'anthropic-haiku'), 0)::numeric(20,6) AS external_cash_brl
 FROM ai_gateway.billing_events
 WHERE ts >= $1
   AND ts <  $2
@@ -118,6 +122,7 @@ WHERE ts >= $1
 SELECT
     COALESCE(SUM(tokens_in + tokens_out) FILTER (WHERE cost_local_phantom_brl > 0), 0)::bigint AS local_tokens,
     COALESCE(SUM(tokens_in + tokens_out), 0)::bigint                                          AS total_tokens,
+    COALESCE(SUM(tokens_in + tokens_out) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::bigint AS haiku_tokens,
     COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::numeric(20,6)  AS credits_covered_brl,
     COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream <> 'anthropic-haiku'), 0)::numeric(20,6) AS external_cash_brl
 FROM ai_gateway.billing_events

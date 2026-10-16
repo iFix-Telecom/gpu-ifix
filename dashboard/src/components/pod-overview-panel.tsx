@@ -23,7 +23,7 @@ import {
   primaryStateLabel,
 } from "@/components/operacao-fsm-panel";
 import { Badge } from "@/components/ui/badge";
-import { formatBrl, formatCount, formatMs, formatUptime } from "@/lib/format";
+import { formatBrl, formatCount, formatMs, formatPercent, formatUptime } from "@/lib/format";
 import type {
   MetricsResponse,
   OperationsResponse,
@@ -183,7 +183,7 @@ export function PodOverviewPanel({
         <Metric label="Custo mês">
           {formatBrl(vast_cost.month_brl)}{" "}
           <small className="font-medium text-muted-foreground">
-            {vast_cost.budget_pct_used}% budget
+            {formatPercent(vast_cost.budget_pct_used)} do budget
           </small>
         </Metric>
         <Metric label="Breaker" className="text-[13px]">

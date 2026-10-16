@@ -139,4 +139,22 @@ func TestSumEconomyTokensRange(t *testing.T) {
 	if f, _ := got.ExternalCashBrl.Float64Value(); f.Float64 != 5 {
 		t.Errorf("external_cash_brl = %v, want 5", f.Float64)
 	}
+	if got.HaikuTokens != 2000 {
+		t.Errorf("haiku_tokens = %d, want 2000", got.HaikuTokens)
+	}
+
+	// Série diária: o mesmo split créditos × caixa por dia BRT.
+	days, err := gen.New(pool).SumPhantomAllTenantsByDate(ctx, gen.SumPhantomAllTenantsByDateParams{Ts: ts.Add(-time.Hour), Ts_2: ts.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("SumPhantomAllTenantsByDate: %v", err)
+	}
+	if len(days) != 1 {
+		t.Fatalf("dias = %d, want 1", len(days))
+	}
+	if f, _ := days[0].CreditsCoveredBrl.Float64Value(); f.Float64 != 10 {
+		t.Errorf("série credits_covered_brl = %v, want 10", f.Float64)
+	}
+	if f, _ := days[0].ExternalCashBrl.Float64Value(); f.Float64 != 5 {
+		t.Errorf("série external_cash_brl = %v, want 5", f.Float64)
+	}
 }

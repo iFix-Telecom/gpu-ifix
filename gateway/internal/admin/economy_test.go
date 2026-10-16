@@ -98,15 +98,18 @@ type econResponse struct {
 		HorasPodUp         float64  `json:"horas_pod_up"`
 
 		PctServidoLocalTokens *float64 `json:"pct_servido_local_tokens"`
+		PctHaikuTokens        *float64 `json:"pct_haiku_tokens"`
 		CustoCreditosHaikuBRL float64  `json:"custo_creditos_haiku_brl"`
 		CustoExternoCaixaBRL  float64  `json:"custo_externo_caixa_brl"`
 		Vast3060BRL           float64  `json:"vast_3060_brl"`
 	} `json:"summary"`
 	Series []struct {
-		Date        string  `json:"date"`
-		PhantomBrl  float64 `json:"phantom_brl"`
-		VastBrl     float64 `json:"vast_brl"`
-		EconomiaBrl float64 `json:"economia_brl"`
+		Date             string  `json:"date"`
+		PhantomBrl       float64 `json:"phantom_brl"`
+		VastBrl          float64 `json:"vast_brl"`
+		EconomiaBrl      float64 `json:"economia_brl"`
+		CreditosHaikuBrl float64 `json:"creditos_haiku_brl"`
+		CaixaExternoBrl  float64 `json:"caixa_externo_brl"`
 	} `json:"series"`
 }
 
@@ -408,6 +411,52 @@ func TestEconomyHandler_CreditosHaikuECaixa(t *testing.T) {
 	}
 	if body.Summary.CustoOpenRouterBRL != 15 {
 		t.Errorf("custo_openrouter_brl = %v, want 15 (total externo, compatível)", body.Summary.CustoOpenRouterBRL)
+	}
+}
+
+// TestEconomyHandler_SeriesCreditosECaixa: a série diária carrega o split
+// créditos Haiku × caixa externo de cada dia (gráfico de tendência).
+func TestEconomyHandler_SeriesCreditosECaixa(t *testing.T) {
+	d1 := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	fake := &fakeEconomyQueries{
+		dayRows: []gen.SumPhantomAllTenantsByDateRow{
+			{Date: econDate(d1), PhantomBrl: opNumeric(1), CreditsCoveredBrl: opNumeric(12.5), ExternalCashBrl: opNumeric(3.25)},
+		},
+		rangeRow: gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(1), ExternalBrl: opNumeric(15.75), TotalRequests: 1},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, body := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if len(body.Series) != 1 {
+		t.Fatalf("series len = %d, want 1", len(body.Series))
+	}
+	if got := body.Series[0].CreditosHaikuBrl; got != 12.5 {
+		t.Errorf("creditos_haiku_brl = %v, want 12.5", got)
+	}
+	if got := body.Series[0].CaixaExternoBrl; got != 3.25 {
+		t.Errorf("caixa_externo_brl = %v, want 3.25", got)
+	}
+}
+
+// TestEconomyHandler_PctHaikuTokens: 30 de 120 tokens pelo passo ① → 0,25;
+// total 0 → null.
+func TestEconomyHandler_PctHaikuTokens(t *testing.T) {
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{TotalRequests: 1},
+		tokensRow: gen.SumEconomyTokensRangeRow{TotalTokens: 120, HaikuTokens: 30},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	_, body := doEconomyRequest(t, h, econRange)
+	if body.Summary.PctHaikuTokens == nil || *body.Summary.PctHaikuTokens != 0.25 {
+		t.Errorf("pct_haiku_tokens = %v, want 0.25", body.Summary.PctHaikuTokens)
+	}
+
+	fake.tokensRow = gen.SumEconomyTokensRangeRow{}
+	_, body = doEconomyRequest(t, h, econRange)
+	if body.Summary.PctHaikuTokens != nil {
+		t.Errorf("pct_haiku_tokens = %v, want null com total 0", *body.Summary.PctHaikuTokens)
 	}
 }
 

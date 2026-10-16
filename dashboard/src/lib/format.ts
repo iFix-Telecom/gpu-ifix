@@ -21,12 +21,28 @@ export function formatErrorRate(rate: number): string {
   })} %`;
 }
 
+/** Format a value already on the 0–100 scale — e.g. `7,6 %`. */
+export function formatPercent(value: number): string {
+  return `${value.toLocaleString("pt-BR", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} %`;
+}
+
 /** Format a BRL cost value — e.g. `R$ 84,20`. */
 export function formatBrl(value: number): string {
   return value.toLocaleString("pt-BR", {
     style: "currency",
     currency: "BRL",
   });
+}
+
+/** Compact pt-BR count for KPI tiles — e.g. `413,7 mi`, `32,9 mi`, `27,1 mil`. */
+export function formatCompact(value: number): string {
+  return new Intl.NumberFormat("pt-BR", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
 }
 
 /** Format an integer count — e.g. `1.234`. */

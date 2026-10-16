@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { fillDateGaps, topTenantsByVolume } from "@/lib/consumo";
+import {
+  aggregateSummary,
+  fillDateGaps,
+  perTenantRows,
+  topTenantsByVolume,
+} from "@/lib/consumo";
 import type { UsageResponse } from "@/lib/gateway";
 
 /**
@@ -109,5 +114,16 @@ describe("fillDateGaps", () => {
       "2026-08-01",
       "2026-08-02",
     ]);
+  });
+});
+
+describe("perTenantRows / aggregateSummary (custo real)", () => {
+  it("uses cost_total_brl, not the phantom saving", () => {
+    const a = usage("chat", 10, { cost_total_brl: 282.43, cost_local_phantom_brl: 3.08 });
+    const b = usage("voip", 5, { cost_total_brl: 8.6, cost_local_phantom_brl: 0 });
+    const rows = perTenantRows([b, a]);
+    expect(rows.map((r) => r.label)).toEqual(["chat", "voip"]);
+    expect(rows[0].cost_total_brl).toBe(282.43);
+    expect(aggregateSummary([a, b]).cost_total_brl).toBeCloseTo(291.03, 2);
   });
 });

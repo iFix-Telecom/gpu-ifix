@@ -54,7 +54,8 @@ export function KpiCard({
         </span>
         <span
           className={cn(
-            "font-display text-[28px] font-bold leading-[1.2] tracking-[-0.02em] tabular-nums",
+            // nowrap: "-R$ 49,66" must not break after the minus sign.
+            "whitespace-nowrap font-display text-[28px] font-bold leading-[1.2] tracking-[-0.02em] tabular-nums",
             status ? tierTextClass(status) : "text-foreground",
           )}
         >

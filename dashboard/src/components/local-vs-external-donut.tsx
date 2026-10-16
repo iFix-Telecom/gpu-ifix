@@ -8,7 +8,8 @@
  * as the Economia panel) and the external side is split into the Haiku step ①
  * (covered by Max credits, real cash R$ 0) and real external cash
  * (`custo_externo_caixa_brl`). `custo_openrouter_brl` is the sum of both and
- * is no longer shown as "pagos".
+ * is no longer shown as "pagos". The ring has three slices, all by TOKENS:
+ * local, Haiku (`pct_haiku_tokens`) and the rest (external cash).
  *
  * HONESTY RULE: `pct_servido_local_tokens` is `*float64` server-side and comes
  * back `null` when the denominator (total tokens) is zero — the gateway refuses
@@ -42,8 +43,10 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
 
   // Clamp defensively: a share outside [0,1] would produce a wrapping arc.
   const local = Math.min(Math.max(pct, 0), 1);
+  const haiku = Math.min(Math.max(summary.pct_haiku_tokens ?? 0, 0), 1 - local);
   const localLen = CIRCUMFERENCE * local;
-  const externalLen = CIRCUMFERENCE - localLen;
+  const haikuLen = CIRCUMFERENCE * haiku;
+  const cashLen = CIRCUMFERENCE - localLen - haikuLen;
 
   return (
     <div className="flex flex-wrap items-center gap-6 py-2">
@@ -60,7 +63,7 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
           stroke="var(--secondary)"
           strokeWidth={18}
         />
-        {/* External slice starts at 12 o'clock… */}
+        {/* Cash slice starts at 12 o'clock, then Haiku, then local. */}
         <circle
           cx="60"
           cy="60"
@@ -68,10 +71,20 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
           fill="none"
           stroke="var(--chart-ext)"
           strokeWidth={18}
-          strokeDasharray={`${externalLen} ${CIRCUMFERENCE}`}
+          strokeDasharray={`${cashLen} ${CIRCUMFERENCE}`}
           transform="rotate(-90 60 60)"
         />
-        {/* …and the local slice picks up where it ends. */}
+        <circle
+          cx="60"
+          cy="60"
+          r={R}
+          fill="none"
+          stroke="var(--chart-credit)"
+          strokeWidth={18}
+          strokeDasharray={`${haikuLen} ${CIRCUMFERENCE}`}
+          strokeDashoffset={-cashLen}
+          transform="rotate(-90 60 60)"
+        />
         <circle
           cx="60"
           cy="60"
@@ -80,7 +93,7 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
           stroke="var(--chart-llm)"
           strokeWidth={18}
           strokeDasharray={`${localLen} ${CIRCUMFERENCE}`}
-          strokeDashoffset={-externalLen}
+          strokeDashoffset={-(cashLen + haikuLen)}
           transform="rotate(-90 60 60)"
         />
         <text
@@ -124,7 +137,7 @@ export function LocalVsExternalDonut({ summary }: LocalVsExternalDonutProps) {
           <dt className="flex items-center gap-2 text-muted-foreground">
             <span
               aria-hidden="true"
-              className="size-2.5 rounded-[3px] bg-chart-ext"
+              className="size-2.5 rounded-[3px] bg-chart-credit"
             />
             Haiku (créditos)
           </dt>

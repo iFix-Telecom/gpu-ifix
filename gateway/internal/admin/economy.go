@@ -74,6 +74,10 @@ type EconomySummary struct {
 	// tokens_out), mesma escala 0–1 de PctServidoLocal; null quando o total de
 	// tokens do período é zero.
 	PctServidoLocalTokens *float64 `json:"pct_servido_local_tokens"`
+	// PctHaikuTokens: fatia dos tokens servida pelo passo ① (anthropic-haiku);
+	// nil quando o total de tokens é 0. A rosca do Consumo divide o anel em
+	// local / Haiku (créditos) / externo (caixa) com este valor.
+	PctHaikuTokens *float64 `json:"pct_haiku_tokens"`
 	// CustoCreditosHaikuBRL: coberto por créditos = custo do passo ①
 	// (anthropic-haiku) a preço de lista; caixa real = 0 (decisão CONTEXT).
 	CustoCreditosHaikuBRL float64 `json:"custo_creditos_haiku_brl"`
@@ -92,6 +96,10 @@ type EconomyDayRow struct {
 	PhantomBrl  float64 `json:"phantom_brl"`
 	VastBrl     float64 `json:"vast_brl"`
 	EconomiaBrl float64 `json:"economia_brl"`
+	// Phase 23: split do custo externo do dia — passo ① (créditos, preço de
+	// lista) × demais upstreams externos (caixa).
+	CreditosHaikuBrl float64 `json:"creditos_haiku_brl"`
+	CaixaExternoBrl  float64 `json:"caixa_externo_brl"`
 }
 
 // economyQueries isolates the sqlc surface used by the handler. Test injection
@@ -274,6 +282,8 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Phantom series → map; merge with the per-day vast buckets.
 	phantomByDate := make(map[string]float64)
+	creditsByDate := make(map[string]float64)
+	cashByDate := make(map[string]float64)
 	dateSet := make(map[string]struct{})
 	for _, row := range dayRows {
 		date := ""
@@ -282,6 +292,10 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		pf, _ := row.PhantomBrl.Float64Value()
 		phantomByDate[date] = pf.Float64
+		cf, _ := row.CreditsCoveredBrl.Float64Value()
+		creditsByDate[date] = cf.Float64
+		xf, _ := row.ExternalCashBrl.Float64Value()
+		cashByDate[date] = xf.Float64
 		dateSet[date] = struct{}{}
 	}
 	for d := range vastByDate {
@@ -301,6 +315,9 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			PhantomBrl:  p,
 			VastBrl:     v,
 			EconomiaBrl: p - v,
+
+			CreditosHaikuBrl: creditsByDate[d],
+			CaixaExternoBrl:  cashByDate[d],
 		})
 	}
 
@@ -326,6 +343,11 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p := float64(tokRow.LocalTokens) / float64(tokRow.TotalTokens)
 		pctLocalTokens = &p
 	}
+	var pctHaikuTokens *float64
+	if tokRow.TotalTokens != 0 {
+		p := float64(tokRow.HaikuTokens) / float64(tokRow.TotalTokens)
+		pctHaikuTokens = &p
+	}
 	creditsF, _ := tokRow.CreditsCoveredBrl.Float64Value()
 	cashF, _ := tokRow.ExternalCashBrl.Float64Value()
 
@@ -345,6 +367,7 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			HorasPodUp:         horasPodUp,
 
 			PctServidoLocalTokens: pctLocalTokens,
+			PctHaikuTokens:        pctHaikuTokens,
 			CustoCreditosHaikuBRL: creditsF.Float64,
 			CustoExternoCaixaBRL:  cashF.Float64,
 			Vast3060BRL:           vast3060,

@@ -97,6 +97,11 @@ function buildPodConfig() {
       grace_ramp_down_s: 300,
       provision_lead_s: 600,
       schedule_disabled: false,
+      offer_mode: "ondemand",
+      bid_margin: 1.15,
+      max_preemptions_per_day: 2,
+      min_reliability: 0.95,
+      force_machine_id: 0,
     },
     bounds: {
       cap_primary_min: 0.1,

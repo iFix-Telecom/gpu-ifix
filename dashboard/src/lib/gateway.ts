@@ -299,6 +299,10 @@ export interface EconomyDayRow {
   phantom_brl: number;
   vast_brl: number;
   economia_brl: number;
+  /** Custo do passo ① no dia, a preço de lista (coberto por créditos). */
+  creditos_haiku_brl: number;
+  /** Custo externo pago em caixa no dia (todos os externos menos o passo ①). */
+  caixa_externo_brl: number;
 }
 
 /**
@@ -327,6 +331,8 @@ export interface EconomyResponse {
     // --- 23-11 (HAIKU-09): mirror of the new admin.EconomySummary fields ---
     /** local_tokens / total_tokens (0–1 scale) — null when total == 0. */
     pct_servido_local_tokens: number | null;
+    /** Fatia dos tokens servida pelo passo ① (anthropic-haiku), 0–1; null sem tokens. */
+    pct_haiku_tokens: number | null;
     /** Haiku step ① cost — covered by Max credits (real cash = 0). */
     custo_creditos_haiku_brl: number;
     /** Real external cash spend (external total minus the Haiku step ①). */
@@ -403,6 +409,13 @@ export interface PodConfigSection {
   grace_ramp_down_s: number;
   provision_lead_s: number;
   schedule_disabled: boolean;
+  /** quick-261001-qdd — offer selection knobs (fixed ranges, gateway-validated). */
+  offer_mode: "bid" | "ondemand";
+  bid_margin: number;
+  max_preemptions_per_day: number;
+  min_reliability: number;
+  /** 0 = no pin. */
+  force_machine_id: number;
 }
 
 /** The owner-editable min/max gate pairs. Mirrors `admin.BoundsSection`. */
@@ -440,6 +453,33 @@ export interface PodConfigBounds {
 export interface PodConfigResponse {
   config: PodConfigSection;
   bounds: PodConfigBounds;
+  /** Boot-env read-only view (absent on gateways older than this field). */
+  structural?: PodConfigStructural;
+}
+
+/** Mirrors `admin.StructuralSection` (gateway/internal/admin/config_read.go). */
+export interface PodConfigStructural {
+  timezone: string;
+  gpu_name_primary: string;
+  gpu_name_fallback: string;
+  num_gpus_primary: number;
+  num_gpus_fallback: number;
+  template_image: string;
+  infinity_image: string;
+  dcgm_image: string;
+  speaches_image: string;
+  qwen_weights_key: string;
+  qwen_weights_sha256: string;
+  whisper_weights_key: string;
+  whisper_weights_sha256: string;
+  bgem3_weights_key: string;
+  bgem3_weights_sha256: string;
+  chatterbox_weights_key: string;
+  chatterbox_weights_sha256: string;
+  qwen_jinja_key: string;
+  qwen_jinja_sha256: string;
+  llama_args: string[] | null;
+  llama_args_default: boolean;
 }
 
 /**

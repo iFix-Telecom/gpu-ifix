@@ -60,7 +60,7 @@ import type { PodConfigBounds, PodConfigSection } from "@/lib/gateway";
 // Field metadata — the single source for the read-only render + the editor.
 // ──────────────────────────────────────────────────────────────────────────
 
-export type FieldKind = "csv" | "int" | "float" | "switch" | "days";
+export type FieldKind = "csv" | "int" | "float" | "switch" | "days" | "enum";
 
 export interface HotField {
   /** Gateway PATCH `field` name (admin-actions CONFIG_FIELDS key). */
@@ -74,6 +74,11 @@ export interface HotField {
   maxKey?: keyof PodConfigBounds;
   /** Hour field — 0-23 + up≠down cross-field rule. */
   hour?: boolean;
+  /** Fixed range (gateway-hardcoded, not an owner-editable bound). */
+  fixedMin?: number;
+  fixedMax?: number;
+  /** `enum` choices — value sent to the gateway + pt-BR label. */
+  options?: { value: string; label: string }[];
   /** Toast variant: true → "Vale a partir do próximo provisionamento." */
   nextProvision: boolean;
 }
@@ -135,6 +140,52 @@ export const FIELD_GROUPS: FieldGroup[] = [
         label: "Rejeitar IP privado",
         kind: "switch",
         configKey: "reject_private_ip",
+        nextProvision: true,
+      },
+      {
+        field: "offer_mode",
+        label: "Modo da oferta",
+        kind: "enum",
+        configKey: "offer_mode",
+        options: [
+          { value: "ondemand", label: "on-demand" },
+          { value: "bid", label: "lance (interruptível)" },
+        ],
+        nextProvision: true,
+      },
+      {
+        field: "bid_margin",
+        label: "Margem do lance (×)",
+        kind: "float",
+        configKey: "bid_margin",
+        fixedMin: 1,
+        fixedMax: 5,
+        nextProvision: true,
+      },
+      {
+        field: "max_preemptions_per_day",
+        label: "Preempções/dia até on-demand",
+        kind: "int",
+        configKey: "max_preemptions_per_day",
+        fixedMin: 0,
+        fixedMax: 20,
+        nextProvision: true,
+      },
+      {
+        field: "min_reliability",
+        label: "Confiabilidade mínima",
+        kind: "float",
+        configKey: "min_reliability",
+        fixedMin: 0.5,
+        fixedMax: 1,
+        nextProvision: true,
+      },
+      {
+        field: "force_machine_id",
+        label: "Máquina fixa (0 = nenhuma)",
+        kind: "int",
+        configKey: "force_machine_id",
+        fixedMin: 0,
         nextProvision: true,
       },
     ],
@@ -281,6 +332,8 @@ export function formatHotValue(f: HotField, config: PodConfigSection): string {
     }
     case "switch":
       return v ? "sim" : "não";
+    case "enum":
+      return f.options?.find((o) => o.value === v)?.label ?? String(v ?? "—");
     case "days": {
       const days = (v as string[]) ?? [];
       return days.length > 0
@@ -637,6 +690,11 @@ function HotFieldRow({
     if (f.kind === "days") {
       return { value: DAY_ORDER.filter((d) => draftDays.includes(d)) };
     }
+    if (f.kind === "enum") {
+      return f.options?.some((o) => o.value === draft)
+        ? { value: draft }
+        : { error: GENERIC_ERROR };
+    }
     // int / float
     const num = Number(draft);
     if (draft.trim() === "" || Number.isNaN(num)) {
@@ -668,6 +726,17 @@ function HotFieldRow({
         };
       }
     }
+    if (
+      (f.fixedMin !== undefined && num < f.fixedMin) ||
+      (f.fixedMax !== undefined && num > f.fixedMax)
+    ) {
+      return {
+        error:
+          f.fixedMax !== undefined
+            ? `Valor fora do limite permitido (${f.fixedMin}–${f.fixedMax}).`
+            : `O valor precisa ser ≥ ${f.fixedMin}.`,
+      };
+    }
     return { value: f.kind === "int" ? Math.trunc(num) : num };
   }
 
@@ -696,6 +765,13 @@ function HotFieldRow({
         title: "Estreitar a janela agora?",
         body: "Isto vai drenar o pod que está rodando AGORA. O atendimento pelo pod primário cai imediatamente até a próxima janela.",
         confirmLabel: "Estreitar agenda",
+      };
+    }
+    if (f.field === "offer_mode" && value === "bid") {
+      return {
+        title: "Usar lance interruptível?",
+        body: "No modo lance a Vast pode preemptar o pod a qualquer momento. Depois do limite de preempções do dia, o gateway volta para on-demand.",
+        confirmLabel: "Usar lance",
       };
     }
     if (f.field === "schedule_disabled" && value === true) {
@@ -839,7 +915,22 @@ function HotFieldRow({
       <span className="text-[12px] font-semibold text-muted-foreground">
         {f.label}
       </span>
-      {f.kind === "days" ? (
+      {f.kind === "enum" ? (
+        <div className="flex flex-wrap gap-1">
+          {(f.options ?? []).map((o) => (
+            <Button
+              key={o.value}
+              type="button"
+              size="sm"
+              variant={draft === o.value ? "default" : "outline"}
+              disabled={pending}
+              onClick={() => setDraft(o.value)}
+            >
+              {o.label}
+            </Button>
+          ))}
+        </div>
+      ) : f.kind === "days" ? (
         <div className="flex flex-wrap gap-1">
           {DAY_ORDER.map((d) => {
             const on = draftDays.includes(d);

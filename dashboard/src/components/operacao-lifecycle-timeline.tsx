@@ -84,7 +84,9 @@ export function OperacaoLifecycleTimeline({
                     <TableCell className="text-right tabular-nums">
                       {lc.cost_brl !== null ? formatBrl(lc.cost_brl) : "em curso"}
                     </TableCell>
-                    <TableCell>
+                    {/* Vast daemon errors run to hundreds of chars — wrap
+                        instead of overflowing the card (TableCell is nowrap). */}
+                    <TableCell className="min-w-[16rem] whitespace-normal break-words">
                       {open
                         ? "rodando"
                         : `encerrada${lc.shutdown_reason ? ` (${lc.shutdown_reason})` : ""}`}

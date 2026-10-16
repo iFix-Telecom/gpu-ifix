@@ -61,6 +61,7 @@
   --chart-stt: #b06a12;
   --chart-ext: #7d47c4;
   --chart-embed: #157a54;
+  --chart-credit: #8f7408;
 }
 
 .dark {
@@ -105,6 +106,8 @@
   --chart-stt: #c9791e;
   --chart-ext: #9d5fe0;
   --chart-embed: #1f9e6d;
+  /* credit = gasto coberto por créditos (Haiku passo ①), não uma modalidade. */
+  --chart-credit: #e3c13b;
 
   /*
    * --chart-1..5 are the shadcn generic slots. Repointed onto the categorical
@@ -144,6 +147,7 @@
   --color-chart-stt: var(--chart-stt);
   --color-chart-ext: var(--chart-ext);
   --color-chart-embed: var(--chart-embed);
+  --color-chart-credit: var(--chart-credit);
   --color-status-ok: var(--status-ok);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);

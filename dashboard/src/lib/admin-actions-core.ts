@@ -423,9 +423,14 @@ interface ConfigFieldSpec {
   min?: keyof PodConfigBoundsT;
   max?: keyof PodConfigBoundsT;
   hour?: boolean;
+  /** Fixed range (not an owner-editable bound) — mirrors the gateway check. */
+  fixedMin?: number;
+  fixedMax?: number;
+  /** Closed enum (string fields). */
+  oneOf?: readonly string[];
 }
 
-/** The 16 hot fields, keyed by their gateway PATCH `field` name. */
+/** The 21 hot fields, keyed by their gateway PATCH `field` name. */
 const CONFIG_FIELDS: Record<string, ConfigFieldSpec> = {
   blocklist: { configKey: "vast_machine_blocklist" },
   allowlist: { configKey: "vast_machine_allowlist" },
@@ -485,6 +490,15 @@ const CONFIG_FIELDS: Record<string, ConfigFieldSpec> = {
     max: "provision_lead_s_max",
   },
   schedule_disabled: { configKey: "schedule_disabled" },
+  offer_mode: { configKey: "offer_mode", oneOf: ["bid", "ondemand"] },
+  bid_margin: { configKey: "bid_margin", fixedMin: 1, fixedMax: 5 },
+  max_preemptions_per_day: {
+    configKey: "max_preemptions_per_day",
+    fixedMin: 0,
+    fixedMax: 20,
+  },
+  min_reliability: { configKey: "min_reliability", fixedMin: 0.5, fixedMax: 1 },
+  force_machine_id: { configKey: "force_machine_id", fixedMin: 0 },
 };
 
 /** Spec for one editable bound: its counterpart + which side this field is. */
@@ -579,6 +593,22 @@ export async function updatePodConfigCore(args: {
         );
       }
     }
+  }
+
+  if (spec.fixedMin !== undefined || spec.fixedMax !== undefined) {
+    if (typeof args.value !== "number" || Number.isNaN(args.value)) {
+      throw new Error(`Valor inválido para ${args.field}.`);
+    }
+    const lo = spec.fixedMin ?? -Infinity;
+    const hi = spec.fixedMax ?? Infinity;
+    if (args.value < lo || args.value > hi) {
+      throw new Error(
+        `Valor ${args.value} fora do limite permitido [${spec.fixedMin ?? "—"}, ${spec.fixedMax ?? "—"}] para ${args.field}.`,
+      );
+    }
+  }
+  if (spec.oneOf && !spec.oneOf.includes(args.value as string)) {
+    throw new Error(`Valor inválido para ${args.field}.`);
   }
 
   await patch("primary/config", {

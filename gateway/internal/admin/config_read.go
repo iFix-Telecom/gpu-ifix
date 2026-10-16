@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/obs"
@@ -37,6 +38,70 @@ const configReadRoute = "/admin/primary/config"
 type ConfigReadResponse struct {
 	Config ConfigSection `json:"config"`
 	Bounds BoundsSection `json:"bounds"`
+	// Structural: boot-env fields (NOT pod_config) shown read-only by the
+	// dashboard. Changed only by redeploy/env. Only image tags, GPU shape,
+	// MinIO object keys and their sha256 (public-grade integrity digests) —
+	// no credential is serialized. Omitted when the handler was built without it.
+	Structural *StructuralSection `json:"structural,omitempty"`
+}
+
+// StructuralSection mirrors the dashboard's "Configuração estrutural" panel.
+type StructuralSection struct {
+	Timezone                string   `json:"timezone"`
+	GPUNamePrimary          string   `json:"gpu_name_primary"`
+	GPUNameFallback         string   `json:"gpu_name_fallback"`
+	NumGPUsPrimary          int      `json:"num_gpus_primary"`
+	NumGPUsFallback         int      `json:"num_gpus_fallback"`
+	TemplateImage           string   `json:"template_image"`
+	InfinityImage           string   `json:"infinity_image"`
+	DCGMImage               string   `json:"dcgm_image"`
+	SpeachesImage           string   `json:"speaches_image"`
+	QwenWeightsKey          string   `json:"qwen_weights_key"`
+	QwenWeightsSHA256       string   `json:"qwen_weights_sha256"`
+	WhisperWeightsKey       string   `json:"whisper_weights_key"`
+	WhisperWeightsSHA256    string   `json:"whisper_weights_sha256"`
+	BGEM3WeightsKey         string   `json:"bgem3_weights_key"`
+	BGEM3WeightsSHA256      string   `json:"bgem3_weights_sha256"`
+	ChatterboxWeightsKey    string   `json:"chatterbox_weights_key"`
+	ChatterboxWeightsSHA256 string   `json:"chatterbox_weights_sha256"`
+	QwenJinjaKey            string   `json:"qwen_jinja_key"`
+	QwenJinjaSHA256         string   `json:"qwen_jinja_sha256"`
+	LlamaArgs               []string `json:"llama_args"`
+	// LlamaArgsDefault: true when PRIMARY_LLAMA_ARGS is empty and LlamaArgs is
+	// the code default.
+	LlamaArgsDefault bool `json:"llama_args_default"`
+}
+
+// StructuralFromConfig builds the read-only structural view from boot config.
+// defaultLlamaArgs is the code default used when PRIMARY_LLAMA_ARGS is empty.
+func StructuralFromConfig(cfg config.Config, defaultLlamaArgs []string) StructuralSection {
+	s := StructuralSection{
+		Timezone:                cfg.PrimaryPodScheduleTimezone,
+		GPUNamePrimary:          cfg.PrimaryVastGPUNamePrimary,
+		GPUNameFallback:         cfg.PrimaryVastGPUNameFallback,
+		NumGPUsPrimary:          cfg.PrimaryVastNumGPUsPrimary,
+		NumGPUsFallback:         cfg.PrimaryVastNumGPUsFallback,
+		TemplateImage:           cfg.PrimaryTemplateImage,
+		InfinityImage:           cfg.PrimaryInfinityImage,
+		DCGMImage:               cfg.PrimaryDCGMImage,
+		SpeachesImage:           cfg.PrimarySpeachesImage,
+		QwenWeightsKey:          cfg.PrimaryQwenWeightsKey,
+		QwenWeightsSHA256:       cfg.PrimaryQwenWeightsSHA256,
+		WhisperWeightsKey:       cfg.PrimaryWhisperWeightsKey,
+		WhisperWeightsSHA256:    cfg.PrimaryWhisperWeightsSHA256,
+		BGEM3WeightsKey:         cfg.PrimaryBGEM3WeightsKey,
+		BGEM3WeightsSHA256:      cfg.PrimaryBGEM3WeightsSHA256,
+		ChatterboxWeightsKey:    cfg.PrimaryChatterboxWeightsKey,
+		ChatterboxWeightsSHA256: cfg.PrimaryChatterboxWeightsSHA256,
+		QwenJinjaKey:            cfg.PrimaryQwenJinjaKey,
+		QwenJinjaSHA256:         cfg.PrimaryQwenJinjaSHA256,
+		LlamaArgs:               cfg.PrimaryLlamaArgs,
+	}
+	if len(s.LlamaArgs) == 0 {
+		s.LlamaArgs = defaultLlamaArgs
+		s.LlamaArgsDefault = true
+	}
+	return s
 }
 
 // ConfigSection is the 16 hot pod_config fields, typed.
@@ -103,8 +168,15 @@ type podConfigReadQueries interface {
 
 // PrimaryConfigReadHandler serves GET /admin/primary/config.
 type PrimaryConfigReadHandler struct {
-	q   podConfigReadQueries
-	log *slog.Logger
+	q          podConfigReadQueries
+	log        *slog.Logger
+	structural *StructuralSection
+}
+
+// WithStructural attaches the boot-env structural view to every response.
+func (h *PrimaryConfigReadHandler) WithStructural(s StructuralSection) *PrimaryConfigReadHandler {
+	h.structural = &s
+	return h
 }
 
 // NewPrimaryConfigReadHandler wires the production dependency (the concrete
@@ -146,6 +218,7 @@ func (h *PrimaryConfigReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 
 	resp := ConfigReadResponse{
+		Structural: h.structural,
 		Config: ConfigSection{
 			VastMachineBlocklist: row.VastMachineBlocklist,
 			VastMachineAllowlist: row.VastMachineAllowlist,

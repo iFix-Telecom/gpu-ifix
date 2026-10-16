@@ -43,9 +43,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatBrl } from "@/lib/format";
 import {
   fetchMetrics,
+  fetchTenants,
   fetchUsage,
   GatewayError,
-  tenantLabel,
 } from "@/lib/gateway";
 
 /** WR-06: the specific proxy/gateway cause, or the generic fallback. */
@@ -93,17 +93,17 @@ export default function TenantsPage() {
     enabled: applied !== null,
   });
 
-  // De-duplicate tenants by UUID, keeping the human label for display.
+  // Every tenant, not just the ones seen in the live 5-min metrics window —
+  // the cost question is about the period, and idle-right-now tenants count.
   // The Select VALUE stays the UUID (the stable id `/admin/usage` accepts),
   // but the operator sees the name/slug, not a bare UUID (WR-10).
-  const tenantOptions = Array.from(
-    new Map(
-      (metricsQuery.data?.tenants ?? []).map((t) => [
-        t.tenant_id,
-        { id: t.tenant_id, label: tenantLabel(t) },
-      ]),
-    ).values(),
-  );
+  const tenantsQuery = useQuery({
+    queryKey: ["tenants"],
+    queryFn: () => fetchTenants(),
+  });
+  const tenantOptions = (tenantsQuery.data ?? [])
+    .map((t) => ({ id: t.id, label: t.name || t.slug || t.id }))
+    .sort((a, b) => a.label.localeCompare(b.label, "pt-BR"));
 
   const canApply =
     selectedTenant !== "" && range?.from !== undefined && range?.to !== undefined;

@@ -56,7 +56,7 @@ export function ConsumoTable({ rows }: ConsumoTableProps) {
             <TableRow key={row.tenant_id}>
               <TableCell>{row.label}</TableCell>
               <TableCell className="text-right tabular-nums">
-                {formatBrl(row.cost_local_phantom_brl)}
+                {formatBrl(row.cost_total_brl)}
               </TableCell>
               <TableCell className="text-right tabular-nums">
                 {formatCount(row.tokens_in)}

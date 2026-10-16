@@ -25,12 +25,12 @@ export interface ConsumoSummary {
   requests_count: number;
 }
 
-/** One merged trend point — total tokens and phantom cost for a single day. */
+/** One merged trend point — total tokens and real cost for a single day. */
 export interface DailyAggRow {
   date: string;
   /** `tokens_in + tokens_out` summed across all tenants for this date. */
   tokens: number;
-  /** `cost_local_phantom_brl` summed across all tenants for this date. */
+  /** `cost_total_brl` summed across all tenants for this date. */
   cost_brl: number;
 }
 
@@ -54,7 +54,8 @@ export interface TenantVolumeRow {
 export interface TenantUsageRow {
   tenant_id: string;
   label: string;
-  cost_local_phantom_brl: number;
+  /** `summary.cost_total_brl` — real money (phantom is a saving, not a cost). */
+  cost_total_brl: number;
   tokens_in: number;
   tokens_out: number;
   audio_seconds: number;
@@ -93,7 +94,7 @@ export function aggregateSummary(responses: UsageResponse[]): ConsumoSummary {
 
 /**
  * Merge every response's `rows` by `date`: sum `tokens_in + tokens_out` into
- * `tokens` and `cost_local_phantom_brl` into `cost_brl`. Sorted ascending by
+ * `tokens` and `cost_total_brl` into `cost_brl`. Sorted ascending by
  * `date` (string compare on YYYY-MM-DD is chronological).
  *
  * @param responses - the fulfilled `fetchUsage` results, one per tenant.
@@ -107,12 +108,12 @@ export function aggregateDaily(responses: UsageResponse[]): DailyAggRow[] {
       const tokens = row.tokens_in + row.tokens_out;
       if (existing) {
         existing.tokens += tokens;
-        existing.cost_brl += row.cost_local_phantom_brl;
+        existing.cost_brl += row.cost_total_brl;
       } else {
         byDate.set(row.date, {
           date: row.date,
           tokens,
-          cost_brl: row.cost_local_phantom_brl,
+          cost_brl: row.cost_total_brl,
         });
       }
     }
@@ -124,7 +125,7 @@ export function aggregateDaily(responses: UsageResponse[]): DailyAggRow[] {
 
 /**
  * One row per tenant, taken from that tenant's `summary`, sorted by
- * `cost_local_phantom_brl` descending (the biggest spender first). The label
+ * `cost_total_brl` descending (the biggest spender first). The label
  * falls back name → slug → raw id so a since-renamed tenant stays identifiable.
  *
  * @param responses - the fulfilled `fetchUsage` results, one per tenant.
@@ -135,13 +136,13 @@ export function perTenantRows(responses: UsageResponse[]): TenantUsageRow[] {
     .map((r) => ({
       tenant_id: r.tenant.id,
       label: r.tenant.name || r.tenant.slug || r.tenant.id,
-      cost_local_phantom_brl: r.summary.cost_local_phantom_brl,
+      cost_total_brl: r.summary.cost_total_brl,
       tokens_in: r.summary.tokens_in,
       tokens_out: r.summary.tokens_out,
       audio_seconds: r.summary.audio_seconds,
       embeds_count: r.summary.embeds_count,
     }))
-    .sort((a, b) => b.cost_local_phantom_brl - a.cost_local_phantom_brl);
+    .sort((a, b) => b.cost_total_brl - a.cost_total_brl);
 }
 
 /**

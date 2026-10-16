@@ -36,7 +36,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
-import { fetchAudit, GatewayError } from "@/lib/gateway";
+import { fetchAudit, fetchTenants, GatewayError } from "@/lib/gateway";
 
 const PAGE_SIZE = 50;
 
@@ -81,6 +81,15 @@ export default function IncidentsPage() {
     queryFn: () =>
       fetchAudit(PAGE_SIZE, offset, applied.from, applied.to, search),
   });
+  // Names, not ids: resolve tenant_id → name for the table (best effort — a
+  // failed lookup just leaves the raw id).
+  const tenantsQuery = useQuery({
+    queryKey: ["tenants"],
+    queryFn: () => fetchTenants(),
+  });
+  const tenantNames = Object.fromEntries(
+    (tenantsQuery.data ?? []).map((t) => [t.id, t.name || t.slug]),
+  );
 
   function applyPeriod() {
     if (!range?.from || !range?.to) return;
@@ -166,6 +175,7 @@ export default function IncidentsPage() {
               total={data?.total}
               onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
               onNext={() => setOffset((o) => o + PAGE_SIZE)}
+              tenantNames={tenantNames}
             />
           )}
         </CardContent>

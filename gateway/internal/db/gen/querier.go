@@ -314,6 +314,8 @@ type Querier interface {
 	// Drives the daily chart series (economia_liquida per day = phantom - vast).
 	// Keep the `(ts AT TIME ZONE 'America/Sao_Paulo')::date` idiom verbatim --
 	// CURRENT_DATE + tz is invalid SQL (RESEARCH Anti-Patterns).
+	// credits_covered_brl / external_cash_brl: mesmo split de SumEconomyTokensRange,
+	// por dia, para o gráfico de tendência mostrar Haiku (créditos) e caixa.
 	SumPhantomAllTenantsByDate(ctx context.Context, arg SumPhantomAllTenantsByDateParams) ([]SumPhantomAllTenantsByDateRow, error)
 	// Phase 7 — per-tenant/route latency percentiles for the observability
 	// dashboard's /admin/metrics JSON (consumed by the admin handler in plan

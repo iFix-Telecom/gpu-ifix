@@ -47,6 +47,20 @@ export interface AuditTableProps {
   /** Pager callbacks — the page owns the limit/offset query state. */
   onPrev: () => void;
   onNext: () => void;
+  /** tenant_id → display name. Ids missing from the map render raw. */
+  tenantNames?: Record<string, string>;
+}
+
+/** Gateway-internal events (FSM, reconcilers) carry the all-zero tenant id. */
+const SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000";
+
+/** Tenant cell: "sistema" for internal events, else name → raw id. */
+export function formatTenant(
+  tenantId: string,
+  names?: Record<string, string>,
+): string {
+  if (!tenantId || tenantId === SYSTEM_TENANT_ID) return "sistema";
+  return names?.[tenantId] ?? tenantId;
 }
 
 /**
@@ -65,6 +79,7 @@ export function AuditTable({
   total,
   onPrev,
   onNext,
+  tenantNames,
 }: AuditTableProps) {
   if (rows.length === 0) {
     return (
@@ -118,7 +133,9 @@ export function AuditTable({
                     {row.event_kind ?? "—"}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-[14px]">{row.tenant_id}</TableCell>
+                <TableCell className="text-[14px]">
+                  {formatTenant(row.tenant_id, tenantNames)}
+                </TableCell>
                 <TableCell className="text-[14px] text-muted-foreground">
                   {row.route}
                 </TableCell>

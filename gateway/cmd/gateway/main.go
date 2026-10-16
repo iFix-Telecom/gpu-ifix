@@ -1641,7 +1641,8 @@ func main() {
 	// (NOT /admin/operations, whose boot-env diverges after an edit). PATCH
 	// /primary/config: the one write verb (validated vs the live bound).
 	adminPrimaryLifecycleHandler := admin.NewPrimaryLifecycleHandler(gen.New(pool), primaryReconciler, emergFSM, log)
-	adminPrimaryConfigReadHandler := admin.NewPrimaryConfigReadHandler(gen.New(pool), log)
+	adminPrimaryConfigReadHandler := admin.NewPrimaryConfigReadHandler(gen.New(pool), log).
+		WithStructural(admin.StructuralFromConfig(cfg, primary.DefaultLlamaArgs()))
 	var adminPrimaryConfigWriteHandler http.Handler
 	if podCfgLoader != nil {
 		adminPrimaryConfigWriteHandler = admin.NewPrimaryConfigWriteHandler(gen.New(pool), podCfgLoader, log)

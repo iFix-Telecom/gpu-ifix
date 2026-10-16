@@ -4,10 +4,12 @@
  * Economia trend chart — a Recharts `ComposedChart` over the daily
  * `/admin/economy` series:
  *   vast_brl     → grouped BAR, --chart-llm  (custo Vast real/dia)
- *   phantom_brl  → grouped BAR, --chart-ext  (custo externo evitado/dia)
+ *   phantom_brl  → grouped BAR, --chart-embed (custo externo evitado/dia)
+ *   creditos_haiku_brl → grouped BAR, --chart-credit (Haiku passo ①, créditos)
+ *   caixa_externo_brl  → grouped BAR, --chart-ext    (externo pago em caixa)
  *   economia_brl → LINE overlay, --primary   (economia líquida/dia)
  *
- * The two cost quantities are what the day IS — discrete daily amounts, best
+ * The daily money amounts are what the day IS — discrete daily amounts, best
  * compared side by side as bars. The net saving is the derived headline, so it
  * rides over them as a line: here the X axis IS time, so a line is legitimate
  * (unlike latency-by-route, where the axis is categorical).
@@ -35,14 +37,16 @@ import {
 import type { EconomyDayRow } from "@/lib/gateway";
 
 /**
- * Categorical palette: the two costs are DIFFERENT KINDS of money (own GPU vs
- * external provider), not two tiers of the same status — so they take the
- * llm/ext category hues, not the green/amber ramp. The net saving keeps the
+ * Categorical palette: the bars are DIFFERENT KINDS of money (own GPU, saving,
+ * credits, cash), not tiers of one status — so each takes its own category
+ * hue, not the green/amber ramp. The net saving keeps the
  * brand accent because it is the number the screen exists to show.
  */
 const chartConfig = {
   vast_brl: { label: "Vast R$/dia", color: "var(--chart-llm)" },
-  phantom_brl: { label: "Phantom R$/dia", color: "var(--chart-ext)" },
+  phantom_brl: { label: "Economizado pelo pod R$/dia", color: "var(--chart-embed)" },
+  creditos_haiku_brl: { label: "Haiku (créditos) R$/dia", color: "var(--chart-credit)" },
+  caixa_externo_brl: { label: "Externo (caixa) R$/dia", color: "var(--chart-ext)" },
   economia_brl: { label: "Economia R$/dia", color: "var(--primary)" },
 } satisfies ChartConfig;
 
@@ -83,6 +87,16 @@ export function EconomyTrendChart({ rows }: EconomyTrendChartProps) {
         <Bar
           dataKey="phantom_brl"
           fill="var(--color-phantom_brl)"
+          radius={[4, 4, 0, 0]}
+        />
+        <Bar
+          dataKey="creditos_haiku_brl"
+          fill="var(--color-creditos_haiku_brl)"
+          radius={[4, 4, 0, 0]}
+        />
+        <Bar
+          dataKey="caixa_externo_brl"
+          fill="var(--color-caixa_externo_brl)"
           radius={[4, 4, 0, 0]}
         />
         <Line

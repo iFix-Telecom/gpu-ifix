@@ -4,7 +4,7 @@
  * Consumo — aggregated cost/usage across ALL tenants for a date range.
  *
  * The gateway's `/admin/usage` takes a single `tenant` and has no "all" mode,
- * so this page aggregates client-side: list tenants via `fetchMetrics`, fan
+ * so this page aggregates client-side: list tenants via `fetchTenants`, fan
  * out one `fetchUsage` per tenant with `Promise.allSettled`, then sum/merge
  * via the `@/lib/consumo` helpers. A single failing tenant must NOT blank the
  * page — partial failures are tolerated and surfaced as an honest note.
@@ -46,10 +46,10 @@ import {
   perTenantRows,
   topTenantsByVolume,
 } from "@/lib/consumo";
-import { formatBrl, formatCount } from "@/lib/format";
+import { formatBrl, formatCompact, formatCount } from "@/lib/format";
 import {
   fetchEconomy,
-  fetchMetrics,
+  fetchTenants,
   fetchUsage,
   GatewayError,
 } from "@/lib/gateway";
@@ -103,24 +103,22 @@ export default function ConsumoPage() {
   const query = useQuery({
     queryKey: ["consumo", applied],
     queryFn: async () => {
-      // 1. List tenants. If this throws, the whole query rejects → error state.
-      const metrics = await fetchMetrics();
-      // 2. De-duplicate tenant ids (a tenant appears once per route in metrics).
-      const ids = Array.from(
-        new Map(
-          (metrics.tenants ?? []).map((t) => [t.tenant_id, t]),
-        ).values(),
-      ).map((t) => t.tenant_id);
+      // 1. List EVERY tenant. If this throws, the whole query rejects → error
+      //    state. (`/admin/metrics` only carries tenants seen in the live 5-min
+      //    window, which silently dropped most of the period's spend.)
+      const ids = (await fetchTenants()).map((t) => t.id);
       // 3. Fan out one usage call per tenant — partial failures tolerated.
       const settled = await Promise.allSettled(
         ids.map((id) => fetchUsage(id, applied.from, applied.to)),
       );
       // 4. Keep only the fulfilled responses.
-      const responses = settled
+      const fulfilled = settled
         .filter((r) => r.status === "fulfilled")
         .map((r) => (r as PromiseFulfilledResult<Awaited<ReturnType<typeof fetchUsage>>>).value);
+      // Tenants with no traffic in the period add nothing but empty rows.
+      const responses = fulfilled.filter((r) => r.summary.requests_count > 0);
       // 5. Count failures for the honest partial-failure note.
-      const failures = settled.length - responses.length;
+      const failures = settled.length - fulfilled.length;
       return {
         summary: aggregateSummary(responses),
         // Expanded over the FULL range so days with no billing row render as
@@ -222,15 +220,17 @@ export default function ConsumoPage() {
             />
             <KpiCard
               caption="Custo total"
-              value={formatBrl(query.data.summary.cost_local_phantom_brl)}
+              value={formatBrl(query.data.summary.cost_total_brl)}
             />
             <KpiCard
               caption="Tokens entrada"
-              value={formatCount(query.data.summary.tokens_in)}
+              value={formatCompact(query.data.summary.tokens_in)}
+              hint={formatCount(query.data.summary.tokens_in)}
             />
             <KpiCard
               caption="Tokens saída"
-              value={formatCount(query.data.summary.tokens_out)}
+              value={formatCompact(query.data.summary.tokens_out)}
+              hint={formatCount(query.data.summary.tokens_out)}
             />
             <KpiCard
               caption="Áudio (s)"

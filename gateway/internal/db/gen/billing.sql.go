@@ -263,6 +263,7 @@ const sumEconomyTokensRange = `-- name: SumEconomyTokensRange :one
 SELECT
     COALESCE(SUM(tokens_in + tokens_out) FILTER (WHERE cost_local_phantom_brl > 0), 0)::bigint AS local_tokens,
     COALESCE(SUM(tokens_in + tokens_out), 0)::bigint                                          AS total_tokens,
+    COALESCE(SUM(tokens_in + tokens_out) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::bigint AS haiku_tokens,
     COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::numeric(20,6)  AS credits_covered_brl,
     COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream <> 'anthropic-haiku'), 0)::numeric(20,6) AS external_cash_brl
 FROM ai_gateway.billing_events
@@ -278,6 +279,7 @@ type SumEconomyTokensRangeParams struct {
 type SumEconomyTokensRangeRow struct {
 	LocalTokens       int64          `json:"local_tokens"`
 	TotalTokens       int64          `json:"total_tokens"`
+	HaikuTokens       int64          `json:"haiku_tokens"`
 	CreditsCoveredBrl pgtype.Numeric `json:"credits_covered_brl"`
 	ExternalCashBrl   pgtype.Numeric `json:"external_cash_brl"`
 }
@@ -294,6 +296,7 @@ func (q *Queries) SumEconomyTokensRange(ctx context.Context, arg SumEconomyToken
 	err := row.Scan(
 		&i.LocalTokens,
 		&i.TotalTokens,
+		&i.HaikuTokens,
 		&i.CreditsCoveredBrl,
 		&i.ExternalCashBrl,
 	)
@@ -303,7 +306,9 @@ func (q *Queries) SumEconomyTokensRange(ctx context.Context, arg SumEconomyToken
 const sumPhantomAllTenantsByDate = `-- name: SumPhantomAllTenantsByDate :many
 SELECT
     (ts AT TIME ZONE 'America/Sao_Paulo')::date AS date,
-    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl
+    COALESCE(SUM(cost_local_phantom_brl), 0)::numeric(20,6) AS phantom_brl,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream = 'anthropic-haiku'), 0)::numeric(20,6)  AS credits_covered_brl,
+    COALESCE(SUM(cost_external_brl) FILTER (WHERE upstream <> 'anthropic-haiku'), 0)::numeric(20,6) AS external_cash_brl
 FROM ai_gateway.billing_events
 WHERE ts >= $1
   AND ts <  $2
@@ -317,8 +322,10 @@ type SumPhantomAllTenantsByDateParams struct {
 }
 
 type SumPhantomAllTenantsByDateRow struct {
-	Date       pgtype.Date    `json:"date"`
-	PhantomBrl pgtype.Numeric `json:"phantom_brl"`
+	Date              pgtype.Date    `json:"date"`
+	PhantomBrl        pgtype.Numeric `json:"phantom_brl"`
+	CreditsCoveredBrl pgtype.Numeric `json:"credits_covered_brl"`
+	ExternalCashBrl   pgtype.Numeric `json:"external_cash_brl"`
 }
 
 // GATEWAY-WIDE phantom series for GET /admin/economy (OBS-09). The deliberate
@@ -327,6 +334,8 @@ type SumPhantomAllTenantsByDateRow struct {
 // Drives the daily chart series (economia_liquida per day = phantom - vast).
 // Keep the `(ts AT TIME ZONE 'America/Sao_Paulo')::date` idiom verbatim --
 // CURRENT_DATE + tz is invalid SQL (RESEARCH Anti-Patterns).
+// credits_covered_brl / external_cash_brl: mesmo split de SumEconomyTokensRange,
+// por dia, para o gráfico de tendência mostrar Haiku (créditos) e caixa.
 func (q *Queries) SumPhantomAllTenantsByDate(ctx context.Context, arg SumPhantomAllTenantsByDateParams) ([]SumPhantomAllTenantsByDateRow, error) {
 	rows, err := q.db.Query(ctx, sumPhantomAllTenantsByDate, arg.Ts, arg.Ts_2)
 	if err != nil {
@@ -336,7 +345,12 @@ func (q *Queries) SumPhantomAllTenantsByDate(ctx context.Context, arg SumPhantom
 	var items []SumPhantomAllTenantsByDateRow
 	for rows.Next() {
 		var i SumPhantomAllTenantsByDateRow
-		if err := rows.Scan(&i.Date, &i.PhantomBrl); err != nil {
+		if err := rows.Scan(
+			&i.Date,
+			&i.PhantomBrl,
+			&i.CreditsCoveredBrl,
+			&i.ExternalCashBrl,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -22,6 +22,7 @@ function makeSummary(over: Partial<Summary> = {}): Summary {
     pct_servido_local: 0.87,
     horas_pod_up: 56.5,
     pct_servido_local_tokens: 0.625,
+    pct_haiku_tokens: 0.3,
     custo_creditos_haiku_brl: 10,
     custo_externo_caixa_brl: 2.34,
     vast_3060_brl: 4.5,

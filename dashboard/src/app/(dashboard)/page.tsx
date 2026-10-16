@@ -41,6 +41,7 @@ import {
   formatCount,
   formatErrorRate,
   formatMs,
+  formatPercent,
   latencyTier,
 } from "@/lib/format";
 import {
@@ -161,7 +162,7 @@ export default function OverviewPage() {
               value={vastCost ? formatBrl(vastCost.today_brl) : "—"}
               hint={
                 vastCost
-                  ? `mês ${formatBrl(vastCost.month_brl)} · budget ${vastCost.budget_pct_used}%`
+                  ? `mês ${formatBrl(vastCost.month_brl)} · ${formatPercent(vastCost.budget_pct_used)} do budget`
                   : "custo indisponível"
               }
               series={costSeries}

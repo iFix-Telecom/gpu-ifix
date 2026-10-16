@@ -355,3 +355,9 @@ func buildPrimaryOnstart(llamaArgs []string, jinjaPath string) string {
 	_ = jinjaPath
 	return primaryOnstartHead + "exec /usr/bin/supervisord -n -c /etc/supervisor/conf.d/services.conf\n"
 }
+
+// DefaultLlamaArgs returns a copy of primaryLlamaArgsDefault (read-only view
+// for the dashboard's structural panel; PRIMARY_LLAMA_ARGS empty → this).
+func DefaultLlamaArgs() []string {
+	return append([]string(nil), primaryLlamaArgsDefault...)
+}

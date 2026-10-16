@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/config"
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 )
 
@@ -157,5 +159,50 @@ func TestConfigReadHandler_QueryError_500(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// TestConfigReadHandler_Structural: com WithStructural a resposta traz a seção
+// estrutural do boot-env; PRIMARY_LLAMA_ARGS vazio cai no default do código.
+func TestConfigReadHandler_Structural(t *testing.T) {
+	cfg := config.Config{
+		PrimaryPodScheduleTimezone: "America/Sao_Paulo",
+		PrimaryVastGPUNamePrimary:  "RTX 3090",
+		PrimaryVastNumGPUsPrimary:  1,
+		PrimaryQwenWeightsSHA256:   "abc123",
+	}
+	fake := &fakeConfigReadQueries{row: gen.AiGatewayPodConfig{ID: true}}
+	h := newPrimaryConfigReadHandlerWithQueries(fake, discardLog()).
+		WithStructural(StructuralFromConfig(cfg, []string{"--port", "8000"}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/primary/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body ConfigReadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	s := body.Structural
+	if s == nil {
+		t.Fatal("structural ausente")
+	}
+	if s.Timezone != "America/Sao_Paulo" || s.GPUNamePrimary != "RTX 3090" || s.NumGPUsPrimary != 1 || s.QwenWeightsSHA256 != "abc123" {
+		t.Errorf("structural = %+v", *s)
+	}
+	if !s.LlamaArgsDefault || len(s.LlamaArgs) != 2 {
+		t.Errorf("llama args = %v default=%v, want default do código", s.LlamaArgs, s.LlamaArgsDefault)
+	}
+}
+
+// TestConfigReadHandler_NoStructural: sem WithStructural a chave some do JSON.
+func TestConfigReadHandler_NoStructural(t *testing.T) {
+	fake := &fakeConfigReadQueries{row: gen.AiGatewayPodConfig{ID: true}}
+	h := newPrimaryConfigReadHandlerWithQueries(fake, discardLog())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/primary/config", nil))
+	if strings.Contains(rec.Body.String(), `"structural"`) {
+		t.Errorf("structural não deveria aparecer: %s", rec.Body.String())
 	}
 }
