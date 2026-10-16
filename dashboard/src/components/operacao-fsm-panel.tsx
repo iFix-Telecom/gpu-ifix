@@ -19,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { fsmMeta } from "@/lib/fsm";
 import type { OperationsFSM, OperationsSchedule } from "@/lib/gateway";
 import { cn } from "@/lib/utils";
 
@@ -111,7 +112,7 @@ export function OperacaoFsmPanel({ fsm, schedule }: OperacaoFsmPanelProps) {
             {primaryStateLabel(fsm.primary_state)}
           </Badge>
           <span className="text-[12px] font-semibold text-muted-foreground">
-            Emergência: {fsm.emerg_state}
+            Emergência: {fsmMeta(fsm.emerg_state).label}
           </span>
           <Badge
             className={cn(
