@@ -55,3 +55,20 @@ Script `rerank_eval.py` (nesta pasta): 13 perguntas PT-BR de atendimento (teleco
 - **FATO:** o container `ai-gateway-rerank` recebeu 2.876 `POST /v1/rerank` em 8 h, todos de `10.0.0.2` (rede de entrada do swarm) e exatamente a cada 10 s — é a sonda do próprio gateway (`internal/upstreams/probe.go:354`, `PROBE_INTERVAL_SECONDS=10`), não tráfego desviado do gateway.
 - **FATO:** converseai prod (worker2) e dev (vps-ifix-vm) têm `RAG_RERANK_URL=https://ai-gateway.converse-ai.app` e `RAG_RERANK_MODEL=bge-reranker-v2-m3`. No log do agents de prod não há linha de RAG nas últimas 26 h; no de dev (reiniciado há 3 h) o único evento tem `buscou=False chunks=0`.
 - HIPÓTESE: as conversas de hoje não acionaram a busca na base (RAG), então não houve o que reordenar. Resolve: medir de novo depois de um dia com tráfego de RAG.
+
+## Conferência 2026-10-16 18:47 BRT
+
+Consulta somente leitura em `ai_gateway.audit_log`, rota `/v1/rerank`, desde 02:10 UTC, tenant converseai (uat10-test fora).
+
+| Status | Chamadas | p50 | p95 | máx | Janela (UTC) |
+|---|---|---|---|---|---|
+| 200 | 88 | 1,89 s | 6,47 s | 13,74 s | 13:37–14:02 |
+| 499 | 1 | 4,01 s | — | — | 13:40 |
+
+- **FATO:** 0 × 503. Faixas: 48 < 2 s, 30 entre 2 e 4 s, 7 entre 4 e 8 s, 4 ≥ 8 s. A cauda > 4 s está em 13:41 (10 chamadas, máx 13,7 s) e 13:49 (9 chamadas, máx 9,7 s); concorrência máxima de 4 chamadas simultâneas.
+- **FATO:** rajada atípica: 88 rerank para 17 chat na mesma janela, todas pela mesma chave do tenant converseai. O agents de prod (worker2, no ar desde 15/10 22:07 UTC) não tem nenhuma linha de rerank/RAG entre 13:35 e 14:05 UTC.
+- **FATO:** às 13:51 UTC entrou no develop do converseai o `0aa821948` "fix(rag): rerank com 10 trechos e corte 0.6 para o modelo de CPU" (card 86akuh17c): com 30 trechos a chamada passava do timeout de 4 s e o corte 0,05 descartava acertos. O agents de dev foi recriado às 13:58 UTC. Depois disso: 5 chamadas, 1,35–1,83 s, todas 200 (log do dev: `rerank_ms` 1521 e 1894, 10 trechos).
+- **FATO:** o agents de prod ainda roda imagem anterior ao `0aa821948` (iniciado 15/10), ou seja, com 30 trechos e corte 0,05.
+- HIPÓTESE: a rajada de 13:37–13:49 é a calibração feita no dev pela sessão do card 86akuh17c, com 30 trechos (daí a cauda > 4 s e o 499 em 4,01 s). Os logs do container anterior se perderam na recriação; resolve com o histórico daquela sessão.
+- HIPÓTESE: enquanto o `0aa821948` não for para prod, uma busca RAG real em prod com 30 trechos tende a passar de 4 s e virar 499 (rerank descartado, ordem vetorial mantida). Resolve com o próximo deploy de prod do converseai ou com uma busca RAG em prod.
+- Conclusão: o modelo de CPU atende em ~1,5–2 s com 10 trechos; o gateway não precisa de mudança.
