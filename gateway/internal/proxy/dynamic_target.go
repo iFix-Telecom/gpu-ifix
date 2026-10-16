@@ -110,6 +110,13 @@ func parseStaticUpstream(kind, upstreamURL string) (*url.URL, error) {
 	return u, nil
 }
 
+// EmbedResponseHeaderTimeout é o ResponseHeaderTimeout do proxy de
+// embeddings. Era 10 s: o bge-m3 em CPU (worker-vm) leva 6–10 s para o lote
+// noturno do chat-ifix (4 textos, ~2.550 tokens) e ~35 % dessas chamadas
+// caíam em 502 (119–165/dia desde 2026-10-09). 30 s = WRITE_TIMEOUT_EMBED
+// da rota, então o proxy não corta antes do limite da própria rota.
+var EmbedResponseHeaderTimeout = 30 * time.Second
+
 // NewDynamicEmbeddingsProxy é o proxy de POST /v1/embeddings com alvo
 // resolvido por request. Transport/timeouts/ErrorHandler idênticos ao
 // NewEmbeddingsProxy histórico. Sem FlushInterval (embeddings nunca fazem
@@ -121,7 +128,7 @@ func NewDynamicEmbeddingsProxy(target TargetFunc, log *slog.Logger, interceptors
 			MaxIdleConns:          50,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
+			ResponseHeaderTimeout: EmbedResponseHeaderTimeout,
 		}),
 		ErrorHandler:   ErrorHandler("embed", log),
 		ModifyResponse: ComposeInterceptors(interceptors...),
