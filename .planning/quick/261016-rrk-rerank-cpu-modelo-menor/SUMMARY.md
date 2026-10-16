@@ -48,3 +48,10 @@ Script `rerank_eval.py` (nesta pasta): 13 perguntas PT-BR de atendimento (teleco
 
 - `audit_log`, rota rerank, desde 02:10 UTC, sem o tenant de teste: **0 chamadas** do converseai (madrugada). Medição de latência real pendente para o horário comercial.
 - Na janela de 24 h anterior à troca: 22 × 503 (cancelamento em 4 s) para 8 × 200 com p50 25,3 s.
+
+## Conferência 2026-10-16 10:13 BRT
+
+- **FATO:** `audit_log` rota rerank desde 02:10 UTC, sem uat10-test: **0 chamadas** (nenhum 200, 499 ou 503). O converseai fez 14 chamadas de chat no período, nenhuma de rerank.
+- **FATO:** o container `ai-gateway-rerank` recebeu 2.876 `POST /v1/rerank` em 8 h, todos de `10.0.0.2` (rede de entrada do swarm) e exatamente a cada 10 s — é a sonda do próprio gateway (`internal/upstreams/probe.go:354`, `PROBE_INTERVAL_SECONDS=10`), não tráfego desviado do gateway.
+- **FATO:** converseai prod (worker2) e dev (vps-ifix-vm) têm `RAG_RERANK_URL=https://ai-gateway.converse-ai.app` e `RAG_RERANK_MODEL=bge-reranker-v2-m3`. No log do agents de prod não há linha de RAG nas últimas 26 h; no de dev (reiniciado há 3 h) o único evento tem `buscou=False chunks=0`.
+- HIPÓTESE: as conversas de hoje não acionaram a busca na base (RAG), então não houve o que reordenar. Resolve: medir de novo depois de um dia com tráfego de RAG.
