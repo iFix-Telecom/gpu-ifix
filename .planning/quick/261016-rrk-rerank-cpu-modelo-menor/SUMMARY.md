@@ -38,3 +38,8 @@ Script `rerank_eval.py` (nesta pasta): 13 perguntas PT-BR de atendimento (teleco
 - Pelo gateway público (`/v1/rerank`, tenant uat10-test, 10 docs): 5/5 em 200, 0,96–1,68 s, trecho certo em 1º (nota 0,995).
 - Rollback: PUT do snapshot no stack 41 (volta o bge-v2-m3; cache do modelo antigo segue no volume).
 - O tier-0 `rerank-gpu` (pod 3060) continua com o bge-v2-m3 quando o pod voltar.
+
+## Achados durante a validação (2026-10-16)
+
+- **Cliente que desiste gravava 503/502 de upstream.** `http.TimeoutHandler` responde 503 sem corpo quando o contexto é cancelado pelo cliente; a consulta de cota respondia 503 `quota_check_unavailable` no mesmo caso; o ErrorHandler do proxy, 502. Corrigido em `3f75de2` + `7d05c92`: 499 (convenção nginx) via `httpx.RewriteClientClosed` no grupo `/v1` e no enforcer de cota. A taxa de erro (status ≥ 500) deixa de contar esses casos. Teste em prod do `3f75de2`: request cortado em 0,3 s gravado como 499.
+- **Sondas para IP de terceiro.** O `url_override` dos tier-0 da 3060 (`rerank-gpu`, `kokoro-tts`, `local-stt`, `embed-gpu`) apontava para `79.116.207.136` (instância destruída em 14/10). Trocado para `http://127.0.0.1:1` com `gatewayctl upstreams update --url`; seguem enabled. Nenhum request real foi para eles em 2 dias (audit_log). Smoke pós-troca: rerank 200 (0,85 s), TTS 200 (1,46 s), embed 200 (0,54 s), STT 200 (1,98 s, transcrição correta).
