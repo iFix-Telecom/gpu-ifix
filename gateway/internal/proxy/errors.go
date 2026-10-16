@@ -133,6 +133,22 @@ func ErrorHandler(upstreamName string, log *slog.Logger) func(http.ResponseWrite
 			// No dispatchResult → standalone proxy; write the normal 502.
 		}
 
+		// The CLIENT gave up (e.g. converseai rerank cuts at 4 s): not an
+		// upstream failure. Record 499 instead of a 502 and skip the ERROR
+		// log; the breaker already ignores context.Canceled.
+		if httpx.ClientClosed(r) {
+			log.DebugContext(r.Context(), "client closed request before upstream answered",
+				"request_id", httpx.RequestIDFrom(r.Context()),
+				"path", r.URL.Path,
+			)
+			w.WriteHeader(httpx.StatusClientClosedRequest)
+			if res := dispatchResultFrom(r.Context()); res != nil {
+				res.wrote = true
+				res.err = err
+			}
+			return
+		}
+
 		log.ErrorContext(r.Context(), "upstream error",
 			"err", err,
 			"request_id", httpx.RequestIDFrom(r.Context()),

@@ -2386,7 +2386,8 @@ func bootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, bootstrap string
 	return nil
 }
 
-// wrapWithTimeout wraps h with http.TimeoutHandler for `seconds` > 0,
+// wrapWithTimeout wraps h with http.TimeoutHandler for `seconds` > 0 (client
+// cancellation recorded as 499, see httpx.RewriteClientClosed),
 // returning a handler that writes a JSON timeout envelope if the inner
 // handler does not complete within the budget. seconds <= 0 means
 // "unlimited" (used for SSE chat). Phase 4 folded TODO: per-route
@@ -2396,8 +2397,10 @@ func wrapWithTimeout(next http.Handler, seconds int) http.Handler {
 	if seconds <= 0 {
 		return next
 	}
-	return http.TimeoutHandler(next, time.Duration(seconds)*time.Second,
-		`{"error":{"type":"timeout","message":"upstream timeout","code":"upstream_timeout"}}`)
+	// RewriteClientClosed: TimeoutHandler answers 503 also when the CLIENT
+	// cancels; that case is recorded as 499 (not an upstream failure).
+	return httpx.RewriteClientClosed(http.TimeoutHandler(next, time.Duration(seconds)*time.Second,
+		`{"error":{"type":"timeout","message":"upstream timeout","code":"upstream_timeout"}}`))
 }
 
 // mustLoadLocation returns the *time.Location for name or fails the process
