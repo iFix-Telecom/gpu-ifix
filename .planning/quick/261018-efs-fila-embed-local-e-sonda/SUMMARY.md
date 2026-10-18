@@ -33,3 +33,26 @@ Pedro, 2026-10-18: "siga com 1 e 2" — (1) a sonda não derruba upstream ocupad
 ## Rollback
 
 - Só a fila: `EMBED_LOCAL_MAX_CONCURRENT=0`. Só a sonda: `EMBED_LOCAL_BUSY_WINDOW_S=0`. Tudo: imagem anterior `develop-e7a1fe6` no stack 38.
+
+## Deploy (2026-10-18)
+
+- PR #23 → `develop` `2fee2ca`; CI verde (unit, integração, build). Stack 38 com `develop-2fee2ca@sha256:0bd7bcbf…` às 13:35 BRT. Cópias: `~/gw-embed-17u65kmhb1h/stack38*-pre-efs-20261018-133458.json` (600).
+- Smoke: embed 200 (0,5–1,1 s), chat 200. Dois 404 e um 504 nas trocas de container não aparecem no `audit_log` (proxy de entrada durante a troca).
+
+## Teste de carga e ajuste da concorrência
+
+- 8 chamadas pesadas simultâneas (3 textos longos cada) pelo gateway, limite 4: sonda pulada a cada 10 s, breaker do local-embed **não abriu**, fila segurou 4 chamadas por ~29,7 s. Mas todas as 8 deram 502 em 30 s (as 4 em atendimento passaram de 30 s; as 4 da fila também, depois da espera).
+- Medição direta no infinity (rede `ai-gateway`, mesmo corpo):
+  - n=1: 565 s — ficou atrás das 8 chamadas que o gateway já tinha abandonado.
+  - n=2: 2 × 220 s (221 s no total).
+  - n=4: 2 × 276 s e 2 × 618 s (618 s no total).
+  - Container a 378–437 % de CPU por ~15 min, voltou a ~1 % ao final.
+- **FATO:** o infinity continua calculando chamadas que o cliente abandonou; um 502 por timeout não libera CPU.
+- **FATO:** de 2 para 4 simultâneas a vazão não melhorou (≈110 s vs ≈155 s por chamada) e a latência de cada uma subiu.
+- **FATO (madrugada de 18/10, `audit_log`):** com 2–3 chamadas reais simultâneas, todas 200 e máximo de 24,5 s.
+- Decisão: `EMBED_LOCAL_MAX_CONCURRENT=2` no stack 38 (compose + Env) às 14:03 BRT. Cópia: `stack38*-pre-conc-20261018-140315.json`. Smoke: 5/5 embed 200 (1,1–2,4 s).
+
+## Pendente
+
+- Conferir a madrugada de 19/10: 503 `local_queue_full`, 499, breaker do local-embed, `brain_kb_ingest_failed`/`help_center_*` no Maestro.
+- HIPÓTESE: com o timeout de 30 s, chamadas reais que passam do limite ainda gastam CPU no infinity depois do 502 (trabalho perdido). Subir o `EmbedResponseHeaderTimeout` (hoje fixo em 30 s no código) reduziria o desperdício, desde que o Maestro espere mais. Resolve com o log do Maestro de 19/10.
