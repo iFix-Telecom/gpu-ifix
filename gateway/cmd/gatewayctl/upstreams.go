@@ -31,7 +31,7 @@ import (
 func runUpstreams(ctx context.Context, args []string, log *slog.Logger) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: gatewayctl upstreams list|update|enable|disable [flags]")
-		fmt.Fprintln(os.Stderr, "  update --name=X [--tier=N] [--enabled=true|false] [--circuit-failures=N] [--circuit-cooldown-s=N] [--url=http(s)://host:port | --clear-url]")
+		fmt.Fprintln(os.Stderr, "  update --name=X [--tier=N] [--enabled=true|false] [--circuit-failures=N] [--circuit-cooldown-s=N] [--parked=true|false] [--url=http(s)://host:port | --clear-url]")
 		return 2
 	}
 	switch args[0] {
@@ -111,11 +111,12 @@ type upstreamsUpdateOpts struct {
 	ccCooldown int
 	url        string
 	clearURL   bool
+	parked     string // quick 261018-prk: "true" | "false" | "" (leave unchanged)
 }
 
 // hasAdminChange reports whether any UpdateUpstreamAdmin field was requested.
 func (o upstreamsUpdateOpts) hasAdminChange() bool {
-	return o.tier >= 0 || o.enabled != "" || o.ccFailures > 0 || o.ccCooldown > 0
+	return o.tier >= 0 || o.enabled != "" || o.ccFailures > 0 || o.ccCooldown > 0 || o.parked != ""
 }
 
 // hasURLChange reports whether --url or --clear-url was requested.
@@ -136,6 +137,7 @@ func parseUpstreamsUpdateFlags(args []string) (upstreamsUpdateOpts, int) {
 	fs.IntVar(&o.ccCooldown, "circuit-cooldown-s", 0, "cooldown seconds; 0 = leave unchanged")
 	fs.StringVar(&o.url, "url", "", "set url_override (http/https URL; hot-reload, takes precedence over the url_env env var)")
 	fs.BoolVar(&o.clearURL, "clear-url", false, "clear url_override (gateway falls back to the url_env env var)")
+	fs.StringVar(&o.parked, "parked", "", "'true' or 'false': parked tier-0 is not probed and routes straight to tier-1; empty = leave unchanged")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return o, 0
@@ -148,6 +150,10 @@ func parseUpstreamsUpdateFlags(args []string) (upstreamsUpdateOpts, int) {
 	}
 	if o.enabled != "" && o.enabled != "true" && o.enabled != "false" {
 		fmt.Fprintf(os.Stderr, "--enabled must be 'true' or 'false' (got %q)\n", o.enabled)
+		return o, 2
+	}
+	if o.parked != "" && o.parked != "true" && o.parked != "false" {
+		fmt.Fprintf(os.Stderr, "--parked must be 'true' or 'false' (got %q)\n", o.parked)
 		return o, 2
 	}
 	if o.url != "" && o.clearURL {
@@ -203,7 +209,7 @@ func runUpstreamsUpdate(ctx context.Context, args []string, log *slog.Logger) in
 	case "false":
 		params.Enabled = pgtype.Bool{Bool: false, Valid: true}
 	}
-	if o.ccFailures > 0 || o.ccCooldown > 0 {
+	if o.ccFailures > 0 || o.ccCooldown > 0 || o.parked != "" {
 		// Merge the new values into the existing JSONB so unrelated
 		// fields are preserved (e.g. future Phase 5 saturation thresholds).
 		merged := map[string]any{}
@@ -215,6 +221,12 @@ func runUpstreamsUpdate(ctx context.Context, args []string, log *slog.Logger) in
 		}
 		if o.ccCooldown > 0 {
 			merged["cooldown_s"] = o.ccCooldown
+		}
+		switch o.parked {
+		case "true":
+			merged["parked"] = true
+		case "false":
+			delete(merged, "parked")
 		}
 		buf, err := json.Marshal(merged)
 		if err != nil {
@@ -257,6 +269,7 @@ func runUpstreamsUpdate(ctx context.Context, args []string, log *slog.Logger) in
 		"enabled", o.enabled,
 		"circuit_failures", o.ccFailures,
 		"circuit_cooldown_s", o.ccCooldown,
+		"parked", o.parked,
 	)
 	return 0
 }

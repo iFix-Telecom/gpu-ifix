@@ -71,6 +71,21 @@ func TestParseUpstreamsUpdateFlags(t *testing.T) {
 			args:     []string{"--name=local-llm", "--enabled=maybe"},
 			wantCode: 2,
 		},
+		{
+			name:     "parked is an admin change",
+			args:     []string{"--name=rerank-gpu", "--parked=true"},
+			wantCode: 0,
+			check: func(t *testing.T, o upstreamsUpdateOpts) {
+				if o.parked != "true" || !o.hasAdminChange() || o.hasURLChange() {
+					t.Fatalf("opts = %+v", o)
+				}
+			},
+		},
+		{
+			name:     "invalid parked",
+			args:     []string{"--name=rerank-gpu", "--parked=yes"},
+			wantCode: 2,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

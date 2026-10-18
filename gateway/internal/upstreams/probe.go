@@ -230,6 +230,10 @@ func (p *Probe) doTick(parent context.Context) {
 // uniformly. On success/failure, enqueues a writeback event to the
 // updates channel.
 func (p *Probe) probeOne(ctx context.Context, u UpstreamConfig) {
+	if u.IsParked() {
+		p.log.Debug("probe skipped: upstream parked", "upstream", u.Name)
+		return
+	}
 	if p.cfg.SkipIfBusy != nil && p.cfg.SkipIfBusy(u.Name) {
 		p.log.Debug("probe skipped: upstream busy with healthy real traffic", "upstream", u.Name)
 		return

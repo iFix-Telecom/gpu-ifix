@@ -482,6 +482,20 @@ func NewDispatcher(cfg DispatcherConfig) http.Handler {
 		// 3. Detect streaming (chat-specific; embed/audio always non-stream).
 		streaming := IsStreamingRequest(r)
 
+		// quick 261018-prk: parked tier-0 (pod desligado de propósito) — vai
+		// direto ao tier-1 sem discar e sem tocar no breaker, para não gerar
+		// transição/alerta. Sensível: 503 RES-08 imediato (sem o retry de ~4 s
+		// do caminho OPEN, que não teria como dar certo).
+		if t0.IsParked() {
+			if sensitive {
+				cfg.writeSensitiveBlock(w, r)
+				return
+			}
+			restoreBody, _ := prepareReplayBody(r)
+			cfg.cascadeTier1(w, r, streaming, restoreBody, log)
+			return
+		}
+
 		// Phase 06.9 Plan 04: EffectiveState combines operator force-override
 		// (via gatewayctl breaker force-open) with the observation-driven
 		// gobreaker state. Force-open SHORT-CIRCUITS routing to tier-1 without
@@ -650,7 +664,7 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 		pinName  string // the model_aliases.upstream_name that matched (priority key)
 	}
 	var candidates []pinnedCand
-	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok && !opts.skipTier0 {
+	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok && !opts.skipTier0 && !t0.IsParked() {
 		_, direct := pinSet[t0.Name]
 		matched := direct
 		pinName := t0.Name

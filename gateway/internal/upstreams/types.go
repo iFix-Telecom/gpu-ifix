@@ -49,6 +49,13 @@ type UpstreamConfig struct {
 	IsEmergency bool `json:"-"`
 }
 
+// IsParked reports whether this resolution is a parked tier-0 (quick
+// 261018-prk). An active emergency override wins: the slot is then the live
+// pod, so it is never parked.
+func (u UpstreamConfig) IsParked() bool {
+	return u.Tier == 0 && u.CircuitConfig.Parked && !u.IsEmergency
+}
+
 // Valores de UpstreamConfig.URLSource (quick 260930-uru).
 const (
 	URLSourceOverride = "override"
@@ -89,6 +96,15 @@ type CircuitConfig struct {
 	ShedRecoverSeconds int           `json:"shed_recover_seconds,omitempty"`
 	ShedArm            time.Duration `json:"-"` // derived from ShedArmSeconds
 	ShedRecover        time.Duration `json:"-"` // derived from ShedRecoverSeconds
+
+	// Parked (quick 261018-prk) marca um tier-0 desligado de propósito (pod
+	// apagado) que precisa continuar enabled porque o dispatcher responde 503
+	// "No primary upstream configured for role" sem tier-0. Parked = a sonda
+	// não testa, o roteamento vai direto ao tier-1 sem discar nem mexer no
+	// breaker (logo nenhum alerta de breaker), sensível recebe o 503 RES-08
+	// imediato. Não vale quando o override de emergência está ativo
+	// (IsEmergency): aí o slot é o pod vivo. Só tem efeito em tier-0.
+	Parked bool `json:"parked,omitempty"`
 }
 
 // RoleTier keys the by-role-tier snapshot map. String-serializable for

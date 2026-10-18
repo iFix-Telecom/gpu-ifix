@@ -53,7 +53,7 @@ type healthResponse struct {
 //     aggregate-status computation so a healthy pod does not yield "failed"
 //     (D-14).
 type upstreamStatus struct {
-	State           string `json:"state"` // "closed" | "half-open" | "open" | "forced-open" | "unknown"
+	State           string `json:"state"` // "closed" | "half-open" | "open" | "forced-open" | "parked" | "unknown"
 	Role            string `json:"role"`
 	Tier            int    `json:"tier"`
 	LastProbeMs     *int32 `json:"last_probe_ms,omitempty"`
@@ -188,6 +188,11 @@ func buildHealthResponse(loader *Loader, bs *breaker.Set) ([]byte, int, error) {
 	for _, res := range tier0 {
 		eff := res.Effective
 		st := stateFor(eff.Name)
+		if eff.IsParked() {
+			// quick 261018-prk: sem sonda nem tráfego o breaker não diz nada
+			// — reporta "parked" e não conta como tier-0 CLOSED.
+			st = "parked"
+		}
 		us := upstreamStatus{State: st, Role: eff.Role, Tier: 0}
 		if res.Overridden {
 			us.OverrideActive = true
