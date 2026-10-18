@@ -86,7 +86,10 @@ type Config struct {
 	UpstreamLLMAnthropicAPIKeys string // UPSTREAM_LLM_ANTHROPIC_API_KEYS (formato do 23-05: label=key@dia,...; NUNCA logado)
 	// LLMExternalHeaderTimeoutS é o ResponseHeaderTimeout de ①②③. Em ① e ②
 	// o estouro vira fallthrough pré-byte para o próximo passo.
-	LLMExternalHeaderTimeoutS int    // UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS (default 120)
+	LLMExternalHeaderTimeoutS int // UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS (default 120)
+	// SystemOneTimeoutS é o prazo total de POST /v1/systemone (Jev, quick
+	// 261018) — destino único no OpenRouter, sem cascata. Estouro → 504.
+	SystemOneTimeoutS         int    // UPSTREAM_SYSTEMONE_TIMEOUT_SECONDS (default 10)
 	AnthropicKeyRenewalTZ     string // ANTHROPIC_KEY_RENEWAL_TZ (default America/Sao_Paulo)
 	AnthropicToolLoopMode     string // ANTHROPIC_TOOL_LOOP_MODE (omit|disable|skip; default omit; inválido → omit + WARN)
 	UpstreamTTSOpenRouterURL  string // UPSTREAM_TTS_OPENROUTER_URL (ex.: https://openrouter.ai/api)
@@ -451,6 +454,7 @@ func Load() (Config, error) {
 		UpstreamLLMAnthropicURL:     os.Getenv("UPSTREAM_LLM_ANTHROPIC_URL"),
 		UpstreamLLMAnthropicAPIKeys: os.Getenv("UPSTREAM_LLM_ANTHROPIC_API_KEYS"),
 		LLMExternalHeaderTimeoutS:   atoiOr(os.Getenv("UPSTREAM_LLM_EXTERNAL_HEADER_TIMEOUT_SECONDS"), 120),
+		SystemOneTimeoutS:           atoiOr(os.Getenv("UPSTREAM_SYSTEMONE_TIMEOUT_SECONDS"), 10),
 		AnthropicKeyRenewalTZ:       strOr(os.Getenv("ANTHROPIC_KEY_RENEWAL_TZ"), "America/Sao_Paulo"),
 		AnthropicToolLoopMode:       anthropicToolLoopModeOr(os.Getenv("ANTHROPIC_TOOL_LOOP_MODE")),
 		UpstreamTTSOpenRouterURL:    os.Getenv("UPSTREAM_TTS_OPENROUTER_URL"),
