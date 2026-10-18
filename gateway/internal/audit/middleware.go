@@ -53,10 +53,30 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 			// Capture request body (for POST JSON routes; audio multipart
 			// path skips capture — raw audio is PII per D-B6, we only
 			// keep form metadata which we read from FormValue post-proxy).
+			//
+			// quick-261018 (audit-body): the capture is capped at
+			// contentCapBytes, but the request body handed downstream MUST
+			// stay whole. Before this fix the capped prefix REPLACED r.Body,
+			// so every chat request over 128 KB reached the dispatcher
+			// truncated: extractModelName failed on the broken JSON, the
+			// alias pin was skipped, Resolve(llm, 0) found no tier-0 and the
+			// client got 503 "No primary upstream configured for role."
+			// (measured 2026-10-18: 100 KB body → 200, 140 KB → 503). The
+			// truncated prefix is also not valid JSON, so it is not stored.
 			var reqBody []byte
+			promptTruncated := false
 			if isNormal && r.Body != nil && !isAudioRoute(r.URL.Path) {
-				reqBody, _ = io.ReadAll(io.LimitReader(r.Body, contentCapBytes))
-				r.Body = io.NopCloser(bytes.NewReader(reqBody))
+				reqBody, _ = io.ReadAll(io.LimitReader(r.Body, contentCapBytes+1))
+				if len(reqBody) > contentCapBytes {
+					promptTruncated = true
+					r.Body = joinedBody{
+						Reader: io.MultiReader(bytes.NewReader(reqBody), r.Body),
+						Closer: r.Body,
+					}
+					reqBody = reqBody[:contentCapBytes]
+				} else {
+					r.Body = io.NopCloser(bytes.NewReader(reqBody))
+				}
 			}
 
 			// Wrap writer to capture status + response body.
@@ -131,8 +151,13 @@ func Middleware(writer *Writer, log *slog.Logger) func(http.Handler) http.Handle
 						event.Response = nil
 					}
 				}
-				if len(event.Prompt) == 0 {
+				// A capped prompt is a JSON prefix, not JSON: storing it fails
+				// the WHOLE flush batch (SQLSTATE 22P02, envelope rows lost).
+				if len(event.Prompt) == 0 || promptTruncated {
 					event.Prompt = nil
+				}
+				if promptTruncated {
+					event.Truncated = true
 				}
 			}
 			// Whisper metadata: if route is audio, attempt to extract.
@@ -379,4 +404,11 @@ func (a *auditResponseWriter) Flush() {
 	if f, ok := a.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// joinedBody joins the re-assembled body reader (captured prefix + rest of
+// the original stream) with the original body's Close.
+type joinedBody struct {
+	io.Reader
+	io.Closer
 }

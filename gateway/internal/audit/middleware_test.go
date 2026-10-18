@@ -287,6 +287,82 @@ func TestMiddleware_SSEStreamWithNoParseableChunkReturnsNil(t *testing.T) {
 	}
 }
 
+// TestMiddleware_LargeRequestBodyReachesHandlerWhole locks quick-261018:
+// the audit capture is capped, but the body handed downstream must stay
+// whole. Before the fix the capped prefix replaced r.Body and every chat
+// request over 128 KB reached the dispatcher truncated → alias pin skipped
+// → 503 "No primary upstream configured for role." (prod, 2026-10-18).
+func TestMiddleware_LargeRequestBodyReachesHandlerWhole(t *testing.T) {
+	ac := auth.AuthContext{
+		TenantID:  uuid.New().String(),
+		APIKeyID:  uuid.New().String(),
+		DataClass: auth.DataClassNormal,
+	}
+	big := `{"model":"deepseek-flash","messages":[{"role":"user","content":"` +
+		strings.Repeat("a", 200*1024) + `"}]}`
+	var got []byte
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	cw, h := harness(t, ac, handler)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if string(got) != big {
+		t.Fatalf("handler got %d bytes; want the whole %d-byte body", len(got), len(big))
+	}
+	if !json.Valid(got) {
+		t.Fatalf("handler body is not valid JSON")
+	}
+	ev := cw.events[0]
+	if ev.Prompt != nil {
+		t.Errorf("capped prompt must not be stored (invalid JSON); got %d bytes", len(ev.Prompt))
+	}
+	if !ev.Truncated {
+		t.Errorf("expected Truncated=true for a prompt over the cap")
+	}
+}
+
+// Exactly at the cap: still whole, still stored, not flagged.
+func TestMiddleware_RequestBodyAtCapIsStored(t *testing.T) {
+	ac := auth.AuthContext{
+		TenantID:  uuid.New().String(),
+		APIKeyID:  uuid.New().String(),
+		DataClass: auth.DataClassNormal,
+	}
+	head, tail := `{"p":"`, `"}`
+	body := head + strings.Repeat("b", contentCapBytes-len(head)-len(tail)) + tail
+	var got []byte
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	cw, h := harness(t, ac, handler)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if string(got) != body {
+		t.Fatalf("handler got %d bytes; want %d", len(got), len(body))
+	}
+	ev := cw.events[0]
+	if string(ev.Prompt) != body {
+		t.Errorf("prompt at the cap should be stored whole; got %d bytes", len(ev.Prompt))
+	}
+	if ev.Truncated {
+		t.Errorf("Truncated must stay false at exactly the cap")
+	}
+}
+
 func TestMiddleware_CapturesAtMost128KB(t *testing.T) {
 	ac := auth.AuthContext{
 		TenantID:  uuid.New().String(),
