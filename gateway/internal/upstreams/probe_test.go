@@ -423,3 +423,33 @@ func TestProbe_Rerank_PostsRerank(t *testing.T) {
 		}
 	})
 }
+
+// TestProbe_SkipIfBusy (quick 261018-efs): com SkipIfBusy=true a sonda não
+// chama o upstream (nem mexe no breaker); com false sonda normalmente.
+func TestProbe_SkipIfBusy(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	u := UpstreamConfig{Name: "local-embed", Role: "embed", Tier: 1, URL: srv.URL, Enabled: true}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bs := breaker.NewSet(newProbeRedis(t), logger, breaker.Options{}, []string{u.Name})
+	busy := true
+	p := NewProbe(NewLoaderInMemory(u), bs, nil, ProbeConfig{
+		SkipIfBusy: func(name string) bool { return name == "local-embed" && busy },
+	}, logger)
+
+	p.probeOne(context.Background(), u)
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("busy: upstream hits = %d, want 0 (probe must be skipped)", got)
+	}
+	busy = false
+	p.probeOne(context.Background(), u)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("not busy: upstream hits = %d, want 1", got)
+	}
+}
