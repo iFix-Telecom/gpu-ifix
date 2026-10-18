@@ -78,8 +78,9 @@ func TestIntegration_Migration0043_PricesScale(t *testing.T) {
 		t.Fatalf("delete test row: %v", err)
 	}
 
-	if err := db.Down(ctx, pool, 1); err != nil {
-		t.Fatalf("db.Down(1) revert 0043: %v", err)
+	// 0044 (model_aliases priority/fallback_models) HEAD bump: Down(1)→Down(2).
+	if err := db.Down(ctx, pool, 2); err != nil {
+		t.Fatalf("db.Down(2) revert 0044+0043: %v", err)
 	}
 	if p, s := typeOf(); p != 12 || s != 8 {
 		t.Fatalf("unit_cost_usd after Down = NUMERIC(%d,%d), want (12,8)", p, s)

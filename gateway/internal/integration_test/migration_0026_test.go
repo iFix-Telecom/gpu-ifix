@@ -114,8 +114,9 @@ func TestIntegration_Migration0026_UpDownUp(t *testing.T) {
 	// quick-261007-sjo HEAD bump: Down(12)→Down(13) when 0040 landed.
 	// Phase 23 HEAD bump: Down(13)→Down(15) when 0041+0042 landed.
 	// 0043 (prices scale) HEAD bump: Down(15)→Down(16).
-	if err := db.Down(ctx, pool, 16); err != nil {
-		t.Fatalf("db.Down(16) revert 0043+0042+0041+0040+0039+0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028: %v", err)
+	// 0044 (model_aliases priority/fallback_models) HEAD bump: Down(16)→Down(17).
+	if err := db.Down(ctx, pool, 17); err != nil {
+		t.Fatalf("db.Down(17) revert 0044+0043+0042+0041+0040+0039+0038+0037+0036+0035+0034+0033+0032+0031+0030+0029+0028: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
 		`DELETE FROM ai_gateway.model_aliases WHERE alias='whisper' AND upstream_name='local-stt'`); err != nil {
@@ -255,9 +256,10 @@ func TestIntegration_Migration0026_DownAbortsOnDuplicateAliases(t *testing.T) {
 	// quick-261007-sjo HEAD bump: Down(14)→Down(15) when 0040 landed.
 	// Phase 23 HEAD bump: Down(15)→Down(17) when 0041+0042 landed.
 	// 0043 (prices scale) HEAD bump: Down(17)→Down(18).
-	err := db.Down(ctx, pool, 18)
+	// 0044 (model_aliases priority/fallback_models) HEAD bump: Down(18)→Down(19).
+	err := db.Down(ctx, pool, 19)
 	if err == nil {
-		t.Fatal("db.Down(18) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
+		t.Fatal("db.Down(19) succeeded; expected error from R3 duplicate-alias guard during 0026 Down")
 	}
 	wantPhrase := "Phase 06.9 migration 0026 Down aborted: duplicate-alias rows exist"
 	if !strings.Contains(err.Error(), wantPhrase) {
