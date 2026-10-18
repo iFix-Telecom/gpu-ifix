@@ -36,6 +36,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 
 	"github.com/sony/gobreaker/v2"
@@ -212,6 +213,20 @@ type EmergTrafficRegistrar interface {
 // renamed the model afterwards.
 type ModelPinner interface {
 	PinnedUpstreams(alias string) []string
+}
+
+// ModelPriorities is the OPTIONAL per-alias ordering surface (quick 261018),
+// implemented by *models.Resolver (PinnedPriorities). Kept separate from
+// ModelPinner so existing pinners (tests, integration harness) stay valid:
+// dispatchPinned type-asserts cfg.Pins and, when the pinner does not
+// implement it, keeps the global order.
+//
+// Contract: nil map = no row of the alias has a priority → global order,
+// byte-for-byte the pre-261018 behaviour. Non-nil = upstream_name → priority
+// for the rows that carry one; rows absent from the map sort after every
+// prioritized row.
+type ModelPriorities interface {
+	PinnedPriorities(alias string) map[string]int
 }
 
 // DispatcherConfig groups the collaborators required to route a single
@@ -631,28 +646,55 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 
 	type pinnedCand struct {
 		u        upstreams.UpstreamConfig
-		external bool // tier>=1 → RES-08 applies for sensitive tenants
+		external bool   // tier>=1 → RES-08 applies for sensitive tenants
+		pinName  string // the model_aliases.upstream_name that matched (priority key)
 	}
 	var candidates []pinnedCand
 	if t0, ok := cfg.Loader.Resolve(cfg.Role, 0); ok && !opts.skipTier0 {
 		_, direct := pinSet[t0.Name]
 		matched := direct
+		pinName := t0.Name
 		if !matched && t0.IsEmergency {
 			// Pin on the static tier-0 name follows the slot to the pod.
 			for _, res := range cfg.Loader.ResolveTier0Roles() {
 				if res.Role == cfg.Role && res.ReplacedStaticName != "" {
 					_, matched = pinSet[res.ReplacedStaticName]
+					pinName = res.ReplacedStaticName
 					break
 				}
 			}
 		}
 		if matched {
-			candidates = append(candidates, pinnedCand{u: t0})
+			candidates = append(candidates, pinnedCand{u: t0, pinName: pinName})
 		}
 	}
 	for _, t1 := range cfg.Loader.ResolveFallbacks(cfg.Role) {
 		if _, ok := pinSet[t1.Name]; ok {
-			candidates = append(candidates, pinnedCand{u: t1, external: true})
+			candidates = append(candidates, pinnedCand{u: t1, external: true, pinName: t1.Name})
+		}
+	}
+
+	// quick 261018 — per-alias priority. Only REORDERS the roster built above
+	// (same members, same tier-0/emergency slot matching, same per-candidate
+	// gates below — RES-08 is checked per candidate, so order cannot leak a
+	// sensitive tenant to an external). No priority on any row → nil map →
+	// untouched global order. Stable sort: rows without priority keep the
+	// global order among themselves and go after every prioritized row;
+	// equal priorities also tie-break by the global order.
+	if mp, ok := cfg.Pins.(ModelPriorities); ok {
+		if prio := mp.PinnedPriorities(model); len(prio) > 0 {
+			sort.SliceStable(candidates, func(i, j int) bool {
+				pi, iok := prio[candidates[i].pinName]
+				pj, jok := prio[candidates[j].pinName]
+				switch {
+				case iok && jok:
+					return pi < pj
+				case iok != jok:
+					return iok // prioritized before NULL
+				default:
+					return false // both NULL → keep global order
+				}
+			})
 		}
 	}
 
@@ -1137,6 +1179,13 @@ func prepareReplayBody(r *http.Request) (func(), bool) {
 // (or streaming pre-flight fail-fast). Stamps the audit context with
 // upstream="blocked_sensitive" so the audit middleware records D-B3.
 func (cfg DispatcherConfig) writeSensitiveBlock(w http.ResponseWriter, r *http.Request) {
+	writeSensitiveBlock(w, r)
+}
+
+// writeSensitiveBlock is the receiver-free body of the RES-08 503 block, so
+// routes outside the role dispatcher (POST /v1/systemone, quick 261018) emit
+// the exact same envelope + audit override + metric.
+func writeSensitiveBlock(w http.ResponseWriter, r *http.Request) {
 	// Mutate the request reference in-place so the audit middleware sees the
 	// override via r.Context() after ServeHTTP returns. This is safe ONLY
 	// because audit.Middleware reads r.Context() sequentially AFTER

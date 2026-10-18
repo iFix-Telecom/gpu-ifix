@@ -22,7 +22,8 @@
 // Subcommands:
 //
 //	model-alias list
-//	  Tab-separated table: ALIAS  UPSTREAM_NAME  ROLE  TARGET
+//	  Tab-separated table: ALIAS  UPSTREAM_NAME  ROLE  PRIORITY  TARGET
+//	  FALLBACK_MODELS  PROVIDER_PREFS (rows of one alias in routing order)
 //
 //	model-alias get --alias X --upstream Y
 //	  Single-row JSON output for scripting.
@@ -54,11 +55,13 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/models"
@@ -161,6 +164,77 @@ func validateModelAliasSet(alias, upstream, target, providerPrefs string) (strin
 	return role, prefsBytes, nil
 }
 
+// aliasRoutingInput is the parsed result of the quick-261018 flags. The *Set
+// booleans distinguish "flag given" from "keep the row's current value".
+type aliasRoutingInput struct {
+	prioritySet bool
+	priority    pgtype.Int4 // Valid=false → NULL (clear)
+	fallbackSet bool
+	fallback    []string // nil → NULL (clear)
+}
+
+// validateAliasRoutingFlags parses --priority / --clear-priority /
+// --fallback-models / --clear-fallback-models (quick 261018). Pure function —
+// unit-testable without DB.
+//
+//   - --priority N: any int32. Lower runs first INSIDE this alias; rows of the
+//     alias without priority run after every prioritized row.
+//   - --fallback-models a,b: comma-separated OpenRouter slugs, only on the
+//     OpenRouter upstreams (same scope as --provider-prefs), validated by
+//     models.ValidateFallbackModels against --target.
+//   - each value flag is mutually exclusive with its --clear-* flag.
+func validateAliasRoutingFlags(upstream, target, priority string, clearPriority bool, fallbackCSV string, clearFallback bool) (aliasRoutingInput, error) {
+	var in aliasRoutingInput
+	if priority != "" && clearPriority {
+		return in, errors.New("--priority and --clear-priority are mutually exclusive")
+	}
+	if fallbackCSV != "" && clearFallback {
+		return in, errors.New("--fallback-models and --clear-fallback-models are mutually exclusive")
+	}
+	switch {
+	case priority != "":
+		n, err := strconv.ParseInt(priority, 10, 32)
+		if err != nil {
+			return in, fmt.Errorf("--priority must be an integer: %w", err)
+		}
+		in.prioritySet = true
+		in.priority = pgtype.Int4{Int32: int32(n), Valid: true}
+	case clearPriority:
+		in.prioritySet = true
+	}
+	switch {
+	case fallbackCSV != "":
+		if !models.FallbackModelsUpstreams[upstream] {
+			return in, fmt.Errorf("--fallback-models only applies to --upstream %s", providerPrefsUpstreamsList())
+		}
+		canon, err := models.ValidateFallbackModels(target, strings.Split(fallbackCSV, ","))
+		if err != nil {
+			return in, err
+		}
+		in.fallbackSet = true
+		in.fallback = canon
+	case clearFallback:
+		in.fallbackSet = true
+	}
+	return in, nil
+}
+
+// formatPriority renders the nullable priority for list/set output.
+func formatPriority(p pgtype.Int4) string {
+	if !p.Valid {
+		return "-"
+	}
+	return strconv.Itoa(int(p.Int32))
+}
+
+// formatFallbackModels renders the nullable list for list/set output.
+func formatFallbackModels(fb []string) string {
+	if len(fb) == 0 {
+		return "-"
+	}
+	return strings.Join(fb, ",")
+}
+
 // runModelAlias dispatches `gatewayctl model-alias <subcommand>`.
 func runModelAlias(ctx context.Context, args []string, log *slog.Logger) int {
 	if len(args) == 0 {
@@ -205,6 +279,20 @@ Subcommands:
                                                data_collection/zdr/sort.
          [--clear-provider-prefs]              Drop the stored prefs (NULL).
          (omitting both flags KEEPS the row's current prefs)
+         [--priority N]                        Order of this upstream INSIDE the
+                                               alias (ASC). If any row of the
+                                               alias has a priority, the alias
+                                               tries upstreams by priority
+                                               (rows without one go last, ties
+                                               by global tier/tier_priority);
+                                               all NULL = global order.
+         [--clear-priority]                    Drop the priority (NULL).
+         [--fallback-models a,b]               (openrouter-chat / openrouter-deepseek
+                                               only) OpenRouter model fallback:
+                                               body gets "models":[target,a,b].
+                                               Max 5, no spaces, not = target.
+         [--clear-fallback-models]             Drop the list (NULL).
+         (omitting a value flag and its --clear-* KEEPS the current value)
   delete --alias X --upstream Y                Delete row.
 
 D-06 — model-alias CLI vs UPSTREAM_<U>_MODEL env var:
@@ -306,13 +394,14 @@ func runModelAliasList(ctx context.Context, args []string, log *slog.Logger) int
 		return 1
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ALIAS\tUPSTREAM_NAME\tROLE\tTARGET\tPROVIDER_PREFS")
+	fmt.Fprintln(tw, "ALIAS\tUPSTREAM_NAME\tROLE\tPRIORITY\tTARGET\tFALLBACK_MODELS\tPROVIDER_PREFS")
 	for _, r := range rows {
 		prefs := "-"
 		if len(r.ProviderPrefs) > 0 {
 			prefs = string(r.ProviderPrefs)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Alias, r.UpstreamName, r.Upstream, r.Target, prefs)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Alias, r.UpstreamName, r.Upstream,
+			formatPriority(r.Priority), r.Target, formatFallbackModels(r.FallbackModels), prefs)
 	}
 	if err := tw.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "flush table: %v\n", err)
@@ -351,14 +440,24 @@ func runModelAliasGet(ctx context.Context, args []string, log *slog.Logger) int 
 	}
 	// []byte would marshal as base64 — surface provider_prefs as raw JSON.
 	view := struct {
-		Alias         string          `json:"alias"`
-		Upstream      string          `json:"upstream"`
-		Target        string          `json:"target"`
-		UpstreamName  string          `json:"upstream_name"`
-		ProviderPrefs json.RawMessage `json:"provider_prefs"`
-	}{row.Alias, row.Upstream, row.Target, row.UpstreamName, json.RawMessage("null")}
+		Alias          string          `json:"alias"`
+		Upstream       string          `json:"upstream"`
+		Target         string          `json:"target"`
+		UpstreamName   string          `json:"upstream_name"`
+		ProviderPrefs  json.RawMessage `json:"provider_prefs"`
+		Priority       *int32          `json:"priority"`
+		FallbackModels []string        `json:"fallback_models"`
+	}{Alias: row.Alias, Upstream: row.Upstream, Target: row.Target, UpstreamName: row.UpstreamName,
+		ProviderPrefs: json.RawMessage("null")}
 	if len(row.ProviderPrefs) > 0 {
 		view.ProviderPrefs = json.RawMessage(row.ProviderPrefs)
+	}
+	if row.Priority.Valid {
+		p := row.Priority.Int32
+		view.Priority = &p
+	}
+	if len(row.FallbackModels) > 0 {
+		view.FallbackModels = row.FallbackModels
 	}
 	out, err := json.MarshalIndent(view, "", "  ")
 	if err != nil {
@@ -377,6 +476,10 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 	target := fs.String("target", "", "target slug to rewrite to (required)")
 	providerPrefs := fs.String("provider-prefs", "", "openrouter-chat / openrouter-deepseek only: JSON provider object (see usage)")
 	clearPrefs := fs.Bool("clear-provider-prefs", false, "drop the stored provider_prefs (NULL)")
+	priority := fs.String("priority", "", "order of this upstream inside the alias (integer, ASC)")
+	clearPriority := fs.Bool("clear-priority", false, "drop the stored priority (NULL)")
+	fallbackModels := fs.String("fallback-models", "", "openrouter-chat / openrouter-deepseek only: comma-separated OpenRouter fallback model slugs")
+	clearFallback := fs.Bool("clear-fallback-models", false, "drop the stored fallback_models (NULL)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -395,6 +498,11 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 	// (usage error) because the operator can fix the typed input + retry;
 	// this is NOT a transient operational error worth exit 1.
 	role, prefsBytes, err := validateModelAliasSet(*alias, *upstream, *target, *providerPrefs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	routing, err := validateAliasRoutingFlags(*upstream, *target, *priority, *clearPriority, *fallbackModels, *clearFallback)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 2
@@ -424,21 +532,44 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 
 	// Neither flag → preserve whatever prefs the row already carries so a
 	// plain target change never silently wipes an operator's routing policy.
-	if prefsBytes == nil && !*clearPrefs {
-		if cur, err := q.GetModelAlias(ctx, gen.GetModelAliasParams{Alias: *alias, UpstreamName: *upstream}); err == nil {
-			prefsBytes = cur.ProviderPrefs
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+	// quick 261018: same keep-unless-flagged rule for priority and
+	// fallback_models.
+	keepPrefs := prefsBytes == nil && !*clearPrefs
+	if keepPrefs || !routing.prioritySet || !routing.fallbackSet {
+		cur, err := q.GetModelAlias(ctx, gen.GetModelAliasParams{Alias: *alias, UpstreamName: *upstream})
+		switch {
+		case err == nil:
+			if keepPrefs {
+				prefsBytes = cur.ProviderPrefs
+			}
+			if !routing.prioritySet {
+				routing.priority = cur.Priority
+			}
+			if !routing.fallbackSet {
+				routing.fallback = cur.FallbackModels
+			}
+		case !errors.Is(err, pgx.ErrNoRows):
 			fmt.Fprintf(os.Stderr, "read current model_alias: %v\n", err)
 			return 1
 		}
 	}
+	// A kept fallback list may now repeat a NEW target — re-validate so the
+	// stored row never holds a list the write path would refuse.
+	if len(routing.fallback) > 0 {
+		if _, err := models.ValidateFallbackModels(*target, routing.fallback); err != nil {
+			fmt.Fprintf(os.Stderr, "error: stored fallback_models invalid for this target: %v (pass --fallback-models or --clear-fallback-models)\n", err)
+			return 2
+		}
+	}
 
 	if err := q.UpsertModelAlias(ctx, gen.UpsertModelAliasParams{
-		Alias:         *alias,
-		Upstream:      role,
-		Target:        *target,
-		UpstreamName:  *upstream,
-		ProviderPrefs: prefsBytes,
+		Alias:          *alias,
+		Upstream:       role,
+		Target:         *target,
+		UpstreamName:   *upstream,
+		ProviderPrefs:  prefsBytes,
+		Priority:       routing.priority,
+		FallbackModels: routing.fallback,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "upsert model_alias: %v\n", err)
 		return 1
@@ -447,12 +578,15 @@ func runModelAliasSet(ctx context.Context, args []string, log *slog.Logger) int 
 	if len(prefsBytes) > 0 {
 		prefsOut = string(prefsBytes)
 	}
-	fmt.Fprintf(os.Stdout, "model-alias set: alias=%s upstream=%s role=%s target=%s provider_prefs=%s\n", *alias, *upstream, role, *target, prefsOut)
+	fmt.Fprintf(os.Stdout, "model-alias set: alias=%s upstream=%s role=%s target=%s priority=%s fallback_models=%s provider_prefs=%s\n",
+		*alias, *upstream, role, *target, formatPriority(routing.priority), formatFallbackModels(routing.fallback), prefsOut)
 	log.Info("model-alias set",
 		"alias", *alias,
 		"upstream", *upstream,
 		"role", role,
 		"target", *target,
+		"priority", formatPriority(routing.priority),
+		"fallback_models", formatFallbackModels(routing.fallback),
 	)
 	return 0
 }

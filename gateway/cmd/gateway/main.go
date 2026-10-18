@@ -86,6 +86,7 @@ type proxies struct {
 	audio           http.Handler
 	tts             http.Handler         // Phase 06.7 — POST /v1/audio/speech (tts dispatcher: tier-0 pod Chatterbox -> tier-1 Piper adapter)
 	rerank          http.Handler         // quick 260825 — POST /v1/rerank (rerank dispatcher: tier-0 rerank-gpu -> tier-1 rerank-cpu)
+	systemone       http.Handler         // quick 261018 — POST /v1/systemone (Jev via OpenRouter, destino único, sem cascata)
 	voices          *proxy.VoiceHandlers // Phase 06.7 — /v1/audio/voices CRUD (nil disables the routes in the scaffold variant)
 	voicesMaxBytes  int64                // Phase 06.7 — VOICE_MAX_UPLOAD_BYTES cap applied to the upload route
 	auditWriter     *audit.Writer
@@ -1571,6 +1572,28 @@ func main() {
 	// would kill legitimate fallback requests mid-flight.
 	rerankHandler := wrapWithTimeout(rerankDispatcher, cfg.WriteTimeoutAudioS)
 
+	// quick 261018 — POST /v1/systemone (Jev, decisão tipada do OpenRouter).
+	// Mesma URL + credencial do openrouter-chat/openrouter-deepseek
+	// (UPSTREAM_LLM_OPENROUTER_URL / _AUTH_BEARER). Sem URL → rota 501
+	// (scaffoldNotImplemented), igual às demais rotas sem upstream. O prazo
+	// curto é aplicado DENTRO do handler (504); não passa pelo
+	// http.TimeoutHandler para não virar 503 genérico.
+	var systemOneHandler http.Handler
+	if cfg.UpstreamOpenRouterChatURL != "" {
+		h, serr := proxy.NewSystemOneHandler(proxy.SystemOneConfig{
+			BaseURL:      cfg.UpstreamOpenRouterChatURL,
+			AuthBearer:   cfg.UpstreamOpenRouterChatAuthBearer,
+			Timeout:      time.Duration(cfg.SystemOneTimeoutS) * time.Second,
+			Log:          log,
+			Interceptors: []proxy.ProxyResponseInterceptor{usageInterceptor},
+		})
+		if serr != nil {
+			log.Warn("build systemone handler", "err", serr)
+		} else {
+			systemOneHandler = h
+		}
+	}
+
 	// Phase 06.7 — voice-clone CRUD handlers. The MinIO S3 client is built from
 	// config.Minio* creds; if those are unset (scaffold/dev without MinIO) the
 	// voices routes are disabled (nil handler -> buildRouter skips the mounts)
@@ -1674,6 +1697,7 @@ func main() {
 		audio:                  audioHandler,
 		tts:                    ttsHandler,
 		rerank:                 rerankHandler,
+		systemone:              systemOneHandler,
 		voices:                 voiceHandlers,
 		voicesMaxBytes:         cfg.VoiceMaxUploadBytes,
 		auditWriter:            auditWriter,
@@ -1880,6 +1904,10 @@ func buildRouter(log *slog.Logger, startedAt time.Time, verifier *auth.Verifier,
 		// quick 260825 — rerank (tier-0 rerank-gpu -> tier-1 rerank-cpu
 		// dispatcher). Same authed /v1/* group as the other proxied routes.
 		mount(http.MethodPost, "/v1/rerank", px.rerank)
+		// quick 261018 — Jev (POST /v1/systemone → OpenRouter /api/v1/systemone).
+		// Mesmo grupo autenticado: auth por tenant, audit, rate-limit e quota
+		// (classifyRoute cai no bucket chat), billing route=systemone.
+		mount(http.MethodPost, "/v1/systemone", px.systemone)
 		if px.voices != nil {
 			maxBytes := px.voicesMaxBytes
 			if maxBytes <= 0 {

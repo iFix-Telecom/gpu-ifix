@@ -4,7 +4,9 @@
 // per-model OpenRouter provider_prefs.
 //
 //	GET    /admin/model-aliases                       → every row
-//	PUT    /admin/model-aliases {alias,upstream_name,target,provider_prefs?}
+//	PUT    /admin/model-aliases {alias,upstream_name,target,provider_prefs?,
+//	                         priority?,fallback_models?}   (quick 261018:
+//	                         priority/fallback_models absent = keep current)
 //	                                                  → 200 row (upsert)
 //	DELETE /admin/model-aliases/{alias}/{upstream}    → 204
 //
@@ -22,6 +24,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,6 +38,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	gen "github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
@@ -93,13 +97,22 @@ type ModelAliasRow struct {
 	Role          string          `json:"role"`
 	Target        string          `json:"target"`
 	ProviderPrefs json.RawMessage `json:"provider_prefs"` // null when unset
+	// quick 261018 — ordem dentro do alias e fallback nativo do OpenRouter.
+	Priority       *int32   `json:"priority"`        // null when unset
+	FallbackModels []string `json:"fallback_models"` // null when unset
 }
 
+// upsertModelAliasRequest: provider_prefs keeps its historical contract
+// (absent/null clears). The quick-261018 fields use json.RawMessage to tell
+// ABSENT (keep the row's current value — a dashboard that does not know the
+// field yet never wipes it) from explicit null (clear) and a value (set).
 type upsertModelAliasRequest struct {
-	Alias         string          `json:"alias"`
-	UpstreamName  string          `json:"upstream_name"`
-	Target        string          `json:"target"`
-	ProviderPrefs json.RawMessage `json:"provider_prefs"` // absent/null clears
+	Alias          string          `json:"alias"`
+	UpstreamName   string          `json:"upstream_name"`
+	Target         string          `json:"target"`
+	ProviderPrefs  json.RawMessage `json:"provider_prefs"`  // absent/null clears
+	Priority       json.RawMessage `json:"priority"`        // absent keeps, null clears, int sets
+	FallbackModels json.RawMessage `json:"fallback_models"` // absent keeps, null/[] clears, []string sets
 }
 
 // ModelAliasAdminHandler serves the three model-alias admin routes.
@@ -121,14 +134,26 @@ func newModelAliasAdminHandlerWithQueries(q modelAliasQueries, refresher aliasRe
 	return &ModelAliasAdminHandler{q: q, refresher: refresher, log: log.With("module", "ADMIN_MODEL_ALIASES")}
 }
 
-func toModelAliasRow(alias, upstreamName, role, target string, prefs []byte) ModelAliasRow {
+func toModelAliasRow(alias, upstreamName, role, target string, prefs []byte, priority pgtype.Int4, fallback []string) ModelAliasRow {
 	row := ModelAliasRow{Alias: alias, UpstreamName: upstreamName, Role: role, Target: target}
 	if len(prefs) > 0 {
 		row.ProviderPrefs = json.RawMessage(prefs)
 	} else {
 		row.ProviderPrefs = json.RawMessage("null")
 	}
+	if priority.Valid {
+		p := priority.Int32
+		row.Priority = &p
+	}
+	if len(fallback) > 0 {
+		row.FallbackModels = fallback
+	}
 	return row
+}
+
+// isJSONNull reports an explicit JSON null (absent fields decode to len 0).
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 // List serves GET /admin/model-aliases.
@@ -142,7 +167,7 @@ func (h *ModelAliasAdminHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]ModelAliasRow, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, toModelAliasRow(row.Alias, row.UpstreamName, row.Upstream, row.Target, row.ProviderPrefs))
+		out = append(out, toModelAliasRow(row.Alias, row.UpstreamName, row.Upstream, row.Target, row.ProviderPrefs, row.Priority, row.FallbackModels))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -186,6 +211,38 @@ func (h *ModelAliasAdminHandler) Upsert(w http.ResponseWriter, r *http.Request) 
 		prefs = canon
 	}
 
+	// quick 261018 — priority / fallback_models (absent = keep current).
+	var priority pgtype.Int4
+	prioritySet := len(body.Priority) > 0
+	if prioritySet && !isJSONNull(body.Priority) {
+		var n int32
+		if err := json.Unmarshal(body.Priority, &n); err != nil {
+			h.bad(w, "invalid_priority", "priority deve ser inteiro (int32) ou null")
+			return
+		}
+		priority = pgtype.Int4{Int32: n, Valid: true}
+	}
+	var fallback []string
+	fallbackSet := len(body.FallbackModels) > 0
+	if fallbackSet && !isJSONNull(body.FallbackModels) {
+		var list []string
+		if err := json.Unmarshal(body.FallbackModels, &list); err != nil {
+			h.bad(w, "invalid_fallback_models", "fallback_models deve ser lista de strings ou null")
+			return
+		}
+		if len(list) > 0 && !models.FallbackModelsUpstreams[body.UpstreamName] {
+			h.bad(w, "fallback_models_not_supported",
+				fmt.Sprintf("fallback_models só se aplica aos upstreams %s", providerPrefsUpstreamsList()))
+			return
+		}
+		canon, err := models.ValidateFallbackModels(body.Target, list)
+		if err != nil {
+			h.bad(w, "invalid_fallback_models", err.Error())
+			return
+		}
+		fallback = canon
+	}
+
 	// FK-emulation (same as gatewayctl): the upstream row must exist; its
 	// role is the value stored in model_aliases.upstream.
 	up, err := h.q.GetUpstreamByName(r.Context(), body.UpstreamName)
@@ -202,12 +259,40 @@ func (h *ModelAliasAdminHandler) Upsert(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !prioritySet || !fallbackSet {
+		cur, err := h.q.GetModelAlias(r.Context(), gen.GetModelAliasParams{Alias: body.Alias, UpstreamName: body.UpstreamName})
+		switch {
+		case err == nil:
+			if !prioritySet {
+				priority = cur.Priority
+			}
+			if !fallbackSet {
+				fallback = cur.FallbackModels
+			}
+		case !errors.Is(err, pgx.ErrNoRows):
+			h.log.Error("GetModelAlias failed", "err", err)
+			httpx.WriteOpenAIError(w, http.StatusInternalServerError, "api_error", "model_alias_upsert_failed", "")
+			obs.GatewayAdminRequests.WithLabelValues(modelAliasesRoute, "5xx").Inc()
+			return
+		}
+		// A kept list may now repeat a NEW target — refuse instead of storing
+		// a row the write path itself would reject.
+		if !fallbackSet && len(fallback) > 0 {
+			if _, err := models.ValidateFallbackModels(body.Target, fallback); err != nil {
+				h.bad(w, "invalid_fallback_models", "fallback_models atual inválido para o novo target: "+err.Error())
+				return
+			}
+		}
+	}
+
 	if err := h.q.UpsertModelAlias(r.Context(), gen.UpsertModelAliasParams{
-		Alias:         body.Alias,
-		Upstream:      up.Role,
-		Target:        body.Target,
-		UpstreamName:  body.UpstreamName,
-		ProviderPrefs: prefs,
+		Alias:          body.Alias,
+		Upstream:       up.Role,
+		Target:         body.Target,
+		UpstreamName:   body.UpstreamName,
+		ProviderPrefs:  prefs,
+		Priority:       priority,
+		FallbackModels: fallback,
 	}); err != nil {
 		h.log.Error("UpsertModelAlias failed", "err", err)
 		httpx.WriteOpenAIError(w, http.StatusInternalServerError, "api_error", "model_alias_upsert_failed", "")
@@ -216,11 +301,12 @@ func (h *ModelAliasAdminHandler) Upsert(w http.ResponseWriter, r *http.Request) 
 	}
 	h.refresh(r.Context())
 	h.log.Info("model alias upserted", "alias", body.Alias, "upstream", body.UpstreamName,
-		"role", up.Role, "target", body.Target, "has_provider_prefs", prefs != nil)
+		"role", up.Role, "target", body.Target, "has_provider_prefs", prefs != nil,
+		"priority_set", priority.Valid, "fallback_models", len(fallback))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(toModelAliasRow(body.Alias, body.UpstreamName, up.Role, body.Target, prefs))
+	_ = json.NewEncoder(w).Encode(toModelAliasRow(body.Alias, body.UpstreamName, up.Role, body.Target, prefs, priority, fallback))
 	obs.GatewayAdminRequests.WithLabelValues(modelAliasesRoute, "2xx").Inc()
 }
 

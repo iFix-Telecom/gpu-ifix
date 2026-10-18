@@ -82,6 +82,15 @@ type Resolver struct {
 	// openrouter-chat director via ProviderPrefs; rebuilt atomically with
 	// aliases/pins on every Refresh.
 	prefs map[aliasKey][]byte
+	// priorities is alias → upstream_name → priority (quick 261018). An alias
+	// is present ONLY when at least one of its rows has a non-NULL priority;
+	// NULL rows are absent from the inner map. Read by the dispatcher via
+	// PinnedPriorities; rebuilt atomically with aliases/pins on every Refresh.
+	priorities map[string]map[string]int
+	// fallbacks is the (alias, upstream_name) → fallback_models projection
+	// (quick 261018). Only rows with a non-empty list are present. Read by the
+	// OpenRouter directors via FallbackModels.
+	fallbacks map[aliasKey][]string
 }
 
 // NewResolver wires the Postgres pool.
@@ -92,6 +101,9 @@ func NewResolver(pool *pgxpool.Pool, log *slog.Logger) *Resolver {
 		aliases: map[aliasKey]string{},
 		pins:    map[string][]string{},
 		prefs:   map[aliasKey][]byte{},
+
+		priorities: map[string]map[string]int{},
+		fallbacks:  map[aliasKey][]string{},
 	}
 }
 
@@ -110,6 +122,8 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 	fresh := make(map[aliasKey]string, len(rows))
 	freshPins := make(map[string][]string, len(rows))
 	freshPrefs := make(map[aliasKey][]byte)
+	freshPriorities := make(map[string]map[string]int)
+	freshFallbacks := make(map[aliasKey][]string)
 	for _, row := range rows {
 		k := aliasKey{Alias: row.Alias, Upstream: row.UpstreamName}
 		fresh[k] = row.Target
@@ -117,11 +131,24 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		if len(row.ProviderPrefs) > 0 {
 			freshPrefs[k] = row.ProviderPrefs
 		}
+		if row.Priority.Valid {
+			m := freshPriorities[row.Alias]
+			if m == nil {
+				m = make(map[string]int)
+				freshPriorities[row.Alias] = m
+			}
+			m[row.UpstreamName] = int(row.Priority.Int32)
+		}
+		if len(row.FallbackModels) > 0 {
+			freshFallbacks[k] = row.FallbackModels
+		}
 	}
 	r.mu.Lock()
 	r.aliases = fresh
 	r.pins = freshPins
 	r.prefs = freshPrefs
+	r.priorities = freshPriorities
+	r.fallbacks = freshFallbacks
 	r.mu.Unlock()
 	r.log.Info("model aliases refreshed", "count", len(fresh))
 

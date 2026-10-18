@@ -658,6 +658,10 @@ func routeToBillingRoute(path string) string {
 		return "tts"
 	case strings.HasPrefix(path, "/v1/audio"):
 		return "stt"
+	case strings.HasPrefix(path, "/v1/systemone"):
+		// quick 261018 — Jev (decisão tipada) via OpenRouter; o handler já
+		// carimba a rota no ctx, este case cobre o fallback por path.
+		return SystemOneBillingRoute
 	case strings.HasPrefix(path, "/v1/rerank"):
 		// quick-260825-anq (fix C): without this case rerank fell through to
 		// "chat" — the dispatcher stamped route=chat into ctx (inbound path,
@@ -705,6 +709,10 @@ type sseUsageFrame struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// InputTokens é o formato do POST /v1/systemone do OpenRouter (Jev,
+		// quick 261018): usage = {input_tokens, cost}, sem prompt_tokens.
+		// Só é lido quando o frame não traz prompt/completion_tokens.
+		InputTokens int `json:"input_tokens"`
 		// Cost é o usage.cost (US$) que o OpenRouter acrescenta (23-10).
 		Cost *float64 `json:"cost"`
 		// PromptTokensDetails vem do OpenRouter e do passo ① traduzido
@@ -725,6 +733,10 @@ func applyUsageFrame(usage *billing.RequestUsage, f *sseUsageFrame) {
 	}
 	usage.TokensIn.Store(int64(f.Usage.PromptTokens))
 	usage.TokensOut.Store(int64(f.Usage.CompletionTokens))
+	if f.Usage.PromptTokens == 0 && f.Usage.CompletionTokens == 0 && f.Usage.InputTokens > 0 {
+		// quick 261018: shape {input_tokens} (Jev / systemone).
+		usage.TokensIn.Store(int64(f.Usage.InputTokens))
+	}
 	if d := f.Usage.PromptTokensDetails; d != nil {
 		usage.TokensCacheRead.Store(int64(d.CachedTokens))
 		usage.TokensCacheWrite.Store(int64(d.CacheWriteTokens))
@@ -932,6 +944,13 @@ func (b *usageJSONBuffer) Close() error {
 	// un-settable). Fall back to a stable per-upstream model key so STT cost
 	// attribution works. Affects every flatten-to-text STT upstream (gemini-stt
 	// was billing R$0; openai-whisper reuses its existing whisper-1 seed row).
+	// quick 261018: a resposta do systemone (Jev) não traz "model" → grava o
+	// model do corpo da requisição, carimbado no ctx pelo handler.
+	if route == SystemOneBillingRoute && b.usage != nil && b.usage.Model() == "" {
+		if m := systemOneModelFrom(b.reqCtx); m != "" {
+			b.usage.SetModel(m)
+		}
+	}
 	if route == "stt" && b.usage != nil && b.usage.Model() == "" {
 		if up := auditctx.BillingUpstreamFrom(b.reqCtx); up != "" {
 			b.usage.SetModel(sttBillingModel(up))
