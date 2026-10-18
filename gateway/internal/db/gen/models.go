@@ -144,6 +144,10 @@ type AiGatewayModelAlias struct {
 	UpstreamName string `json:"upstream_name"`
 	// quick 260830-o2j: optional OpenRouter `provider` routing object injected verbatim by the openrouter-chat director for this (alias, upstream_name) when the tenant has no provider_prefs. NULL = fall through. Only meaningful for upstream_name=openrouter-chat.
 	ProviderPrefs []byte `json:"provider_prefs"`
+	// quick 261018: ordem do upstream dentro do alias pinado (ASC, nulos por último, empate pela ordem global tier/tier_priority). Todas nulas no alias = ordem global.
+	Priority pgtype.Int4 `json:"priority"`
+	// quick 261018: lista de fallback de modelo do OpenRouter; o director injeta "models": [target, ...fallback_models]. Só vale para upstream_name openrouter-chat / openrouter-deepseek. NULL = sem fallback.
+	FallbackModels []string `json:"fallback_models"`
 }
 
 // Single-row DB-backed primary-pod HOT config (Phase 17). 16 hot fields + 10 numeric bound pairs. Seeded from env at boot (Plan 17-03); owner-edited via PATCH /admin/primary/config (Plan 17-04). pod_config_changed NOTIFY drives the in-memory loader reload.

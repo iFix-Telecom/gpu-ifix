@@ -225,6 +225,11 @@ type Querier interface {
 	// gateway tries upstreams: tier, then tier_priority), not alphabetical. The
 	// LEFT JOIN only feeds ORDER BY — returned columns are unchanged. Aliases whose
 	// upstream_name has no upstreams row sort last within the alias.
+	// quick 261018: priority (per-row, nullable) leads the per-alias order — an
+	// alias whose rows are all NULL keeps exactly the global order above; when
+	// some rows carry priority, NULLs sort last and the global order breaks ties.
+	// The resolver does NOT depend on this ORDER BY (it re-derives the priority
+	// map itself); it only keeps `gatewayctl model-alias list` in routing order.
 	ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error)
 	// Used by `gatewayctl primary lifecycles --since N --limit M` (Plan 06.6-09).
 	// Excludes the events JSONB column (callers fetch via id when needed) so the
@@ -446,6 +451,9 @@ type Querier interface {
 	// a single source of truth on the composite PK semantic + UPSERT shape.
 	// quick 260830-o2j: provider_prefs ($5, nullable jsonb) travels with the row —
 	// NULL clears any previous per-model provider preference.
+	// quick 261018: priority ($6, nullable int) and fallback_models ($7, nullable
+	// text[]) follow the same full-row semantic — callers that want to KEEP the
+	// current value read the row first and pass it back (gatewayctl/admin do).
 	UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error
 }
 

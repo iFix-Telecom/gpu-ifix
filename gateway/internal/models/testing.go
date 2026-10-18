@@ -39,3 +39,28 @@ func (r *Resolver) SetProviderPrefsForTesting(alias, upstream string, raw []byte
 	r.prefs[aliasKey{Alias: alias, Upstream: upstream}] = raw
 	r.mu.Unlock()
 }
+
+// SetPriorityForTesting stores a priority for (alias, upstream) on a test
+// Resolver (quick 261018). TESTS ONLY.
+func (r *Resolver) SetPriorityForTesting(alias, upstream string, priority int) {
+	r.mu.Lock()
+	if r.priorities == nil {
+		r.priorities = map[string]map[string]int{}
+	}
+	if r.priorities[alias] == nil {
+		r.priorities[alias] = map[string]int{}
+	}
+	r.priorities[alias][upstream] = priority
+	r.mu.Unlock()
+}
+
+// SetFallbackModelsForTesting stores an OpenRouter fallback list for (alias,
+// upstream) on a test Resolver (quick 261018). TESTS ONLY.
+func (r *Resolver) SetFallbackModelsForTesting(alias, upstream string, models []string) {
+	r.mu.Lock()
+	if r.fallbacks == nil {
+		r.fallbacks = map[aliasKey][]string{}
+	}
+	r.fallbacks[aliasKey{Alias: alias, Upstream: upstream}] = models
+	r.mu.Unlock()
+}

@@ -7,6 +7,8 @@ package gen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const deleteModelAlias = `-- name: DeleteModelAlias :exec
@@ -26,7 +28,7 @@ func (q *Queries) DeleteModelAlias(ctx context.Context, arg DeleteModelAliasPara
 }
 
 const getModelAlias = `-- name: GetModelAlias :one
-SELECT alias, upstream, target, upstream_name, provider_prefs FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
+SELECT alias, upstream, target, upstream_name, provider_prefs, priority, fallback_models FROM ai_gateway.model_aliases WHERE alias = $1 AND upstream_name = $2
 `
 
 type GetModelAliasParams struct {
@@ -35,11 +37,13 @@ type GetModelAliasParams struct {
 }
 
 type GetModelAliasRow struct {
-	Alias         string `json:"alias"`
-	Upstream      string `json:"upstream"`
-	Target        string `json:"target"`
-	UpstreamName  string `json:"upstream_name"`
-	ProviderPrefs []byte `json:"provider_prefs"`
+	Alias          string      `json:"alias"`
+	Upstream       string      `json:"upstream"`
+	Target         string      `json:"target"`
+	UpstreamName   string      `json:"upstream_name"`
+	ProviderPrefs  []byte      `json:"provider_prefs"`
+	Priority       pgtype.Int4 `json:"priority"`
+	FallbackModels []string    `json:"fallback_models"`
 }
 
 func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (GetModelAliasRow, error) {
@@ -51,29 +55,38 @@ func (q *Queries) GetModelAlias(ctx context.Context, arg GetModelAliasParams) (G
 		&i.Target,
 		&i.UpstreamName,
 		&i.ProviderPrefs,
+		&i.Priority,
+		&i.FallbackModels,
 	)
 	return i, err
 }
 
 const listModelAliases = `-- name: ListModelAliases :many
-SELECT m.alias, m.upstream, m.target, m.upstream_name, m.provider_prefs
+SELECT m.alias, m.upstream, m.target, m.upstream_name, m.provider_prefs, m.priority, m.fallback_models
 FROM ai_gateway.model_aliases m
 LEFT JOIN ai_gateway.upstreams u ON u.name = m.upstream_name
-ORDER BY m.alias, u.tier NULLS LAST, u.tier_priority NULLS LAST, m.upstream_name
+ORDER BY m.alias, m.priority NULLS LAST, u.tier NULLS LAST, u.tier_priority NULLS LAST, m.upstream_name
 `
 
 type ListModelAliasesRow struct {
-	Alias         string `json:"alias"`
-	Upstream      string `json:"upstream"`
-	Target        string `json:"target"`
-	UpstreamName  string `json:"upstream_name"`
-	ProviderPrefs []byte `json:"provider_prefs"`
+	Alias          string      `json:"alias"`
+	Upstream       string      `json:"upstream"`
+	Target         string      `json:"target"`
+	UpstreamName   string      `json:"upstream_name"`
+	ProviderPrefs  []byte      `json:"provider_prefs"`
+	Priority       pgtype.Int4 `json:"priority"`
+	FallbackModels []string    `json:"fallback_models"`
 }
 
 // quick 261007-gyq: rows of one alias come out in ROUTING order (the order the
 // gateway tries upstreams: tier, then tier_priority), not alphabetical. The
 // LEFT JOIN only feeds ORDER BY — returned columns are unchanged. Aliases whose
 // upstream_name has no upstreams row sort last within the alias.
+// quick 261018: priority (per-row, nullable) leads the per-alias order — an
+// alias whose rows are all NULL keeps exactly the global order above; when
+// some rows carry priority, NULLs sort last and the global order breaks ties.
+// The resolver does NOT depend on this ORDER BY (it re-derives the priority
+// map itself); it only keeps `gatewayctl model-alias list` in routing order.
 func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, error) {
 	rows, err := q.db.Query(ctx, listModelAliases)
 	if err != nil {
@@ -89,6 +102,8 @@ func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, 
 			&i.Target,
 			&i.UpstreamName,
 			&i.ProviderPrefs,
+			&i.Priority,
+			&i.FallbackModels,
 		); err != nil {
 			return nil, err
 		}
@@ -101,19 +116,23 @@ func (q *Queries) ListModelAliases(ctx context.Context) ([]ListModelAliasesRow, 
 }
 
 const upsertModelAlias = `-- name: UpsertModelAlias :exec
-INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name, provider_prefs)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO ai_gateway.model_aliases (alias, upstream, target, upstream_name, provider_prefs, priority, fallback_models)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (alias, upstream_name) DO UPDATE
     SET target = EXCLUDED.target,
-        provider_prefs = EXCLUDED.provider_prefs
+        provider_prefs = EXCLUDED.provider_prefs,
+        priority = EXCLUDED.priority,
+        fallback_models = EXCLUDED.fallback_models
 `
 
 type UpsertModelAliasParams struct {
-	Alias         string `json:"alias"`
-	Upstream      string `json:"upstream"`
-	Target        string `json:"target"`
-	UpstreamName  string `json:"upstream_name"`
-	ProviderPrefs []byte `json:"provider_prefs"`
+	Alias          string      `json:"alias"`
+	Upstream       string      `json:"upstream"`
+	Target         string      `json:"target"`
+	UpstreamName   string      `json:"upstream_name"`
+	ProviderPrefs  []byte      `json:"provider_prefs"`
+	Priority       pgtype.Int4 `json:"priority"`
+	FallbackModels []string    `json:"fallback_models"`
 }
 
 // Phase 06.9 R7 (REVIEWS.md): used by Plan 04's gatewayctl model-alias CLI.
@@ -121,6 +140,9 @@ type UpsertModelAliasParams struct {
 // a single source of truth on the composite PK semantic + UPSERT shape.
 // quick 260830-o2j: provider_prefs ($5, nullable jsonb) travels with the row —
 // NULL clears any previous per-model provider preference.
+// quick 261018: priority ($6, nullable int) and fallback_models ($7, nullable
+// text[]) follow the same full-row semantic — callers that want to KEEP the
+// current value read the row first and pass it back (gatewayctl/admin do).
 func (q *Queries) UpsertModelAlias(ctx context.Context, arg UpsertModelAliasParams) error {
 	_, err := q.db.Exec(ctx, upsertModelAlias,
 		arg.Alias,
@@ -128,6 +150,8 @@ func (q *Queries) UpsertModelAlias(ctx context.Context, arg UpsertModelAliasPara
 		arg.Target,
 		arg.UpstreamName,
 		arg.ProviderPrefs,
+		arg.Priority,
+		arg.FallbackModels,
 	)
 	return err
 }

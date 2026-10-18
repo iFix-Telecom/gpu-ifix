@@ -159,6 +159,27 @@ func BuildOpenRouterDirector(
 			return
 		}
 
+		// PASS 2b — fallback nativo de modelo do OpenRouter (quick 261018).
+		// Linha (alias, upstream) com fallback_models → "models":
+		// [model, ...fallback_models], com model = alvo JÁ reescrito no
+		// PASS 1 (env override incluso). Sem lista → corpo intocado (um
+		// "models" mandado pelo cliente segue como sempre seguiu). Limitação:
+		// as normalizações Anthropic dos PASS 4-6 olham só o `model`
+		// primário — um fallback anthropic/* atrás de um primário não-Anthropic
+		// não recebe cache_control/prefill/sampling.
+		if resolver != nil {
+			if fb := resolver.FallbackModels(modelAliasFromBody(body), upstreamName); len(fb) > 0 {
+				if withModels, ferr := injectFallbackModels(patched, fb); ferr == nil {
+					patched = withModels
+				} else if log != nil {
+					log.Warn("openrouter_director injectFallbackModels failed",
+						"upstream", upstreamName,
+						"error_class", fmt.Sprintf("%T", ferr),
+					)
+				}
+			}
+		}
+
 		// PASS 3 — stream_options.include_usage injection (Pitfall 5).
 		// OpenRouter mirrors OpenAI: the final {"usage":...} chunk is
 		// omitted on streaming responses unless stream_options.include_usage
@@ -240,6 +261,35 @@ func injectProviderPrefs(body []byte, prefs []byte) ([]byte, error) {
 		return nil, err
 	}
 	m["provider"] = json.RawMessage(prefs)
+	return json.Marshal(m)
+}
+
+// injectFallbackModels grava "models": [model, ...fallbacks] no corpo
+// (parâmetro nativo de fallback de modelo do OpenRouter: tenta os modelos em
+// ordem quando o primário falha). `model` continua igual ao alvo; a lista
+// armazenada já foi validada na escrita (models.ValidateFallbackModels), então
+// aqui só se monta o array. Corpo sem `model` string → erro (nada injetado).
+func injectFallbackModels(body []byte, fallbacks []string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	var model string
+	if err := json.Unmarshal(m["model"], &model); err != nil || model == "" {
+		return nil, fmt.Errorf("inject fallback models: body has no string model")
+	}
+	list := make([]string, 0, len(fallbacks)+1)
+	list = append(list, model)
+	for _, f := range fallbacks {
+		if f != model {
+			list = append(list, f)
+		}
+	}
+	raw, err := json.Marshal(list)
+	if err != nil {
+		return nil, err
+	}
+	m["models"] = raw
 	return json.Marshal(m)
 }
 

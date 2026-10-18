@@ -29,7 +29,7 @@ func (f *fakeAliasQueries) ListModelAliases(context.Context) ([]gen.ListModelAli
 func (f *fakeAliasQueries) GetModelAlias(_ context.Context, arg gen.GetModelAliasParams) (gen.GetModelAliasRow, error) {
 	for _, r := range f.rows {
 		if r.Alias == arg.Alias && r.UpstreamName == arg.UpstreamName {
-			return gen.GetModelAliasRow{Alias: r.Alias, Upstream: r.Upstream, Target: r.Target, UpstreamName: r.UpstreamName, ProviderPrefs: r.ProviderPrefs}, nil
+			return gen.GetModelAliasRow{Alias: r.Alias, Upstream: r.Upstream, Target: r.Target, UpstreamName: r.UpstreamName, ProviderPrefs: r.ProviderPrefs, Priority: r.Priority, FallbackModels: r.FallbackModels}, nil
 		}
 	}
 	return gen.GetModelAliasRow{}, pgx.ErrNoRows
