@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	// Phase 4 — embed all IANA timezone data into the binary so distroless
@@ -359,10 +360,21 @@ func main() {
 		loader.Names(),
 	)
 	go breakerSet.Subscribe(ctx)
+	// Quick 261018-efs — a fila do local-embed é montada mais abaixo (junto do
+	// proxy); a sonda já roda antes disso, então lê o gate por ponteiro atômico.
+	var localEmbedGate atomic.Pointer[proxy.LocalGate]
+	localEmbedBusyWindow := time.Duration(cfg.EmbedLocalBusyWindowS) * time.Second
 	probe := upstreams.NewProbe(loader, breakerSet, gen.New(pool),
 		upstreams.ProbeConfig{
 			Interval: time.Duration(cfg.ProbeIntervalSeconds) * time.Second,
 			Budget:   time.Duration(cfg.ProbeBudgetSeconds) * time.Second,
+			SkipIfBusy: func(name string) bool {
+				if name != "local-embed" || localEmbedBusyWindow <= 0 {
+					return false
+				}
+				g := localEmbedGate.Load()
+				return g != nil && g.Busy(localEmbedBusyWindow)
+			},
 		},
 		log,
 	)
@@ -883,7 +895,14 @@ func main() {
 	// o mesmo construtor NewEmbeddingsProxy serve os dois. openai-embed fica no
 	// map mas em tier 2 nunca é resolvido pela cascata (ResolveAllTier1 filtra
 	// tier==1) — entrada dormente para re-enable manual.
-	embedRoleProxies := map[string]http.Handler{"local-embed": embedRP}
+	// Quick 261018-efs — fila curta na frente do local-embed (infinity em CPU):
+	// no máximo EMBED_LOCAL_MAX_CONCURRENT chamadas simultâneas, as demais
+	// esperam até EMBED_LOCAL_QUEUE_WAIT_S; também alimenta o SkipIfBusy da sonda.
+	localEmbed := proxy.NewLocalGate("local-embed", embedRP,
+		cfg.EmbedLocalMaxConcurrent,
+		time.Duration(cfg.EmbedLocalQueueWaitS)*time.Second, log)
+	localEmbedGate.Store(localEmbed)
+	embedRoleProxies := map[string]http.Handler{"local-embed": localEmbed}
 	// Quick 260930-uru: embed-gpu (pod 3060) com URL resolvida por request via
 	// loader (url_override > env UPSTREAM_EMBED_GPU_URL); registrado sempre.
 	embedRoleProxies["embed-gpu"] = proxy.NewDynamicEmbeddingsProxy(

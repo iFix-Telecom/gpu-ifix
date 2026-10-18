@@ -444,7 +444,7 @@ func clearPhase4(t *testing.T) {
 // AdminKeyBootstrap="", RateLimitFailOpen=true (fail-open preserves failover
 // invisibility during Redis blips), QuotaFailOpen=false (fail-closed stops
 // runaway external cost when visibility is lost), USDBRLDefault=5.10,
-// WriteTimeoutChatS=0 (SSE), WriteTimeoutEmbedS=30, WriteTimeoutAudioS=120.
+// WriteTimeoutChatS=0 (SSE), WriteTimeoutEmbedS=90, WriteTimeoutAudioS=120.
 func TestLoad_Phase4Defaults(t *testing.T) {
 	clearAll(t)
 	clearPhase3(t)
@@ -469,8 +469,8 @@ func TestLoad_Phase4Defaults(t *testing.T) {
 	if cfg.WriteTimeoutChatS != 0 {
 		t.Errorf("WriteTimeoutChatS default: want 0 (SSE), got %d", cfg.WriteTimeoutChatS)
 	}
-	if cfg.WriteTimeoutEmbedS != 30 {
-		t.Errorf("WriteTimeoutEmbedS default: want 30, got %d", cfg.WriteTimeoutEmbedS)
+	if cfg.WriteTimeoutEmbedS != 90 {
+		t.Errorf("WriteTimeoutEmbedS default: want 90, got %d", cfg.WriteTimeoutEmbedS)
 	}
 	if cfg.WriteTimeoutAudioS != 120 {
 		t.Errorf("WriteTimeoutAudioS default: want 120, got %d", cfg.WriteTimeoutAudioS)

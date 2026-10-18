@@ -166,8 +166,12 @@ type Config struct {
 	// embed=30s and audio=120s restore slow-client-DoS defense on
 	// non-streaming routes now justified by rate-limiting.
 	WriteTimeoutChatS  int // GATEWAY_WRITE_TIMEOUT_CHAT_S  (default 0 — unlimited for SSE)
-	WriteTimeoutEmbedS int // GATEWAY_WRITE_TIMEOUT_EMBED_S (default 30)
-	WriteTimeoutAudioS int // GATEWAY_WRITE_TIMEOUT_AUDIO_S (default 120; Whisper multipart)
+	WriteTimeoutEmbedS int // GATEWAY_WRITE_TIMEOUT_EMBED_S (default 90 = fila de até 60 s + 30 s de resposta; quick 261018-efs)
+	// Quick 261018-efs — fila curta na frente do local-embed (infinity em CPU).
+	EmbedLocalMaxConcurrent int // EMBED_LOCAL_MAX_CONCURRENT (default 4; 0 = sem limite)
+	EmbedLocalQueueWaitS    int // EMBED_LOCAL_QUEUE_WAIT_S (default 60) — espera máxima por vaga
+	EmbedLocalBusyWindowS   int // EMBED_LOCAL_BUSY_WINDOW_S (default 60; 0 = sonda nunca é pulada) — 2xx real recente que torna o local-embed "ocupado" para a sonda
+	WriteTimeoutAudioS      int // GATEWAY_WRITE_TIMEOUT_AUDIO_S (default 120; Whisper multipart)
 	// TTSResponseHeaderTimeoutS limita a espera pelos headers da síntese nos
 	// proxies TTS (default 60). Kokoro CPU noturno sem stream só responde ao
 	// fim da síntese (RTF ~1,4 medido 2026-10-08) — texto longo passa de 60s.
@@ -501,7 +505,10 @@ func Load() (Config, error) {
 		QuotaFailOpen:             boolOr(os.Getenv("AI_GATEWAY_QUOTA_FAIL_OPEN"), false),
 		USDBRLDefault:             floatOr(os.Getenv("AI_GATEWAY_USD_BRL_RATE_DEFAULT"), 5.10),
 		WriteTimeoutChatS:         atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_CHAT_S"), 0),
-		WriteTimeoutEmbedS:        atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 30),
+		WriteTimeoutEmbedS:        atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_EMBED_S"), 90),
+		EmbedLocalMaxConcurrent:   atoiOr(os.Getenv("EMBED_LOCAL_MAX_CONCURRENT"), 4),
+		EmbedLocalQueueWaitS:      atoiOr(os.Getenv("EMBED_LOCAL_QUEUE_WAIT_S"), 60),
+		EmbedLocalBusyWindowS:     atoiOr(os.Getenv("EMBED_LOCAL_BUSY_WINDOW_S"), 60),
 		WriteTimeoutAudioS:        atoiOr(os.Getenv("GATEWAY_WRITE_TIMEOUT_AUDIO_S"), 120),
 		TTSResponseHeaderTimeoutS: atoiOr(os.Getenv("TTS_RESPONSE_HEADER_TIMEOUT_SECONDS"), 60),
 

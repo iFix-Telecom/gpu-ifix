@@ -72,6 +72,13 @@ const (
 type ProbeConfig struct {
 	Interval time.Duration // default 10s — tick cadence
 	Budget   time.Duration // default 5s  — shared deadline across one tick's probes
+
+	// SkipIfBusy (quick 261018-efs), quando não-nil, é consultado antes de
+	// sondar cada upstream: true = upstream ocupado com tráfego real que está
+	// respondendo 2xx, então a sonda NÃO roda neste tick. Evita que o ping,
+	// preso atrás de lotes reais no infinity em CPU, estoure o orçamento e
+	// abra o breaker de um upstream que está só ocupado.
+	SkipIfBusy func(name string) bool
 }
 
 // probeQueries isolates the sqlc surface so tests can stub the writeback
@@ -223,6 +230,10 @@ func (p *Probe) doTick(parent context.Context) {
 // uniformly. On success/failure, enqueues a writeback event to the
 // updates channel.
 func (p *Probe) probeOne(ctx context.Context, u UpstreamConfig) {
+	if p.cfg.SkipIfBusy != nil && p.cfg.SkipIfBusy(u.Name) {
+		p.log.Debug("probe skipped: upstream busy with healthy real traffic", "upstream", u.Name)
+		return
+	}
 	start := time.Now()
 	_, err := p.breaker.Execute(u.Name, func() (*http.Response, error) {
 		return p.dispatch(ctx, u)
