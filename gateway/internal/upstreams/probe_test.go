@@ -453,3 +453,58 @@ func TestProbe_SkipIfBusy(t *testing.T) {
 		t.Fatalf("not busy: upstream hits = %d, want 1", got)
 	}
 }
+
+// quick 261018-prk: parked tier-0 is never probed (no hit, no breaker
+// transition → no alert); the emergency override un-parks the slot.
+func TestProbe_SkipsParked(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	u := UpstreamConfig{Name: "rerank-gpu", Role: "rerank", Tier: 0, URL: srv.URL, Enabled: true,
+		CircuitConfig: CircuitConfig{Parked: true}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bs := breaker.NewSet(newProbeRedis(t), logger, breaker.Options{}, []string{u.Name})
+	p := NewProbe(NewLoaderInMemory(u), bs, nil, ProbeConfig{}, logger)
+
+	p.probeOne(context.Background(), u)
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("parked: upstream hits = %d, want 0", got)
+	}
+	u.IsEmergency = true
+	p.probeOne(context.Background(), u)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("emergency override: upstream hits = %d, want 1", got)
+	}
+}
+
+func TestUpstreamConfig_IsParked(t *testing.T) {
+	cases := []struct {
+		name string
+		u    UpstreamConfig
+		want bool
+	}{
+		{"tier-0 parked", UpstreamConfig{Tier: 0, CircuitConfig: CircuitConfig{Parked: true}}, true},
+		{"tier-0 not parked", UpstreamConfig{Tier: 0}, false},
+		{"tier-1 flag ignored", UpstreamConfig{Tier: 1, CircuitConfig: CircuitConfig{Parked: true}}, false},
+		{"emergency override wins", UpstreamConfig{Tier: 0, IsEmergency: true, CircuitConfig: CircuitConfig{Parked: true}}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.u.IsParked(); got != tc.want {
+			t.Errorf("%s: IsParked = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestParseCircuitConfig_Parked(t *testing.T) {
+	if cc := parseCircuitConfig([]byte(`{"parked":true}`)); !cc.Parked {
+		t.Fatal("parked:true not parsed")
+	}
+	if cc := parseCircuitConfig([]byte(`{"failures":3}`)); cc.Parked {
+		t.Fatal("absent parked must be false")
+	}
+}
