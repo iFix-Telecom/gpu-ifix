@@ -3,7 +3,9 @@
  *
  * Renders the KPI metrics side by side (CONTEXT §Números do painel) over the
  * server-computed `/admin/economy` summary:
- *   1. Líquido R$                   — economia_liquida_brl (phantom − Vast)
+ *   1. Líquido R$                   — economia_liquida_brl (phantom + créditos
+ *                                     Haiku − Vast; créditos contam como
+ *                                     economia desde 2026-10-20)
  *   2. ROI multiplier               — roi_multiplier (phantom per R$1 of GPU)
  *   3. Haiku (coberto por créditos) — custo_creditos_haiku_brl (step ① cost,
  *                                     paid by Max credits → caixa real R$ 0)
@@ -73,7 +75,7 @@ export function EconomyPanel({ summary }: EconomyPanelProps) {
           <KpiCard
             caption="Líquido R$"
             value={formatBrl(summary.economia_liquida_brl)}
-            hint="Phantom − Vast no período"
+            hint="Pod + créditos Haiku − Vast no período"
           />
           <KpiCard
             caption="ROI multiplier"
@@ -83,7 +85,7 @@ export function EconomyPanel({ summary }: EconomyPanelProps) {
           <KpiCard
             caption="Haiku (coberto por créditos)"
             value={formatBrl(summary.custo_creditos_haiku_brl)}
-            hint={`Caixa real: ${formatBrl(0)}`}
+            hint={`Caixa real: ${formatBrl(0)} · conta como economia`}
           />
           <KpiCard
             caption="Custo externo (caixa)"

@@ -555,3 +555,42 @@ func TestEconomyHandler_AuxQueryError500(t *testing.T) {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
+
+// TestEconomyHandler_CreditosHaikuContamComoEconomia: decisão 2026-10-20 —
+// economia = phantom + créditos Haiku − vast, no resumo e na série; ROI segue
+// phantom / vast.
+func TestEconomyHandler_CreditosHaikuContamComoEconomia(t *testing.T) {
+	now := time.Now()
+	day := pgtype.Date{Time: now.In(time.FixedZone("BRT", -3*3600)), Valid: true}
+	fake := &fakeEconomyQueries{
+		rangeRow:  gen.SumBillingAllTenantsRangeRow{PhantomBrl: opNumeric(10), TotalRequests: 1},
+		tokensRow: gen.SumEconomyTokensRangeRow{CreditsCoveredBrl: opNumeric(30), ExternalCashBrl: opNumeric(2)},
+		dayRows: []gen.SumPhantomAllTenantsByDateRow{{
+			Date: day, PhantomBrl: opNumeric(10), CreditsCoveredBrl: opNumeric(30), ExternalCashBrl: opNumeric(2),
+		}},
+		lcRows: []gen.ListPrimaryLifecyclesInRangeRow{{
+			ID:           1,
+			StartedAt:    now.Add(-5 * time.Hour),
+			EndedAt:      opTimestamptz(now.Add(-2 * time.Hour)),
+			TotalCostBrl: opNumeric(5),
+		}},
+	}
+	h := newEconomyHandlerWithQueries(fake, opTestCfg(), discardLog())
+	rec, body := doEconomyRequest(t, h, econRange)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if body.Summary.EconomiaLiquidaBRL != 35 {
+		t.Errorf("economia_liquida_brl = %v, want 35 (10 + 30 − 5)", body.Summary.EconomiaLiquidaBRL)
+	}
+	if body.Summary.ROIMultiplier == nil || *body.Summary.ROIMultiplier != 2 {
+		t.Errorf("roi_multiplier = %v, want 2 (só GPU)", body.Summary.ROIMultiplier)
+	}
+	var seriesEco float64
+	for _, r := range body.Series {
+		seriesEco += r.EconomiaBrl
+	}
+	if d := seriesEco - 35; d > 0.05 || d < -0.05 {
+		t.Errorf("soma economia da série = %v, want 35", seriesEco)
+	}
+}

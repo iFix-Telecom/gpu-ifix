@@ -7,7 +7,8 @@
  *   phantom_brl  → grouped BAR, --chart-embed (custo externo evitado/dia)
  *   creditos_haiku_brl → grouped BAR, --chart-credit (Haiku passo ①, créditos)
  *   caixa_externo_brl  → grouped BAR, --chart-ext    (externo pago em caixa)
- *   economia_brl → LINE overlay, --primary   (economia líquida/dia)
+ *   economia_brl → LINE overlay, --primary   (economia líquida/dia =
+ *                  phantom + créditos Haiku − Vast)
  *
  * The daily money amounts are what the day IS — discrete daily amounts, best
  * compared side by side as bars. The net saving is the derived headline, so it

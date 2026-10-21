@@ -7,7 +7,7 @@
 //
 // The five locked summary metrics (CONTEXT.md):
 //
-//	economia_liquida_brl = phantom_brl − vast_brl
+//	economia_liquida_brl = phantom_brl + créditos Haiku − vast_brl
 //	roi_multiplier       = phantom_brl / vast_brl  (null when vast_brl == 0)
 //	custo_openrouter_brl = SUM(cost_external_brl)  (real external spend, pod DOWN)
 //	pct_servido_local    = local_requests / total_requests (null when total == 0)
@@ -21,6 +21,10 @@
 //	custo 3060           = custo dos pods auxiliares (aux_pod_lifecycles)
 //	vast_brl             = 3090 (primary_lifecycles) + 3060 (aux_pod_lifecycles)
 //
+// Decisão Pedro 2026-10-20: o passo ① é pago pelos créditos das contas Max
+// (caixa real 0), então o custo dele a preço de lista também conta como
+// economia — entra no economia_liquida_brl e no economia_brl da série. O ROI
+// continua medindo só a GPU (phantom / vast).
 // The gateway-wide phantom sum (no tenant filter) is the OBS-09 blocker fix:
 // operations.go left phantom_month_brl nil because no no-tenant-filter sqlc
 // query existed. The Vast cost + pod-up hours reuse the operations.go accrual.
@@ -89,8 +93,8 @@ type EconomySummary struct {
 	Vast3060BRL float64 `json:"vast_3060_brl"`
 }
 
-// EconomyDayRow is one entry in the daily series (economia = phantom − vast
-// for that BRT day).
+// EconomyDayRow is one entry in the daily series (economia = phantom +
+// créditos Haiku − vast for that BRT day).
 type EconomyDayRow struct {
 	Date        string  `json:"date"`
 	PhantomBrl  float64 `json:"phantom_brl"`
@@ -310,11 +314,12 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, d := range dates {
 		p := phantomByDate[d]
 		v := vastByDate[d]
+		c := creditsByDate[d]
 		series = append(series, EconomyDayRow{
 			Date:        d,
 			PhantomBrl:  p,
 			VastBrl:     v,
-			EconomiaBrl: p - v,
+			EconomiaBrl: p + c - v,
 
 			CreditosHaikuBrl: creditsByDate[d],
 			CaixaExternoBrl:  cashByDate[d],
@@ -360,7 +365,7 @@ func (h *EconomyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Summary: EconomySummary{
 			PhantomBRL:         phantom,
 			VastBRL:            vastTotal,
-			EconomiaLiquidaBRL: phantom - vastTotal,
+			EconomiaLiquidaBRL: phantom + creditsF.Float64 - vastTotal,
 			ROIMultiplier:      roi,
 			CustoOpenRouterBRL: custoOpenRouter,
 			PctServidoLocal:    pctLocal,
