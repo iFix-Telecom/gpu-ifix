@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/billing"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/db/gen"
 )
 
@@ -129,6 +130,17 @@ func runBillingReconcile(ctx context.Context, args []string, log *slog.Logger) i
 
 	todayLocal := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 
+	// quick 261020 (OPERACOES-28152): usage_counters.tokens_in é o contador
+	// da cota com o cache ponderado pelo preço (billing.QuotaTokensIn). O
+	// reconcile compara/reescreve com a MESMA fórmula — senão o --apply
+	// desfaria a ponderação. Usa os preços vigentes (valid_to IS NULL).
+	priceRows, err := q.ListActivePrices(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list active prices: %v\n", err)
+		return 1
+	}
+	prices := billing.NewPricesLoaderFromRows(priceRows, log)
+
 	anyDrift := false
 	for _, tenant := range tenants {
 		days, err := q.SumBillingEventsByDate(ctx, gen.SumBillingEventsByDateParams{
@@ -149,8 +161,24 @@ func runBillingReconcile(ctx context.Context, args []string, log *slog.Logger) i
 		// still sees drift analysis structure.
 		cachedToday, cacheErr := q.GetUsageCountersToday(ctx, tenant.ID)
 
+		quotaGroups, err := q.SumBillingQuotaTokensByDate(ctx, gen.SumBillingQuotaTokensByDateParams{
+			LongContextThreshold: billing.AnthropicLongContextThreshold,
+			TenantID:             tenant.ID,
+			FromTs:               from,
+			ToTs:                 to,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sum quota tokens (tenant=%s): %v\n", tenant.Slug, err)
+			return 1
+		}
+		quotaIn := quotaTokensInByDate(prices, quotaGroups)
+
 		for _, day := range days {
-			billingSum := day.TokensIn + day.TokensOut
+			dayQuotaIn := day.TokensIn
+			if v, ok := quotaIn[formatDate(day.Date)]; ok {
+				dayQuotaIn = v
+			}
+			billingSum := dayQuotaIn + day.TokensOut
 
 			// Only the row whose date matches today's local date can be
 			// compared against GetUsageCountersToday. Other rows are treated
@@ -199,7 +227,7 @@ func runBillingReconcile(ctx context.Context, args []string, log *slog.Logger) i
 				if err := q.ResetUsageCountersForReconcile(ctx, gen.ResetUsageCountersForReconcileParams{
 					TenantID:            tenant.ID,
 					Date:                day.Date,
-					TokensIn:            day.TokensIn,
+					TokensIn:            dayQuotaIn,
 					TokensOut:           day.TokensOut,
 					AudioSeconds:        audioSec,
 					EmbedsCount:         day.EmbedsCount,
@@ -226,6 +254,19 @@ func runBillingReconcile(ctx context.Context, args []string, log *slog.Logger) i
 		fmt.Println("no drift detected")
 	}
 	return 0
+}
+
+// quotaTokensInByDate soma, por dia (chave formatDate), o tokens_in da cota de
+// cada grupo (upstream, model, contexto longo) com os pesos de cache do par
+// de preço do grupo — mesma fórmula do hot path (billing.QuotaTokensIn).
+func quotaTokensInByDate(prices *billing.PricesLoader, rows []gen.SumBillingQuotaTokensByDateRow) map[string]int64 {
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		m, p := billing.QuotaPriceKey(r.Upstream, r.Model, r.LongContext)
+		wr, ww := billing.CacheWeights(prices, m, p)
+		out[formatDate(r.Date)] += billing.QuotaTokensIn(r.TokensIn, r.TokensCacheRead, r.TokensCacheWrite, wr, ww)
+	}
+	return out
 }
 
 // runUsage implements `gatewayctl usage report ...`. Queries billing_events

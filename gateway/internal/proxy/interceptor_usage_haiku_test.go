@@ -71,6 +71,11 @@ func TestUsageReportedCostJSON(t *testing.T) {
 	if ev.TokensCacheRead != 11800 || ev.TokensCacheWrite != 0 || ev.TokensIn != 12050 || ev.TokensOut != 431 {
 		t.Errorf("tokens: in=%d out=%d cr=%d cw=%d", ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
 	}
+	// quick 261020: há input_token mas não cache_read_token para este par →
+	// peso 1, cota igual ao tokens_in cru.
+	if ev.QuotaTokensIn != 12050 {
+		t.Errorf("quota sem linha de cache: want 12050, got %d", ev.QuotaTokensIn)
+	}
 	if ev.CostLocalPhantomBRL != 0 {
 		t.Errorf("phantom: want 0, got %v", ev.CostLocalPhantomBRL)
 	}
@@ -163,6 +168,11 @@ func TestUsageAnthropicHaikuCacheAware(t *testing.T) {
 	if ev.TokensCacheRead != 8000 || ev.TokensCacheWrite != 1000 {
 		t.Errorf("cache: cr=%d cw=%d", ev.TokensCacheRead, ev.TokensCacheWrite)
 	}
+	// quick 261020: cota = 1000 sem cache + 8000×0,1 + 1000×1,25 = 3050;
+	// billing_events segue cru (TokensIn 10000).
+	if ev.TokensIn != 10000 || ev.QuotaTokensIn != 3050 {
+		t.Errorf("quota: in=%d quota_in=%d (want 10000/3050)", ev.TokensIn, ev.QuotaTokensIn)
+	}
 }
 
 func TestUsageAnthropicHaikuLongTier(t *testing.T) {
@@ -181,6 +191,10 @@ func TestUsageAnthropicHaikuMissingCacheRowChargesInput(t *testing.T) {
 	wantUSD := 10000*1e-7 + 500*5e-7
 	if !approx(ev.CostExternalBRL, wantUSD*testFX) {
 		t.Errorf("external fallback: want %v, got %v", wantUSD*testFX, ev.CostExternalBRL)
+	}
+	// quick 261020: sem linha de cache → peso 1 (cota = tokens_in cru).
+	if ev.QuotaTokensIn != 10000 {
+		t.Errorf("quota sem preço de cache: want 10000, got %d", ev.QuotaTokensIn)
 	}
 }
 

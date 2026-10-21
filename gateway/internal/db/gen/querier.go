@@ -135,6 +135,11 @@ type Querier interface {
 	// IMPORTANT: timezone idiom is `(now() AT TIME ZONE 'America/Sao_Paulo')::date`
 	// (the alternative "CURRENT_DATE" + tz form documented in RESEARCH §Anti-Patterns
 	// is invalid SQL; do NOT use it).
+	//
+	// quick 261020 (OPERACOES-28152): usage_counters.tokens_in (contador da cota)
+	// recebe quota_tokens_in = tokens_in com o cache ponderado pelo preço do cache do mesmo
+	// (model, provider) — billing.QuotaTokensIn. billing_events.tokens_in segue
+	// cru ($8). Nenhuma coluna nova.
 	InsertBillingEvent(ctx context.Context, arg InsertBillingEventParams) error
 	// Creates a new emergency lifecycle row with started_at = NOW(). Returns the
 	// BIGSERIAL id so the caller can attach Vast IDs later via UpdateEmergencyLifecycleVastIDs.
@@ -306,6 +311,12 @@ type Querier interface {
 	SumBillingEventsByDate(ctx context.Context, arg SumBillingEventsByDateParams) ([]SumBillingEventsByDateRow, error)
 	// Aggregate over the entire range -- for the `summary` field.
 	SumBillingEventsRange(ctx context.Context, arg SumBillingEventsRangeParams) (SumBillingEventsRangeRow, error)
+	// quick 261020 (OPERACOES-28152): insumo do `gatewayctl billing reconcile`
+	// para recalcular usage_counters.tokens_in com o cache ponderado pelo preço
+	// (billing.QuotaTokensIn). Agrupa por (dia, upstream, model, contexto longo)
+	// porque o peso depende do par de preço; long_context replica o degrau :long
+	// do passo ① (tokens_in > limiar, por evento).
+	SumBillingQuotaTokensByDate(ctx context.Context, arg SumBillingQuotaTokensByDateParams) ([]SumBillingQuotaTokensByDateRow, error)
 	// Phase 23 (23-11, HAIKU-09): agregado gateway-wide (sem tenant) para o
 	// painel Economia fidedigno. local_tokens usa o mesmo INVARIANT de
 	// SumBillingAllTenantsRange (servido local sse cost_local_phantom_brl > 0).

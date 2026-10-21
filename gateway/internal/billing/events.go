@@ -47,7 +47,18 @@ func insertParams(e Event) gen.InsertBillingEventParams {
 		TokensCacheRead:     int32(e.TokensCacheRead),
 		TokensCacheWrite:    int32(e.TokensCacheWrite),
 		CostSource:          pgtype.Text{String: e.CostSource, Valid: e.CostSource != ""},
+		QuotaTokensIn:       quotaTokensIn(e),
 	}
+}
+
+// quotaTokensIn devolve o incremento de usage_counters.tokens_in: o valor
+// ponderado quando o caller o preencheu, senão o tokens_in cru (callers
+// antigos / testes que não conhecem o campo).
+func quotaTokensIn(e Event) int64 {
+	if e.QuotaTokensIn > 0 || e.TokensIn <= 0 {
+		return e.QuotaTokensIn
+	}
+	return int64(e.TokensIn)
 }
 
 // nullableUUIDForPG converts a Go uuid.UUID to pgtype.UUID; zero UUID maps

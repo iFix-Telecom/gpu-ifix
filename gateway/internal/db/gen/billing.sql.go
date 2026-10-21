@@ -36,7 +36,7 @@ INSERT INTO ai_gateway.usage_counters
      cost_local_phantom_brl, cost_external_brl, requests_count)
 SELECT tenant_id,
        (now() AT TIME ZONE 'America/Sao_Paulo')::date,
-       tokens_in, tokens_out, audio_seconds::bigint, embeds_count,
+       $18::bigint, tokens_out, audio_seconds::bigint, embeds_count,
        cost_local_phantom_brl::numeric(10,4), cost_external_brl::numeric(10,4), 1
 FROM inserted
 ON CONFLICT (tenant_id, date) DO UPDATE SET
@@ -67,6 +67,7 @@ type InsertBillingEventParams struct {
 	TokensCacheRead     int32          `json:"tokens_cache_read"`
 	TokensCacheWrite    int32          `json:"tokens_cache_write"`
 	CostSource          pgtype.Text    `json:"cost_source"`
+	QuotaTokensIn       int64          `json:"quota_tokens_in"`
 }
 
 // Atomic insert into billing_events + UPSERT delta into usage_counters in a
@@ -78,6 +79,11 @@ type InsertBillingEventParams struct {
 // IMPORTANT: timezone idiom is `(now() AT TIME ZONE 'America/Sao_Paulo')::date`
 // (the alternative "CURRENT_DATE" + tz form documented in RESEARCH §Anti-Patterns
 // is invalid SQL; do NOT use it).
+//
+// quick 261020 (OPERACOES-28152): usage_counters.tokens_in (contador da cota)
+// recebe quota_tokens_in = tokens_in com o cache ponderado pelo preço do cache do mesmo
+// (model, provider) — billing.QuotaTokensIn. billing_events.tokens_in segue
+// cru ($8). Nenhuma coluna nova.
 func (q *Queries) InsertBillingEvent(ctx context.Context, arg InsertBillingEventParams) error {
 	_, err := q.db.Exec(ctx, insertBillingEvent,
 		arg.RequestID,
@@ -97,6 +103,7 @@ func (q *Queries) InsertBillingEvent(ctx context.Context, arg InsertBillingEvent
 		arg.TokensCacheRead,
 		arg.TokensCacheWrite,
 		arg.CostSource,
+		arg.QuotaTokensIn,
 	)
 	return err
 }
@@ -257,6 +264,78 @@ func (q *Queries) SumBillingEventsRange(ctx context.Context, arg SumBillingEvent
 		&i.RequestsCount,
 	)
 	return i, err
+}
+
+const sumBillingQuotaTokensByDate = `-- name: SumBillingQuotaTokensByDate :many
+SELECT
+    (ts AT TIME ZONE 'America/Sao_Paulo')::date                 AS date,
+    upstream,
+    model,
+    (tokens_in > $1::int)::boolean AS long_context,
+    COALESCE(SUM(tokens_in), 0)::bigint                         AS tokens_in,
+    COALESCE(SUM(tokens_cache_read), 0)::bigint                 AS tokens_cache_read,
+    COALESCE(SUM(tokens_cache_write), 0)::bigint                AS tokens_cache_write
+FROM ai_gateway.billing_events
+WHERE tenant_id = $2
+  AND ts >= $3
+  AND ts <  $4
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2, 3, 4
+`
+
+type SumBillingQuotaTokensByDateParams struct {
+	LongContextThreshold int32     `json:"long_context_threshold"`
+	TenantID             uuid.UUID `json:"tenant_id"`
+	FromTs               time.Time `json:"from_ts"`
+	ToTs                 time.Time `json:"to_ts"`
+}
+
+type SumBillingQuotaTokensByDateRow struct {
+	Date             pgtype.Date `json:"date"`
+	Upstream         string      `json:"upstream"`
+	Model            string      `json:"model"`
+	LongContext      bool        `json:"long_context"`
+	TokensIn         int64       `json:"tokens_in"`
+	TokensCacheRead  int64       `json:"tokens_cache_read"`
+	TokensCacheWrite int64       `json:"tokens_cache_write"`
+}
+
+// quick 261020 (OPERACOES-28152): insumo do `gatewayctl billing reconcile`
+// para recalcular usage_counters.tokens_in com o cache ponderado pelo preço
+// (billing.QuotaTokensIn). Agrupa por (dia, upstream, model, contexto longo)
+// porque o peso depende do par de preço; long_context replica o degrau :long
+// do passo ① (tokens_in > limiar, por evento).
+func (q *Queries) SumBillingQuotaTokensByDate(ctx context.Context, arg SumBillingQuotaTokensByDateParams) ([]SumBillingQuotaTokensByDateRow, error) {
+	rows, err := q.db.Query(ctx, sumBillingQuotaTokensByDate,
+		arg.LongContextThreshold,
+		arg.TenantID,
+		arg.FromTs,
+		arg.ToTs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SumBillingQuotaTokensByDateRow
+	for rows.Next() {
+		var i SumBillingQuotaTokensByDateRow
+		if err := rows.Scan(
+			&i.Date,
+			&i.Upstream,
+			&i.Model,
+			&i.LongContext,
+			&i.TokensIn,
+			&i.TokensCacheRead,
+			&i.TokensCacheWrite,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const sumEconomyTokensRange = `-- name: SumEconomyTokensRange :one
