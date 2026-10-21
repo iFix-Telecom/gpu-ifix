@@ -56,20 +56,7 @@ func (l *PricesLoader) Refresh(ctx context.Context) error {
 		obs.GatewayPricesReload.WithLabelValues("error").Inc()
 		return fmt.Errorf("billing: list active prices: %w", err)
 	}
-	s := &pricesSnapshot{byKey: make(map[PriceKey]Price, len(rows))}
-	for _, r := range rows {
-		f, ferr := r.UnitCostUsd.Float64Value()
-		if ferr != nil || !f.Valid {
-			l.log.Warn("price row has invalid unit_cost_usd; skipped",
-				"model", r.Model, "provider", r.Provider, "unit", r.Unit,
-				"err", ferr)
-			continue
-		}
-		s.byKey[PriceKey{Model: r.Model, Provider: r.Provider, Unit: r.Unit}] = Price{
-			UnitCostUSD: f.Float64,
-			ValidFrom:   r.ValidFrom,
-		}
-	}
+	s := snapshotFromRows(rows, l.log)
 	l.snap.Store(s)
 	obs.GatewayPricesReload.WithLabelValues("ok").Inc()
 	l.log.Info("prices refreshed", "rows", len(s.byKey))
@@ -86,6 +73,40 @@ func (l *PricesLoader) Get(model, provider, unit string) (Price, bool) {
 	}
 	p, ok := s.byKey[PriceKey{Model: model, Provider: provider, Unit: unit}]
 	return p, ok
+}
+
+// snapshotFromRows converte as linhas ativas de ai_gateway.prices no snapshot
+// em memória; linha com unit_cost_usd inválido é pulada com WARN.
+func snapshotFromRows(rows []gen.AiGatewayPrice, log *slog.Logger) *pricesSnapshot {
+	s := &pricesSnapshot{byKey: make(map[PriceKey]Price, len(rows))}
+	for _, r := range rows {
+		f, ferr := r.UnitCostUsd.Float64Value()
+		if ferr != nil || !f.Valid {
+			if log != nil {
+				log.Warn("price row has invalid unit_cost_usd; skipped",
+					"model", r.Model, "provider", r.Provider, "unit", r.Unit,
+					"err", ferr)
+			}
+			continue
+		}
+		s.byKey[PriceKey{Model: r.Model, Provider: r.Provider, Unit: r.Unit}] = Price{
+			UnitCostUSD: f.Float64,
+			ValidFrom:   r.ValidFrom,
+		}
+	}
+	return s
+}
+
+// NewPricesLoaderFromRows monta um loader estático (sem Refresh/LISTEN) a
+// partir de linhas já lidas de ListActivePrices. Usado pelo gatewayctl
+// (billing reconcile) para aplicar os mesmos pesos de cache do hot path.
+func NewPricesLoaderFromRows(rows []gen.AiGatewayPrice, log *slog.Logger) *PricesLoader {
+	if log == nil {
+		log = slog.Default()
+	}
+	l := &PricesLoader{log: log.With("module", "PRICES")}
+	l.snap.Store(snapshotFromRows(rows, l.log))
+	return l
 }
 
 // NewStaticPricesLoader builds a loader over a fixed in-memory snapshot with

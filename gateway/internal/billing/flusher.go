@@ -46,6 +46,11 @@ type Event struct {
 	TokensCacheRead  int
 	TokensCacheWrite int
 	CostSource       string // "provider_reported" | "price_table" | "" (NULL)
+	// QuotaTokensIn é o tokens_in que entra em usage_counters (contador da
+	// cota): cache ponderado pelo preço (QuotaTokensIn em quota_tokens.go).
+	// NÃO vai para billing_events. Valor ≤ 0 com TokensIn > 0 (caller que não
+	// preencheu) cai em TokensIn cru — comportamento anterior.
+	QuotaTokensIn int64
 }
 
 // flusher abstracts the DB writer so tests can inject a fake. Production

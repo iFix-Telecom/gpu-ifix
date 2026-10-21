@@ -336,6 +336,11 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		}
 	}
 
+	// quick 261020 (OPERACOES-28152): a cota pesa os tokens de cache pelo
+	// preço do cache do mesmo (model, provider) da cobrança. billing_events
+	// segue com os números crus; só usage_counters.tokens_in recebe isto.
+	quotaTokensIn := billing.QuotaTokensInFor(u.prices, upstream, model, tokensIn, cacheRead, cacheWrite)
+
 	ev := billing.Event{
 		TS:                  time.Now(),
 		RequestID:           reqUUID,
@@ -348,6 +353,7 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		TokensOut:           int(tokensOut),
 		TokensCacheRead:     int(cacheRead),
 		TokensCacheWrite:    int(cacheWrite),
+		QuotaTokensIn:       quotaTokensIn,
 		CostSource:          costSource,
 		AudioSeconds:        audioSeconds,
 		EmbedsCount:         int(embedsCount),
@@ -388,9 +394,9 @@ const haikuPhantomModel = "anthropic/claude-haiku-5.5"
 // a entrada total (não-cacheado + cache read + cache write = prompt_tokens)
 // passa de anthropicLongContextThreshold tokens.
 const (
-	anthropicHaikuPriceModel      = "claude-haiku-5-5"
-	anthropicHaikuLongPriceModel  = "claude-haiku-5-5:long"
-	anthropicLongContextThreshold = 100000
+	anthropicHaikuPriceModel      = billing.AnthropicHaikuPriceModel
+	anthropicHaikuLongPriceModel  = billing.AnthropicHaikuLongPriceModel
+	anthropicLongContextThreshold = billing.AnthropicLongContextThreshold
 )
 
 // usdToBRL resolve a taxa USD→BRL com a mesma regra de billing.ComputeCostBRL:
@@ -497,22 +503,7 @@ func hasPrice(prices *billing.PricesLoader, model, provider, unit string) bool {
 // Upstream names are the authoritative wire identifier; providers group
 // pricing by commercial vendor.
 func providerForUpstream(upstream string) string {
-	switch upstream {
-	case "openrouter-chat", "openrouter-deepseek":
-		return "openrouter-fireworks"
-	case "anthropic-haiku":
-		return "anthropic"
-	case "openrouter-tts":
-		// Chave (tts-1, openrouter, input_token) — não colide com o phantom
-		// de TTS self-hosted (tts-1, openrouter-fireworks).
-		return "openrouter"
-	case "openai-embed":
-		return "openai"
-	case "openai-whisper":
-		return "openai"
-	default:
-		return upstream
-	}
+	return billing.ProviderForUpstream(upstream)
 }
 
 // ttsBillingModel is the fixed price-lookup model for route "tts"
