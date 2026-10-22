@@ -53,6 +53,14 @@ type Set struct {
 	// breaker/force_override.go for the read-path contract + Plan 06.9-04
 	// SUMMARY for the entry-gate findings (WARNING-4).
 	forceCache *forceCache
+
+	// Mirror write ordering (quick 261022). Every gw:breaker:{name} write
+	// takes a ticket at event time (mirrorTicket, synchronous) and the async
+	// writer skips a ticket older than the last one written — so the boot /
+	// reset "closed" write can never overwrite a later real transition.
+	mirrorMu   sync.Mutex
+	mirrorNext map[string]uint64
+	mirrorDone map[string]uint64
 }
 
 // NewSet constructs the initial set of breakers, one per upstream name.
@@ -68,31 +76,64 @@ func NewSet(rdb *redis.Client, log *slog.Logger, opt Options, names []string) *S
 		// "no override" (the natural cold-start state). The first Execute
 		// per upstream populates the cache via the lazy debounce path.
 		forceCache: newForceCache(),
+		mirrorNext: make(map[string]uint64),
+		mirrorDone: make(map[string]uint64),
 	}
 	for _, n := range names {
 		s.cbs[n] = s.newBreaker(n)
 	}
-	go s.mirrorClosed(append([]string(nil), names...)...)
+	s.mirrorClosedAsync(names...)
 	return s
 }
 
-// mirrorClosed writes state=closed to the gw:breaker:{name} mirror for
+// mirrorClosedAsync records state=closed in the gw:breaker:{name} mirror for
 // breakers this process just created or reset (quick 261022). The mirror is
 // only written on transitions, so after a restart it kept the previous
 // process's last state — `gatewayctl breaker list` showed HALF_OPEN while the
 // live FSM was CLOSED. Mirror only: no Pub/Sub event, so peers' remoteOpen
-// overlays are untouched. Best-effort: a Redis error is counted and logged.
-func (s *Set) mirrorClosed(names ...string) {
-	if s.rdb == nil {
+// overlays are untouched. Tickets are taken here, synchronously, so a real
+// transition that happens afterwards always wins the mirror.
+func (s *Set) mirrorClosedAsync(names ...string) {
+	if s.rdb == nil || len(names) == 0 {
 		return
 	}
 	now := time.Now().Unix()
-	for _, n := range names {
-		if err := redisx.WriteBreakerState(context.Background(), s.rdb, n, gobreaker.StateClosed.String(), now); err != nil {
-			obs.BreakerMirrorFailuresTotal.Inc()
-			s.log.Warn("breaker mirror HSET failed", "upstream", n, "err", err)
-		}
+	tickets := make([]uint64, len(names))
+	for i, n := range names {
+		tickets[i] = s.mirrorTicket(n)
 	}
+	names = append([]string(nil), names...)
+	go func() {
+		for i, n := range names {
+			if err := s.writeMirror(n, gobreaker.StateClosed.String(), now, tickets[i]); err != nil {
+				obs.BreakerMirrorFailuresTotal.Inc()
+				s.log.Warn("breaker mirror HSET failed", "upstream", n, "err", err)
+			}
+		}
+	}()
+}
+
+// mirrorTicket reserves the next mirror-write sequence number for name.
+func (s *Set) mirrorTicket(name string) uint64 {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+	s.mirrorNext[name]++
+	return s.mirrorNext[name]
+}
+
+// writeMirror HSETs the mirror unless a newer ticket was already written.
+// Writes are serialized under mirrorMu (low volume: transitions + boot).
+func (s *Set) writeMirror(name, state string, sinceUnix int64, ticket uint64) error {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+	if ticket <= s.mirrorDone[name] {
+		return nil
+	}
+	if err := redisx.WriteBreakerState(context.Background(), s.rdb, name, state, sinceUnix); err != nil {
+		return err
+	}
+	s.mirrorDone[name] = ticket
+	return nil
 }
 
 // Rebuild atomically swaps the breaker map to match a new set of names.
@@ -119,9 +160,7 @@ func (s *Set) Rebuild(names []string) {
 			created = append(created, n)
 		}
 	}
-	if len(created) > 0 {
-		go s.mirrorClosed(created...)
-	}
+	s.mirrorClosedAsync(created...)
 }
 
 // Reset substitui o breaker de name por um novo (CLOSED, contadores zerados)
@@ -143,7 +182,7 @@ func (s *Set) Reset(name string) {
 	delete(s.remoteOpen, name)
 	obs.BreakerState.WithLabelValues(name).Set(stateFloat(gobreaker.StateClosed))
 	s.log.Info("breaker reset (upstream url changed)", "upstream", name)
-	go s.mirrorClosed(name)
+	s.mirrorClosedAsync(name)
 }
 
 // Get returns the breaker for name + found flag. Caller uses it for
@@ -407,7 +446,9 @@ func (s *Set) newBreaker(name string) *gobreaker.CircuitBreaker[*http.Response] 
 				obs.BreakerTripsTotal.WithLabelValues(n).Inc()
 			}
 			// Mirror to Redis (best-effort; DO NOT block the state machine).
-			go s.publishTransition(n, to)
+			// The ticket is taken here, at transition time, to order it
+			// against the boot/reset "closed" mirror write.
+			go s.publishTransition(n, to, s.mirrorTicket(n))
 		},
 		IsSuccessful: IsSuccessful,
 	})
@@ -470,9 +511,9 @@ func (e *HTTPError) Error() string { return e.Msg }
 // Separate function so tests can stub it. Failures bump the
 // gateway_breaker_mirror_failures_total counter and log at WARN; the
 // in-process state machine is unaffected (CONTEXT.md D-D1).
-func (s *Set) publishTransition(name string, to gobreaker.State) {
+func (s *Set) publishTransition(name string, to gobreaker.State, ticket uint64) {
 	ctx := context.Background()
-	if err := redisx.WriteBreakerState(ctx, s.rdb, name, to.String(), time.Now().Unix()); err != nil {
+	if err := s.writeMirror(name, to.String(), time.Now().Unix(), ticket); err != nil {
 		obs.BreakerMirrorFailuresTotal.Inc()
 		s.log.Warn("breaker mirror HSET failed", "upstream", name, "err", err)
 		return
