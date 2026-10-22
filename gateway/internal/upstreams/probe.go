@@ -80,6 +80,14 @@ type ProbeConfig struct {
 	// preso atrás de lotes reais no infinity em CPU, estoure o orçamento e
 	// abra o breaker de um upstream que está só ocupado.
 	SkipIfBusy func(name string) bool
+
+	// Via (quick 261022), quando não-nil e devolvendo um handler para o nome,
+	// faz a sonda STT passar pelo MESMO proxy do tráfego real (reescrita de
+	// path, modelo por upstream, auth) com o alias "whisper" que os clientes
+	// mandam. Sem isto a sonda genérica (POST {url}/v1/audio/transcriptions
+	// model=whisper-1) recebia 404 do gemini-stt e do groq-whisper — e 4xx
+	// conta como sucesso no breaker, então a sonda só media alcance.
+	Via func(name string) http.Handler
 }
 
 // probeQueries isolates the sqlc surface so tests can stub the writeback
@@ -224,6 +232,13 @@ func (p *Probe) doTick(parent context.Context) {
 		// a CLOSED tier-1 is still skipped.
 		if u.Tier == 1 && tier0Closed[u.Role] && breakerSnap[u.Name] == "closed" {
 			continue // skip external probe on-demand (D-A2)
+		}
+		// Quick 261022: a tier-2 last resort (openai-whisper) is probed only
+		// while its own breaker is not CLOSED — before, it was probed every
+		// tick (a paid transcription every 10 s). Real traffic still records
+		// its failures, so a broken tier-2 still trips.
+		if u.Tier >= 2 && breakerSnap[u.Name] == "closed" {
+			continue
 		}
 		g.Go(func() error {
 			p.probeOne(tickCtx, u)
@@ -380,6 +395,11 @@ func (p *Probe) dispatch(ctx context.Context, u UpstreamConfig) (*http.Response,
 		}
 		req.Header.Set("Content-Type", "application/json")
 	case "stt":
+		if p.cfg.Via != nil {
+			if h := p.cfg.Via(u.Name); h != nil {
+				return p.dispatchVia(ctx, u, h)
+			}
+		}
 		buf := &bytes.Buffer{}
 		mw := multipart.NewWriter(buf)
 		if err := mw.WriteField("model", "whisper-1"); err != nil {
@@ -514,4 +534,70 @@ func (p *Probe) drain(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// dispatchVia sends the synthetic STT probe through h — the same proxy that
+// serves real traffic for u (quick 261022). The response is captured by a
+// status-only writer and classified like dispatch: 5xx (including the 502 the
+// proxy writes on a transport/retryable error) → failure; 4xx → *HTTPError
+// that the breaker counts as success; 2xx → success.
+func (p *Probe) dispatchVia(ctx context.Context, u UpstreamConfig, h http.Handler) (*http.Response, error) {
+	buf := &bytes.Buffer{}
+	mw := multipart.NewWriter(buf)
+	if err := mw.WriteField("model", "whisper"); err != nil {
+		return nil, err
+	}
+	fw, err := mw.CreateFormFile("file", "probe.wav")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write(probeWAV); err != nil {
+		return nil, err
+	}
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/audio/transcriptions", buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := &probeStatusWriter{header: http.Header{}}
+	h.ServeHTTP(rec, req)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	status := rec.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status >= 500 {
+		return nil, &breaker.HTTPError{Status: status, Msg: "probe upstream 5xx: " + strconv.Itoa(status) + " (via proxy " + u.Name + ")"}
+	}
+	if status >= 400 {
+		return nil, &breaker.HTTPError{Status: status, Msg: "probe 4xx: " + strconv.Itoa(status) + " (via proxy " + u.Name + ")"}
+	}
+	return nil, nil
+}
+
+// probeStatusWriter is the minimal http.ResponseWriter dispatchVia hands to
+// the proxy: it keeps the status code and discards the body.
+type probeStatusWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *probeStatusWriter) Header() http.Header { return w.header }
+
+func (w *probeStatusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
+func (w *probeStatusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return len(b), nil
 }

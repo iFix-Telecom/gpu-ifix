@@ -72,7 +72,27 @@ func NewSet(rdb *redis.Client, log *slog.Logger, opt Options, names []string) *S
 	for _, n := range names {
 		s.cbs[n] = s.newBreaker(n)
 	}
+	go s.mirrorClosed(append([]string(nil), names...)...)
 	return s
+}
+
+// mirrorClosed writes state=closed to the gw:breaker:{name} mirror for
+// breakers this process just created or reset (quick 261022). The mirror is
+// only written on transitions, so after a restart it kept the previous
+// process's last state — `gatewayctl breaker list` showed HALF_OPEN while the
+// live FSM was CLOSED. Mirror only: no Pub/Sub event, so peers' remoteOpen
+// overlays are untouched. Best-effort: a Redis error is counted and logged.
+func (s *Set) mirrorClosed(names ...string) {
+	if s.rdb == nil {
+		return
+	}
+	now := time.Now().Unix()
+	for _, n := range names {
+		if err := redisx.WriteBreakerState(context.Background(), s.rdb, n, gobreaker.StateClosed.String(), now); err != nil {
+			obs.BreakerMirrorFailuresTotal.Inc()
+			s.log.Warn("breaker mirror HSET failed", "upstream", n, "err", err)
+		}
+	}
 }
 
 // Rebuild atomically swaps the breaker map to match a new set of names.
@@ -92,10 +112,15 @@ func (s *Set) Rebuild(names []string) {
 			delete(s.remoteOpen, n)
 		}
 	}
+	var created []string
 	for _, n := range names {
 		if _, ok := s.cbs[n]; !ok {
 			s.cbs[n] = s.newBreaker(n)
+			created = append(created, n)
 		}
+	}
+	if len(created) > 0 {
+		go s.mirrorClosed(created...)
 	}
 }
 
@@ -118,6 +143,7 @@ func (s *Set) Reset(name string) {
 	delete(s.remoteOpen, name)
 	obs.BreakerState.WithLabelValues(name).Set(stateFloat(gobreaker.StateClosed))
 	s.log.Info("breaker reset (upstream url changed)", "upstream", name)
+	go s.mirrorClosed(name)
 }
 
 // Get returns the breaker for name + found flag. Caller uses it for

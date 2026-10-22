@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/sony/gobreaker/v2"
 )
 
@@ -57,4 +59,28 @@ func TestReset_UnknownNameNoop(t *testing.T) {
 	if _, ok := s.Get("does-not-exist"); ok {
 		t.Fatal("Reset must not create breakers for unknown names")
 	}
+}
+
+// TestNewSet_MirrorsClosedOnBoot (quick 261022): a fresh Set overwrites a
+// stale mirror left by the previous process, so `gatewayctl breaker list`
+// matches the live (CLOSED) FSM after a restart.
+func TestNewSet_MirrorsClosedOnBoot(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	mr.HSet("gw:breaker:groq-whisper", "state", "half-open", "since_unix", "1")
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	_ = NewSet(rdb, discardLogger(), fastOpts(), []string{"groq-whisper"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if mr.HGet("gw:breaker:groq-whisper", "state") == "closed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("mirror state = %q, want closed", mr.HGet("gw:breaker:groq-whisper", "state"))
 }
