@@ -24,6 +24,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/sony/gobreaker/v2"
 
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/breaker"
 )
@@ -506,5 +507,51 @@ func TestParseCircuitConfig_Parked(t *testing.T) {
 	}
 	if cc := parseCircuitConfig([]byte(`{"failures":3}`)); cc.Parked {
 		t.Fatal("absent parked must be false")
+	}
+}
+
+// TestProbe_ProbesTrippedTier1UnderClosedTier0 (quick 261022): with tier-0
+// CLOSED, a tier-1 whose own breaker is OPEN/HALF_OPEN is probed, and a
+// successful probe closes it. A CLOSED tier-1 sibling stays unprobed (D-A2).
+func TestProbe_ProbesTrippedTier1UnderClosedTier0(t *testing.T) {
+	var trippedHits, healthyHits atomic.Int32
+	ok := func(hits *atomic.Int32) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if hits != nil {
+				hits.Add(1)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}))
+	}
+	t0Srv, tripSrv, healthySrv := ok(nil), ok(&trippedHits), ok(&healthyHits)
+	defer t0Srv.Close()
+	defer tripSrv.Close()
+	defer healthySrv.Close()
+
+	loader := NewLoaderForTest(
+		UpstreamConfig{Name: "local-llm", Role: "llm", Tier: 0, URL: t0Srv.URL, Enabled: true},
+		UpstreamConfig{Name: "openrouter-chat", Role: "llm", Tier: 1, URL: tripSrv.URL, Enabled: true},
+		UpstreamConfig{Name: "openrouter-deepseek", Role: "llm", Tier: 1, URL: healthySrv.URL, Enabled: true},
+	)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bs := breaker.NewSet(newProbeRedis(t), logger,
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 10 * time.Millisecond},
+		[]string{"local-llm", "openrouter-chat", "openrouter-deepseek"})
+	_, _ = bs.Execute("openrouter-chat", func() (*http.Response, error) {
+		return nil, &breaker.HTTPError{Status: 503, Msg: "trip"}
+	})
+	time.Sleep(20 * time.Millisecond) // cooldown elapsed → HALF_OPEN
+
+	p := NewProbe(loader, bs, nil, ProbeConfig{Budget: 5 * time.Second}, logger)
+	p.doTick(context.Background())
+	if trippedHits.Load() == 0 {
+		t.Fatal("tripped tier-1 NOT probed under CLOSED tier-0; it could never recover")
+	}
+	if healthyHits.Load() != 0 {
+		t.Errorf("CLOSED tier-1 probed %d times under CLOSED tier-0; want 0 (D-A2)", healthyHits.Load())
+	}
+	if st := bs.EffectiveState("openrouter-chat"); st != gobreaker.StateClosed {
+		t.Errorf("tripped tier-1 after successful probe = %v, want closed", st)
 	}
 }

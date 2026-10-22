@@ -717,12 +717,15 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 	skippedSensitive := false
 	var lastErr *dispatchResult // last fallthrough carrying a real upstream status
 
-	for _, c := range candidates {
+	roster := make([]upstreams.UpstreamConfig, len(candidates))
+	for i, c := range candidates {
+		roster[i] = c.u
+	}
+	order, trial := cfg.breakerOrder(roster)
+	for k, idx := range order {
+		c := candidates[idx]
 		if sensitive && c.external {
 			skippedSensitive = true
-			continue
-		}
-		if cfg.Breaker.EffectiveState(c.u.Name) != gobreaker.StateClosed {
 			continue
 		}
 		if _, ok := cfg.Proxies[c.u.Name]; !ok {
@@ -760,6 +763,9 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 				lastErr = &last
 			}
 			continue
+		}
+		if trial[k] {
+			cfg.recordTrialSuccess(r, c.u.Name, log)
 		}
 		return // committed (success or terminal error envelope)
 	}
@@ -855,7 +861,8 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 	restoreBody, _ := prepareReplayBody(r)
 	var lastErr *dispatchResult
 	for _, t1 := range cfg.Loader.ResolveAllTier1(cfg.Role) {
-		if cfg.Breaker.EffectiveState(t1.Name) == gobreaker.StateOpen {
+		st := cfg.Breaker.EffectiveState(t1.Name)
+		if st == gobreaker.StateOpen {
 			continue
 		}
 		if _, ok := cfg.Proxies[t1.Name]; !ok {
@@ -877,6 +884,9 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 			}
 			continue
 		}
+		if st == gobreaker.StateHalfOpen {
+			cfg.recordTrialSuccess(r, t1.Name, log)
+		}
 		return
 	}
 	if writeLastUpstreamError(w, lastErr) {
@@ -889,8 +899,10 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 }
 
 // cascadeTier1 dispatches to the first CLOSED tier-1 candidate (tier_priority
-// ASC). On a pre-byte connection-class dial failure (D-08) it records the
-// candidate's breaker failure and advances to the next CLOSED candidate,
+// ASC), then — quick 261022 — HALF_OPEN tier-1 as a trial and enabled tier-2
+// rows last (breakerOrder + ResolveFallbacks). On a pre-byte connection-class
+// dial failure (D-08) it records the candidate's breaker failure and advances
+// to the next candidate,
 // replaying the body identically each hop (restoreBody). When the chain is
 // exhausted it writes the existing 503 exhaustion envelope exactly once.
 //
@@ -902,18 +914,20 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 // EffectiveState honors operator force-override (gw:breaker:force:{name}) —
 // force-opening a candidate makes the loop skip it (Phase 06.9 Plan 04).
 func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request, streaming bool, restoreBody func(), log *slog.Logger) bool {
-	candidates := cfg.Loader.ResolveAllTier1(cfg.Role)
+	// Quick 261022: the roster includes the enabled tier-2 last-resort rows
+	// (openai-whisper) after every tier-1 — before, a role whose tier-1 were
+	// all unavailable answered 503 with a healthy tier-2 configured.
+	candidates := cfg.Loader.ResolveFallbacks(cfg.Role)
 	if len(candidates) == 0 {
 		httpx.WriteOpenAIError(w, http.StatusServiceUnavailable,
 			"service_unavailable", "upstream_unavailable",
 			"Primary upstream unavailable and no fallback configured for role.")
 		return false
 	}
+	order, trial := cfg.breakerOrder(candidates)
 	var lastErr *dispatchResult // last fallthrough carrying a real upstream status
-	for _, t1 := range candidates {
-		if cfg.Breaker.EffectiveState(t1.Name) != gobreaker.StateClosed {
-			continue
-		}
+	for k, idx := range order {
+		t1 := candidates[idx]
 		// Phase 23-04: a dormant tier-1 (row enabled, proxy not wired — e.g.
 		// the Haiku upstream before its key is configured) must be skipped,
 		// not answered with the terminal "proxy not registered" 503 that
@@ -945,6 +959,9 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
+		if trial[k] {
+			cfg.recordTrialSuccess(r, t1.Name, log)
+		}
 		return true
 	}
 	// Phase 23-04: return the last real upstream error when there is one.
@@ -1121,6 +1138,58 @@ func (cfg DispatcherConfig) recordUpstreamFailure(name string) {
 	_, _ = cfg.Breaker.Execute(name, func() (*http.Response, error) {
 		return nil, &breaker.HTTPError{Status: http.StatusBadGateway, Msg: "upstream failure (fallthrough)"}
 	})
+}
+
+// breakerOrder orders a cascade roster by effective breaker state (quick
+// 261022). The roster is walked in runs of consecutive same-tier rows; inside
+// each run CLOSED candidates come first, then HALF_OPEN ones as a trial, both
+// in roster order; OPEN (operator force-open included) is left out. Runs keep
+// their roster order, so a HALF_OPEN tier-1 is still tried before a paid
+// tier-2 last resort and per-alias priorities across tiers are preserved.
+// trial[k] is true when order[k] was admitted as HALF_OPEN.
+//
+// Before, every cascade skipped anything not CLOSED. Real traffic only ever
+// records FAILURES on a fallback breaker, so a HALF_OPEN tier-1 could only
+// close through a probe — and tier-1 probes are gated off while tier-0 is
+// CLOSED or parked. On 2026-10-21/22 groq-whisper and gemini-stt sat HALF_OPEN
+// for 16 h while both providers answered 200, and STT returned 503 for every
+// tenant.
+func (cfg DispatcherConfig) breakerOrder(roster []upstreams.UpstreamConfig) (order []int, trial []bool) {
+	for start := 0; start < len(roster); {
+		end := start
+		for end < len(roster) && roster[end].Tier == roster[start].Tier {
+			end++
+		}
+		var halfOpen []int
+		for i := start; i < end; i++ {
+			switch cfg.Breaker.EffectiveState(roster[i].Name) {
+			case gobreaker.StateClosed:
+				order = append(order, i)
+				trial = append(trial, false)
+			case gobreaker.StateHalfOpen:
+				halfOpen = append(halfOpen, i)
+			}
+		}
+		for _, i := range halfOpen {
+			order = append(order, i)
+			trial = append(trial, true)
+		}
+		start = end
+	}
+	return order, trial
+}
+
+// recordTrialSuccess records one success on a HALF_OPEN breaker whose
+// upstream just served a real request, so it closes (MaxRequests=1) instead
+// of waiting for a probe that may never run. Counterpart of
+// recordUpstreamFailure; the fn makes no network call.
+func (cfg DispatcherConfig) recordTrialSuccess(r *http.Request, name string, log *slog.Logger) {
+	_, _ = cfg.Breaker.Execute(name, func() (*http.Response, error) { return nil, nil })
+	log.Info("half-open upstream served real traffic; breaker success recorded",
+		"upstream", name,
+		"state", cfg.Breaker.EffectiveState(name).String(),
+		"request_id", httpx.RequestIDFrom(r.Context()),
+	)
 }
 
 // prepareReplayBody makes r's body replayable across cascade hops. Returns a
