@@ -11,8 +11,9 @@
 //   - Per-upstream goroutine ALWAYS returns nil from g.Go to prevent any
 //     accidental cascade cancel even though we use the zero-value group.
 //   - Tier-0 upstreams are ALWAYS probed; tier-1 externals are probed
-//     ONLY when the same-role tier-0 breaker is OPEN or HALF_OPEN
-//     (D-A2 — saves OpenRouter / OpenAI cost during steady state).
+//     ONLY when the same-role tier-0 breaker is OPEN or HALF_OPEN, or when
+//     their own breaker is not CLOSED (D-A2 — saves OpenRouter / OpenAI cost
+//     during steady state; quick 261022 — lets a tripped tier-1 recover).
 //   - Each probe drives the breaker via breaker.Set.Execute so the D-A4
 //     IsSuccessful classification (4xx/429/Canceled NOT failures, 5xx +
 //     timeouts ARE) applies uniformly across real traffic and probes.
@@ -214,7 +215,14 @@ func (p *Probe) doTick(parent context.Context) {
 			continue // defensive: never probe an overridden static row
 		}
 		u := u
-		if u.Tier == 1 && tier0Closed[u.Role] {
+		// Quick 261022: a tier-1 whose OWN breaker is not CLOSED is probed even
+		// with tier-0 CLOSED. Real traffic only ever records failures on a
+		// tier-1 breaker, so without this probe a HALF_OPEN tier-1 under a
+		// CLOSED (or parked, whose breaker never moves) tier-0 never closes
+		// again — groq-whisper stayed HALF_OPEN for 16 h on 2026-10-21/22 and
+		// STT returned 503 for every tenant. Steady-state cost is unchanged:
+		// a CLOSED tier-1 is still skipped.
+		if u.Tier == 1 && tier0Closed[u.Role] && breakerSnap[u.Name] == "closed" {
 			continue // skip external probe on-demand (D-A2)
 		}
 		g.Go(func() error {
