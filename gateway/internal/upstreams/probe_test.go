@@ -555,3 +555,96 @@ func TestProbe_ProbesTrippedTier1UnderClosedTier0(t *testing.T) {
 		t.Errorf("tripped tier-1 after successful probe = %v, want closed", st)
 	}
 }
+
+// TestProbe_STTViaProxy (quick 261022): with Via set, an STT probe goes
+// through the registered proxy handler (inbound path + alias "whisper"), not
+// a raw POST to the row URL, and the handler's status is classified.
+func TestProbe_STTViaProxy(t *testing.T) {
+	rawHits := atomic.Int32{}
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		rawHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer raw.Close()
+
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"ok", http.StatusOK, "ok"},
+		{"config", http.StatusNotFound, "config"},
+		{"failed", http.StatusBadGateway, "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotModel string
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotModel = r.FormValue("model")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"text":""}`))
+			})
+			u := UpstreamConfig{Name: "groq-whisper", Role: "stt", Tier: 1, URL: raw.URL, Enabled: true}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			bs := breaker.NewSet(newProbeRedis(t), logger, breaker.Options{ConsecutiveFailures: 3, Cooldown: time.Hour}, []string{u.Name})
+			p := NewProbe(NewLoaderForTest(u), bs, nil, ProbeConfig{
+				Via: func(name string) http.Handler {
+					if name == u.Name {
+						return h
+					}
+					return nil
+				},
+			}, logger)
+
+			p.probeOne(context.Background(), u)
+			ev := <-p.updates
+			if ev.LastProbeStatus.String != tc.want {
+				t.Errorf("status = %q, want %q", ev.LastProbeStatus.String, tc.want)
+			}
+			if gotPath != "/v1/audio/transcriptions" || gotModel != "whisper" {
+				t.Errorf("via request path=%q model=%q, want /v1/audio/transcriptions + whisper", gotPath, gotModel)
+			}
+		})
+	}
+	if rawHits.Load() != 0 {
+		t.Errorf("row URL hit %d times; the probe must go through the proxy", rawHits.Load())
+	}
+}
+
+// TestProbe_Tier2OnlyWhenTripped (quick 261022): a CLOSED tier-2 last resort
+// is not probed (it used to be, every tick — a paid call); once its breaker
+// trips, it is probed so it can recover.
+func TestProbe_Tier2OnlyWhenTripped(t *testing.T) {
+	var t2Hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t2Hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"text":""}`))
+	}))
+	defer srv.Close()
+
+	loader := NewLoaderForTest(
+		UpstreamConfig{Name: "openai-whisper", Role: "stt", Tier: 2, URL: srv.URL, Enabled: true},
+	)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bs := breaker.NewSet(newProbeRedis(t), logger,
+		breaker.Options{ConsecutiveFailures: 1, Cooldown: 10 * time.Millisecond}, []string{"openai-whisper"})
+	p := NewProbe(loader, bs, nil, ProbeConfig{Budget: 5 * time.Second}, logger)
+
+	p.doTick(context.Background())
+	if t2Hits.Load() != 0 {
+		t.Fatalf("CLOSED tier-2 probed %d times; want 0", t2Hits.Load())
+	}
+	_, _ = bs.Execute("openai-whisper", func() (*http.Response, error) {
+		return nil, &breaker.HTTPError{Status: 503, Msg: "trip"}
+	})
+	time.Sleep(20 * time.Millisecond)
+	p.doTick(context.Background())
+	if t2Hits.Load() == 0 {
+		t.Fatal("tripped tier-2 NOT probed; it could never recover")
+	}
+	if st := bs.EffectiveState("openai-whisper"); st != gobreaker.StateClosed {
+		t.Errorf("tier-2 after successful probe = %v, want closed", st)
+	}
+}

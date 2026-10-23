@@ -363,6 +363,9 @@ func main() {
 	// Quick 261018-efs — a fila do local-embed é montada mais abaixo (junto do
 	// proxy); a sonda já roda antes disso, então lê o gate por ponteiro atômico.
 	var localEmbedGate atomic.Pointer[proxy.LocalGate]
+	// Quick 261022 — proxies STT externos pelos quais a sonda passa (mesmo
+	// caminho do tráfego real); preenchido depois que os proxies existem.
+	var probeVia atomic.Pointer[map[string]http.Handler]
 	localEmbedBusyWindow := time.Duration(cfg.EmbedLocalBusyWindowS) * time.Second
 	probe := upstreams.NewProbe(loader, breakerSet, gen.New(pool),
 		upstreams.ProbeConfig{
@@ -374,6 +377,12 @@ func main() {
 				}
 				g := localEmbedGate.Load()
 				return g != nil && g.Busy(localEmbedBusyWindow)
+			},
+			Via: func(name string) http.Handler {
+				if m := probeVia.Load(); m != nil {
+					return (*m)[name]
+				}
+				return nil
 			},
 		},
 		log,
@@ -980,6 +989,13 @@ func main() {
 		}
 		_ = u
 	}
+	viaProxies := make(map[string]http.Handler, 3)
+	for _, n := range []string{"gemini-stt", "groq-whisper", "openai-whisper"} {
+		if h, ok := sttRoleProxies[n]; ok {
+			viaProxies[n] = h
+		}
+	}
+	probeVia.Store(&viaProxies)
 	// Phase 06.7 / quick 260704-ubt — tts role proxies. tier-0 (local-tts) =
 	// the JSON->binary reverse proxy whose upstream the reconciler overrides;
 	// tier-1 is now kokoro-tts (Kokoro-FastAPI, OpenAI-compatible

@@ -31,10 +31,12 @@ func TestOnStateChangePublishesToRedis(t *testing.T) {
 			return nil, &HTTPError{Status: 503, Msg: "x"}
 		})
 	}
-	// Wait for the goroutine publisher to write to Redis.
+	// Wait for the goroutine publisher to write to Redis. Quick 261022: the
+	// hash now exists from boot (state=closed), so wait for the transition's
+	// state, not for the key.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		if mr.Exists("gw:breaker:local-llm") {
+		if mr.HGet("gw:breaker:local-llm", "state") == "open" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
