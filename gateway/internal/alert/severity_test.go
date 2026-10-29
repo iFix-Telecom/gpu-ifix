@@ -310,3 +310,24 @@ func TestSeverityFor_RoutesPrimaryChannel(t *testing.T) {
 		t.Errorf("severityFor must route PrimaryEventsChannel to severityForPrimary (critical); got %q", sev)
 	}
 }
+
+// Card 17u65kmhj0r: contexto longo = warning, fingerprint por tenant+upstream.
+func TestSeverityForLongContext(t *testing.T) {
+	payload := []byte(`{"tenant_slug":"converseai-main","upstream":"anthropic-haiku","model":"claude-haiku-5-5","tokens_in":123456,"request_id":"r1","ts_unix":1}`)
+	sev, msg, err := severityFor(redisx.LongContextEventsChannel, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sev != SeverityWarning || msg.Severity != SeverityWarning {
+		t.Errorf("severity: want warning, got %s/%s", sev, msg.Severity)
+	}
+	if msg.Fingerprint != "longctx:converseai-main:anthropic-haiku" {
+		t.Errorf("fingerprint: got %q", msg.Fingerprint)
+	}
+	if !strings.Contains(msg.Body, "123456") || !strings.Contains(msg.Title, "converseai-main") {
+		t.Errorf("title/body missing data: %q / %q", msg.Title, msg.Body)
+	}
+	if _, _, err := severityFor(redisx.LongContextEventsChannel, []byte("{")); err == nil {
+		t.Error("malformed: want error")
+	}
+}

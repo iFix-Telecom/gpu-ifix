@@ -8,6 +8,7 @@ package alert
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -99,5 +100,23 @@ func TestDedupShouldSend_FailClosedWarningInfo(t *testing.T) {
 	}
 	if dedupShouldSend(ctx, rdb, SeverityInfo, "breaker:local-llm:closed") {
 		t.Error("Redis error + info: shouldSend = true, want false (fail-closed)")
+	}
+}
+
+// Card 17u65kmhj0r: fingerprint de contexto longo segura 1 h, não 5 min.
+func TestDedupShouldSend_LongContextOneHour(t *testing.T) {
+	rdb, mr := newDedupTestRedis(t)
+	ctx := context.Background()
+	const fp = "longctx:converseai-main:anthropic-haiku"
+	if !dedupShouldSend(ctx, rdb, SeverityWarning, fp) {
+		t.Fatal("first: want send")
+	}
+	mr.FastForward(30 * time.Minute)
+	if dedupShouldSend(ctx, rdb, SeverityWarning, fp) {
+		t.Error("after 30 min: want suppressed")
+	}
+	mr.FastForward(31 * time.Minute)
+	if !dedupShouldSend(ctx, rdb, SeverityWarning, fp) {
+		t.Error("after 61 min: want send again")
 	}
 }

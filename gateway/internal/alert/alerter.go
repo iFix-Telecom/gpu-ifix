@@ -145,6 +145,8 @@ func (a *Alerter) Run(ctx context.Context) {
 			// published but never fanned out to an operator. Adding it here wires
 			// the distinct billing-stop vs host-death critical alert.
 			redisx.PrimaryEventsChannel,
+			// Card 17u65kmhj0r: prompt acima do degrau 5× do Haiku.
+			redisx.LongContextEventsChannel,
 		)
 		ch := ps.Channel()
 		drained := false
