@@ -28,6 +28,7 @@ package alert
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -43,6 +44,11 @@ const (
 	// genuinely recurring problem re-alerts rather than being silently
 	// forgotten (07-RESEARCH.md).
 	dedupTTL = 5 * time.Minute
+
+	// longCtxDedupTTL é a janela dos fingerprints de contexto longo: um loop
+	// de tools gera centenas de requests seguidos; um alerta por hora por
+	// tenant basta (card 17u65kmhj0r).
+	longCtxDedupTTL = 1 * time.Hour
 
 	// dedupOpTimeout caps the single SET NX Redis call. Matches the 2s
 	// redisOpTimeout convention used throughout redisx (shed.go) — the
@@ -75,7 +81,11 @@ func dedupShouldSend(ctx context.Context, rdb *redis.Client, sev Severity, finge
 	ctx, cancel := context.WithTimeout(ctx, dedupOpTimeout)
 	defer cancel()
 
-	ok, err := rdb.SetNX(ctx, redisx.AlertDedupKey(fingerprint), "1", dedupTTL).Result()
+	ttl := dedupTTL
+	if strings.HasPrefix(fingerprint, LongContextFingerprintPrefix) {
+		ttl = longCtxDedupTTL
+	}
+	ok, err := rdb.SetNX(ctx, redisx.AlertDedupKey(fingerprint), "1", ttl).Result()
 	if err != nil {
 		// Redis is degraded — fall back to the severity-dependent default.
 		// critical fails OPEN (send anyway); warning/info fail CLOSED.

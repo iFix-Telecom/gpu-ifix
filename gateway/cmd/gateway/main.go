@@ -696,6 +696,13 @@ func main() {
 		cfg.USDBRLDefault,
 		log,
 	)
+	// Card 17u65kmhj0r: alerta (ClickUp + Brevo via alerter) quando um
+	// prompt de chat passa do degrau 5× de 100k tokens do Haiku.
+	usageInterceptor.SetLongContextPublisher(func(ev redisx.LongContextEvent) {
+		if err := redisx.PublishLongContextEvent(ctx, rdb, ev); err != nil {
+			log.Warn("long-context event publish failed", "err", err)
+		}
+	})
 
 	// Build the LOCAL reverse proxies (Plan 02-04). Interceptors are passed
 	// at construction time per Codex review [HIGH/MEDIUM] 02-05 decoupling.

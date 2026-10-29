@@ -62,6 +62,8 @@ func severityFor(channel string, payload []byte) (Severity, Message, error) {
 		return severityForEmerg(payload)
 	case redisx.PrimaryEventsChannel:
 		return severityForPrimary(payload)
+	case redisx.LongContextEventsChannel:
+		return severityForLongContext(payload)
 	default:
 		return "", Message{}, fmt.Errorf("alert: unknown event channel %q", channel)
 	}
@@ -85,6 +87,36 @@ func severityFor(channel string, payload []byte) (Severity, Message, error) {
 // destroyed, force_*_request, cancel_in_flight) are informational here and
 // classify as info (logged, never paged). The body carries ONLY the cause +
 // lifecycle id — no tenant payload, no secrets (V7 / T-12-06).
+// LongContextFingerprintPrefix marca os fingerprints de contexto longo; o
+// dedup usa janela de 1 h para eles (dedup.go) porque um loop gera centenas
+// de requests seguidos e um alerta por hora basta.
+const LongContextFingerprintPrefix = "longctx:"
+
+// severityForLongContext classifica um gw:longctx:events: sempre warning
+// (ClickUp + Brevo). Fingerprint por tenant + upstream, sem timestamp.
+func severityForLongContext(payload []byte) (Severity, Message, error) {
+	var ev redisx.LongContextEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return "", Message{}, fmt.Errorf("alert: malformed longctx event: %w", err)
+	}
+	tenant := ev.TenantSlug
+	if tenant == "" {
+		tenant = ev.TenantID
+	}
+	title := fmt.Sprintf("Prompt acima de 100k tokens: %s → %s", tenant, ev.Upstream)
+	body := fmt.Sprintf("O tenant %q mandou um prompt de %d tokens de entrada para %s (modelo %s). "+
+		"Acima de 100k o Haiku cobra 5× a entrada. Request %s. "+
+		"Costuma ser loop de tools ou histórico sem corte no cliente; conferir em billing_events "+
+		"(tokens_in > 100000) e no audit_log_content. Novo alerta deste tenant só depois de 1 h.",
+		tenant, ev.TokensIn, ev.Upstream, ev.Model, ev.RequestID)
+	return SeverityWarning, Message{
+		Severity:    SeverityWarning,
+		Title:       title,
+		Body:        body,
+		Fingerprint: fmt.Sprintf("%s%s:%s", LongContextFingerprintPrefix, tenant, ev.Upstream),
+	}, nil
+}
+
 func severityForPrimary(payload []byte) (Severity, Message, error) {
 	var ev redisx.PrimaryEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {

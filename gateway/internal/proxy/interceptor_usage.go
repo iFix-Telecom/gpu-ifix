@@ -36,6 +36,7 @@ import (
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/auth"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/billing"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/httpx"
+	"github.com/ifixtelecom/gpu-ifix/gateway/internal/redisx"
 	"github.com/ifixtelecom/gpu-ifix/gateway/internal/tenants"
 )
 
@@ -51,6 +52,27 @@ type UsageInterceptor struct {
 	tenantsLoader *tenants.Loader
 	defaultUSDBRL float64
 	log           *slog.Logger
+
+	// longCtxPublish recebe um evento por request de chat com entrada acima
+	// de anthropicLongContextThreshold num upstream com degrau 5× (card
+	// 17u65kmhj0r). nil = alerta desligado. Chamado em goroutine própria:
+	// nunca segura o fechamento do request.
+	longCtxPublish func(redisx.LongContextEvent)
+}
+
+// SetLongContextPublisher liga o alerta de contexto longo. main.go passa um
+// closure que publica em redisx.LongContextEventsChannel.
+func (u *UsageInterceptor) SetLongContextPublisher(fn func(redisx.LongContextEvent)) {
+	if u != nil {
+		u.longCtxPublish = fn
+	}
+}
+
+// chargesLongContext diz se o upstream/modelo cobra o degrau 5× acima de
+// anthropicLongContextThreshold: o Haiku direto (passo ①) e qualquer modelo
+// Claude via OpenRouter (passo ②, mesmo override min_prompt_tokens).
+func chargesLongContext(upstream, model string) bool {
+	return upstream == "anthropic-haiku" || strings.Contains(strings.ToLower(model), "claude")
 }
 
 // billingEnqueuer is the slice of *billing.Flusher the interceptor uses.
@@ -363,6 +385,27 @@ func (u *UsageInterceptor) FinalizeRequest(ctx context.Context, reqID string, ro
 		Source:              source,
 	}
 	u.flusher.Enqueue(ev)
+
+	if u.longCtxPublish != nil && routeName == "chat" &&
+		tokensIn > anthropicLongContextThreshold && chargesLongContext(upstream, model) {
+		lev := redisx.LongContextEvent{
+			TenantID:  tenantID.String(),
+			Upstream:  upstream,
+			Model:     model,
+			TokensIn:  tokensIn,
+			RequestID: reqID,
+			TSUnix:    ev.TS.Unix(),
+		}
+		if u.tenantsLoader != nil {
+			if tc, err := u.tenantsLoader.Get(tenantID); err == nil {
+				lev.TenantSlug = tc.Slug
+			}
+		}
+		u.log.Warn("long_context_request",
+			"request_id", reqID, "tenant", lev.TenantSlug,
+			"upstream", upstream, "model", model, "tokens_in", tokensIn)
+		go u.longCtxPublish(lev)
+	}
 	u.log.Debug("billing event enqueued",
 		"request_id", reqID,
 		"tenant_id", tenantID.String(),
