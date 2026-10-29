@@ -222,3 +222,40 @@ Protocolo levantado (docs OpenAI `realtime-sip` + `live-delegation`, 2026-09-29)
 - Custo: $0,05/min por segundo + cérebro. Sem cobrança extra de SIP (pricing).
 Implementação planejada: modo `POC_VOICE_MODE=live` no `ops/poc-voz-realtime/server.ts` (worker-vm), verificar assinatura com `client.webhooks.verifySignature` + JSON.parse (unwrap pode não conhecer o tipo live), cérebro direto no OpenRouter (cadeia com provedor fixo + reasoning low, igual à ponte Gemini). Teste pelo softphone: `channel originate PJSIP/poc_voz_ramal application Dial PJSIP/poc_openai_realtime`.
 ClickUp: [OPERACOES-27078](https://app.clickup.com/t/86akqn35e) — lista "O - DEV's - Tarefas", atribuída ao Pedro.
+
+## 12. Teste GPT-Live 1 — ligação 2026-10-29 18:30 UTC (softphone, 110 s)
+
+Config: `POC_VOICE_MODE=live` (commit `47bf81a`), `gpt-live-1` voz `marin`, delegação `client`, cérebro
+`gpt-oss-120b@Cerebras` com o MESMO prompt/cliente fictício da ponte Gemini. Sessão `live_u2_EePBAp3oMe4os6Be8qwR0gKJkJZoRZa3`
+(`store:true`, gravação WAV estéreo 24 kHz baixada via `GET /v1/live/sessions/{id}/content`).
+
+Infra (FATOS): o mesmo INVITE gera `realtime.call.incoming` e `live.transport.incoming` — o 1º accept escolhe.
+Webhook `whe_6ab46e…` passou a assinar `live.transport.incoming` (via `POST /v1/webhook_endpoints/{id}`).
+Porta do host mudou 8099 → 8121 (ingress do swarm `clint-test_crm_clint_c2c-dev` tomou a 8099).
+
+Medições (FATOS: logs NDJSON + energia por canal da gravação, janela 20 ms, ±0,1 s):
+| Turno | cliente parou → 1º som da IA | → início da resposta do cérebro | delegação → commentary enviado | cérebro |
+|---|---|---|---|---|
+| alô | 1,1 s | — | — | — |
+| internet caiu | 0,6 s | 3,4 s | 771 ms | 410 ms |
+| CPF | 1,7 s | 3,9 s | 289 ms | 288 ms |
+| PABX | 0,6 s | 2,7 s | 656 ms | 300 ms |
+| ramal 2002 | 1,8 s | 4,2 s | 280 ms | 278 ms |
+| fatura | 0,7 s | 2,9 s | 706 ms | 342 ms |
+| 2ª via | 1,5 s | 3,4 s | 338 ms | 337 ms |
+- 6 delegações, 6/6 no 1º elo (Cerebras), zero falha. Transcrição correta (CPF dígito a dígito, "dois mil e dois").
+- O atraso até o conteúdo é a **confirmação automática** ("Certo, só um instante.", 1–2 s falada) + ~1 s de
+  silêncio depois dela; o resultado já estava entregue antes do fim da confirmação em todos os turnos.
+- Uso: `session.usage.updated.seconds` = 104 para 110 s de sessão.
+
+Problemas:
+1. **Cérebro inventou o e-mail do cliente**: mandou a 2ª via para `contato@ifixtelecom.com.br` (e-mail da EMPRESA;
+   o cliente fictício não tem e-mail) — a voz leu "e-mail cadastrado". Prompt do cérebro.
+2. **Promessa de ação inexistente**: cérebro "Vou encaminhar ao suporte" / "Estou pronto para abrir um chamado" e a voz
+   reforçou para "Vou abrir um chamado". Mesma pendência do Gemini, agora vinda do cérebro.
+3. Resposta do cérebro com pergunta duplicada ("Qual ramal…? … Qual o número do ramal afetado?").
+
+HIPÓTESE (não testada): suprimir a confirmação automática (`delegation.acknowledgement_delay_ms` +
+`session.thinking.append` vazio) faria o conteúdo começar ~1 s após o cliente, já que cérebro+envio levam 0,3–0,8 s.
+O campo não existe no tipo `ClientDelegation` do SDK 7.23 (doc `live-delegation` cita) — testar mandando cru.
+HIPÓTESE: custo US$ 0,05/min (preço levantado em 29/09, seção 11) ≈ R$ 0,26/min ≈ R$ 0,45 nesta ligação; conferir no billing.
