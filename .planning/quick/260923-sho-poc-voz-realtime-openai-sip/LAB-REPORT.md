@@ -277,3 +277,39 @@ Sessão `live_u2_EePHgp3oN9HgmtwpPlP39COExH9a69wG`. `acknowledgement_delay_ms` m
   + contato da empresa), uma pergunta por resposta. Barge-in ("uhum") pausou e retomou a fala.
 - Problema: no CPF o cérebro despejou a fatura (não pedida) e perdeu o fio do PABX/ramal 2002; não respondeu se o
   PABX parado era pela fatura. Prompt/raciocínio do cérebro — precisa de estado da conversa (motivo do contato).
+
+### 12.2 Terceira e quarta ligação GPT-Live — 2026-10-29 20:31 UTC (104 s) e 23:31 UTC (131 s)
+
+Mesmo código e mesmo container da 12.1 (`poc-voz-realtime` iniciado 18:36:33 UTC, commit `3741354`, `POC_MODEL=gpt-realtime-2.1-mini`).
+Sessões `live_u0_EeR4Hp3oMNjJlQ6OsITcf55WOkt33wly` (3ª) e `live_u0_EeTshp3oNOYv9daN7T6dmoraYX6wD6xM` (4ª). As duas foram encerradas pelo cliente (`remote_hangup`).
+
+**Métrica única (FATO, logs):** latência = `commentary.start_ms − last_user_end_ms`, com granularidade de 200 ms da API.
+A 2ª ligação foi recalculada com essa mesma régua. Os ~2,4 s da 12.1 usavam outra régua e não entram na comparação.
+
+| Ligação | Turnos delegados | Latência por turno | Mediana | Cérebro (Cerebras) |
+|---|---|---|---|---|
+| 2ª (18:37) | 4 | 1,4 / 1,6 / 2,2 / 1,8 s | ~1,7 s | 265–722 ms |
+| 3ª (20:31) | 4 | 1,2 / 1,2 / 1,2 / 1,2 s | 1,2 s | 304–394 ms |
+| 4ª (23:31) | 6 | 1,2 / 1,0 / 2,8 / 1,2 / 1,8 / 1,2 s | 1,2 s | 240–612 ms |
+
+- Nenhuma confirmação automática nas 10 delegações. Barge-in e follow-up ("qual o valor", "obrigado") foram respondidos pela voz sozinha, sem delegar.
+- O turno de 2,8 s da 4ª ligação ("meu ramal 2002") teve a delegação criada 1,6 s depois do fim da fala, então o tempo se perdeu na decisão de fim de turno da voz, não no cérebro.
+- HIPÓTESE: a diferença 2ª→3ª/4ª é variação entre turnos (fala, pausas, ruído), não melhoria, porque config e código são idênticos. Mais ligações com o mesmo roteiro resolveriam.
+
+**Acertos de conteúdo:**
+- Fatura, telefone e e-mail citados estão no prompt como dados fictícios (`server.ts` 424–430), então não houve invenção.
+- O cérebro manteve o contexto: na 4ª, o CPF foi dado no assunto "instabilidade", depois veio o ramal 2002, e a pergunta sobre fatura foi respondida sem pedir o CPF de novo. O problema da 12.1 (motivo do contato perdido após o CPF) não se repetiu.
+- "Qual e-mail foi enviado?" teve resposta honesta: o cérebro disse que não tem acesso e passou o contato da empresa. A voz omitiu o "não tenho acesso" e falou só o contato.
+
+**Problemas (FATO, transcrição):**
+1. **Procedimento inventado (4ª):** sobre o webphone, o cérebro disse "Acesse o portal da iFix, faça login, na lista de ramais selecione o 2002, use a opção Reiniciar…". Esse procedimento não existe no prompt, e a regra da linha 442 (não inventar procedimentos) foi violada.
+2. **Status inventado (4ª):** "Não há registro de instabilidade geral". O prompt diz que o cérebro não tem acesso a status de conexão (linha 124), então a resposta certa era dizer que não consegue verificar daqui.
+3. **CPF pedido para pergunta de instabilidade (4ª):** consulta de status geral não exige identificar o cliente.
+4. **Duas falas numa resposta (3ª):** o cérebro respondeu "qual ramal?" + "reinicie o aparelho". A voz falou a pergunta, esperou o "2002" e soltou a instrução sem usar o número.
+5. **"Internet lenta" tratada como problema de ramal (3ª):** o prompt só tem o caminho técnico de PABX.
+6. **"A segunda via foi enviada por e-mail" (3ª e 4ª):** soa como ação feita na hora, mas é o status do cadastro fictício.
+
+**Implicação para a fase 50 (voip-api):** prompt sozinho não segura a invenção de procedimento e de status. O cérebro de produção precisa de:
+- respostas técnicas restritas a uma base de procedimentos (RAG ou lista fechada), com recusa explícita fora dela;
+- ferramentas reais de consulta (status, fatura) em vez de dados soltos no prompt;
+- uma única fala por resposta.
