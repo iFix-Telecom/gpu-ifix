@@ -35,6 +35,31 @@ const TRANSCRIBE_PROMPT =
     'fatura, boleto, segunda via, CPF, CNPJ, contrato, ramal, PABX, internet caiu, instabilidade, suporte, ' +
     'protocolo, parcelamento. Números podem ser ditados dígito a dígito.'
 const NOISE_REDUCTION = process.env.POC_NOISE_REDUCTION ?? 'near_field'
+// Superfície de voz. 'realtime' = gpt-realtime-* + tool consultar_atendente (caminho original).
+// 'live' = GPT-Live 1 com delegação `client`: o modelo de voz delega e nós respondemos com o cérebro.
+// O mesmo INVITE gera `realtime.call.incoming` e `live.transport.incoming`; o 1º accept escolhe a superfície.
+const VOICE_MODE = process.env.POC_VOICE_MODE ?? 'realtime'
+const LIVE_MODEL = process.env.POC_LIVE_MODEL ?? 'gpt-live-1'
+const LIVE_VOICE = process.env.POC_LIVE_VOICE ?? 'marin'
+// store=true guarda a sessão para baixar a gravação (GET /v1/live/sessions/{id}/content) e comparar de ouvido.
+const LIVE_STORE = (process.env.POC_LIVE_STORE ?? 'true') === 'true'
+// Delegação chega antes da transcrição terminar: espera a entrada ficar quieta antes de montar o histórico.
+const LIVE_TRANSCRIPT_QUIET_MS = Number(process.env.POC_LIVE_TRANSCRIPT_QUIET_MS ?? 350)
+const LIVE_TRANSCRIPT_MAX_WAIT_MS = Number(process.env.POC_LIVE_TRANSCRIPT_MAX_WAIT_MS ?? 1500)
+// Cérebro do modo live = o mesmo da ponte Gemini (comparação justa): direto no OpenRouter, cadeia por tok/s
+// com provedor fixado. Formato: modelo[@Provedor],...
+const BRAIN_BASE_URL = process.env.BRAIN_BASE_URL ?? 'https://openrouter.ai/api/v1'
+const BRAIN_API_KEY = process.env.BRAIN_API_KEY ?? ''
+const BRAIN_CHAIN = (process.env.BRAIN_CHAIN ?? 'openai/gpt-oss-120b@Cerebras,openai/gpt-oss-safeguard-20b@Groq,google/gemini-3.1-flash-lite')
+  .split(',')
+  .map((x) => x.trim())
+  .filter(Boolean)
+  .map((x) => {
+    const [model, provider] = x.split('@')
+    return { model, provider }
+  })
+const BRAIN_REASONING_EFFORT = process.env.BRAIN_REASONING_EFFORT ?? 'low'
+const BRAIN_ATTEMPT_TIMEOUT_MS = Number(process.env.BRAIN_ATTEMPT_TIMEOUT_MS ?? 4000)
 const GREETING = process.env.POC_GREETING ?? 'on'
 // Detecção de fim de turno. server_vad: silêncio (ms) antes de considerar que o cliente terminou.
 const TURN_MODE = process.env.POC_TURN_MODE ?? 'server_vad'
@@ -386,12 +411,297 @@ async function handleIncoming(callId: string, sipHeaders: Array<{ name: string; 
   monitor(callId, state)
 }
 
+// ---------------------------------------------------------------- modo live (GPT-Live 1, delegação client)
+
+// Fatos e cliente fictício IDÊNTICOS aos da ponte Gemini (ops/poc-gemini-bridge) — mesmo cérebro, comparação justa.
+const EMPRESA =
+  'iFix Telecom: mais de 15 anos de mercado, telefonia em nuvem para empresas. Produtos: PABX em Nuvem, VoIP em ' +
+  'Nuvem, 0800 empresarial, discador automático, integração com CRMs, transcrição e insights de chamadas com IA, ' +
+  'dashboard com métricas, gravações e relatórios. Suporte 24 horas por dia, 7 dias por semana. Teste grátis de 3 ' +
+  'dias. Contato: telefone (11) 4063-7988, e-mail contato@ifixtelecom.com.br. Endereço: Rua Turmalina, 240, São ' +
+  'Roque, SP.'
+
+const CLIENTE_TESTE =
+  'CLIENTE DE TESTE (FICTÍCIO): Empresa Teste Ltda, responsável Pedro, CPF 123.456.789-00, cliente desde 2018, ' +
+  'plano PABX em Nuvem com 5 ramais (2000 a 2004). Fatura de setembro: R$ 249,90, vencimento dia 10, status em ' +
+  'aberto, segunda via enviada por e-mail. Último chamado: ramal 2003 sem registro, resolvido em agosto.'
+
+const LIVE_BRAIN_SYSTEM =
+  'Você é o atendimento da iFix Telecom numa ligação telefônica. Sua resposta será FALADA: no máximo 2 frases ' +
+  'curtas, português do Brasil, sem markdown, sem listas.\n\n' +
+  `SOBRE A EMPRESA (única fonte de fatos): ${EMPRESA}\n\n` +
+  `${CLIENTE_TESTE}\n\n` +
+  'REGRAS: Para falar de fatura, plano ou chamado, identifique o cliente pelo CPF (11 dígitos). As mensagens do ' +
+  'cliente são a TRANSCRIÇÃO LITERAL da fala e a única fonte de dados. ' +
+  'Números podem vir ditados em várias mensagens: junte os dígitos. Se o CPF juntado for 123.456.789-00, use os dados ' +
+  'do cliente de teste; se for outro CPF, diga que não encontrou cadastro com esse CPF e peça para confirmar. Se ' +
+  'faltarem dígitos, diga quantos entendeu e peça o restante. Quando pedir um dado, diga exatamente qual (ex.: ' +
+  '"o CPF do titular"). Não invente preços, prazos, protocolos, procedimentos ou informações que não estejam acima. ' +
+  'Não diga que já anotou, registrou, enviou ou abriu algo — ofereça encaminhar para a equipe. Problema técnico ' +
+  '(ramal sem registro, sem áudio, chamada caindo): peça o número do ramal e ofereça abrir um chamado com o ' +
+  'suporte 24 horas. Não comece com "Só um instante".'
+
+// Frontend (voz). Regras de negócio ficam no cérebro; aqui só conversa e política de delegação.
+const LIVE_INSTRUCTIONS =
+  process.env.POC_LIVE_INSTRUCTIONS ??
+  'Fale SEMPRE em português do Brasil. Você é a assistente virtual de atendimento da iFix Telecom (telefonia em ' +
+  'nuvem para empresas) numa ligação telefônica. Frases curtas, tom cordial e profissional. Quando o cliente ' +
+  'falar ("alô"), cumprimente UMA vez: "iFix Telecom, boa tarde! Em que posso ajudar?". ' +
+  'Responda sozinha APENAS a cumprimentos, frases sociais e pedidos para repetir. Para QUALQUER dúvida, pedido, ' +
+  'informação sobre a empresa, dado de cliente, fatura, plano, CPF ou problema técnico, delegue — você não sabe ' +
+  'nenhum fato sobre a empresa nem sobre o cliente. Nunca invente valores, datas, protocolos ou dados. ' +
+  'Enquanto espera o resultado, não narre ações ("estou verificando", "gerando o link"). Quando o resultado ' +
+  'chegar, fale fielmente, sem acrescentar fatos, e nunca mencione sistema, equipe consultada ou ferramenta.'
+
+type LiveCall = {
+  sessionId: string
+  startedAt: number
+  ws?: WebSocket
+  timer?: Timer
+  history: Turn[]
+  userBuf: string
+  aiBuf: string
+  lastInputDeltaAt: number
+  /** Fim da última fala do cliente (end_ms da transcrição, relógio da sessão) e quando chegou aqui. */
+  lastUserEndMs?: number
+  lastUserAt?: number
+  awaitingFirstOutput: boolean
+  /** delegation_id -> instante em que foi criada (latência delegação → fala do resultado). */
+  pendingDelegations: Map<string, number>
+  commentaryAt?: number
+  ended: boolean
+}
+
+const liveCalls = new Map<string, LiveCall>()
+// Dedup de entrega do webhook (header webhook-id).
+const seenWebhookIds = new Set<string>()
+
+function flushLiveUser(call: LiveCall) {
+  const text = call.userBuf.trim()
+  call.userBuf = ''
+  if (!text) return
+  call.history.push({ role: 'user', content: text })
+  log(call.sessionId, 'user_transcript', { text })
+  if (CARRIER_ANNOUNCEMENT.test(text) && !call.history.some((t) => t.role === 'assistant')) {
+    log(call.sessionId, 'carrier_announcement_hangup', { text })
+    client.live.sessions.hangup(call.sessionId).catch((e) => log(call.sessionId, 'hangup_fail', { err: String(e) }))
+  }
+}
+
+function flushLiveAi(call: LiveCall) {
+  const text = call.aiBuf.trim()
+  call.aiBuf = ''
+  if (!text) return
+  call.history.push({ role: 'assistant', content: text })
+  log(call.sessionId, 'ai_transcript', { text })
+}
+
+/** Cadeia do cérebro (OpenRouter, provedor fixado). Devolve texto para a voz falar. */
+async function askBrainChain(call: LiveCall): Promise<string> {
+  const t0 = Date.now()
+  // Google recusa histórico terminando em fala da IA ("Requests ending with a model turn are not supported").
+  const hist = [...call.history]
+  while (hist.length && hist[hist.length - 1].role === 'assistant') hist.pop()
+  const messages = [{ role: 'system', content: LIVE_BRAIN_SYSTEM }, ...hist.slice(-12)]
+  for (const { model, provider } of BRAIN_CHAIN) {
+    const ta = Date.now()
+    try {
+      const res = await fetch(`${BRAIN_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${BRAIN_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages,
+          max_tokens: 800,
+          temperature: 0.3,
+          provider: provider ? { order: [provider], allow_fallbacks: false } : { sort: 'latency' },
+          ...(model.startsWith('openai/gpt-oss') ? { reasoning: { effort: BRAIN_REASONING_EFFORT } } : {}),
+        }),
+        signal: AbortSignal.timeout(BRAIN_ATTEMPT_TIMEOUT_MS),
+      })
+      const data = (await res.json()) as {
+        provider?: string
+        error?: unknown
+        model?: string
+        choices?: Array<{ finish_reason?: string; message?: { content?: string } }>
+      }
+      const c = data.choices?.[0]
+      let text = c?.message?.content?.trim()
+      if (text && c?.finish_reason === 'length') {
+        const end = Math.max(text.lastIndexOf('.'), text.lastIndexOf('!'), text.lastIndexOf('?'))
+        text = end > 0 ? text.slice(0, end + 1) : undefined
+      }
+      if (res.ok && text) {
+        log(call.sessionId, 'brain_done', { ms: Date.now() - t0, attempt_ms: Date.now() - ta, model, provider: data.provider, finish_reason: c?.finish_reason, text })
+        return text
+      }
+      log(call.sessionId, 'brain_attempt_fail', { model, provider, ms: Date.now() - ta, http: res.status, err: JSON.stringify(data.error ?? '').slice(0, 200) })
+    } catch (e) {
+      log(call.sessionId, 'brain_attempt_fail', { model, provider, ms: Date.now() - ta, err: String(e).slice(0, 200) })
+    }
+  }
+  log(call.sessionId, 'brain_fail', { ms: Date.now() - t0 })
+  return 'Tive uma instabilidade para consultar essa informação agora. Posso encaminhar seu pedido para a equipe retornar.'
+}
+
+async function handleDelegation(call: LiveCall, ws: WebSocket, delegationId: string) {
+  // Espera a transcrição da fala que gerou a delegação assentar (sem atividade por QUIET_MS, teto MAX_WAIT_MS).
+  const t0 = Date.now()
+  while (Date.now() - t0 < LIVE_TRANSCRIPT_MAX_WAIT_MS && Date.now() - call.lastInputDeltaAt < LIVE_TRANSCRIPT_QUIET_MS) {
+    await Bun.sleep(50)
+  }
+  flushLiveAi(call)
+  flushLiveUser(call)
+  log(call.sessionId, 'transcript_wait', { ms: Date.now() - t0 })
+  const output = await askBrainChain(call)
+  if (ws.readyState !== WebSocket.OPEN) return log(call.sessionId, 'commentary_dropped', { reason: 'ws_closed' })
+  call.commentaryAt = Date.now()
+  call.awaitingFirstOutput = true
+  ws.send(JSON.stringify({ type: 'session.commentary.append', event_id: `res_${delegationId}`, delegation_id: delegationId, content: output }))
+  log(call.sessionId, 'commentary_sent', { delegation_id: delegationId, since_delegation_ms: Date.now() - (call.pendingDelegations.get(delegationId) ?? t0) })
+  call.pendingDelegations.delete(delegationId)
+}
+
+function endLiveCall(call: LiveCall, reason: string) {
+  if (call.ended) return
+  call.ended = true
+  flushLiveUser(call)
+  flushLiveAi(call)
+  clearTimeout(call.timer)
+  log(call.sessionId, 'live_end', { reason, duration_s: Math.round((Date.now() - call.startedAt) / 1000) })
+  liveCalls.delete(call.sessionId)
+}
+
+function attachLive(call: LiveCall) {
+  const ws = new WebSocket(`wss://api.openai.com/v1/live/sessions/${call.sessionId}/attach`, {
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'OpenAI-Project': process.env.OPENAI_PROJECT_ID ?? '' },
+  } as unknown as string[])
+  call.ws = ws
+  ws.onopen = () => log(call.sessionId, 'ws_open')
+  ws.onmessage = (msg) => {
+    const ev = JSON.parse(String(msg.data)) as { type: string; [k: string]: unknown }
+    const now = Date.now()
+    switch (ev.type) {
+      case 'session.output_audio.delta':
+        // Sideband não deveria receber áudio; se vier, não loga cada pacote.
+        break
+      case 'session.input_transcript.delta': {
+        // Cliente falando de novo: fecha o que a IA estava dizendo.
+        if (call.aiBuf) flushLiveAi(call)
+        call.userBuf += String(ev.delta ?? '')
+        call.lastInputDeltaAt = now
+        if (typeof ev.end_ms === 'number') call.lastUserEndMs = ev.end_ms
+        call.lastUserAt = now
+        call.awaitingFirstOutput = true
+        break
+      }
+      case 'session.output_transcript.delta': {
+        if (call.userBuf) flushLiveUser(call)
+        if (call.awaitingFirstOutput) {
+          call.awaitingFirstOutput = false
+          // Proxy de latência: última transcrição de entrada → 1º texto de saída (o áudio sai junto).
+          log(call.sessionId, 'first_output', {
+            since_last_input_delta_ms: call.lastUserAt ? now - call.lastUserAt : null,
+            since_commentary_ms: call.commentaryAt ? now - call.commentaryAt : null,
+            start_ms: ev.start_ms,
+            last_user_end_ms: call.lastUserEndMs,
+          })
+          call.commentaryAt = undefined
+        }
+        call.aiBuf += String(ev.delta ?? '')
+        break
+      }
+      case 'session.delegation.created': {
+        const d = ev.delegation as { id: string; target?: string }
+        call.pendingDelegations.set(d.id, now)
+        log(call.sessionId, 'delegation', { id: d.id, target: d.target, offset_ms: ev.offset_ms, user_buf: call.userBuf })
+        void handleDelegation(call, ws, d.id)
+        break
+      }
+      case 'session.closed':
+        log(call.sessionId, 'session_closed', { ev })
+        endLiveCall(call, 'session_closed')
+        break
+      case 'error':
+        log(call.sessionId, 'error', { error: ev.error })
+        break
+      default:
+        // Primeira rodada com GPT-Live: registra tudo o mais (transport.*, usage, appended, info) p/ análise.
+        log(call.sessionId, 'ev', { type: ev.type, body: JSON.stringify(ev).slice(0, 600) })
+    }
+  }
+  ws.onclose = (e) => {
+    log(call.sessionId, 'ws_close', { code: e.code, reason: e.reason })
+    if (!call.ended && e.code !== 1000) {
+      client.live.sessions.hangup(call.sessionId).catch((err) => log(call.sessionId, 'hangup_fail', { err: String(err) }))
+    }
+    endLiveCall(call, `ws_close_${e.code}`)
+  }
+}
+
+async function handleLiveIncoming(sessionId: string, sipHeaders: Array<{ name: string; value: string }>) {
+  const user = fromUser(sipHeaders)
+  if (!CALLER_TOKEN || user !== CALLER_TOKEN) {
+    log(sessionId, 'reject_caller', { from_user: user })
+    await client.live.sessions.reject(sessionId, { status_code: 603 }).catch((e) => log(sessionId, 'reject_fail', { err: String(e) }))
+    return
+  }
+  if (liveCalls.size + calls.size >= MAX_CONCURRENT) {
+    log(sessionId, 'reject_busy', { active: liveCalls.size + calls.size })
+    await client.live.sessions.reject(sessionId, { status_code: 486 }).catch((e) => log(sessionId, 'reject_fail', { err: String(e) }))
+    return
+  }
+  const call: LiveCall = {
+    sessionId,
+    startedAt: Date.now(),
+    history: [],
+    userBuf: '',
+    aiBuf: '',
+    lastInputDeltaAt: 0,
+    awaitingFirstOutput: false,
+    pendingDelegations: new Map(),
+    ended: false,
+  }
+  liveCalls.set(sessionId, call)
+  try {
+    await client.live.sessions.accept(sessionId, {
+      session: {
+        type: 'live',
+        model: LIVE_MODEL,
+        instructions: LIVE_INSTRUCTIONS,
+        audio: { output: { voice: LIVE_VOICE } },
+        delegation: { type: 'client' },
+        store: LIVE_STORE,
+      },
+    })
+    log(sessionId, 'accepted', { surface: 'live', model: LIVE_MODEL, voice: LIVE_VOICE, store: LIVE_STORE, brain_chain: BRAIN_CHAIN })
+  } catch (e) {
+    log(sessionId, 'accept_fail', { err: String(e) })
+    liveCalls.delete(sessionId)
+    return
+  }
+  call.timer = setTimeout(() => {
+    log(sessionId, 'max_duration_hangup', { max_s: MAX_CALL_SECONDS })
+    client.live.sessions.hangup(sessionId).catch((e) => log(sessionId, 'hangup_fail', { err: String(e) }))
+  }, MAX_CALL_SECONDS * 1000)
+  attachLive(call)
+}
+
 Bun.serve({
   port: PORT,
   async fetch(req) {
     const url = new URL(req.url)
     if (req.method === 'GET' && url.pathname === '/health') {
-      return Response.json({ ok: true, secret_configured: Boolean(WEBHOOK_SECRET), caller_token_configured: Boolean(CALLER_TOKEN), active_calls: calls.size, model: MODEL, backend: BACKEND, brain_model: GATEWAY_MODEL })
+      return Response.json({
+        ok: true,
+        secret_configured: Boolean(WEBHOOK_SECRET),
+        caller_token_configured: Boolean(CALLER_TOKEN),
+        voice_mode: VOICE_MODE,
+        active_calls: calls.size + liveCalls.size,
+        model: VOICE_MODE === 'live' ? LIVE_MODEL : MODEL,
+        backend: BACKEND,
+        brain: VOICE_MODE === 'live' ? { chain: BRAIN_CHAIN, key_configured: Boolean(BRAIN_API_KEY) } : GATEWAY_MODEL,
+      })
     }
     if (req.method !== 'POST' || url.pathname !== '/webhook') return new Response('not found', { status: 404 })
     // Fail-closed: sem secret nenhuma chamada é aceita.
@@ -405,7 +715,23 @@ Bun.serve({
       log(null, 'bad_signature', { err: String(e) })
       return new Response('invalid signature', { status: 400 })
     }
-    if (event.type === 'realtime.call.incoming') {
+    const webhookId = req.headers.get('webhook-id')
+    if (webhookId) {
+      if (seenWebhookIds.has(webhookId)) return new Response('ok')
+      seenWebhookIds.add(webhookId)
+      if (seenWebhookIds.size > 1000) seenWebhookIds.clear()
+    }
+    // O mesmo INVITE chega pelas duas superfícies; só a do modo atual decide (1º accept vence).
+    if (event.type === 'live.transport.incoming' || event.type === 'live.call.incoming') {
+      if (VOICE_MODE !== 'live') {
+        log(event.data.session_id, 'ignored_event', { type: event.type, voice_mode: VOICE_MODE })
+        return new Response('ok')
+      }
+      log(event.data.session_id, 'incoming', { type: event.type, sip_headers: event.data.sip_headers, media: event.data.sip_media_security })
+      void handleLiveIncoming(event.data.session_id, event.data.sip_headers)
+    } else if (event.type === 'realtime.call.incoming' && VOICE_MODE === 'live') {
+      log(event.data.call_id, 'ignored_event', { type: event.type, voice_mode: VOICE_MODE })
+    } else if (event.type === 'realtime.call.incoming') {
       log(event.data.call_id, 'incoming', { sip_headers: event.data.sip_headers })
       // Responde 200 já; aceite roda assíncrono.
       void handleIncoming(event.data.call_id, event.data.sip_headers)
@@ -416,4 +742,4 @@ Bun.serve({
   },
 })
 
-log(null, 'listening', { port: PORT, model: MODEL, secret_configured: Boolean(WEBHOOK_SECRET) })
+log(null, 'listening', { port: PORT, voice_mode: VOICE_MODE, model: VOICE_MODE === 'live' ? LIVE_MODEL : MODEL, secret_configured: Boolean(WEBHOOK_SECRET) })
