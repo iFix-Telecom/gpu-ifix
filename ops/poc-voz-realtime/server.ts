@@ -44,7 +44,10 @@ const LIVE_VOICE = process.env.POC_LIVE_VOICE ?? 'marin'
 // store=true guarda a sessão para baixar a gravação (GET /v1/live/sessions/{id}/content) e comparar de ouvido.
 const LIVE_STORE = (process.env.POC_LIVE_STORE ?? 'true') === 'true'
 // Delegação chega antes da transcrição terminar: espera a entrada ficar quieta antes de montar o histórico.
-const LIVE_TRANSCRIPT_QUIET_MS = Number(process.env.POC_LIVE_TRANSCRIPT_QUIET_MS ?? 350)
+// Confirmação automática ("só um instante") só sai se o resultado não chegar em N ms: o commentary.append
+// cancela a confirmação pendente. Cérebro+envio mediram 0,3–0,8 s (ligação 29/10). Máx. 800 (400 da API). 0 = padrão.
+const LIVE_ACK_DELAY_MS = Number(process.env.POC_LIVE_ACK_DELAY_MS ?? 800)
+const LIVE_TRANSCRIPT_QUIET_MS =Number(process.env.POC_LIVE_TRANSCRIPT_QUIET_MS ?? 350)
 const LIVE_TRANSCRIPT_MAX_WAIT_MS = Number(process.env.POC_LIVE_TRANSCRIPT_MAX_WAIT_MS ?? 1500)
 // Cérebro do modo live = o mesmo da ponte Gemini (comparação justa): direto no OpenRouter, cadeia por tok/s
 // com provedor fixado. Formato: modelo[@Provedor],...
@@ -437,9 +440,14 @@ const LIVE_BRAIN_SYSTEM =
   'do cliente de teste; se for outro CPF, diga que não encontrou cadastro com esse CPF e peça para confirmar. Se ' +
   'faltarem dígitos, diga quantos entendeu e peça o restante. Quando pedir um dado, diga exatamente qual (ex.: ' +
   '"o CPF do titular"). Não invente preços, prazos, protocolos, procedimentos ou informações que não estejam acima. ' +
-  'Não diga que já anotou, registrou, enviou ou abriu algo — ofereça encaminhar para a equipe. Problema técnico ' +
-  '(ramal sem registro, sem áudio, chamada caindo): peça o número do ramal e ofereça abrir um chamado com o ' +
-  'suporte 24 horas. Não comece com "Só um instante".'
+  'O cliente de teste NÃO tem e-mail nem telefone cadastrados aqui: nunca diga um e-mail ou telefone do cliente ' +
+  '(contato@ifixtelecom.com.br e (11) 4063-7988 são da EMPRESA). ' +
+  'Nesta ligação você NÃO executa nenhuma ação: não envia segunda via, não abre chamado, não encaminha, não anota. ' +
+  'Nunca diga "vou enviar", "vou encaminhar", "vou abrir", "já anotei" nem equivalentes. Se o cliente pedir uma ação, ' +
+  'diga com clareza que por esta ligação você não consegue fazer isso e que a equipe de atendimento faz pelo ' +
+  '(11) 4063-7988 ou contato@ifixtelecom.com.br. Problema técnico (ramal sem registro, sem áudio, chamada caindo): ' +
+  'pergunte o número do ramal e dê 1 orientação básica (conferir internet e reiniciar o aparelho). ' +
+  'Faça no máximo UMA pergunta por resposta. Não comece com "Só um instante".'
 
 // Frontend (voz). Regras de negócio ficam no cérebro; aqui só conversa e política de delegação.
 const LIVE_INSTRUCTIONS =
@@ -451,7 +459,8 @@ const LIVE_INSTRUCTIONS =
   'informação sobre a empresa, dado de cliente, fatura, plano, CPF ou problema técnico, delegue — você não sabe ' +
   'nenhum fato sobre a empresa nem sobre o cliente. Nunca invente valores, datas, protocolos ou dados. ' +
   'Enquanto espera o resultado, não narre ações ("estou verificando", "gerando o link"). Quando o resultado ' +
-  'chegar, fale fielmente, sem acrescentar fatos, e nunca mencione sistema, equipe consultada ou ferramenta.'
+  'chegar, fale fielmente, sem acrescentar fatos, e nunca mencione sistema, equipe consultada ou ferramenta. ' +
+  'Nunca transforme uma oferta ou informação em promessa de ação ("vou abrir", "vou enviar", "vou encaminhar").'
 
 type LiveCall = {
   sessionId: string
@@ -670,11 +679,14 @@ async function handleLiveIncoming(sessionId: string, sipHeaders: Array<{ name: s
         model: LIVE_MODEL,
         instructions: LIVE_INSTRUCTIONS,
         audio: { output: { voice: LIVE_VOICE } },
-        delegation: { type: 'client' },
+        // acknowledgement_delay_ms está na doc (live-delegation) mas não no tipo ClientDelegation do SDK 7.23.
+        delegation: (LIVE_ACK_DELAY_MS > 0
+          ? { type: 'client', acknowledgement_delay_ms: LIVE_ACK_DELAY_MS }
+          : { type: 'client' }) as { type: 'client' },
         store: LIVE_STORE,
       },
     })
-    log(sessionId, 'accepted', { surface: 'live', model: LIVE_MODEL, voice: LIVE_VOICE, store: LIVE_STORE, brain_chain: BRAIN_CHAIN })
+    log(sessionId, 'accepted', { surface: 'live', model: LIVE_MODEL, voice: LIVE_VOICE, store: LIVE_STORE, ack_delay_ms: LIVE_ACK_DELAY_MS, brain_chain: BRAIN_CHAIN })
   } catch (e) {
     log(sessionId, 'accept_fail', { err: String(e) })
     liveCalls.delete(sessionId)
