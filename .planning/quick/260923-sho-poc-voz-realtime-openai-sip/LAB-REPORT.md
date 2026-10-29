@@ -259,3 +259,21 @@ HIPÓTESE (não testada): suprimir a confirmação automática (`delegation.ackn
 `session.thinking.append` vazio) faria o conteúdo começar ~1 s após o cliente, já que cérebro+envio levam 0,3–0,8 s.
 O campo não existe no tipo `ClientDelegation` do SDK 7.23 (doc `live-delegation` cita) — testar mandando cru.
 HIPÓTESE: custo US$ 0,05/min (preço levantado em 29/09, seção 11) ≈ R$ 0,26/min ≈ R$ 0,45 nesta ligação; conferir no billing.
+
+### 12.1 Segunda ligação GPT-Live — 2026-10-29 18:37 UTC (90 s) — ack delay 800 ms + cérebro corrigido (commit `3741354`)
+
+Sessão `live_u2_EePHgp3oN9HgmtwpPlP39COExH9a69wG`. `acknowledgement_delay_ms` máx. = 800 (API devolve 400 acima).
+
+| Turno | cliente parou → resposta com conteúdo | cliente parou → delegação criada | delegação → commentary | cérebro |
+|---|---|---|---|---|
+| PABX parado | 1,6 s | 0,3 s | 1.080 ms (358 espera transcrição) | 722 ms |
+| "já fiz isso" | 2,3 s | 1,2 s | 265 ms | 265 ms |
+| CPF ditado | 2,9 s | 1,8 s | 433 ms | 428 ms |
+| "é a fatura?" | 2,5 s | 1,4 s | 297 ms | 297 ms |
+- **Confirmação automática sumiu nas 4 delegações** (nenhum "só um instante" na transcrição); conteúdo começa em
+  1,6–2,9 s (mediana ~2,4 s) contra 2,7–4,2 s (mediana ~3,4 s) na ligação anterior.
+- Gargalo agora é o modelo de voz decidir o fim do turno e delegar (0,3–1,8 s; maior no CPF ditado com pausas).
+- Correções confirmadas: zero e-mail inventado, zero promessa de ação ("Não consigo regularizar a fatura por aqui"
+  + contato da empresa), uma pergunta por resposta. Barge-in ("uhum") pausou e retomou a fala.
+- Problema: no CPF o cérebro despejou a fatura (não pedida) e perdeu o fio do PABX/ramal 2002; não respondeu se o
+  PABX parado era pela fatura. Prompt/raciocínio do cérebro — precisa de estado da conversa (motivo do contato).
