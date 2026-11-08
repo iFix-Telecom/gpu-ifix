@@ -55,10 +55,15 @@ func RequestAudioSecondsMiddleware(log *slog.Logger, defaultLang string) func(ht
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			seconds, ok := deriveRequestAudioSeconds(r, log, defaultLang)
+			seconds, upper, ok := deriveRequestAudioSeconds(r, log, defaultLang)
 			if ok && seconds > 0 {
 				ctx := auditctx.WithRequestAudioSeconds(r.Context(), seconds)
 				r = r.WithContext(ctx)
+			}
+			// Quick 261108-sgr: conservative length that sizes the STT
+			// header wait (sttHeaderBudget). Separate from the billing value.
+			if upper > 0 {
+				r = r.WithContext(withSTTAudioUpperSeconds(r.Context(), upper))
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -72,27 +77,29 @@ func RequestAudioSecondsMiddleware(log *slog.Logger, defaultLang string) func(ht
 //
 // On every path that consumed r.Body it sets r.Body + r.GetBody back so the
 // downstream proxy + dispatcher replay see the original bytes.
-func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang string) (float64, bool) {
+// The second value is the conservative (upper) length for the STT header
+// budget, see sttAudioUpperSeconds; 0 when no audio part was parsed.
+func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang string) (float64, float64, bool) {
 	if r == nil || r.Body == nil || r.Body == http.NoBody {
-		return 0, false
+		return 0, 0, false
 	}
 	if !isAudioTranscriptionsPath(r.URL.Path) {
-		return 0, false
+		return 0, 0, false
 	}
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
-		return 0, false
+		return 0, 0, false
 	}
 	boundary := params["boundary"]
 	if boundary == "" {
-		return 0, false
+		return 0, 0, false
 	}
 
 	// Over-cap by declared length → do NOT buffer (memory bound, T-16-07).
 	// The dispatcher already exempts >25 MiB bodies from replay buffering.
 	if r.ContentLength > maxSTTBodyBuffer {
-		return 0, false
+		return 0, 0, false
 	}
 
 	// Read the whole body BOUNDED to maxSTTBodyBuffer (+1 to detect overflow).
@@ -119,18 +126,18 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang st
 	restoreRequestBody(r, buf)
 	if rerr != nil {
 		log.Debug("stt request-audio read failed; forwarding unstamped", "err", rerr)
-		return 0, false
+		return 0, 0, false
 	}
 	if int64(len(buf)) > maxSTTBodyBuffer {
 		// Streamed past the cap mid-read → too big to derive; forward as-is.
 		log.Debug("stt request-audio body over cap; forwarding unstamped",
 			"cap_bytes", maxSTTBodyBuffer)
-		return 0, false
+		return 0, 0, false
 	}
 
 	fileBytes, fileMime, ok := extractMultipartFile(buf, boundary)
 	if !ok || len(fileBytes) == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 
 	// Duration is derived from the ORIGINAL file bytes BEFORE any transcode —
@@ -160,7 +167,23 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang st
 		}
 	}
 
-	return seconds, seconds > 0
+	return seconds, sttAudioUpperSeconds(fileBytes, seconds), seconds > 0
+}
+
+// sttUpperAssumedKbps is the LOW bitrate used to over-estimate the length of
+// a compressed recording for the header budget. The voip call recordings are
+// ~8 kbps mp3 (07/11/2026: 435 KB billed by Groq as 435 s), while the billing
+// estimate assumes 128 kbps (assumedKbps) and reads the same file as 27 s.
+const sttUpperAssumedKbps = 8
+
+// sttAudioUpperSeconds returns the exact length for WAV (derived from its
+// header) and a low-bitrate over-estimate for any other container. Over-
+// estimating only makes the header wait longer, bounded by STTHeaderBudgetCap.
+func sttAudioUpperSeconds(fileBytes []byte, derived float64) float64 {
+	if isWAV(fileBytes) && derived > 0 {
+		return derived
+	}
+	return float64(len(fileBytes)) * 8 / (sttUpperAssumedKbps * 1000)
 }
 
 // restoreRequestBody sets BOTH r.Body and r.GetBody from buf so the dispatcher

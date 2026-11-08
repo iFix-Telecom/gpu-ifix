@@ -21,10 +21,14 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 // fallthroughRoundTripper wraps a base RoundTripper. On a pre-byte
@@ -39,6 +43,18 @@ type fallthroughRoundTripper struct {
 	// chat upstreams (NewChatFallthroughTransport, Phase 23-12). Both
 	// constructors document why it is pre-byte-safe.
 	preByteTimeout bool
+
+	// slowNotFailure (STT only, quick 261108-sgr): a pre-byte timeout still
+	// falls through, but as sttSlowTimeoutError, whose SkipBreaker() keeps it
+	// out of the breaker. Slow is not down: the upstream answers short audio
+	// in ~2 s and only long recordings outlast the header wait.
+	slowNotFailure bool
+
+	// headerBudget, when set, replaces the base transport's fixed
+	// ResponseHeaderTimeout with a per-request wait derived from the request
+	// context (sttHeaderBudget). The base's own ResponseHeaderTimeout should be
+	// set just above the budget cap as a safety net.
+	headerBudget func(context.Context) time.Duration
 }
 
 // NewChatFallthroughTransport envolve base para os upstreams de chat tier-1
@@ -80,19 +96,186 @@ func NewChatFallthroughTransport(base http.RoundTripper) http.RoundTripper {
 // 502 — groq-whisper and openai-whisper were never tried despite being enabled
 // and probing ok. Three n8n retries burned 213s on a recording that the same
 // Gemini model transcribed in 21s.
+//
+// Quick 261108-sgr: the timeout cascades WITHOUT a breaker penalty
+// (sttSlowTimeoutError). Before, every slow long recording recorded a failure,
+// CLOSED successes never reset the count, and every third slow request opened
+// the gemini-stt breaker — sending ALL STT to the paid groq-whisper for the
+// cooldown window. Real errors (dial, 5xx, provider envelope) still count.
 func NewSTTFallthroughTransport(base http.RoundTripper) http.RoundTripper {
-	return fallthroughRoundTripper{base: base, preByteTimeout: true}
+	return fallthroughRoundTripper{base: base, preByteTimeout: true, slowNotFailure: true}
 }
+
+// NewSTTBudgetFallthroughTransport is NewSTTFallthroughTransport with the
+// response-header wait sized per request from the audio length
+// (sttHeaderBudget) instead of one fixed value for every recording.
+//
+// Quick 261108-sgr: gemini-stt waited a fixed 25 s. Short audio answers in
+// ~2 s (p95 4.5 s), but a 17-minute call outlasted the 25 s and was sent again
+// to groq-whisper, the paid fallback. The budget grows with the audio so the
+// primary gets the time it needs, while a hung upstream on a short request is
+// still abandoned after the 25 s floor.
+func NewSTTBudgetFallthroughTransport(base http.RoundTripper) http.RoundTripper {
+	return fallthroughRoundTripper{
+		base:           base,
+		preByteTimeout: true,
+		slowNotFailure: true,
+		headerBudget:   sttHeaderBudget,
+	}
+}
+
+// STT header-wait budget (quick 261108-sgr). Worst-case STT chain:
+// 150 s (gemini-stt) + 60 s (groq-whisper) = 210 s, under the 290 s audio
+// write timeout and the 300 s timeout of the n8n recording processor.
+const (
+	STTHeaderBudgetFloor          = 25 * time.Second
+	STTHeaderBudgetCap            = 150 * time.Second
+	sttHeaderBudgetPerAudioSecond = 100 * time.Millisecond
+)
+
+// sttHeaderBudget returns floor + 0.1 s per second of audio, capped. The
+// audio length is the conservative upper estimate stamped by the STT request
+// middleware (withSTTAudioUpperSeconds); without it the floor applies.
+func sttHeaderBudget(ctx context.Context) time.Duration {
+	secs := sttAudioUpperSecondsFrom(ctx)
+	if secs <= 0 {
+		return STTHeaderBudgetFloor
+	}
+	b := STTHeaderBudgetFloor + time.Duration(secs*float64(sttHeaderBudgetPerAudioSecond))
+	if b > STTHeaderBudgetCap {
+		return STTHeaderBudgetCap
+	}
+	return b
+}
+
+type sttAudioUpperSecondsKey struct{}
+
+// withSTTAudioUpperSeconds stamps a conservative (upper) audio duration used
+// only to size the header wait — never for billing.
+func withSTTAudioUpperSeconds(ctx context.Context, secs float64) context.Context {
+	return context.WithValue(ctx, sttAudioUpperSecondsKey{}, secs)
+}
+
+func sttAudioUpperSecondsFrom(ctx context.Context) float64 {
+	v, _ := ctx.Value(sttAudioUpperSecondsKey{}).(float64)
+	return v
+}
+
+// sttSlowTimeoutError is the fallthrough sentinel for an STT upstream that
+// sent no response header in time. errors.Is matches errDialFailedFallthrough,
+// so the ErrorHandler and the cascade treat it exactly like a dial failure;
+// SkipBreaker keeps it from counting as a breaker failure.
+type sttSlowTimeoutError struct {
+	budget time.Duration // 0 = the base transport's fixed timeout fired
+}
+
+func (e sttSlowTimeoutError) Error() string {
+	if e.budget > 0 {
+		return fmt.Sprintf("proxy: stt upstream sent no response headers within %s, fall through without breaker penalty", e.budget)
+	}
+	return "proxy: stt upstream response-header timeout, fall through without breaker penalty"
+}
+
+func (sttSlowTimeoutError) Is(target error) bool { return target == errDialFailedFallthrough }
+
+// SkipBreaker implements breakerSkipper (dispatcher.go).
+func (sttSlowTimeoutError) SkipBreaker() bool { return true }
 
 // RoundTrip implements http.RoundTripper.
 func (f fallthroughRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if f.headerBudget != nil {
+		return f.roundTripWithBudget(r)
+	}
 	resp, err := f.base.RoundTrip(r)
-	if err != nil && (isConnectionClass(err) || (f.preByteTimeout && isPreByteTimeout(r.Context(), err))) {
-		// Pre-byte dial failure: substitute the typed sentinel so the
-		// ErrorHandler suppresses the 502 write and the dispatcher re-routes.
-		return nil, errDialFailedFallthrough
+	if err != nil {
+		if ferr := f.classify(r.Context(), err, 0); ferr != nil {
+			return nil, ferr
+		}
 	}
 	return resp, err
+}
+
+// classify maps a base RoundTrip error to the fallthrough sentinel, or nil
+// when it must pass through unchanged (post-dial failure, caller gone, or a
+// timeout on a transport without preByteTimeout).
+func (f fallthroughRoundTripper) classify(ctx context.Context, err error, budget time.Duration) error {
+	if isConnectionClass(err) {
+		// Pre-byte dial failure: substitute the typed sentinel so the
+		// ErrorHandler suppresses the 502 write and the dispatcher re-routes.
+		return errDialFailedFallthrough
+	}
+	if f.preByteTimeout && isPreByteTimeout(ctx, err) {
+		if f.slowNotFailure {
+			return sttSlowTimeoutError{budget: budget}
+		}
+		return errDialFailedFallthrough
+	}
+	return nil
+}
+
+// roundTripWithBudget runs the base RoundTrip under a per-request header
+// wait. A timer cancels a child context when the budget elapses before the
+// response headers arrive; on success the child context lives on until the
+// response body is closed, so reading the body is never cut by the budget.
+func (f fallthroughRoundTripper) roundTripWithBudget(r *http.Request) (*http.Response, error) {
+	parent := r.Context()
+	budget := f.headerBudget(parent)
+	ctx, cancel := context.WithCancel(parent)
+
+	var mu sync.Mutex
+	headersIn, fired := false, false
+	timer := time.AfterFunc(budget, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if headersIn {
+			return
+		}
+		fired = true
+		cancel()
+	})
+
+	resp, err := f.base.RoundTrip(r.WithContext(ctx))
+
+	mu.Lock()
+	headersIn = true
+	timedOut := fired
+	mu.Unlock()
+	timer.Stop()
+
+	if timedOut {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		cancel()
+		if parent.Err() != nil {
+			// The caller gave up at the same moment: never cascade for a
+			// response nobody will read (same rule as isPreByteTimeout).
+			return nil, parent.Err()
+		}
+		return nil, sttSlowTimeoutError{budget: budget}
+	}
+	if err != nil {
+		cancel()
+		if ferr := f.classify(parent, err, 0); ferr != nil {
+			return nil, ferr
+		}
+		return nil, err
+	}
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// cancelOnCloseBody releases the budget's child context once the response
+// body is closed.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // isConnectionClass reports whether err is a PRE-BYTE connection-class

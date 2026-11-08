@@ -2230,14 +2230,17 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 		// connection-class, and the client got a terminal 502 with
 		// groq-whisper/openai-whisper never tried. STT is non-streaming, so the
 		// wrapper is pre-byte-safe.
-		Transport: proxy.NewSTTFallthroughTransport(&http.Transport{
-			MaxIdleConns:        20,
-			MaxIdleConnsPerHost: 4,
-			IdleConnTimeout:     90 * time.Second,
-			// RES-13 intra-tier failover: 25s (< the request deadline) so a
-			// hung gemini-stt leaves budget for the openai-whisper fallback
-			// hop instead of consuming the whole 60s and starving it.
-			ResponseHeaderTimeout: 25 * time.Second,
+		//
+		// Quick 261108-sgr: the header wait is sized per request from the
+		// audio length (25 s floor + 0.1 s per audio second, 150 s cap — see
+		// proxy.NewSTTBudgetFallthroughTransport). The fixed 25 s sent every
+		// long call recording to the paid groq-whisper. The transport's own
+		// ResponseHeaderTimeout stays just above the cap as a safety net.
+		Transport: proxy.NewSTTBudgetFallthroughTransport(&http.Transport{
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: proxy.STTHeaderBudgetCap + 5*time.Second,
 		}),
 		ErrorHandler: proxy.ErrorHandler("gemini-stt", log),
 	}
