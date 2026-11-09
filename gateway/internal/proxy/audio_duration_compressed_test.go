@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math"
 	"os"
 	"path/filepath"
@@ -80,5 +82,32 @@ func TestCompressedDurationSeconds_Garbage(t *testing.T) {
 		if s, ok := compressedDurationSeconds(in); ok {
 			t.Errorf("input %d parsed as %.3f s, want no parse", i, s)
 		}
+	}
+}
+
+// A forged header cannot push the duration outside what the payload size
+// allows (security review: quota/billing bypass).
+func TestCompressedDurationSeconds_ClampedByPayload(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "audio", "voice.ogg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := append([]byte(nil), b...)
+	last := bytes.LastIndex(forged, []byte("OggS"))
+	// granule = pre-skip + 1 sample → header claims ~0 s.
+	head := bytes.Index(forged, []byte("OpusHead"))
+	pre := uint64(binary.LittleEndian.Uint16(forged[head+10 : head+12]))
+	binary.LittleEndian.PutUint64(forged[last+6:last+14], pre+1)
+	got, ok := compressedDurationSeconds(forged)
+	floor := float64(len(forged)) * 8 / (compressedMaxKbps * 1000)
+	if !ok || got < floor-1e-9 {
+		t.Fatalf("forged short header = %.4f ok=%v, want >= %.4f (512 kbps floor)", got, ok, floor)
+	}
+	// Huge granule → capped at the 4 kbps ceiling.
+	binary.LittleEndian.PutUint64(forged[last+6:last+14], 1<<40)
+	got, _ = compressedDurationSeconds(forged)
+	ceil := float64(len(forged)) * 8 / (compressedMinKbps * 1000)
+	if got > ceil+1e-9 {
+		t.Fatalf("forged long header = %.1f, want <= %.1f (4 kbps ceiling)", got, ceil)
 	}
 }

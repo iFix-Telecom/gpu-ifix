@@ -170,12 +170,28 @@ func isAudioTranscriptionsPath(path string) bool {
 // compressedDurationSeconds returns the duration of an MP3 (Layer III) or
 // Ogg/Opus payload read from its own headers, or (0, false) when the bytes
 // are neither or the headers do not validate.
+//
+// The header value is client-controlled, so it is clamped to the range a real
+// encode of len(b) bytes can span: no shorter than at 512 kbps, no longer than
+// at 4 kbps. A forged header can therefore not shrink the metered duration
+// below what the payload size allows (quota/billing bypass) nor inflate it.
 func compressedDurationSeconds(b []byte) (float64, bool) {
-	if s, ok := oggOpusDurationSeconds(b); ok {
-		return s, true
+	s, ok := oggOpusDurationSeconds(b)
+	if !ok {
+		s, ok = mp3DurationSeconds(b)
 	}
-	return mp3DurationSeconds(b)
+	if !ok {
+		return 0, false
+	}
+	bits := float64(len(b)) * 8
+	return min(max(s, bits/(compressedMaxKbps*1000)), bits/(compressedMinKbps*1000)), true
 }
+
+// Plausible bitrate bounds for compressed speech/music (kbps).
+const (
+	compressedMinKbps = 4
+	compressedMaxKbps = 512
+)
 
 var (
 	mp3V1L3Kbps  = [16]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
