@@ -130,10 +130,17 @@ func NewSTTBudgetFallthroughTransport(base http.RoundTripper) http.RoundTripper 
 const (
 	STTHeaderBudgetFloor          = 25 * time.Second
 	STTHeaderBudgetCap            = 150 * time.Second
-	sttHeaderBudgetPerAudioSecond = 100 * time.Millisecond
+	sttHeaderBudgetPerAudioSecond = 200 * time.Millisecond
 )
 
-// sttHeaderBudget returns floor + 0.1 s per second of audio, capped. The
+// Quick 261109 (ClickUp 17u65kmj918): 0.1 s/s ficava curto em gravação longa.
+// Medido em prod 09/11: gemini-stt em áudio de 8 min+ teve p95 105 s e máx
+// 117 s, acima do limite médio de ~92 s — 7 das 34 idas ao Groq do dia foram
+// esse corte. Até 8 min o máx ficou bem abaixo do limite (as idas ali são
+// travadas, não limite curto). Com 0.2 s/s, 8 min → 121 s e ~10 min bate o
+// teto de 150 s; em nota de voz curta o piso de 25 s quase não muda.
+
+// sttHeaderBudget returns floor + 0.2 s per second of audio, capped. The
 // audio length is the conservative upper estimate stamped by the STT request
 // middleware (withSTTAudioUpperSeconds); without it the floor applies.
 func sttHeaderBudget(ctx context.Context) time.Duration {

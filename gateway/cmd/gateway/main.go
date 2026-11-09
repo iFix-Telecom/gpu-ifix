@@ -2232,7 +2232,7 @@ func buildGeminiSTTProxy(rawURL, apiKey string, resolver *models.Resolver, log *
 		// wrapper is pre-byte-safe.
 		//
 		// Quick 261108-sgr: the header wait is sized per request from the
-		// audio length (25 s floor + 0.1 s per audio second, 150 s cap — see
+		// audio length (25 s floor + 0.2 s per audio second, 150 s cap — see
 		// proxy.NewSTTBudgetFallthroughTransport). The fixed 25 s sent every
 		// long call recording to the paid groq-whisper. The transport's own
 		// ResponseHeaderTimeout stays just above the cap as a safety net.

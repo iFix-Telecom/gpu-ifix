@@ -23,9 +23,10 @@ func TestSTTHeaderBudget(t *testing.T) {
 		want time.Duration
 	}{
 		{"no stamp → floor", 0, STTHeaderBudgetFloor},
-		{"short voice note", 10, 26 * time.Second},
-		{"5 min call", 300, 55 * time.Second},
-		{"17 min call", 1027, 25*time.Second + 102700*time.Millisecond},
+		{"short voice note", 10, 27 * time.Second},
+		{"5 min call", 300, 85 * time.Second},
+		{"8 min call", 480, 121 * time.Second},
+		{"17 min call → cap", 1027, STTHeaderBudgetCap},
 		{"very long → cap", 5000, STTHeaderBudgetCap},
 	}
 	for _, c := range cases {
