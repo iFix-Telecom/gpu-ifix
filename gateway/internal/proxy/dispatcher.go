@@ -97,7 +97,41 @@ type dispatchResult struct {
 	lastStatus      int
 	lastBody        []byte
 	lastContentType string
+
+	// status is the HTTP status committed to the client by this dispatch
+	// (0 when nothing was written). Quick 261108-pnd: lets the cascade tell a
+	// real success (<500) from a terminal 502 before recording breaker success.
+	status int
 }
+
+// statusRecorder captures the status code written through it. Unwrap keeps
+// http.ResponseController (ReverseProxy flush, SSE) reaching the real writer.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // dormantSkipWarned guarda quais upstreams já tiveram o WARN de "candidato sem
 // proxy registrado" emitido (Phase 23-14). Um upstream dormente — linha
@@ -764,9 +798,7 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 			}
 			continue
 		}
-		if trial[k] {
-			cfg.recordTrialSuccess(r, c.u.Name, log)
-		}
+		cfg.recordServed(r, c.u.Name, trial[k], res.status, log)
 		return // committed (success or terminal error envelope)
 	}
 
@@ -884,9 +916,7 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 			}
 			continue
 		}
-		if st == gobreaker.StateHalfOpen {
-			cfg.recordTrialSuccess(r, t1.Name, log)
-		}
+		cfg.recordServed(r, t1.Name, st == gobreaker.StateHalfOpen, res.status, log)
 		return
 	}
 	if writeLastUpstreamError(w, lastErr) {
@@ -959,9 +989,7 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 			continue
 		}
 		// Terminal: a response was committed (success or a non-dial 502).
-		if trial[k] {
-			cfg.recordTrialSuccess(r, t1.Name, log)
-		}
+		cfg.recordServed(r, t1.Name, trial[k], res.status, log)
 		return true
 	}
 	// Phase 23-04: return the last real upstream error when there is one.
@@ -1090,7 +1118,9 @@ func (cfg DispatcherConfig) dispatchTo(w http.ResponseWriter, r *http.Request, n
 	// RES-02 deferral: ReverseProxy.ServeHTTP writes directly to the
 	// ResponseWriter — backoff retry would require a buffering layer
 	// (see retry.go godoc). Phase 3 relies on breaker fallback instead.
-	proxy.ServeHTTP(w, r)
+	rec := &statusRecorder{ResponseWriter: w}
+	proxy.ServeHTTP(rec, r)
+	res.status = rec.status
 	// If the ErrorHandler did not run (successful proxy) the response was
 	// committed by ReverseProxy — record wrote=true so callers treat it as
 	// terminal.
@@ -1177,6 +1207,33 @@ func (cfg DispatcherConfig) breakerOrder(roster []upstreams.UpstreamConfig) (ord
 		start = end
 	}
 	return order, trial
+}
+
+// recordServed is the breaker bookkeeping after a cascade candidate committed
+// a response. A real answer (status 1xx–4xx) records a success: on a HALF_OPEN
+// breaker it closes it (trial); on a CLOSED one it resets ConsecutiveFailures.
+// A committed 5xx (terminal non-dial error) records nothing.
+//
+// Quick 261108-pnd: before, a CLOSED fallback breaker only ever received
+// failures. gobreaker (Interval 0) clears the count only on success, and tier-1
+// probes are gated off while tier-0 is parked, so three failures spread over
+// days — with thousands of 200s between them — opened gemini-stt and sent ALL
+// STT to the paid groq-whisper for the cooldown window.
+func (cfg DispatcherConfig) recordServed(r *http.Request, name string, trial bool, status int, log *slog.Logger) {
+	if status == 0 || status >= http.StatusInternalServerError {
+		return
+	}
+	if trial {
+		cfg.recordTrialSuccess(r, name, log)
+		return
+	}
+	cfg.recordClosedSuccess(name)
+}
+
+// recordClosedSuccess records one success on the named breaker without
+// logging (hot path). On a CLOSED breaker it only resets the failure streak.
+func (cfg DispatcherConfig) recordClosedSuccess(name string) {
+	_, _ = cfg.Breaker.Execute(name, func() (*http.Response, error) { return nil, nil })
 }
 
 // recordTrialSuccess records one success on a HALF_OPEN breaker whose
