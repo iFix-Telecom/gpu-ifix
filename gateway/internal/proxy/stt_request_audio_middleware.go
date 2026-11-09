@@ -176,12 +176,16 @@ func deriveRequestAudioSeconds(r *http.Request, log *slog.Logger, defaultLang st
 // estimate assumes 128 kbps (assumedKbps) and reads the same file as 27 s.
 const sttUpperAssumedKbps = 8
 
-// sttAudioUpperSeconds returns the exact length for WAV (derived from its
-// header) and a low-bitrate over-estimate for any other container. Over-
-// estimating only makes the header wait longer, bounded by STTHeaderBudgetCap.
+// sttAudioUpperSeconds returns the exact length when the container header
+// gives one (WAV, MP3, Ogg/Opus — quick 261108-pnd) and a low-bitrate over-
+// estimate for any other container. Over-estimating only makes the header
+// wait longer, bounded by STTHeaderBudgetCap.
 func sttAudioUpperSeconds(fileBytes []byte, derived float64) float64 {
-	if isWAV(fileBytes) && derived > 0 {
+	if derived > 0 && isWAV(fileBytes) {
 		return derived
+	}
+	if s, ok := compressedDurationSeconds(fileBytes); ok {
+		return s
 	}
 	return float64(len(fileBytes)) * 8 / (sttUpperAssumedKbps * 1000)
 }
