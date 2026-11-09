@@ -171,10 +171,11 @@ func isAudioTranscriptionsPath(path string) bool {
 // Ogg/Opus payload read from its own headers, or (0, false) when the bytes
 // are neither or the headers do not validate.
 //
-// The header value is client-controlled, so it is clamped to the range a real
-// encode of len(b) bytes can span: no shorter than at 512 kbps, no longer than
-// at 4 kbps. A forged header can therefore not shrink the metered duration
-// below what the payload size allows (quota/billing bypass) nor inflate it.
+// The header value is client-controlled, so it is clamped by the payload
+// size: never shorter than the pre-existing assumedKbps estimate (a forged
+// header can only RAISE the metered duration relative to the old behaviour,
+// never shrink it — no quota/billing bypass) and never longer than a 4 kbps
+// encode of the same bytes.
 func compressedDurationSeconds(b []byte) (float64, bool) {
 	s, ok := oggOpusDurationSeconds(b)
 	if !ok {
@@ -187,10 +188,11 @@ func compressedDurationSeconds(b []byte) (float64, bool) {
 	return min(max(s, bits/(compressedMaxKbps*1000)), bits/(compressedMinKbps*1000)), true
 }
 
-// Plausible bitrate bounds for compressed speech/music (kbps).
+// Bitrate bounds for the header clamp (kbps). The upper bound equals
+// assumedKbps on purpose: the size-only estimate is the floor.
 const (
 	compressedMinKbps = 4
-	compressedMaxKbps = 512
+	compressedMaxKbps = assumedKbps
 )
 
 var (

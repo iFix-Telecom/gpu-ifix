@@ -101,7 +101,7 @@ func TestCompressedDurationSeconds_ClampedByPayload(t *testing.T) {
 	got, ok := compressedDurationSeconds(forged)
 	floor := float64(len(forged)) * 8 / (compressedMaxKbps * 1000)
 	if !ok || got < floor-1e-9 {
-		t.Fatalf("forged short header = %.4f ok=%v, want >= %.4f (512 kbps floor)", got, ok, floor)
+		t.Fatalf("forged short header = %.4f ok=%v, want >= %.4f (assumedKbps floor = old estimate)", got, ok, floor)
 	}
 	// Huge granule → capped at the 4 kbps ceiling.
 	binary.LittleEndian.PutUint64(forged[last+6:last+14], 1<<40)
