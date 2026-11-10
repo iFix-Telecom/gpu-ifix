@@ -286,6 +286,25 @@ func BuildGeminiSTTDirector(
 				sb.WriteString(p.Text)
 			}
 		}
+		// Quick 261110: texto em laço cascateia pro próximo STT (sem
+		// penalidade no breaker) em vez de ir pro cliente.
+		if isRepetitiveTranscript(sb.String()) {
+			oa, _ := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": "transcription is repetitive (loop)",
+					"type":    "upstream_error",
+					"code":    "repetitive_transcript",
+				},
+			})
+			resp.Body = io.NopCloser(bytes.NewReader(oa))
+			resp.ContentLength = int64(len(oa))
+			resp.StatusCode = http.StatusBadGateway
+			resp.Header.Set("Content-Type", "application/json")
+			resp.Header.Set("Content-Length", strconv.Itoa(len(oa)))
+			log.Warn("gemini-stt: transcrição em laço, cascateando pro próximo STT",
+				"upstream", upstreamName, "chars", sb.Len())
+			return sttRepetitiveTranscriptError{}
+		}
 		out, _ := json.Marshal(map[string]string{"text": sb.String()})
 		resp.Body = io.NopCloser(bytes.NewReader(out))
 		resp.ContentLength = int64(len(out))
