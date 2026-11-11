@@ -105,6 +105,17 @@ type CircuitConfig struct {
 	// imediato. Não vale quando o override de emergência está ativo
 	// (IsEmergency): aí o slot é o pod vivo. Só tem efeito em tier-0.
 	Parked bool `json:"parked,omitempty"`
+
+	// MaxTokensIn (quick 17u65kmjaet) é o teto GENÉRICO de tokens de ENTRADA
+	// para despachar neste upstream. Zero/ausente = sem limite (comportamento
+	// inalterado). > 0 = uma request cuja entrada estimada passa do teto é
+	// PULADA na cascata (cascadeTier1) sem contar falha de breaker — o upstream
+	// está saudável; a request é que não cabe no critério de custo. Semeado só
+	// em anthropic-haiku (migration 0045): o Haiku 5.5 cobra 5× a entrada acima
+	// de 100.000 tokens, então pular para o próximo tier-1 é mais barato. Não há
+	// nada hardcoded "haiku" no caminho de decisão — qualquer upstream com este
+	// campo > 0 ganha o mesmo tratamento.
+	MaxTokensIn int `json:"max_tokens_in,omitempty"`
 }
 
 // RoleTier keys the by-role-tier snapshot map. String-serializable for

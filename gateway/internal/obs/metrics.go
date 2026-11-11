@@ -596,6 +596,23 @@ var OverContextCascadedTotal = promauto.NewCounterVec(
 	[]string{"tenant", "upstream"},
 )
 
+// MaxTokensInSkippedTotal counts requests that skipped a tier-1 candidate in
+// the cascade because their estimated input exceeded the candidate's
+// circuit_config.max_tokens_in ceiling (quick 17u65kmjaet). The skip records NO
+// breaker failure — the upstream is healthy; the request just does not fit its
+// cost profile (e.g. Haiku's 5× surcharge above 100k input tokens), so it
+// advances to the next tier-1. Mirrors OverContextCascadedTotal: `upstream` is
+// ALWAYS the candidate that was SKIPPED, never the one that ended up serving.
+// ALERTABLE: sustained growth on anthropic-haiku = lots of large prompts being
+// diverted off the cheap credits-chain to the next (paid) provider.
+var MaxTokensInSkippedTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_max_tokens_in_skipped_total",
+		Help: "Requests that skipped a tier-1 candidate because their estimated input exceeded the candidate's max_tokens_in ceiling, by tenant and the skipped upstream. No breaker failure is recorded.",
+	},
+	[]string{"tenant", "upstream"},
+)
+
 // PrimaryDeathDetectedTotal counts confirmed primary-pod deaths detected on
 // the Ready tick (RES-11, Plan 02). cause ∈ {billing_stopped, host_death,
 // not_found, preempted}. ALERTABLE: cause=billing_stopped (Vast account out of
