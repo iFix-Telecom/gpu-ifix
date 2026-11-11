@@ -60,8 +60,9 @@ func TestIntegration_Migration0039_DefaultsAndDownUp(t *testing.T) {
 	// Phase 23 HEAD bump: Down(2)→Down(4) when 0041+0042 landed.
 	// 0043 (prices scale) HEAD bump: Down(4)→Down(5).
 	// 0044 (model_aliases priority/fallback_models) HEAD bump: Down(5)→Down(6).
-	if err := db.Down(ctx, pool, 6); err != nil {
-		t.Fatalf("db.Down(6) revert 0044+0043+0042+0041+0040+0039: %v", err)
+	// 0045 (haiku max_tokens_in) HEAD bump: Down(6)→Down(7).
+	if err := db.Down(ctx, pool, 7); err != nil {
+		t.Fatalf("db.Down(7) revert 0045+0044+0043+0042+0041+0040+0039: %v", err)
 	}
 	if got := colCount(); got != 0 {
 		t.Fatalf("0039 columns after Down = %d, want 0", got)
