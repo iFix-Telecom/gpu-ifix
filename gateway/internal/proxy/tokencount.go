@@ -248,6 +248,33 @@ func extractTokenizeText(body []byte) string {
 	return string(body)
 }
 
+// avgCharsPerToken is the coarse bytes→tokens divisor used by
+// estimateInputTokens. ~4 is the standard rough ratio for English/Latin text
+// (OpenAI/Anthropic tokenizers). Two effects push in opposite directions and the
+// net is text-dependent: len() counts UTF-8 BYTES, so accented Portuguese
+// (ç/ã/é = 2 bytes) inflates the count vs a char-based estimate, while the real
+// tokens-per-char ratio for Portuguese tends to be higher than English (fewer
+// chars per token), which deflates it. We do NOT claim a guaranteed safe
+// direction — this is only a rough "is the input near/over the ceiling?" signal.
+// The max_tokens_in gate is a coarse cost guard (the Haiku 5× step is a cliff at
+// 100k, not a per-token knob), so approximate detection is acceptable; the field
+// is configurable if a tenant's traffic needs the threshold nudged.
+const avgCharsPerToken = 4
+
+// estimateInputTokens gives a cheap, pod-INDEPENDENT approximation of a chat/
+// embed request's input token count: the length of the tokenizable text
+// divided by avgCharsPerToken. Unlike TokenCounter.Enforce it does NOT call the
+// pod's /tokenize endpoint — quick 17u65kmjaet needs this inside cascadeTier1,
+// which is reached exactly when the tier-0 pod may be parked/down, so the
+// estimate must not depend on the pod being alive. We only need "over the
+// per-upstream limit?", not an exact count, so a rough char heuristic suffices.
+func estimateInputTokens(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	return len(extractTokenizeText(body)) / avgCharsPerToken
+}
+
 // extractModelName pulls the "model" field from a JSON request body.
 // Returns an empty string on parse failure or missing field so callers
 // can fall back to a safe default (e.g. the role name). Used by the

@@ -682,6 +682,74 @@ func TestHaikuChain_M_OnlyHaikuOverloadedGetsOpenAIEnvelope(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// quick 17u65kmjaet — teto de entrada por upstream (max_tokens_in)
+// ---------------------------------------------------------------------------
+
+// TestHaikuChain_N_MaxTokensInSkipsHaiku prova, pela cadeia REAL (dispatchPinned
+// via model_aliases, o caminho de produção do Haiku), que:
+//
+//	(a) entrada estimada > max_tokens_in do anthropic-haiku (100000, semeado pela
+//	    migration 0045) PULA o ① e é atendida pelo próximo tier-1 (②);
+//	(b) o pulo NÃO conta falha de breaker do Haiku (upstream saudável);
+//	(c) entrada dentro do teto continua indo ao ①.
+//
+// A estimativa é char/4 pod-independente, então ~500k chars ≈ 125k tokens > 100k.
+func TestHaikuChain_N_MaxTokensInSkipsHaiku(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, resolver := haikuChainDB(t, ctx)
+
+	bigContent := strings.Repeat("a", 500_000) // ~125k tokens estimados (> 100k)
+	bigBody := `{"model":"deepseek-flash","messages":[{"role":"user","content":"` + bigContent + `"}],"stream":false}`
+
+	t.Run("a_entrada_acima_do_teto_pula_haiku_sem_falha_de_breaker", func(t *testing.T) {
+		env := buildChain(t, ctx, pool, resolver, chainSpec{
+			anth: jsonReply(200, anthMsgOK), or2: jsonReply(200, oaiOKDois), or3: jsonReply(200, oaiOKTres),
+		})
+		rec := env.serve(bigBody)
+		expectServedBy(t, rec, "resposta-dois") // ② atendeu
+		if h := hitsOf(env.anth); h != 0 {
+			t.Fatalf("① Haiku recebeu %d request(s); entrada > 100k devia PULAR o Haiku", h)
+		}
+		// O peek da estimativa (restoreBody + readAndRestoreBody) não pode
+		// truncar o corpo repassado: ② tem de receber o content de 500k íntegro.
+		b := env.or2.lastBody(t)
+		msgs, _ := b["messages"].([]any)
+		if len(msgs) == 0 {
+			t.Fatalf("② sem messages: %v", b)
+		}
+		first, _ := msgs[0].(map[string]any)
+		if c, _ := first["content"].(string); len(c) != len(bigContent) {
+			t.Fatalf("② recebeu content truncado: len=%d, want %d (peek da estimativa corrompeu o replay)", len(c), len(bigContent))
+		}
+		if hitsOf(env.or3) != 0 {
+			t.Errorf("③ chamado com ② servindo")
+		}
+		cb, ok := env.bs.Get("anthropic-haiku")
+		if !ok || cb == nil {
+			t.Fatalf("breaker de anthropic-haiku ausente")
+		}
+		if c := cb.Counts(); c.TotalFailures != 0 {
+			t.Fatalf("pulo por max_tokens_in contou %d falha(s) de breaker; não é falha do upstream", c.TotalFailures)
+		}
+	})
+
+	t.Run("c_entrada_dentro_do_teto_vai_ao_haiku", func(t *testing.T) {
+		env := buildChain(t, ctx, pool, resolver, chainSpec{
+			anth: jsonReply(200, anthMsgOK), or2: jsonReply(200, oaiOKDois), or3: jsonReply(200, oaiOKTres),
+		})
+		rec := env.serve(chainBody) // entrada minúscula, ≤ 100k
+		expectServedBy(t, rec, "resposta-haiku")
+		if h := hitsOf(env.anth); h != 1 {
+			t.Fatalf("① Haiku hits = %d, want 1 (entrada pequena deve ir ao Haiku)", h)
+		}
+		if hitsOf(env.or2) != 0 {
+			t.Errorf("② chamado com entrada dentro do teto")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // TTS: openrouter-tts → kokoro-tts
 // ---------------------------------------------------------------------------
 

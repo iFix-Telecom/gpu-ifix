@@ -756,8 +756,29 @@ func (cfg DispatcherConfig) dispatchPinned(w http.ResponseWriter, r *http.Reques
 		roster[i] = c.u
 	}
 	order, trial := cfg.breakerOrder(roster)
+	// Quick 17u65kmjaet: per-upstream input ceiling. The Haiku chain reaches
+	// upstreams through THIS pinned path (model_aliases), so the max_tokens_in
+	// skip must live here too, not only in cascadeTier1. Lazy sentinel → no-op
+	// for every pinned roster without a max_tokens_in ceiling.
+	estTokensIn, tenantLabel := maxTokensInUncomputed, ""
 	for k, idx := range order {
 		c := candidates[idx]
+		// Quick 17u65kmjaet: input over this candidate's max_tokens_in ceiling →
+		// skip without a breaker failure (healthy upstream, request just does not
+		// fit its cost profile). This runs before the RES-08 sensitive gate but
+		// does NOT weaken it: the skip only REMOVES this candidate from the
+		// roster, it never dispatches. A sensitive tenant whose other candidates
+		// are all external still hits writeSensitiveBlock via skippedSensitive; if
+		// the ceiling-skipped upstream was the ONLY candidate, the roster is
+		// exhausted and the request gets a 503 — no external leak either way.
+		if c.u.CircuitConfig.MaxTokensIn > 0 {
+			if estTokensIn == maxTokensInUncomputed {
+				estTokensIn, tenantLabel = cfg.estimateInputForCeiling(r, restoreBody, log)
+			}
+			if cfg.overMaxTokensIn(r, c.u, estTokensIn, tenantLabel, log) {
+				continue
+			}
+		}
 		if sensitive && c.external {
 			skippedSensitive = true
 			continue
@@ -891,8 +912,20 @@ func (cfg DispatcherConfig) allTier1Unavailable() bool {
 func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	streaming := IsStreamingRequest(r)
 	restoreBody, _ := prepareReplayBody(r)
+	// Quick 17u65kmjaet: the override chain also walks ①→②→③, so a too-big input
+	// must skip a max_tokens_in-capped candidate here too (lazy sentinel → no-op
+	// without a ceiling).
+	estTokensIn, tenantLabel := maxTokensInUncomputed, ""
 	var lastErr *dispatchResult
 	for _, t1 := range cfg.Loader.ResolveAllTier1(cfg.Role) {
+		if t1.CircuitConfig.MaxTokensIn > 0 {
+			if estTokensIn == maxTokensInUncomputed {
+				estTokensIn, tenantLabel = cfg.estimateInputForCeiling(r, restoreBody, log)
+			}
+			if cfg.overMaxTokensIn(r, t1, estTokensIn, tenantLabel, log) {
+				continue
+			}
+		}
 		st := cfg.Breaker.EffectiveState(t1.Name)
 		if st == gobreaker.StateOpen {
 			continue
@@ -928,6 +961,57 @@ func (cfg DispatcherConfig) dispatchOverrideCascade(w http.ResponseWriter, r *ht
 		"service_unavailable", offHoursUnavailableCode, offHoursUnavailableMsg)
 }
 
+// maxTokensInUncomputed is the sentinel for "the input-token estimate has not
+// been computed yet this request". Distinct from a real estimate of 0 so the
+// lazy compute (estimateInputForCeiling) runs at most once per dispatch.
+const maxTokensInUncomputed = -2
+
+// estimateInputForCeiling returns a pod-INDEPENDENT estimate of the request's
+// input tokens plus the tenant label, for the per-upstream max_tokens_in skip
+// (quick 17u65kmjaet). Called lazily — at most once per request, only when a
+// candidate with a positive ceiling is actually reached — because this runs on
+// the cascade/override/pinned paths where the tier-0 pod may be parked/down, so
+// the estimate must not depend on the pod's /tokenize. Resets the replay body
+// before peeking so each per-hop restoreBody() still ships the full bytes. A
+// peek failure yields 0 (fail-open: treat as "fits", like TokenCounter).
+func (cfg DispatcherConfig) estimateInputForCeiling(r *http.Request, restoreBody func(), log *slog.Logger) (int, string) {
+	if restoreBody != nil {
+		restoreBody()
+	}
+	est := 0
+	if body, err := readAndRestoreBody(r); err == nil {
+		est = estimateInputTokens(body)
+	} else {
+		// Fail-open to 0 ("fits") like TokenCounter, but log it: a body-read
+		// error here silently disables the cost gate for this request.
+		log.Warn("max_tokens_in estimate: body read failed, treating as under ceiling",
+			"err", err, "request_id", httpx.RequestIDFrom(r.Context()))
+	}
+	tenant := ""
+	if ac, ok := auth.FromContext(r.Context()); ok {
+		tenant = ac.TenantID
+	}
+	return est, tenant
+}
+
+// overMaxTokensIn reports whether candidate u must be skipped because the
+// request's estimated input exceeds u's per-upstream max_tokens_in ceiling,
+// emitting the metric + log when it does (quick 17u65kmjaet). The caller skips
+// WITHOUT recording a breaker failure — the upstream is healthy; the request
+// just does not fit its cost profile (Haiku 5.5 charges 5× input above 100k
+// tokens). Generic: keyed only on u.CircuitConfig.MaxTokensIn, never on a name.
+func (cfg DispatcherConfig) overMaxTokensIn(r *http.Request, u upstreams.UpstreamConfig, estTokensIn int, tenant string, log *slog.Logger) bool {
+	mx := u.CircuitConfig.MaxTokensIn
+	if mx <= 0 || estTokensIn <= mx {
+		return false
+	}
+	obs.MaxTokensInSkippedTotal.WithLabelValues(tenant, u.Name).Inc()
+	log.Warn("input over per-upstream max_tokens_in; skipping candidate (no breaker failure)",
+		"est_tokens_in", estTokensIn, "max_tokens_in", mx, "skipped_upstream", u.Name,
+		"tenant", tenant, "request_id", httpx.RequestIDFrom(r.Context()))
+	return true
+}
+
 // cascadeTier1 dispatches to the first CLOSED tier-1 candidate (tier_priority
 // ASC), then — quick 261022 — HALF_OPEN tier-1 as a trial and enabled tier-2
 // rows last (breakerOrder + ResolveFallbacks). On a pre-byte connection-class
@@ -955,9 +1039,25 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	order, trial := cfg.breakerOrder(candidates)
+	// Quick 17u65kmjaet: per-upstream input ceiling (circuit_config.max_tokens_in),
+	// estimated lazily at most once (estimateInputForCeiling). Sentinel until a
+	// candidate with a ceiling is reached, so this is a no-op for every role /
+	// upstream without max_tokens_in (unchanged behavior).
+	estTokensIn, tenantLabel := maxTokensInUncomputed, ""
 	var lastErr *dispatchResult // last fallthrough carrying a real upstream status
 	for k, idx := range order {
 		t1 := candidates[idx]
+		// Quick 17u65kmjaet: input over this candidate's max_tokens_in ceiling →
+		// skip WITHOUT touching the breaker (same carve-out spirit as
+		// over-context: a cost/fit skip must never push the breaker toward OPEN).
+		if t1.CircuitConfig.MaxTokensIn > 0 {
+			if estTokensIn == maxTokensInUncomputed {
+				estTokensIn, tenantLabel = cfg.estimateInputForCeiling(r, restoreBody, log)
+			}
+			if cfg.overMaxTokensIn(r, t1, estTokensIn, tenantLabel, log) {
+				continue
+			}
+		}
 		// Phase 23-04: a dormant tier-1 (row enabled, proxy not wired — e.g.
 		// the Haiku upstream before its key is configured) must be skipped,
 		// not answered with the terminal "proxy not registered" 503 that
@@ -1021,6 +1121,14 @@ func (cfg DispatcherConfig) cascadeTier1(w http.ResponseWriter, r *http.Request,
 // goes through dispatchOverrideCascade (①→②→③). dispatchOverride is still
 // used only when the override names an upstream outside this role's tier-1
 // set (e.g. a tier-2 row or another role) — behaviour unchanged there.
+//
+// Quick 17u65kmjaet: the per-upstream max_tokens_in skip is deliberately NOT
+// applied here. This is a single-upstream path with no "next" to cascade to, so
+// skipping the only candidate would just fail the request — the opposite of the
+// skip's intent (route the big request to the NEXT upstream). The only seeded
+// ceiling (anthropic-haiku) is a tier-1 of role llm, which always routes through
+// dispatchOverrideCascade, never here. If a non-tier-1 row ever gains a ceiling,
+// revisit this invariant.
 func (cfg DispatcherConfig) dispatchOverride(w http.ResponseWriter, r *http.Request, name string, log *slog.Logger) {
 	// Check the override target's breaker. If CLOSED or HALF_OPEN we
 	// dispatch; if OPEN the tenant is peak-mode off-hours and has no
