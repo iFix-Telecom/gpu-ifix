@@ -84,6 +84,7 @@ func TestEmbedFS_HasAllMigrations(t *testing.T) {
 		"0042_aux_pod_lifecycles.sql",
 		"0043_prices_unit_cost_scale.sql",
 		"0044_model_aliases_priority_fallback_models.sql",
+		"0045_haiku_max_tokens_in.sql",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("expected %d migrations embedded, got %d: %v", len(want), len(names), names)
