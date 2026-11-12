@@ -242,8 +242,16 @@ jobs:
             echo "::warning::PORTAINER_WEBHOOK_URL_DEV_GATEWAY not set — skipping dev deploy"
             exit 0
           fi
-          curl -X POST "${WEBHOOK}" --fail --silent --show-error
-          echo "Portainer dev webhook triggered — ai-gateway-dev will re-fetch repo + recreate"
+          # O webhook de deploy DEV NÃO é gate: build e testes já falham nos próprios
+          # jobs. Um webhook morto/obsoleto (ex.: stack ai-gateway-dev removida → HTTP
+          # 404) só avisa, nunca derruba um build válido — senão mascara o sinal real.
+          # (Prod permanece fatal de propósito no job deploy-prod.)
+          CODE="$(curl -X POST "${WEBHOOK}" --silent --show-error --output /dev/null --write-out '%{http_code}' || echo 000)"
+          if [[ "${CODE}" =~ ^2 ]]; then
+            echo "Portainer dev webhook disparado (HTTP ${CODE}) — ai-gateway-dev re-fetch repo + recreate"
+          else
+            echo "::warning::Webhook dev retornou HTTP ${CODE} (alvo ausente/obsoleto?) — deploy dev pulado, build segue verde"
+          fi
 
   deploy-prod:
     name: Trigger Portainer redeploy (prod)
