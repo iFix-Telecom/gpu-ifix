@@ -7,6 +7,17 @@ on:
   push:
     branches: [main, develop]
     tags: ['v*']
+  pull_request:
+    # paths filter lives ONLY here (see header). Scope to what the test / go vet /
+    # build jobs actually compile: the gateway module (root go.mod), the pkg/openai
+    # and pod packages they also test, and this workflow file itself.
+    paths:
+      - 'gateway/**'
+      - 'pkg/openai/**'
+      - 'pod/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build-gateway.yml'
   workflow_dispatch:
     inputs:
       tag:

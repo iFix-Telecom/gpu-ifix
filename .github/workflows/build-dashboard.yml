@@ -8,6 +8,12 @@ on:
   push:
     branches: [main, develop]
     tags: ['v*']
+  pull_request:
+    # paths filter lives ONLY here (see header) — scope to the dashboard app the
+    # test / type-check / build jobs compile, plus this workflow file itself.
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/build-dashboard.yml'
   workflow_dispatch:
     inputs:
       tag:
