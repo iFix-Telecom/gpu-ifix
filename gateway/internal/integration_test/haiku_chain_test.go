@@ -681,6 +681,34 @@ func TestHaikuChain_M_OnlyHaikuOverloadedGetsOpenAIEnvelope(t *testing.T) {
 	}
 }
 
+// userTextLen devolve o total de caracteres de texto do campo content de uma
+// mensagem, aceitando as duas formas válidas: string crua OU a lista de blocos
+// Anthropic ([{type:text,text,...}]) que o director produz ao injetar
+// cache_control para alvos anthropic/* (PASS 4 do BuildOpenRouterDirector).
+func userTextLen(content any) int {
+	switch c := content.(type) {
+	case string:
+		return len(c)
+	case []any:
+		n := 0
+		for _, blk := range c {
+			m, ok := blk.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := m["type"].(string); t != "text" {
+				continue
+			}
+			if s, ok := m["text"].(string); ok {
+				n += len(s)
+			}
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
 // ---------------------------------------------------------------------------
 // quick 17u65kmjaet — teto de entrada por upstream (max_tokens_in)
 // ---------------------------------------------------------------------------
@@ -713,14 +741,20 @@ func TestHaikuChain_N_MaxTokensInSkipsHaiku(t *testing.T) {
 		}
 		// O peek da estimativa (restoreBody + readAndRestoreBody) não pode
 		// truncar o corpo repassado: ② tem de receber o content de 500k íntegro.
+		// O alias deepseek-flash resolve para anthropic/claude-haiku-5.5 no
+		// upstream openrouter-chat (pinAliases), então o director reescreve o
+		// model para anthropic/* e o PASS 4 (injectAnthropicCacheControl)
+		// LEGITIMAMENTE converte content string → [{type:text,text,cache_control}].
+		// A integridade do replay é medida pelo tamanho do texto do usuário, em
+		// qualquer das duas formas — não pelo tipo do campo content.
 		b := env.or2.lastBody(t)
 		msgs, _ := b["messages"].([]any)
 		if len(msgs) == 0 {
 			t.Fatalf("② sem messages: %v", b)
 		}
 		first, _ := msgs[0].(map[string]any)
-		if c, _ := first["content"].(string); len(c) != len(bigContent) {
-			t.Fatalf("② recebeu content truncado: len=%d, want %d (peek da estimativa corrompeu o replay)", len(c), len(bigContent))
+		if got := userTextLen(first["content"]); got != len(bigContent) {
+			t.Fatalf("② recebeu content truncado: text len=%d, want %d (peek da estimativa corrompeu o replay)", got, len(bigContent))
 		}
 		if hitsOf(env.or3) != 0 {
 			t.Errorf("③ chamado com ② servindo")

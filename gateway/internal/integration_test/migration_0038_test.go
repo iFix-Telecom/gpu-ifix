@@ -109,8 +109,9 @@ func TestIntegration_Migration0038_DownUp(t *testing.T) {
 	// Phase 23 HEAD bump: Down(3)→Down(5) when 0041+0042 landed.
 	// 0043 (prices scale) HEAD bump: Down(5)→Down(6).
 	// 0044 (model_aliases priority/fallback_models) HEAD bump: Down(6)→Down(7).
-	if err := db.Down(ctx, pool, 7); err != nil {
-		t.Fatalf("db.Down(7) revert 0044+0043+0042+0041+0040+0039+0038: %v", err)
+	// 0045 (haiku max_tokens_in) HEAD bump: Down(7)→Down(8).
+	if err := db.Down(ctx, pool, 8); err != nil {
+		t.Fatalf("db.Down(8) revert 0045+0044+0043+0042+0041+0040+0039+0038: %v", err)
 	}
 	if colExists() {
 		t.Fatal("url_override still present after 0038 Down")
